@@ -206,3 +206,106 @@ produced these refinements:
 - **10.3 `[Could]`** — dragging a scratchpad line onto a day is not implemented.
   The pad is a plain textarea with native text editing; line-level drag sources
   would mean tokenising it, which is a different component.
+
+---
+
+# v2 — Familien-Edition: decisions fixed by the PO (2026-08-25)
+
+The v2 delivery plan (`docs/v2/PLAN.md` §5) listed nine blocking decisions. D2–D6 came
+from the sprint plan; D7–D9 were surfaced by the architecture review. All nine are now
+answered. This section is WP-0's exit criterion.
+
+| # | decision | answer |
+|---|---|---|
+| D1 | Apple Developer ID (99 €/yr) | **No — ship unsigned** |
+| D2 | EU/Frankfurt region for Vercel + Prisma | Yes |
+| D3 | "GitHub sync" = deploy-on-push | Confirmed as written |
+| D4 | Person-colour rule for foreign entries (17.2) | Accept as specced |
+| D5 | Belegt in v2.0 | Keep |
+| D6 | Path A or Path B | **A** — forced by reality; v1 exists as working code |
+| D7 | LZP-901's impossible server-side ownership check | Client-side + structural ownership |
+| D8 | Identity keys in the backup file | **Passphrase-encrypted** |
+| D9 | Invite carries wrapped family keys | **No — admin's device must be online** |
+
+## D1 — unsigned, with the guided unlock screen
+
+LZP-105 (signing & notarization) is **out of scope**; **LZP-106 is in scope and mandatory**,
+not optional. macOS 15 removed the right-click → Open bypass, so an unsigned build cannot be
+opened by folklore any more — the first-run screen walking through the Systemeinstellungen
+unlock in two illustrated steps is the *only* path onto Mom's Mac.
+
+Consequences accepted:
+
+- The scariest screen in the product ships. Deliverable 27 is required, not conditional.
+- The invitation email (deliverable 28, 22.1) must set the expectation *before* she double-clicks,
+  or the unlock screen arrives as an error rather than as a step.
+- LZP-1006 (the Mom test) is now the highest-information test in the plan, because the thing it
+  measures is precisely the thing this decision made harder.
+- Amendment A12 stands: the v1 Gatekeeper note is superseded by 22.2's fallback path.
+
+The CI release workflow is written with signing as a **flag that is off**. Turning it on later
+needs a cert and two GitHub secrets — no code change. The decision is reversible; the fee is
+the only thing standing in the way.
+
+## D8 — the backup's identity block is passphrase-encrypted
+
+PBKDF2-SHA-256 (600 000 iterations) → AES-256-GCM, per ADR 002 §7.2. Export gains one
+passphrase field.
+
+This does **not** contradict "no passwords" (addendum §3). That principle forbids a
+*registration and login system* — an account you sign in to. This is a password on a key file,
+the same category as an SSH key passphrase. Nothing on the server ever sees it, and it is not
+an identity.
+
+The alternative was worse than it looks: two of three reviewed architectures shipped **raw
+private keys** inside a file the onboarding explicitly tells the user to email to themselves.
+That file is a complete device takeover, and it would sit in a mail archive forever.
+
+Copy consequence: the export sheet must say what the passphrase protects and that **losing it
+loses the backup** — there is no reset, by design (Section 3's Option-B trade).
+
+## D9 — invites do NOT carry wrapped keys
+
+The tighter of the two options, chosen deliberately. A leaked invite email is **never**
+sufficient to read family content; the admin's device must be online to wrap the family keys
+to the joiner's device key.
+
+The cost is real and lands on the flow the addendum cared most about. Story 15.3 promises a
+non-technical family member "gets in within a minute". With D9 that is now conditional on the
+admin's Mac being awake, so the join flow **must not hang or lie**. Required behaviour:
+
+1. Mom pastes the code, picks name and colour, and is **immediately a member** — the code
+   redeems against the server, her device key is published, the member list shows her.
+2. Her board then enters an explicit, calm **waiting state**: she is in the circle, and the
+   family entries appear as soon as the admin's Mac next syncs. German-first copy, one line,
+   no spinner on the board (19.3's "silence is the design" still governs).
+3. The admin's device wraps the keys on its next sync — no action required from the admin, no
+   notification demanded of them. It must not need the admin to *notice* anything.
+4. Only then do shared entries decrypt and appear.
+
+This turns a 60-second flow into a two-step one whenever the admin is asleep. It is the price
+of the guarantee, and the UI states it rather than hiding it. Deliverable 25 (empty states)
+gains this waiting state; deliverable 15 (the join flow) must show it as a designed screen.
+
+Not-negotiable follow-on: nothing in the waiting state may be phrased as an error, and it must
+never tell Mom to "ask Dad to open his laptop" as a *requirement* — it resolves itself.
+
+## D7 — ownership is structural, not server-validated
+
+LZP-901 asked for server-side validation that non-owners cannot mutate an entry. That is
+impossible without breaking story 21.1: the server relays ciphertext it cannot read, so it
+cannot know who owns what. The ticket text is amended rather than the guarantee.
+
+The replacement is stronger than a server check in one respect and weaker in another, and
+both halves are stated honestly:
+
+- **Ownership is structural** — the family entity key carries the owner's member id, so there
+  is nothing to forge and nothing to backdate. Property P9 asserts that no op sequence, including
+  stamps at `ms = 0`, can move an entity to a different owner.
+- Every honest client applies the same **deterministic authorization fold**, order-independently.
+- The **server** validates what it legitimately can see: membership, device signatures, rate
+  limits.
+- **What this does not do:** a member who patches their own client can still emit an op the
+  others will reject — but not one they will accept. Enforcement is by convergence, not by
+  gatekeeper. At family scale (2–8 people who know each other) that is the right trade, and
+  it is the only one available under E2EE.
