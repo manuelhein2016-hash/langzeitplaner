@@ -1,0 +1,15 @@
+{
+  "name": "langzeitplaner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rolling 12-month whiteboard calendar for macOS — Jahresplaner poster, digitised.",
+  "type": "module",
+  "scripts": {
+    "dev": "node dev-server.mjs",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

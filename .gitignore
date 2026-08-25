@@ -1,0 +1,11 @@
+node_modules/
+src-tauri/target/
+src-tauri/gen/
+shell-macos/build/
+*.icns
+.DS_Store
+dist/
+.vercel/
+.env
+.env.local
+*.log

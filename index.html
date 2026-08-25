@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LangzeitPlaner</title>
+<!-- Zero network by architecture (13.4): no CDN, no webfont request, no
+     analytics. Ubuntu is used when it is installed locally, otherwise the
+     board falls back to the system UI face. To pin the exact typography,
+     drop Ubuntu*.woff2 into assets/fonts/ and add the @font-face block noted
+     in README.md — still local, still no request. The CSP below turns the
+     promise into a property: even injected markup cannot reach the network. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'">
+<link rel="stylesheet" href="./src/css/app.css">
+<link rel="stylesheet" href="./src/css/print.css">
+</head>
+<body class="paper-a4">
+
+<div class="app">
+
+  <div class="titlebar" data-tauri-drag-region>
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="tb-title">LangzeitPlaner</div>
+    <div class="tb-range" id="tb-range"></div>
+  </div>
+
+  <!-- Option 1a: controls + legend in one 40px strip. It costs 40 of the 900
+       vertical px — one and a half day rows — and buys a permanently readable
+       layer and category state, which 1c hides and 1b pays for in column
+       width (118 → 104px, ~12 characters of note text on every row). -->
+  <div class="toolbar">
+    <button class="btn-today" id="btn-today" title="⌘T">Heute</button>
+
+    <div class="mode-pager" id="pager" hidden>
+      <button class="btn icon" id="pg-prev" title="Jahr zurück">‹</button>
+      <span class="yr" id="pg-year"></span>
+      <button class="btn icon" id="pg-next" title="Jahr vor">›</button>
+    </div>
+
+    <div class="tb-sep"></div>
+
+    <button class="btn layer-toggle" id="btn-feiertage" aria-pressed="true" title="⌘1">
+      <span class="box"></span><span class="lbl">Feiertage</span>
+    </button>
+    <button class="btn layer-toggle" id="btn-schulferien" aria-pressed="false" title="⌘2">
+      <span class="box"></span><span class="lbl">Schulferien</span>
+    </button>
+
+    <div class="tb-sep"></div>
+
+    <div class="legend" id="legend"></div>
+
+    <div class="search-slot">
+      <div class="search-box">
+        <span>⌕</span>
+        <input id="find-input" type="text" placeholder="Suchen" spellcheck="false" autocomplete="off">
+        <span class="count" id="find-count"></span>
+        <button class="nav" id="find-prev" title="⇧⏎">‹</button>
+        <button class="nav" id="find-next" title="⏎">›</button>
+        <span class="kbd" id="find-kbd">⌘F</span>
+      </div>
+      <div class="find-history" id="find-history" hidden></div>
+      <button class="btn icon" id="btn-print" title="⌘P">⎙</button>
+      <button class="btn icon" id="btn-settings" title="⌘,">⚙</button>
+    </div>
+  </div>
+
+  <div class="print-only print-head" id="print-head"></div>
+
+  <div class="board-wrap" id="board-wrap">
+    <div class="board" id="board"></div>
+  </div>
+
+  <div class="print-only print-legend" id="print-legend"></div>
+
+</div>
+
+<script type="module" src="./src/js/main.js"></script>
+</body>
+</html>

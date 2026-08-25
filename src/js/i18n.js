@@ -1,0 +1,187 @@
+// German is the default; English is a toggle (spec 13.7). Weekday abbreviations
+// stay language-specific (Mo/Di/Mi vs Mo/Tu/We) — German readers expect the
+// German pair, English readers stumble over "Mi" for Wednesday.
+
+const DE = {
+  appName: 'LangzeitPlaner',
+  today: 'Heute',
+  feiertage: 'Feiertage',
+  schulferien: 'Schulferien',
+  categories: 'Kategorien',
+  find: 'Suchen',
+  print: 'Drucken',
+  settings: 'Einstellungen',
+  export: 'Exportieren',
+  import: 'Importieren',
+  scratchpad: 'Notizzettel',
+  edit: 'bearbeiten',
+  done: 'Fertig',
+  cancel: 'Abbrechen',
+  save: 'Sichern',
+  delete: 'Löschen',
+  close: 'Schließen',
+  addNote: '＋ Notiz hinzufügen',
+  entries: 'Einträge',
+  entry: 'Eintrag',
+  barsHere: 'Balken an diesem Tag',
+  continues: 'läuft weiter →',
+  layers: 'Ebenen',
+  mode: 'Modus',
+  rolling: 'Rollierend',
+  pinned: 'Fixiert',
+  repeatsYearly: 'Jährlich wiederholen',
+  noResults: 'keine Treffer',
+  ofHits: 'von',
+  language: 'Sprache',
+  bundesland: 'Bundesland',
+  bundeslandNone: 'Kein Bundesland gewählt',
+  pickBundesland: 'Bundesland wählen',
+  ferienHorizon: 'Ferien-Daten bis',
+  ferienUnverified:
+    'Achtung: Platzhalterdaten. Vor Release durch die offiziellen KMK-Termine ersetzen.',
+  launchAtLogin: 'Beim Anmelden starten',
+  menuBarIcon: 'Symbol in der Menüleiste',
+  rowHeight: 'Zeilenhöhe',
+  colWidth: 'Spaltenbreite',
+  paper: 'Papierformat',
+  snapshots: 'Sicherungen',
+  restore: 'Wiederherstellen',
+  noSnapshots: 'Noch keine Sicherungen',
+  newCategory: 'Neue Kategorie',
+  renameCategory: 'Umbenennen',
+  deleteCategory: 'Kategorie löschen',
+  reassignTitle: 'Kategorie löschen',
+  reassignBody: (n, name) =>
+    `„${name}“ hat ${n} ${n === 1 ? 'Eintrag' : 'Einträge'}. Wohin damit?`,
+  reassignTo: 'Einträge verschieben nach',
+  importConfirm: 'Aktuelles Board ersetzen?',
+  importBody:
+    'Der Import überschreibt alle Einträge, Kategorien und Einstellungen. Das lässt sich nicht widerrufen — aber die Sicherung von heute bleibt erhalten.',
+  restoreConfirm: 'Sicherung wiederherstellen?',
+  restoreBody: (d) => `Das Board wird auf den Stand von ${d} zurückgesetzt.`,
+  replace: 'Ersetzen',
+  firstRunTitle: 'Willkommen',
+  firstRunBody:
+    'Klicke auf einen Tag und tippe los. Ziehe senkrecht, um einen Balken zu legen.',
+  firstRunState:
+    'Für Feiertage und Schulferien fehlt noch dein Bundesland.',
+  emptyHint: 'Klicken und tippen',
+  showOtherStates: 'Andere Bundesländer gedimmt',
+  ferienPattern: 'Ferien schraffieren',
+  ferienPatternHint: 'Zweiter Kanal neben der Helligkeit — hilft auf schwachen Displays und im Druck.',
+  gatekeeper:
+    'Beim ersten Start: Rechtsklick auf die App → „Öffnen“, damit macOS die unsignierte App zulässt.',
+  more: 'weitere',
+  lanesFull: 'weitere Balken',
+  historyHitsLabel: 'Außerhalb des Zeitraums',
+  pinnedToHistory: 'Modus: Fixiert — „Heute“ (⌘T) führt zurück',
+  print_generated: 'LangzeitPlaner',
+  yearBack: 'Jahr zurück',
+  yearFwd: 'Jahr vor',
+  density: 'Dichte',
+  appearance: 'Darstellung',
+  data: 'Daten',
+  window: 'Fenster',
+  shortcutHint: 'Alle Kürzel: siehe Menüleiste',
+  untitledBar: 'Balken',
+  hidden: 'ausgeblendet',
+};
+
+const EN = {
+  ...DE,
+  today: 'Today',
+  feiertage: 'Public holidays',
+  schulferien: 'School holidays',
+  categories: 'Categories',
+  find: 'Find',
+  print: 'Print',
+  settings: 'Settings',
+  export: 'Export',
+  import: 'Import',
+  scratchpad: 'Scratchpad',
+  edit: 'edit',
+  done: 'Done',
+  cancel: 'Cancel',
+  save: 'Save',
+  delete: 'Delete',
+  close: 'Close',
+  addNote: '＋ Add note',
+  entries: 'entries',
+  entry: 'entry',
+  barsHere: 'Bars on this day',
+  continues: 'continues →',
+  layers: 'Layers',
+  mode: 'Mode',
+  rolling: 'Rolling',
+  pinned: 'Pinned',
+  repeatsYearly: 'Repeats yearly',
+  noResults: 'no matches',
+  ofHits: 'of',
+  language: 'Language',
+  bundesland: 'Federal state',
+  bundeslandNone: 'No federal state selected',
+  pickBundesland: 'Choose a federal state',
+  ferienHorizon: 'School-holiday data until',
+  ferienUnverified:
+    'Warning: placeholder data. Replace with the official KMK dates before release.',
+  launchAtLogin: 'Launch at login',
+  menuBarIcon: 'Menu-bar icon',
+  rowHeight: 'Row height',
+  colWidth: 'Column width',
+  paper: 'Paper size',
+  snapshots: 'Snapshots',
+  restore: 'Restore',
+  noSnapshots: 'No snapshots yet',
+  newCategory: 'New category',
+  renameCategory: 'Rename',
+  deleteCategory: 'Delete category',
+  reassignTitle: 'Delete category',
+  reassignBody: (n, name) =>
+    `“${name}” has ${n} ${n === 1 ? 'entry' : 'entries'}. Move them where?`,
+  reassignTo: 'Move entries to',
+  importConfirm: 'Replace current board?',
+  importBody:
+    'Importing overwrites all entries, categories and settings. This cannot be undone — but today’s snapshot is kept.',
+  restoreConfirm: 'Restore snapshot?',
+  restoreBody: (d) => `The board will be reset to its state from ${d}.`,
+  replace: 'Replace',
+  firstRunTitle: 'Welcome',
+  firstRunBody:
+    'Click a day and start typing. Drag vertically to lay down a bar.',
+  firstRunState: 'Public and school holidays need your federal state first.',
+  emptyHint: 'Click and type',
+  showOtherStates: 'Other states dimmed',
+  ferienPattern: 'Hatch school holidays',
+  ferienPatternHint: 'A second channel next to brightness — helps on weak displays and in print.',
+  gatekeeper:
+    'On first launch: right-click the app → “Open”, so macOS allows the unsigned app.',
+  more: 'more',
+  lanesFull: 'more bars',
+  historyHitsLabel: 'Outside the visible range',
+  pinnedToHistory: 'Mode: pinned — “Today” (⌘T) brings you back',
+  yearBack: 'Year back',
+  yearFwd: 'Year forward',
+  density: 'Density',
+  appearance: 'Appearance',
+  data: 'Data',
+  window: 'Window',
+  shortcutHint: 'All shortcuts: see the menu bar',
+  untitledBar: 'Bar',
+  hidden: 'hidden',
+};
+
+const TABLES = { de: DE, en: EN };
+
+let current = 'de';
+
+export function setLang(l) {
+  current = TABLES[l] ? l : 'de';
+}
+export function getLang() {
+  return current;
+}
+export function t(key, ...args) {
+  const v = TABLES[current][key];
+  if (typeof v === 'function') return v(...args);
+  return v ?? key;
+}

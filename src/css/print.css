@@ -1,0 +1,136 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Print / PDF — F12. One page, landscape, the whole board.
+   A4 is the compatibility case, A3 the wall format. Metrics below are derived
+   from the paper, not guessed: content box ÷ 12 columns ÷ 31 rows.
+   The @page size rule itself is injected by print.js so the A4/A3 setting can
+   switch it — @page cannot be scoped by a selector.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@media print {
+  html, body {
+    height: auto; overflow: visible;
+    background: #fff;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* 12.2 — all UI leaves; only the board and its legend print. */
+  .titlebar, .toolbar, .scrim, .popover, .coach, .toast,
+  .inline-edit, .drag-ghost, .bar-preview, .drop-row,
+  .bar-handle { display: none !important; }
+
+  /* The "+n" badge stays. Paper has no hover, so a silently dropped entry
+     would make the sheet lie about how full a day is — the count is content,
+     not chrome. It just loses its button affordance. */
+  .d-more { cursor: default; background: transparent; padding: 0; color: #6B5CA5; }
+
+  .app { display: block; height: auto; }
+  .board-wrap { overflow: visible !important; height: auto; }
+  .board { width: 100%; padding: 0; page-break-inside: avoid; }
+  .col { border-right: 0.5pt solid #C9BFE4; }
+
+  .print-head {
+    display: flex !important; align-items: baseline; gap: 10px;
+    margin: 0 0 4px; padding-bottom: 3px;
+    border-bottom: 1pt solid #3D2185;
+  }
+  .print-head .t { font: 600 11pt 'Ubuntu', sans-serif; color: #3D2185; }
+  .print-head .r { font: 400 9pt 'Ubuntu', sans-serif; color: #6B5CA5; }
+  .print-head .meta { margin-left: auto; font: 400 7.5pt 'Ubuntu', sans-serif; color: #8A7CB8; }
+
+  /* 12.4 / design note — a slim legend strip carries the colour key onto
+     paper, because a printed stripe with no key is just a coloured line. */
+  .print-legend {
+    display: flex !important; flex-wrap: wrap; gap: 4px 14px; align-items: center;
+    margin-top: 6px; padding-top: 4px; border-top: 0.5pt solid #C9BFE4;
+  }
+  .print-legend .item { display: flex; align-items: center; gap: 4px; }
+  .print-legend .sw { width: 14px; height: 5px; border-radius: 1px; }
+  .print-legend .nm { font: 500 7pt 'Ubuntu', sans-serif; color: #3D2185; }
+  .print-legend .layers { margin-left: auto; font: 400 7pt 'Ubuntu', sans-serif; color: #6B5CA5; }
+
+  .col-head {
+    position: static; border-bottom: 1pt solid #3D2185;
+    height: 16px; font-size: 8.5pt; padding-left: 3px;
+  }
+  .col.is-today-month .col-head::after { display: none; } /* 15.(4) */
+
+  .day { border-bottom: 0.4pt solid #E4DFF3; }
+  .day:hover { background: inherit; }
+
+  /* 15.(4) — the Today highlight is excluded from print; posters are
+     date-agnostic and a pink band would date the sheet on the wall. That
+     includes the quieter tells: the bold darkest-ink day number, and the
+     missing hatch that would otherwise single today out inside Ferien. */
+  .day.today { background: transparent !important; }
+  .day.today::before { display: none !important; }
+  .day.today.we { background: var(--bg-weekend) !important; }
+  .day.today.fer { background: var(--bg-ferien) !important; }
+  .day.today.we.fer { background: var(--bg-weekend-ferien) !important; }
+  .day.today .d-num { color: var(--ink-3); font-weight: 500; }
+  .day.today.we .d-num { color: var(--ink-2); }
+  body.ferien-hatch .day.today.fer { background-image: var(--ferien-hatch) !important; }
+
+  .note.selected, .bar.selected, .bar-label.selected {
+    outline: 0 !important; box-shadow: none !important;
+  }
+  /* 12.3 — what you see is what prints: find dimming is a view state, not a
+     filter, so it is dropped; category/layer toggles are honoured because the
+     hidden entries were never rendered in the first place. */
+  body.finding .note, body.finding .bar, body.finding .bar-label,
+  body.finding .d-hol, body.finding .pad textarea { opacity: 1 !important; }
+  .note.hit, .pad textarea.hit { background: transparent !important; border-bottom: 0 !important; }
+  .bar.hit, .bar-label.hit { box-shadow: none !important; }
+
+  .pad { border-top: 0.5pt dashed #C9BFE4; }
+  .pad textarea { overflow: hidden; color: #6B5CA5; }
+  /* 10.5 — only non-empty pads print. */
+  .pad.empty { visibility: hidden; }
+
+  .horizon-cue { color: #3F7A22; }
+}
+
+/* ── A4 landscape (297 × 210 mm, 8 mm margins → 1062 × 733 px @96dpi) ─────── */
+@media print {
+  body.paper-a4 {
+    --col-w: 88px;
+    --row-h: 20px;
+    --head-h: 18px;
+    --pad-h: 34px;
+    --gutter: 24px;
+    --lane-w: 5px;
+    --lane-gap: 7px;
+  }
+  body.paper-a4 .d-num { font-size: 7pt; width: 13px; padding-left: 2px; }
+  body.paper-a4 .d-wd { font-size: 6pt; width: 11px; }
+  body.paper-a4 .note { font-size: 6.5pt; line-height: 1.15; }
+  body.paper-a4 .d-hol { font-size: 6pt; }
+  body.paper-a4 .bar-label { font-size: 6pt; line-height: 9px; max-width: 52px; }
+  body.paper-a4 .pad textarea { font-size: 6pt; line-height: 1.3; }
+  body.paper-a4 .pad-label { font-size: 5.5pt; }
+  body.paper-a4 .horizon-cue { font-size: 6pt; }
+}
+
+/* ── A3 landscape (420 × 297 mm, 10 mm margins → 1512 × 1046 px @96dpi) ───── */
+@media print {
+  body.paper-a3 {
+    --col-w: 126px;
+    --row-h: 29px;
+    --head-h: 22px;
+    --pad-h: 46px;
+    --gutter: 30px;
+    --lane-w: 6px;
+    --lane-gap: 9px;
+  }
+  body.paper-a3 .d-num { font-size: 9pt; width: 17px; }
+  body.paper-a3 .d-wd { font-size: 7.5pt; width: 15px; }
+  body.paper-a3 .note { font-size: 8pt; line-height: 1.25; }
+  body.paper-a3 .d-hol { font-size: 7.5pt; }
+  body.paper-a3 .bar-label { font-size: 7.5pt; line-height: 12px; max-width: 74px; }
+  body.paper-a3 .pad textarea { font-size: 7.5pt; line-height: 1.35; }
+  body.paper-a3 .pad-label { font-size: 6.5pt; }
+  body.paper-a3 .print-head .t { font-size: 14pt; }
+  body.paper-a3 .print-legend .nm { font-size: 8.5pt; }
+}
+
+.print-only { display: none; }
