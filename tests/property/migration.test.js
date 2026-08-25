@@ -32,7 +32,7 @@ import { migrateV1, GENESIS, MAX_GENESIS_INDEX } from '../../src/js/core/migrate
 import { foldAuthorized } from '../../src/js/core/authz.js';
 import { fold, mergeMaps, serializeRegisters } from '../../src/js/core/registers.js';
 import { materialize, stripV2Fields } from '../../src/js/core/materialize.js';
-import { sortBars, sortScratchpads } from '../../src/js/core/entities.js';
+import { sortScratchpads } from '../../src/js/core/entities.js';
 
 const pad22 = (s) => (s + 'x'.repeat(22)).slice(0, 22);
 const ME = `mem_${pad22('ME')}`;
@@ -64,32 +64,36 @@ test(`P8 — materialize(fold(migrateV1(b))) deep-equals the v1 board, over ${SE
     const b = board(seed);
     const out = stripV2Fields(roundTrip(b));
 
-    // ADR 001 §8.3's AC reads "including array order after the deterministic sort". Notes and
-    // categories keep v1's ARRAY order — that is exactly what the GENESIS index buys, and the
-    // corpus is built with descending ids so uuid order cannot accidentally supply it. Bars and
-    // scratchpads are deliberately RE-SORTED by §5 step 5, so the expectation for those is v1's
-    // content through the same comparator, not v1's array.
+    // ADR 001 §8.3's AC reads "including array order after the deterministic sort", and it means
+    // it: notes, bars and categories all keep v1's ARRAY order — that is exactly what the GENESIS
+    // index buys, and the corpus is built with descending ids so uuid order cannot accidentally
+    // supply it. Only `scratchpads` is re-keyed, and that is a sorted OBJECT, not an array.
+    //
+    // ATT-50 / ATT-52: bars used to be excepted here, compared against `sortBars(b.bars)` because
+    // `cmpBars` re-sorted them by `(startDate asc, endDate desc, id asc)`. That made the AC false
+    // for any board whose bars were not already in date order, which is most of them. `cmpBars`
+    // is now `(_born asc, id asc)` like the other two, and the exception is gone with it.
     assert.deepEqual(out.notes, b.notes, 'notes lost their v1 array order or a field');
     assert.deepEqual(out.categories, b.categories, 'categories lost their v1 array order or a field');
-    assert.deepEqual(out.bars, sortBars(b.bars.slice()), 'bars did not match the deterministic sort');
+    assert.deepEqual(out.bars, b.bars, 'bars lost their v1 array order or a field');
     assert.deepEqual(out.scratchpads, sortScratchpads(b.scratchpads), 'scratchpads differ');
     assert.deepEqual(out.settings, b.settings, 'a setting was lost or fabricated');
   });
 });
 
-test('P8 — the migrated board renders identically through the REAL layout.js, modulo the §5 sort', () => {
+test('P8 — the migrated board renders identically through the REAL layout.js', () => {
   // Deep-equal arrays do not prove the board LOOKS the same: `layout.js` slices to capacity
   // (:209) and rescues lanes per column (:162-177), both order-sensitive. Running the real layout
   // over both is the only assertion that covers what the user actually sees.
   //
-  // The expectation is v1's board WITH ITS BARS PUT THROUGH `sortBars`, not v1's board as stored,
-  // and that is not a fudge — it is ADR 001 §5 step 5, which re-sorts bars by
-  // `(startDate asc, endDate desc, id asc)` on purpose so that array order is a function of the
-  // op set rather than of insertion history. The next test measures the size of that deliberate
-  // difference instead of hiding it.
+  // The expectation is v1's board EXACTLY AS STORED. It used to be v1's board with its bars put
+  // through `sortBars` — a fudge that looked principled because ADR 001 §5 step 5 sanctioned the
+  // re-sort, and that hid ATT-50/ATT-52: the re-sort moved `seg.labelRow` on real boards. With
+  // `cmpBars` on `(_born asc, id asc)` there is nothing left to except, so the comparison is now
+  // against the user's own file and the test can fail for the reason it was written for.
   forEachSeed(seeds(200), 'P8 through layout.js', (seed) => {
     const b = board(seed);
-    const expected = buildBoard({ ...b, bars: sortBars(b.bars.slice()) });
+    const expected = buildBoard(b);
     const actual = buildBoard(stripV2Fields(roundTrip(b)));
     assert.equal(actual.cols.length, expected.cols.length);
     for (let i = 0; i < expected.cols.length; i++) {
@@ -101,38 +105,39 @@ test('P8 — the migrated board renders identically through the REAL layout.js, 
   });
 });
 
-test('P8 — CHARACTERIZED: the bar re-sort is user-visible, and it never touches notes', () => {
-  // ADR 005 §4.3 requires the deliberate behaviour changes to be pinned "so they cannot drift
-  // further". This measures one that is easy to assume is cosmetic and is not.
+test('P8 — CLOSED (ATT-50/ATT-52): migration moves NOTHING on the rendered board', () => {
+  // This test used to CHARACTERIZE a defect. It asserted that migrating a board whose `bars`
+  // array was not already in `(startDate asc, endDate desc, id asc)` order changed `seg.labelRow`
+  // — which row inside a multi-row bar the label is drawn on — and it required at least one board
+  // in the corpus to demonstrate that, so the "deliberate reordering" could not be forgotten.
   //
-  // FINDING, reported rather than silently accepted: for a board whose `bars` array is not
-  // already in `(startDate asc, endDate desc, id asc)` order, migrating changes `seg.labelRow` —
-  // which row inside the bar the label is drawn on. `assignLanes` (`layout.js:43`) sorts
-  // internally, so LANE assignment really is order-independent as ADR 001 §5 step 5 claims; but
-  // the label-row pass downstream still follows array order, so the claim does not extend as far
-  // as the ADR's wording suggests. A user upgrading may see a long bar's label move rows.
+  // It is no longer a characterization, because the reordering is gone: `cmpBars` is `(_born asc,
+  // id asc)`, so a migrated board's arrays are the user's own file order and `buildBoard` over
+  // the two boards agrees COLUMN FOR COLUMN — days, segments, lanes and label rows alike.
   //
-  // Cosmetic, one-time, and inside what §13.8 already sanctions — but it is a visible change on
-  // upgrade day and the PO should know it exists rather than hear about it from Mom.
-  //
-  // The half that would NOT be acceptable is asserted here too: notes, day rows and the capacity
-  // slice are IDENTICAL, so no entry ever changes day, order, or `+n` truncation.
-  let boardsAffected = 0;
-  forEachSeed(seeds(200), 'P8 bar re-sort visibility', (seed) => {
+  // The corpus deliberately contains boards whose bars are NOT in date order; the counter below
+  // proves it, so a version of this test that could not have caught the old behaviour cannot
+  // pass silently.
+  let boardsWithUnsortedBars = 0;
+  forEachSeed(seeds(200), 'P8 render identity', (seed) => {
     const b = board(seed);
+    const dateOrder = [...b.bars].sort((x, y) =>
+      (x.startDate < y.startDate ? -1 : x.startDate > y.startDate ? 1 : 0) ||
+      (y.endDate < x.endDate ? -1 : y.endDate > x.endDate ? 1 : 0) ||
+      (x.id < y.id ? -1 : 1));
+    if (sig(dateOrder.map((x) => x.id)) !== sig(b.bars.map((x) => x.id))) boardsWithUnsortedBars++;
+
     const asStored = buildBoard(b);
     const migrated = buildBoard(stripV2Fields(roundTrip(b)));
-    let differs = false;
     for (let i = 0; i < asStored.cols.length; i++) {
-      // Day rows carry the NOTES and the capacity slice. These must never differ.
       assert.deepEqual(migrated.cols[i].days, asStored.cols[i].days,
-        `column ${asStored.cols[i].key}: migration moved a NOTE — that is not a sanctioned change`);
-      if (sig(migrated.cols[i].segs) !== sig(asStored.cols[i].segs)) differs = true;
+        `column ${asStored.cols[i].key}: migration moved a NOTE`);
+      assert.deepEqual(migrated.cols[i].segs, asStored.cols[i].segs,
+        `column ${asStored.cols[i].key}: migration moved a BAR SEGMENT`);
     }
-    if (differs) boardsAffected++;
   });
-  assert.ok(boardsAffected > 0,
-    'no board in the corpus exercised the bar re-sort — this characterization is vacuous');
+  assert.ok(boardsWithUnsortedBars > 0,
+    'no board in the corpus has bars out of date order — this test could not have caught ATT-52');
 });
 
 test('P8 — migration is lossless under adversarial DELIVERY, not just in order', () => {

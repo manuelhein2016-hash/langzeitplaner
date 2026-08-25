@@ -39,12 +39,13 @@ import assert from 'node:assert/strict';
 import '../helpers/env.js';
 import { boardState, CAT, note as v1note, bar as v1bar } from '../helpers/fixtures.js';
 import { defaultState } from '../../src/js/store.js';
-import { buildBoard } from '../../src/js/layout.js';
+import { buildBoard, visibleStart } from '../../src/js/layout.js';
 
 import {
   materialize, createdAt, updatedAt, updatedBy,
   DEFAULT_SETTINGS, SCHEMA_VERSION_V2, PREF_ENTITY, PROMOTABLE,
-  V2_ENTRY_FIELDS, stripV2Fields,
+  V1_ENTRY_FIELDS, V2_ENTRY_FIELDS, stripV2Fields, toV1Board, exportV1JSON,
+  MaterializeError,
 } from '../../src/js/core/materialize.js';
 import { fmt } from '../../src/js/core/stamp.js';
 import { FIELDS, flattenPref } from '../../src/js/core/ops.js';
@@ -201,7 +202,18 @@ function v1ToOps(board, { act = ME, constantGenesis = false } = {}) {
 const fromV1 = (board, ctx = soloCtx(), opts = {}) =>
   materialize(foldOps(v1ToOps(board, opts)), ctx);
 
-/** A board with real content in every one of the four content buckets. */
+/**
+ * A board with real content in every one of the four content buckets — THE §8.3 GATE FIXTURE.
+ *
+ * THE BARS ARE DELIBERATELY NOT IN DATE ORDER, and that is load-bearing (ATT-50). The original
+ * fixture listed them `b-1 … b-4`, which happened to be exactly `(startDate asc, endDate desc,
+ * id asc)` — so the round-trip gate below passed while `cmpBars` was re-sorting bars and
+ * destroying the v1 array order §8.3 promises to preserve. A gate that cannot fail is not a gate.
+ *
+ * The file order here (`b-3, b-1, b-4, b-2`) differs from the date order (`b-1, b-2, b-3, b-4`)
+ * in three of four positions, and the notes are likewise NOT in date order, so any comparator
+ * that ignores `_born` reorders this fixture visibly.
+ */
 function richBoard() {
   return boardState({
     notes: [
@@ -213,14 +225,20 @@ function richBoard() {
       v1note('n-6', '2026-11-30', 'Advent', { categoryId: CAT[1] }),
     ],
     bars: [
-      v1bar('b-1', '2026-02-10', '2026-04-20', 'Projekt Nord'),
-      v1bar('b-2', '2026-02-10', '2026-03-01', 'Sprint', { categoryId: CAT[1] }),
       v1bar('b-3', '2026-02-15', '2026-02-28', 'Urlaub', { categoryId: CAT[2] }),
+      v1bar('b-1', '2026-02-10', '2026-04-20', 'Projekt Nord'),
       v1bar('b-4', '2026-02-16', '2026-02-20', 'Messe', { categoryId: CAT[3] }),
+      v1bar('b-2', '2026-02-10', '2026-03-01', 'Sprint', { categoryId: CAT[1] }),
     ],
     scratchpads: { '2026-03': 'Milch\nBrot', '2026-01': 'Vorsätze', '2026-12': 'Geschenke' },
   });
 }
+
+/** The date comparator `cmpBars` used to be — kept ONLY so the gate can prove it is not in use. */
+const dateOrderIds = (bars) => [...bars].sort((a, b) =>
+  (a.startDate < b.startDate ? -1 : a.startDate > b.startDate ? 1 : 0) ||
+  (b.endDate < a.endDate ? -1 : b.endDate > a.endDate ? 1 : 0) ||
+  (a.id < b.id ? -1 : 1)).map((b) => b.id);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // A. THE COMPATIBILITY CONTRACT — v1 is the judge
@@ -246,6 +264,12 @@ test('a real v1 board round-trips to a deep-equal v1 board (ADR 001 §8.3, P8 in
   const board = richBoard();
   const out = fromV1(board);
   assert.deepEqual(stripV2Fields(out), board);
+  // THE GATE MUST BE CAPABLE OF FAILING (ATT-50). Assert that the fixture's bars are genuinely
+  // out of date order, so the deep-equal above is testing `_born` order and not agreeing with a
+  // date sort by accident — which is exactly how the old fixture hid the defect.
+  assert.notDeepEqual(dateOrderIds(board.bars), board.bars.map((b) => b.id),
+    'the gate fixture bars are already in date order — this gate cannot fail');
+  assert.deepEqual(out.bars.map((b) => b.id), board.bars.map((b) => b.id), 'v1 file order');
 });
 
 test('an empty v1 board round-trips too — the first-run case', () => {
@@ -344,6 +368,94 @@ test('V2_ENTRY_FIELDS covers every non-v1 key materialize actually emits', () =>
   check(out.notes, v1NoteKeys);
   check(out.bars, v1BarKeys);
   check(out.categories, v1CatKeys);
+});
+
+test('ATT-51 — `id` is the FIRST key of every entry, exactly as in v1 (11.4)', () => {
+  // v1 writes `id` first (`store.js:19-24`, every `interact.js` create), so `board.json` reads
+  // `{"id": …, "date": …}`. Assigning `id` in the decoration pass put it LAST — a key added to a
+  // JS object after the fact keeps its insertion position — so every entry in the file changed
+  // shape on upgrade day and a byte-wise diff of two exports was useless. 11.4 promises the file
+  // stays human-readable; a diff nobody can read is not that.
+  //
+  // Against the old code the three assertions below read
+  // ['date','text','categoryId','repeatsYearly','id'] and fail.
+  const board = richBoard();
+  const v1 = stripV2Fields(fromV1(board));
+  assert.deepEqual(Object.keys(v1.notes[0]), ['id', 'date', 'text', 'categoryId', 'repeatsYearly']);
+  assert.deepEqual(Object.keys(v1.bars[0]), ['id', 'startDate', 'endDate', 'label', 'categoryId']);
+  assert.deepEqual(Object.keys(v1.categories[0]), ['id', 'name', 'nameEn', 'paletteRef', 'visible']);
+  // and the same on the UNSTRIPPED entry — the v2 decoration is appended, never interleaved
+  const out = fromV1(board);
+  assert.equal(Object.keys(out.notes[0])[0], 'id');
+  assert.equal(Object.keys(out.bars[0])[0], 'id');
+  assert.equal(Object.keys(out.categories[0])[0], 'id');
+  // v1's own file, byte for byte, through v1's own serializer
+  assert.equal(JSON.stringify(v1.notes[0]), JSON.stringify(board.notes[0]));
+  assert.equal(JSON.stringify(v1.bars[0]), JSON.stringify(board.bars[0]));
+  // a FOREIGN entry keeps the rule too — its `id` is the entity key, and it is still first
+  const fam = materialize(foldOps([
+    op(GENESIS(0), MAMA, familyKey('fnote', MAMA, 'x1'),
+      { _born: GENESIS(0), 'pub.level': 'geteilt', 'pub.date': '2026-05-01', 'pub.text': 'Chor' }),
+  ]), familyCtx());
+  assert.equal(Object.keys(fam.notes[0])[0], 'id');
+});
+
+test('ATT-80/81 — stripV2Fields is TOTAL: no v2-only field can survive it', () => {
+  // The privacy claim. v1's `exportJSON()` is `JSON.stringify(this.state, null, 2)` and 11.2
+  // mails that file to somebody. Over a materialized state it carried `ownerId` (a MemberId),
+  // `_born` (whose last 16 chars are this device's `deviceShort`), `entityKey` and `updatedBy`.
+  //
+  // The check ENUMERATES `FIELDS` rather than a hand-written list, so a register added to `note`,
+  // `bar`, `cat`, `fnote` or `fbar` next year is covered the day it is added — which is the only
+  // way a strip stays total without somebody remembering to update it.
+  const v1Union = new Set(Object.values(V1_ENTRY_FIELDS).flat());
+  const declared = [
+    ...['note', 'bar', 'cat'].flatMap((k) => Object.keys(FIELDS[k])),
+    ...['fnote', 'fbar'].flatMap((k) => Object.keys(FIELDS[k]).map((f) => (f.startsWith('pub.') ? f.slice(4) : f))),
+  ];
+  const v2Only = [...new Set(declared)].filter((f) => !v1Union.has(f));
+  assert.ok(v2Only.length >= 5, 'the FIELDS enumeration produced nothing — the test is vacuous');
+
+  const state = materialize(foldOps(v1ToOps(richBoard())), familyCtx({ lastAckedPubLevel: () => 'privat' }));
+  // Plant every v2-only register name AND every decoration on a live entry, then strip.
+  const planted = {
+    ...state,
+    notes: state.notes.map((n) => ({ ...n, ...Object.fromEntries(v2Only.map((f) => [f, 'LEAK'])) })),
+    bars: state.bars.map((b) => ({ ...b, ...Object.fromEntries(v2Only.map((f) => [f, 'LEAK'])) })),
+    categories: state.categories.map((c) => ({ ...c, ...Object.fromEntries(v2Only.map((f) => [f, 'LEAK'])) })),
+  };
+  const out = stripV2Fields(planted);
+  for (const kind of ['notes', 'bars', 'categories']) {
+    for (const e of out[kind]) {
+      for (const f of [...v2Only, ...V2_ENTRY_FIELDS]) {
+        assert.equal(f in e, false, `${kind}: "${f}" survived stripV2Fields`);
+      }
+    }
+  }
+  // …and the serialized bytes contain none of the four identifiers by value, either.
+  const json = exportV1JSON(planted);
+  for (const secret of [ME, MAMA, 'LEAK', ZERO_DEV]) {
+    assert.equal(json.includes(secret), false, `${secret} reached the exported file`);
+  }
+  assert.equal(/\d{13}\.\d{6}\./.test(json), false, 'a stamp reached the exported file');
+
+  // V2_ENTRY_FIELDS is the exact complement, so `undo.js:shadowContent` (which subtracts it)
+  // and the strip (which keeps the whitelist) can never disagree about what "a v1 field" is.
+  for (const f of v2Only) assert.ok(V2_ENTRY_FIELDS.includes(f), `V2_ENTRY_FIELDS is missing "${f}"`);
+  for (const f of V2_ENTRY_FIELDS) assert.equal(v1Union.has(f), false, `"${f}" is a v1 field`);
+});
+
+test('ATT-80 — exportV1JSON round-trips back through migrateV1: schemaVersion 1, re-importable', () => {
+  // `exportJSON()` writing `schemaVersion: 2` produced a file the product's own whole-board
+  // primitive REFUSES ("already at schemaVersion 2"). The seam is what WP-3 calls instead.
+  const state = materialize(foldOps(v1ToOps(richBoard())), familyCtx({ lastAckedPubLevel: () => 'privat' }));
+  const file = JSON.parse(exportV1JSON(state));
+  assert.equal(file.schemaVersion, 1);
+  assert.deepEqual(Object.keys(file), ['schemaVersion', 'notes', 'bars', 'categories', 'scratchpads', 'settings']);
+  assert.equal(exportV1JSON(state), JSON.stringify(toV1Board(state), null, 2), 'v1 exportJSON, verbatim');
+  assert.equal(toV1Board, stripV2Fields, 'the seam is an alias, not a second implementation');
+  // it survives a second lap through the whole pipeline unchanged
+  assert.deepEqual(stripV2Fields(fromV1(file)), file);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -943,15 +1055,36 @@ test('notes sort by (_born asc, id asc)', () => {
   assert.deepEqual(materialize(foldOps(ops), soloCtx()).notes.map((n) => n.id), ['c', 'a', 'z', 'b']);
 });
 
-test('bars sort by (startDate asc, endDate desc, id asc) — layout.js:43\'s own comparator', () => {
-  const mk = (id, s, e) => op(GENESIS(0), ME, `bar:${id}`, { _born: GENESIS(0), startDate: s, endDate: e, label: id, _alive: true });
+test('bars sort by (_born asc, id asc) — v1 FILE ORDER, exactly like notes (ATT-50/ATT-52)', () => {
+  // WAS `(startDate asc, endDate desc, id asc)`. That threw away the v1 array index `_born`
+  // carries (ADR 001 §8.1) and made ADR 001 §8.3's acceptance criterion — "deep-equals the v1
+  // board for every field INCLUDING array order" — FALSE for every board whose bars are not
+  // already in date order. `assignLanes` re-sorts by the date comparator internally
+  // (`layout.js:38-44`), so nothing about lane assignment depends on this.
+  //
+  // The dates below are the OPPOSITE of the `_born` order on purpose: under the old comparator
+  // this test reads ['z', 'a', 'b', 'm'], so it cannot pass by accident under either rule.
+  const mk = (id, born, s, e) => op(born, ME, `bar:${id}`, { _born: born, startDate: s, endDate: e, label: id, _alive: true });
   const ops = [
-    mk('m', '2026-02-01', '2026-02-10'),
-    mk('a', '2026-02-01', '2026-03-10'),
-    mk('z', '2026-01-01', '2026-01-02'),
-    mk('b', '2026-02-01', '2026-02-10'),
+    mk('m', GENESIS(0), '2026-02-01', '2026-02-10'),
+    mk('a', GENESIS(1), '2026-02-01', '2026-03-10'),
+    mk('z', GENESIS(2), '2026-01-01', '2026-01-02'),
+    mk('b', GENESIS(3), '2026-02-01', '2026-02-10'),
   ];
-  assert.deepEqual(materialize(foldOps(ops), soloCtx()).bars.map((b) => b.id), ['z', 'a', 'b', 'm']);
+  assert.deepEqual(materialize(foldOps(ops), soloCtx()).bars.map((b) => b.id), ['m', 'a', 'z', 'b']);
+  // …and it is order-independent, which is the half the date comparator also had.
+  for (let seed = 1; seed <= 20; seed++) {
+    assert.deepEqual(
+      materialize(foldOps(shuffled(ops, mulberry32(seed))), soloCtx()).bars.map((b) => b.id),
+      ['m', 'a', 'z', 'b'], `seed ${seed}`);
+  }
+  // A bar whose `_born` has not arrived sorts LAST, like a note fragment, and `id` is the total
+  // final tiebreak.
+  const frag = op(fmt(9, 0, DEV_B), ME, 'bar:frag', { startDate: '2026-01-01', endDate: '2026-01-02', _alive: true });
+  const tie = mk('aa', GENESIS(0), '2026-05-01', '2026-05-02');
+  assert.deepEqual(
+    materialize(foldOps([...ops, frag, tie]), soloCtx()).bars.map((b) => b.id),
+    ['aa', 'm', 'a', 'z', 'b', 'frag']);
 });
 
 test('categories[0] — the dangling-reference fallback — is deterministic', () => {
@@ -1066,7 +1199,7 @@ test('a board with no live categories repairs nothing and does not crash', () =>
 test('dotted pref registers rebuild the nested v1 settings object', () => {
   const regs = foldOps([
     op(GENESIS(0), ME, PREF_ENTITY, flattenPref({
-      mode: 'pinned', startMonth: '2026-01', rowHeight: 30,
+      mode: 'pinned', startMonth: '2026-01', rowHeight: 30, bundesland: 'BY',
       layers: { feiertage: false, schulferien: true },
     })),
   ]);
@@ -1074,6 +1207,7 @@ test('dotted pref registers rebuild the nested v1 settings object', () => {
   assert.equal(s.mode, 'pinned');
   assert.equal(s.startMonth, '2026-01');
   assert.equal(s.rowHeight, 30);
+  assert.equal(s.bundesland, 'BY');
   assert.deepEqual(s.layers, { feiertage: false, schulferien: true, otherStates: false, ferienPattern: false });
 });
 
@@ -1137,20 +1271,82 @@ test('a scalar and a branch on the same pref path keeps the scalar rather than t
   assert.equal(materialize(regs, soloCtx()).settings.mode, 'pinned');
 });
 
-test('v1\'s LOAD-TIME normalizations are deliberately NOT projection invariants', () => {
-  // `store.js:89-91` ("no Bundesland ⇒ schulferien off") and `store.js:88` (the paletteRef
-  // backfill) live in v1's migrate(), which runs ONCE per load and never again. v1 does not
-  // re-apply them on every mutation, so a materializer that did would not be reproducing v1 —
-  // it would be changing it, and a user who turns the layer on with no Bundesland set would see
-  // it silently turn itself back off. Reported as an ADR gap; pinned here so the behaviour is a
-  // decision rather than an oversight.
+test('ATT-30 — "no Bundesland ⇒ schulferien off" (7.5) IS a projection invariant', () => {
+  // This test used to assert the opposite, on the reasoning that `store.js:89-91` lives in v1's
+  // `migrate()`, which runs once per load, so re-applying it on every projection would be
+  // CHANGING v1 rather than reproducing it. That reasoning was wrong about v1: `replaceAll()`
+  // runs `migrate()` on every incoming board, so v1 re-normalises on every import (11.3) and
+  // every snapshot restore (11.5). Leaving it out meant a shipped v1 invariant survived until
+  // the first import and was then gone forever — which is a silent regression, not a decision.
+  //
+  // Idempotence is why it is safe as a projection invariant: `layout.js:107` skips `ferienIndex`
+  // without a Bundesland anyway, so the layer could only ever have rendered as a pressed toggle
+  // shading nothing.
   const regs = foldOps([
     op(GENESIS(0), ME, PREF_ENTITY, flattenPref({ bundesland: '', layers: { schulferien: true } })),
     op(GENESIS(1), ME, `cat:${CAT[0]}`, { name: 'A', visible: true, _born: GENESIS(1), _alive: true }),
   ]);
   const out = materialize(regs, soloCtx());
-  assert.equal(out.settings.layers.schulferien, true);
+  assert.equal(out.settings.layers.schulferien, false, 'store.js:89-91, on every projection');
+  assert.equal(out.settings.bundesland, '');
+  // …and it touches NOTHING else: the other three layers keep whatever the prefs said.
+  const loud = foldOps([op(GENESIS(0), ME, PREF_ENTITY, flattenPref({
+    bundesland: '', layers: { feiertage: false, schulferien: true, otherStates: true, ferienPattern: true },
+  }))]);
+  assert.deepEqual(materialize(loud, soloCtx()).settings.layers,
+    { feiertage: false, schulferien: false, otherStates: true, ferienPattern: true });
+  // With a Bundesland the layer is left exactly as authored — the normalisation is conditional,
+  // not a permanent "off".
+  const withState = foldOps([op(GENESIS(0), ME, PREF_ENTITY, flattenPref({
+    bundesland: 'BY', layers: { schulferien: true },
+  }))]);
+  assert.equal(materialize(withState, soloCtx()).settings.layers.schulferien, true);
+
+  // `store.js:88`'s paletteRef backfill is still NOT reproduced — it needs `palette.js`, which
+  // is outside `core/` (ADR 005 §2). Still an absence, still the retrofit's job.
   assert.equal('paletteRef' in out.categories[0], false);
+});
+
+test('ATT-97 — a pinned board with no startMonth is REFUSED, never projected', () => {
+  // THE HANG. `DEFAULT_SETTINGS.startMonth` is null (core/ may not read a clock), so a caller
+  // who omits `ctx.defaultSettings` used to get `settings.startMonth: null`. `layout.js:25` then
+  // does `parseISO('null-01')` → `{y: NaN, m: NaN}`, and `holidays.js:51`'s
+  // `while (dow(year, 11, d) !== 3) d -= 1;` never terminates. The app hangs, hard.
+  //
+  // Against the OLD code every assertion below fails: materialize returned a settings object
+  // with `startMonth: null` instead of throwing.
+  const pinned = foldOps([op(GENESIS(0), ME, PREF_ENTITY, flattenPref({ mode: 'pinned' }))]);
+  assert.throws(() => materialize(pinned, {}), MaterializeError);
+  assert.throws(() => materialize(pinned, {}), /ctx\.defaultSettings/);
+  assert.throws(() => materialize(pinned, { defaultSettings: DEFAULT_SETTINGS }), MaterializeError,
+    'DEFAULT_SETTINGS is the headless fallback and is NOT a usable ctx.defaultSettings');
+
+  // Garbage is refused on the same line — the guard is "layout.js can parse it", not "not null".
+  for (const bad of ['2026-13', '2026', 'null', '2026-1', '', 0]) {
+    assert.throws(
+      () => materialize(foldOps([op(GENESIS(0), ME, PREF_ENTITY, flattenPref({ mode: 'pinned', startMonth: bad }))]), {}),
+      MaterializeError, `startMonth ${JSON.stringify(bad)} was projected`);
+  }
+
+  // A real caller passes v1's own defaults and everything works.
+  assert.equal(materialize(pinned, soloCtx()).settings.startMonth, V1_DEFAULT_SETTINGS.startMonth);
+  assert.equal(materialize(foldOps([
+    op(GENESIS(0), ME, PREF_ENTITY, flattenPref({ mode: 'pinned', startMonth: '2026-01' })),
+  ]), {}).settings.startMonth, '2026-01', 'a pref that supplies it needs no ctx at all');
+
+  // ROLLING is untouched — `layout.js:24` never reads `startMonth` there, so a headless fold
+  // with a bare ctx keeps working. That is what bounds the blast radius of the throw.
+  assert.equal(materialize(foldOps([op(GENESIS(0), ME, PREF_ENTITY, { rowHeight: 30 })]), {}).settings.startMonth, null);
+
+  // …and the whole point, end to end: nothing materialize returns can reach visibleStart's NaN.
+  for (const ctx of [soloCtx(), {}]) {
+    let st;
+    try { st = materialize(pinned, ctx); } catch (e) {
+      assert.ok(e instanceof MaterializeError); continue;
+    }
+    const start = visibleStart(st.settings, '2026-03-04');
+    assert.ok(Number.isInteger(start.y) && Number.isInteger(start.m), 'visibleStart returned NaN');
+  }
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

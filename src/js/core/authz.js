@@ -77,7 +77,7 @@ import { isDeviceShort } from './ids.js';
 import {
   parseEntityKey, ownerOfEntity, spaceKey, isMemberId, isDeviceId, isOpId,
 } from './entities.js';
-import { fieldSpec, fieldsOf, classifyOp, spaceClassOf, isPubField } from './ops.js';
+import { fieldSpec, fieldsOf, classifyOp, spaceClassOf, isPubField, PARK_REASONS } from './ops.js';
 // THE join. ADR 005 §1.1 puts `applyOp` / `emptyRegisters` in `registers.js`; there is exactly
 // one implementation of `≺` in the product and this file uses it rather than carrying a rival.
 import { emptyRegisters, applyOp, cmpWrites, getRegister, getValue } from './registers.js';
@@ -132,7 +132,12 @@ export const REJECT_REASONS = Object.freeze({
   LOST_ADMIN_CHAIN: 'lostAdminChain',
   /** A governing `pub.*` write by somebody who is neither the owner nor an unsharing admin. */
   NOT_OWNER: 'notOwner',
-  /** An admin write to another member's entity that is not EXACTLY the §4.3 unshare patch. */
+  /**
+   * An admin write to another member's entity that is not a §4.3 unshare AT ALL — it does not set
+   * `pub.level` to `'privat'`. A patch that MEANS to unshare but carries something this build
+   * cannot read as a withdrawal is PARKED (`PARK_REASONS.UNSHARE_SHAPE`), never rejected: a rejection is
+   * final, and a wrongly-final rejection of an unshare leaves previously-hidden content visible.
+   */
   NOT_AN_UNSHARE: 'notAnUnshare',
   /** `pub.coEdit` is not true on that entity's FINAL registers. */
   NO_COEDIT: 'noCoEdit',
@@ -314,17 +319,47 @@ function adminAtIn(acceptedOps, at) {
 // 4. The admin unshare patch (ADR 001 §4.3 stage 3a · ADR 004 §5)
 //
 // "the patch is exactly `{ 'pub.level': 'privat', ...all other pub fields → null }`".
-// EXACTLY is the operative word, and it is checked in both directions:
-//   * every `pub.*` field of the kind other than `pub.level` must be present AND null — the
-//     ADR 004 §5.1 rule that omission is not withdrawal, applied to the admin's patch too; and
-//   * nothing else may be present — an admin who could append one extra field to an unshare
-//     would have a general write primitive on every member's entity.
-// `_born` is deliberately NOT part of it: it is write-once and the entry is not deleted (18.3).
+// "the patch is exactly `{ 'pub.level': 'privat', ...all other pub fields → null }`". The ADR
+// says EXACTLY, and reading that as "exactly THIS BUILD'S `FIELDS[kind]` table" is wrong — it
+// makes the predicate a function of the reader's version instead of a function of the op.
+//
+// WHAT GOES WRONG WITH THE LITERAL READING. Add one `pub.*` field to `fnote` in v2.1 and the
+// meaning of "an unshare" changes underneath a fleet that is mid-rollout. The unshare a v2.0
+// admin authors carries one field fewer than v2.1 expects; a v2.1 client REJECTS it, and a
+// rejection is FINAL. The entry the admin unshared therefore stays published on the newer
+// client — previously-hidden content still visible, which is precisely the failure ADR 001 §4.1
+// exists to prevent, arriving through a staggered app update instead of through a hostile relay.
+// A privacy retraction must never depend on which build sees it first.
+//
+// WHAT IS CHECKED INSTEAD — a property of the patch, not a diff against a table:
+//   * `pub.level` is present and is `'privat'` — this is the write that unshares, and nothing
+//     without it is an unshare; and
+//   * EVERY OTHER field the patch carries is `null`. That, not the field count, is what makes an
+//     unshare incapable of being a general write primitive: an admin who appends a field to an
+//     unshare can only ever append a WITHDRAWAL of it. Blanking a field the admin was already
+//     allowed to blank grants no new power.
+// Fields this build's table omits from `unsharePatch(kind)` are therefore fine to carry (a newer
+// build's patch) and fine to omit (an older build's). ADR 004 §5.1's "omission is not withdrawal"
+// still holds for the FIELDS THAT EXIST HERE — see `unsharePatch`, which every unshare this build
+// AUTHORS still emits in full; what changed is only what this build ACCEPTS from a peer.
+// `_born` is deliberately not withdrawn: it is write-once and the entry is not deleted (18.3).
+//
+// AND A NEAR-MISS IS PARKED, NOT REJECTED. `'no'` — no `pub.level: 'privat'` at all — is a plain
+// admin write to another member's entity and stays a hard rejection. `'skew'` — an unshare that
+// this build cannot confirm, e.g. a future version that withdraws a field with a sentinel rather
+// than with `null` — is PARKED: retained, not applied, re-evaluated after an app update. Version
+// skew then degrades to "not yet unshared, and the log still knows why", never to "silently not
+// unshared, and the op is gone".
 // ─────────────────────────────────────────────────────────────────────────────
 
 const UNSHARE_CACHE = new Map();
 
-/** The exact patch an admin unshare must carry. @param {'fnote'|'fbar'} kind @returns {Object} */
+/**
+ * The patch an admin unshare this build AUTHORS carries: every `pub.*` field of the kind, the
+ * level set to `'privat'` and the rest nulled. Still the full table, because omission is not
+ * withdrawal for a field we know about. `isAdminUnsharePatch` does NOT require equality with it.
+ * @param {'fnote'|'fbar'} kind @returns {Object}
+ */
 export function unsharePatch(kind) {
   if (UNSHARE_CACHE.has(kind)) return UNSHARE_CACHE.get(kind);
   const out = {};
@@ -337,17 +372,36 @@ export function unsharePatch(kind) {
   return out;
 }
 
-/** @param {'fnote'|'fbar'} kind @param {Object} f @returns {boolean} */
-export function isAdminUnsharePatch(kind, f) {
-  const want = unsharePatch(kind);
-  const wantKeys = Object.keys(want);
-  const gotKeys = Object.keys(f);
-  if (gotKeys.length !== wantKeys.length) return false;
-  for (const k of wantKeys) {
-    if (!Object.prototype.hasOwnProperty.call(f, k)) return false;
-    if (f[k] !== want[k]) return false;
+/**
+ * The tri-state stage-3a verdict on an admin's patch. Version-independent by construction: it
+ * reads only the patch, never `FIELDS[kind]`.
+ *
+ *   'unshare' — admit. Sets the level to privat and withdraws everything else it carries.
+ *   'skew'    — PARK. Clearly means to unshare (level → privat) but carries something this build
+ *               cannot read as a withdrawal. Retained for re-evaluation, never applied.
+ *   'no'      — REJECT. Not an unshare at all.
+ *
+ * @param {'fnote'|'fbar'} kind @param {Object} f @returns {'unshare'|'skew'|'no'}
+ */
+export function classifyUnsharePatch(kind, f) {
+  if (f === null || typeof f !== 'object' || Array.isArray(f)) return 'no';
+  if (!Object.prototype.hasOwnProperty.call(f, 'pub.level')) return 'no';
+  if (f['pub.level'] !== 'privat') return 'no';
+  for (const k of Object.keys(f)) {
+    if (k === 'pub.level') continue;
+    // Not a `pub.*` name (`_born`, a truth field, anything else) → not a withdrawal this build
+    // can vouch for. Not null → the same. Either way: park, do not apply, do not drop.
+    if (!isPubField(k) || f[k] !== null) return 'skew';
   }
-  return true;
+  return 'unshare';
+}
+
+/**
+ * True iff the patch is an admissible admin unshare (ADR 001 §4.3 stage 3a).
+ * @param {'fnote'|'fbar'} kind @param {Object} f @returns {boolean}
+ */
+export function isAdminUnsharePatch(kind, f) {
+  return classifyUnsharePatch(kind, f) === 'unshare';
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -465,42 +519,74 @@ export function foldAuthorized(ops, ctx) {
     rejectionOf.set(id, { stage, reason });
   };
 
+  /**
+   * The other verdict. A park is NOT final: the op is retained, never folded, and re-evaluated
+   * later. Pass A parks what `classifyOp` could not read; stage 3a parks an admin unshare this
+   * build cannot confirm (see §4). Same dedupe discipline as `reject`, for the same reason.
+   */
+  const parkOp = (op, reason) => {
+    const id = op && typeof op === 'object' ? op.id : undefined;
+    if (typeof id === 'string') {
+      if (seenParked.has(id)) return;          // see `seenRejected` above
+      seenParked.add(id);
+      parkReasonOf.set(id, reason);
+    }
+    parked.push(op);
+  };
+
   // ── Pass A. Shape triage and idempotent dedupe ────────────────────────────
   //
   // Duplicate delivery is not an error condition here, it is Tuesday (ADR 001 §6). Dedupe by
   // opId keeps the fold idempotent even for the non-ACI parts (the chain walk). Two DIFFERENT
   // bodies under one opId is envelope splicing (ADR 002 §5.1) — resolved content-addressably so
   // every device picks the same one, and reported.
+  //
+  // THE SPLICE IS RESOLVED FOR PARKED BODIES TOO (attack A6). It used to be resolved only among
+  // ops that classify as `admit`: a body that parked short-circuited straight into `parkOp`,
+  // which dedupes by opId and therefore kept whichever body ARRIVED FIRST. A parked op is
+  // retained precisely so it can be applied after an app update (§7.4), so two devices that
+  // received the two envelopes in opposite orders would apply DIFFERENT ops once they updated —
+  // and never reconcile. Verdict does not decide the contest; the canonical max does, exactly as
+  // in `oplog.js:append`, so both devices retain the same body and then park it for the same
+  // reason. A REJECTED body still never competes: a protocol violation may not win a splice, nor
+  // disturb one, which is why classification runs first and only its two survivors enter here.
   const candidates = new Map();
+  const spliced = new Set();
+  const loose = [];                                // no usable opId — cannot be deduped by one
   for (const op of ops) {
     const verdict = classifyOp(op, { nowMs: ctx.nowMs, haveEpochKey: ctx.haveEpochKey });
     if (verdict.status === 'reject') {
       reject(op, STAGES[0], REJECT_REASONS.SHAPE);
       continue;
     }
-    if (verdict.status === 'park') {
-      const id = op && typeof op === 'object' ? op.id : undefined;
-      if (typeof id === 'string') {
-        if (seenParked.has(id)) continue;          // see `seenRejected` above
-        seenParked.add(id);
-        parkReasonOf.set(id, verdict.parkReason);
-      }
-      parked.push(op);
-      continue;
-    }
-    const prior = candidates.get(op.id);
-    if (!prior) { candidates.set(op.id, op); continue; }
-    if (prior === op) continue;
-    const cp = canonicalJSON(prior);
+    const id = op && typeof op === 'object' && typeof op.id === 'string' ? op.id : null;
+    if (id === null) { loose.push({ op, verdict }); continue; }
+    const prior = candidates.get(id);
+    if (prior === undefined) { candidates.set(id, { op, verdict }); continue; }
+    if (prior.op === op) continue;
+    const cp = canonicalJSON(prior.op);
     const co = canonicalJSON(op);
     if (cp === co) continue;                       // an honest duplicate
-    splicedIds.push(op.id);
-    candidates.set(op.id, co > cp ? op : prior);
+    // A SET, not a running push (attack A5). `rejected` and `parked` were given exactly this
+    // dedupe during WP-1 integration for exactly this reason — re-delivering one of the two
+    // spliced bodies must not make two devices report a different number of splices for the
+    // same log — and `splicedIds` was the one report left as an append-per-collision.
+    spliced.add(id);
+    if (co > cp) candidates.set(id, { op, verdict });
   }
+  for (const id of spliced) splicedIds.push(id);
   splicedIds.sort();
 
+  // Only now is the winner routed to its verdict, so `parked` holds the same body on every
+  // device. `parked` is sorted by opId before it is returned, so this insertion order is not
+  // observable; the BODY is what had to stop depending on arrival.
+  const all = [];
+  for (const { op, verdict } of [...candidates.values(), ...loose]) {
+    if (verdict.status === 'park') { parkOp(op, verdict.parkReason); continue; }
+    all.push(op);
+  }
   // Everything downstream walks this ONE sorted array. No stage ever sees arrival order.
-  const all = [...candidates.values()].sort(opOrder);
+  all.sort(opOrder);
 
   // ── Stage 0a. Attestation registers — self-authorizing ────────────────────
   const attested = new Map();          // memberId -> Set<deviceId>
@@ -691,7 +777,21 @@ export function foldAuthorized(ops, ctx) {
     if (touchesGov) {
       const who = adminAtKey(spaceKey(op.space), op.ts);
       if (who === null || op.act !== who) { reject(op, STAGES[3], REJECT_REASONS.NOT_OWNER); continue; }
-      if (!isAdminUnsharePatch(kind, op.f)) { reject(op, STAGES[3], REJECT_REASONS.NOT_AN_UNSHARE); continue; }
+      const verdict = classifyUnsharePatch(kind, op.f);
+      if (verdict === 'no') { reject(op, STAGES[3], REJECT_REASONS.NOT_AN_UNSHARE); continue; }
+      if (verdict === 'skew') {
+        // An unshare we cannot confirm is PARKED, never rejected. Rejecting it is what turns a
+        // staggered app update into "the admin unshared it and the newer client still shows it"
+        // — the C2 defect, and the failure ADR 001 §4.1 exists to prevent.
+        //
+        // Parking is safe in BOTH directions and that is why it is the answer here rather than a
+        // rejection: a parked op is never folded, so an admin who pads an unshare with a content
+        // write (`{...unsharePatch(kind), 'pub.text': 'gekapert'}`) still gets no write primitive
+        // — see ownership-authz-admin A6b. What parking additionally buys, and a rejection
+        // destroys, is that the op survives to be re-judged by a build that can read it.
+        parkOp(op, PARK_REASONS.UNSHARE_SHAPE);
+        continue;
+      }
       admittedFamily.push(op);
       continue;
     }

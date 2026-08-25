@@ -151,6 +151,27 @@ function valueKey(v) {
 const byString = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
+ * The second key. An OpId is a 22-character Crockford/base64url string, so every real one sorts
+ * below `'￿'`.
+ *
+ * A WRITE WITH NO OPID RANKS ABOVE EVERY REAL ONE — the same "when a tie is reachable at all, the
+ * absorbing side wins" rule `valueKey` applies to `null`, and it is here for the same reason.
+ * `deserializeRegisters` now REFUSES a checkpoint register without an OpId (see there), so within
+ * this build an unattributed write cannot exist; this rank is the defence in depth behind that
+ * refusal. Ranking a missing opId LOWEST — which is what `a.op ?? ''` used to do — made every real
+ * op at the same stamp beat it, so a single dropped optional key anywhere upstream turned the ADR
+ * 004 §5.3 forget blank (value `null`, stamp AND opId retained precisely so the blank wins its own
+ * tie) back into the retracted plaintext on the next re-pull. INV-R4 says a downgrade removes; a
+ * comparator that lets an older value win a tie is that invariant not holding. Ranking it highest
+ * makes the unattributed write absorbing instead: only a genuinely GREATER stamp — the owner
+ * publishing again — can displace it, which is republication, not a leak.
+ * @param {unknown} o @returns {string}
+ */
+function opKey(o) {
+  return typeof o === 'string' && o !== '' ? o : '￿';
+}
+
+/**
  * `≺` — the strict total order on writes (ADR 001 §6 step 1, extended per the header note).
  * Stamp, then opId, then the value. Anything less than total would let two peers that received
  * the same ops in different orders disagree.
@@ -161,7 +182,7 @@ const byString = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 export function cmpWrites(a, b) {
   return /** @type {-1|0|1} */ (
     cmp(a.stamp, b.stamp)
-    || byString(a.op ?? '', b.op ?? '')
+    || byString(opKey(a.op), opKey(b.op))
     || byString(valueKey(a.value), valueKey(b.value))
   );
 }
@@ -642,9 +663,22 @@ export function deserializeRegisters(blob) {
       if (!isMemberId(r.author)) throw new RegisterError(`deserializeRegisters: ${e}.${f} has no valid author`);
       if (!('value' in r)) throw new RegisterError(`deserializeRegisters: ${e}.${f} has no value (absent is not null — R9)`);
       if (!isScalar(r.value)) throw new RegisterError(`deserializeRegisters: ${e}.${f} value is not a JSON scalar or null`);
-      const op = r.op === undefined ? '' : r.op;
-      if (op !== '' && !isOpId(op)) throw new RegisterError(`deserializeRegisters: ${e}.${f} has a malformed op id`);
-      ent.set(f, Object.freeze({ value: r.value, stamp: r.stamp, author: r.author, op }));
+      // `op` IS MANDATORY, exactly like stamp / author / value. It is SHAPE, not vocabulary, and
+      // the doctrine above is "strict on shape". `serializeRegisters` has always written it, and
+      // `oplog.js`'s forget pass already documents its dependence on it ("registers.js refuses a
+      // checkpoint whose `op` is not an OpId"), so nothing legitimate produces a register without
+      // one — only a truncated writer, a lossy JSON round-trip or a hostile checkpoint does.
+      //
+      // Accepting one and storing `''` is what let a re-pull UN-BLANK a retracted field: `''`
+      // ranked BELOW every real opId, so any re-delivered op at the identical stamp beat the
+      // ADR 004 §5.3 forget blank that deliberately kept that stamp. Refusing the file is the
+      // safer of the two available fixes, because it stops the unattributed register at the door
+      // instead of reasoning about how it ranks once it is inside; `opKey` above then ranks a
+      // missing opId highest as the defence in depth behind this check, so the two failure modes
+      // are "the corrupt file is refused" and, if one ever slips past, "the retraction holds" —
+      // never "the retraction is undone".
+      if (!isOpId(r.op)) throw new RegisterError(`deserializeRegisters: ${e}.${f} has a malformed op id`);
+      ent.set(f, Object.freeze({ value: r.value, stamp: r.stamp, author: r.author, op: r.op }));
     }
     out.set(e, ent);
   }

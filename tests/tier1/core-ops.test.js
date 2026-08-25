@@ -602,7 +602,7 @@ test('classifyOp is the ONE triage: admit, park or reject', () => {
 
 test('every park reason is declared, and only declared reasons are parkable', () => {
   assert.deepEqual(Object.values(PARK_REASONS).sort(),
-    ['epoch', 'future', 'unknownField', 'unknownKind', 'unknownSpace', 'version']);
+    ['epoch', 'future', 'unknownField', 'unknownKind', 'unknownSpace', 'unshareShape', 'version']);
   for (const r of Object.values(PARK_REASONS)) assert.ok(isParkReason(r), r);
   assert.equal(isParkReason('typeViolation'), false);
   assert.equal(isParkReason(undefined), false);
@@ -1237,24 +1237,46 @@ test('projectable applies ADR 001 §5 step 3 in full, in its stated order', () =
   assert.equal(projectable('bar', { startDate: '2026-03-10', endDate: '2026-03-20' }), true);
 });
 
-test('cmpBars is layout.js:43 comparator, and pre-sorting never changes lane assignment', () => {
+test('cmpBars is (_born asc, id asc) — v1 file order, NOT the date comparator (ATT-50/ATT-52)', () => {
+  // WAS `(startDate asc, endDate desc, id asc)` — `layout.js:43`'s comparator. That was a real
+  // defect: ADR 001 §8.3's acceptance criterion says a migrated board deep-equals the v1 board
+  // "for every field INCLUDING array order", and `_born` (which carries the v1 array index,
+  // §8.1) is the only thing that can deliver it. Notes and categories did; bars threw it away.
+  //
+  // Nothing about LANE assignment depended on the old comparator, and this test proves it:
+  // `assignLanes` sorts its input by the date comparator ITSELF (`layout.js:38-44`), so it is
+  // order-independent whatever order the array arrives in. What array order still decides is
+  // `seg.labelRow`, and there the user's own file order is the answer that moves nothing.
+  //
+  // The `_born` stamps below run OPPOSITE to the date order on purpose, so this test reads
+  // ['b2','b1','b4','b3','b5'] under the old rule and fails.
   const rnd = mulberry32(0x1A7E5);
+  const born = (i) => stampAt(1000 + i, 0);
   const bars = [
-    bar('b1', '2026-03-01', '2026-03-10', 'a'),
-    bar('b2', '2026-03-01', '2026-03-20', 'b'),   // same start, longer → sorts first
-    bar('b3', '2026-03-05', '2026-03-06', 'c'),
-    bar('b4', '2026-03-01', '2026-03-10', 'd'),   // identical range to b1 → id breaks the tie
-    bar('b5', '2026-04-01', '2026-04-02', 'e'),
+    { ...bar('b1', '2026-03-01', '2026-03-10', 'a'), _born: born(0) },
+    { ...bar('b2', '2026-03-01', '2026-03-20', 'b'), _born: born(1) },  // same start, longer
+    { ...bar('b3', '2026-03-05', '2026-03-06', 'c'), _born: born(2) },
+    { ...bar('b4', '2026-03-01', '2026-03-10', 'd'), _born: born(3) },  // identical range to b1
+    { ...bar('b5', '2026-04-01', '2026-04-02', 'e'), _born: born(4) },
   ];
-  assert.deepEqual(sortBars(bars).map((b) => b.id), ['b2', 'b1', 'b4', 'b3', 'b5']);
+  assert.deepEqual(sortBars(bars).map((b) => b.id), ['b1', 'b2', 'b3', 'b4', 'b5'], 'file order');
   const reference = assignLanes(bars);
   for (let i = 0; i < 30; i++) {
     const shuffled = shuffle(rnd, bars);
     assert.deepEqual([...assignLanes(shuffled).entries()].sort(), [...reference.entries()].sort(),
-      'assignLanes is order-independent because it sorts by exactly this comparator');
-    assert.deepEqual(sortBars(shuffled).map((b) => b.id), ['b2', 'b1', 'b4', 'b3', 'b5'], 'and so is sortBars');
+      'assignLanes is order-independent because it sorts by the date comparator itself');
+    assert.deepEqual(sortBars(shuffled).map((b) => b.id), ['b1', 'b2', 'b3', 'b4', 'b5'], 'and so is sortBars');
   }
+  // Two bars born in the same instant fall through to `id`, and a bar with no `_born` at all —
+  // a fragment of an entity whose create op has not arrived — sorts LAST, exactly like a note.
+  const tie = [
+    { ...bar('zz', '2026-01-01', '2026-01-02', 'z'), _born: born(9) },
+    { ...bar('aa', '2026-12-01', '2026-12-02', 'a'), _born: born(9) },
+    bar('mm', '2026-01-01', '2026-01-02', 'm'),
+  ];
+  assert.deepEqual(sortBars(tie).map((b) => b.id), ['aa', 'zz', 'mm']);
   assert.equal(cmpBars(bars[0], bars[0]), 0, 'a proper comparator returns 0 for identity');
+  assert.equal(cmpBars(tie[2], tie[2]), 0, 'including for two fragments that are the same object');
 });
 
 test('notes and categories sort by (_born asc, id asc), with a fragment sorting last', () => {

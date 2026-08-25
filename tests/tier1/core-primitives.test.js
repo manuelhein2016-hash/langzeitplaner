@@ -87,25 +87,42 @@ const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join(''
 // dev.js
 // ═════════════════════════════════════════════════════════════════════════════
 
-test('dev.js: DEV is off unless __LZP_DEV is set before import', () => {
-  assert.equal(DEV, false);
+// These two used to assert `DEV === false`, which characterised the AMBIENT value of the flag in
+// a test run rather than the mechanism. The suite now arms it — `npm test` runs with
+// `--import ./tests/helpers/dev-flag.mjs` so the R5 shadow-undo assertion is on for the suite it
+// exists to protect (attack ATT-96) — so an assertion on the ambient value would only be
+// re-stating the npm script. What must hold is the MECHANISM: DEV mirrors the global as it stood
+// at import time, in both directions, and never moves afterwards.
+
+test('dev.js: DEV mirrors globalThis.__LZP_DEV as it stood at import time', () => {
   assert.equal(typeof DEV, 'boolean');
+  assert.equal(DEV, !!globalThis.__LZP_DEV);
+  // NOTE the ambient value is deliberately NOT asserted here. `npm test` arms the flag, but this
+  // file must also pass when it is run on its own (`node --test tests/tier1/core-primitives.test.js`),
+  // and a test that depends on its invocation is a trap. That the npm scripts really do carry the
+  // flag is checked where it cannot be sidestepped — `suite-integrity.test.js` reads package.json.
 });
 
-test('dev.js: DEV reads globalThis.__LZP_DEV at import time', async () => {
+test('dev.js: DEV is read ONCE, and a cleared global really does yield false', async () => {
   // There is no build step in this project (ADR 001 §7.1), so DEV is a module constant read
   // once. A fresh module instance is forced with a query string; tests and dev-server.mjs are
   // the only things that ever set the global.
   const before = globalThis.__LZP_DEV;
-  globalThis.__LZP_DEV = true;
+  const pinned = DEV;
   try {
-    const mod = await import('../../src/js/core/dev.js?probe=1');
-    assert.equal(mod.DEV, true);
+    globalThis.__LZP_DEV = true;
+    assert.equal((await import('../../src/js/core/dev.js?probe=on')).DEV, true);
+    // …and the other direction, which is what proves nothing in core forces it on: with the
+    // global cleared, a fresh instance is false.
+    delete globalThis.__LZP_DEV;
+    assert.equal((await import('../../src/js/core/dev.js?probe=off')).DEV, false);
+    globalThis.__LZP_DEV = 0;
+    assert.equal((await import('../../src/js/core/dev.js?probe=falsy')).DEV, false, 'coerced, not truthy-passed');
   } finally {
     if (before === undefined) delete globalThis.__LZP_DEV;
     else globalThis.__LZP_DEV = before;
   }
-  assert.equal(DEV, false, 'the already-imported instance must not change under a live flag flip');
+  assert.equal(DEV, pinned, 'the already-imported instance must not change under a live flag flip');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

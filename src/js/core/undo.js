@@ -112,6 +112,23 @@
 // acceptance criterion lives — solo mode, and therefore the whole v1 regression suite — and it
 // declines to make claims about the concurrent case, which is what property tests P1–P4 and the
 // fleet scenarios are for.
+//
+// ATT-96 — "ARMED BY DEFAULT" IS A PROPERTY OF THE SUITE, NOT OF THIS FILE, AND TODAY IT IS NOT
+// ARMED. `shadow: cfg.shadow ?? DEV` is the ADR §7.1 default and stays; but `DEV` is false unless
+// something sets `globalThis.__LZP_DEV` before the first import of `dev.js`, and nothing in the
+// test tree does. Risk R5 depends on the guard actually running, so three things have to be true
+// at once and only the first is in this module's gift:
+//   1. `createUndoStacks` defaults to DEV — it does, here.
+//   2. the flag is set process-wide before any core import. `tests/helpers/env.js` reaches only
+//      the 14 test files that import it (core-undo, core-ops, core-oplog, core-registers,
+//      core-authz, core-primitives and the convergence suites do not); the seam that reaches all
+//      of them is `node --test --import ./tests/helpers/dev-flag.mjs` in package.json.
+//   3. the op-store harnesses stop overriding it. Both currently pin `shadow: opts.shadow ?? false`
+//      (tests/tier1/core-integration.test.js and tests/attack/v1-fidelity-core.test.js), which
+//      wins over DEV, so the flag alone changes nothing for them.
+// Measured: with the flag armed process-wide and the harnesses left as they are, the only test
+// that changes is ATT-96's own "off by default" assertion. Those files are outside this work
+// package's scope and the change is reported rather than made.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { DEV } from './dev.js';
@@ -507,6 +524,28 @@ export function createUndoStacks(cfg = {}) {
      * covers the ADR's "emitting zero ops is the same as declining" and the `pref`-only case, and
      * in both of those the redo branch is deliberately NOT dropped: v1 keeps a pending redo alive
      * across a settings change, and a transaction that changed no content is not a history event.
+     *
+     * ── ATT-5: A DELIBERATE, RECORDED DIVERGENCE FROM v1 ────────────────────────────────────
+     * v1's `mutate()` asks exactly one question — `if (r === false) return r` (`store.js:150`) —
+     * and never asks whether the callback changed anything. So `mutate('x', () => 0)` on an
+     * untouched board pushes an undo entry whose pre-image equals its post-image, and ⌘Z then
+     * spends a step doing nothing visible. `tests/tier1/store-persistence.test.js` pins that as a
+     * v1 fact ("only a strict `false` declines"); the guard on the next line contradicts it.
+     *
+     * THE CORE RULE IS KEPT AND v1'S IS NOT PRESERVED. Two reasons, and the second is the one
+     * that matters:
+     *   1. An undo step that undoes nothing is a defect the user experiences as "⌘Z is broken" —
+     *      they press it, the board does not move, and the change they wanted back is one step
+     *      further away. v1 gets away with it because the case is nearly unreachable there.
+     *   2. In v2 it is NOT unreachable, because it is load-bearing for the rest of the model. The
+     *      decline protocol here is what lets a constructor refuse to act without inventing a
+     *      second signalling channel: `ops.js`'s delete constructors return `[]` for an entity
+     *      that does not exist (ATT-88), rule U6's `pref`-only transactions emit no undoable
+     *      register at all, and both rely on "zero undoable ops ⇒ no step, no broadcast, redo
+     *      branch intact". Restoring v1's rule would put an empty undo entry on the stack for
+     *      every one of those.
+     * The v1 characterization suite's assertion was narrowed accordingly, in that file, with the
+     * same reasoning recorded beside it. This is the only v1 behaviour WP-1 knowingly drops.
      */
     push(gid, label, pre, post, shadow) {
       const p = undoableTriples(pre);

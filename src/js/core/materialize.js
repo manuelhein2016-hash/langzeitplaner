@@ -72,9 +72,22 @@ export { createdAt, updatedAt, updatedBy };
 // passes its own `defaultState().settings` as `ctx.defaultSettings`, so in the real app there is
 // exactly one source of truth and this constant is only the headless fallback. The duplication is
 // pinned by a test that diffs it against the real `defaultState()` key by key.
+//
+// "REPAIRED BY THE CALLER" WAS AN UNGUARDED HOLE, AND IT WAS AN APP HANG (ATT-97). A caller who
+// omits `ctx.defaultSettings` got `startMonth: null`; `layout.js:25` then parses `'null-01'` into
+// `{y: NaN, m: NaN}` and `holidays.js:51`'s `while (dow(year, 11, d) !== 3) d -= 1;` never
+// terminates. `buildSettings` now THROWS on exactly the combination that reaches that code —
+// `mode === 'pinned'` with an unparseable `startMonth` — so this constant cannot be used to
+// render a pinned board by accident. It is still exported: it is what a test diffs against, and
+// what a caller merges its own clock read into.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** @type {Readonly<Object>} v1 `defaultState().settings`, minus the two dynamic members. */
+/**
+ * v1 `defaultState().settings`, minus the two dynamic members.
+ * NOT SAFE AS A `ctx.defaultSettings` for a pinned board — `startMonth` is `null` and
+ * `buildSettings` refuses it. Pass v1's own `defaultState().settings` instead.
+ * @type {Readonly<Object>}
+ */
 export const DEFAULT_SETTINGS = Object.freeze({
   bundesland: '',
   layers: Object.freeze({
@@ -195,13 +208,21 @@ export const PROMOTABLE = Object.freeze(
  * categories (A3), and a raw `text` would render content the redaction boundary never published.
  * This is barrier 1 of ADR 004 §2.2 pointed the other way, and it costs one `has()`.
  *
+ * `id` SEEDS THE OBJECT (ATT-51). v1 writes `id` first in every entry it creates
+ * (`interact.js`, `store.js:19-24`), so `board.json` reads `{"id": …, "date": …}` and a user
+ * diffing two exports — 11.4 promises the file stays human-readable — sees one changed line, not
+ * a whole re-ordered object. Assigning `id` in the decoration pass instead put it LAST, because
+ * a key added to a JS object after the fact keeps its insertion position. Seeding it here is the
+ * whole fix: `Object.assign(fields, {id, …})` downstream then rewrites the same value in place.
+ *
  * @param {Map<string, Register>} cells
  * @param {string} kind          key into FIELDS
  * @param {(f:string)=>string} rename
+ * @param {string} id            the v1 `id` token for this entry — always the FIRST key
  * @returns {{fields:Object, used:Register[]}}
  */
-function projectCells(cells, kind, rename) {
-  const fields = {};
+function projectCells(cells, kind, rename, id) {
+  const fields = { id };
   const used = [];
   // The iteration order is `FIELDS[kind]`'s DECLARATION order, never the register map's.
   // Map iteration order is op-ARRIVAL order: projecting in it would give two devices holding
@@ -394,7 +415,7 @@ function ownCandidate(regs, key, parsed, ctx) {
   const truthCells = cellsOf(regs, key);
   if (truthCells.size === 0) return null;
 
-  const { fields, used } = projectCells(truthCells, truthKind, (f) => (f === '_alive' ? 'alive' : f));
+  const { fields, used } = projectCells(truthCells, truthKind, (f) => (f === '_alive' ? 'alive' : f), parsed.id);
 
   const me = ctx.me || null;
   const fkey = me && ctx.familySpaceId ? familyKeyFor(key, me) : null;
@@ -441,7 +462,7 @@ function foreignCandidate(regs, key, parsed, ctx) {
   const cells = cellsOf(regs, key);
   if (cells.size === 0) return null;
 
-  const { fields, used } = projectCells(cells, parsed.kind, displayName);
+  const { fields, used } = projectCells(cells, parsed.kind, displayName, key);
   const owner = parsed.owner;
   const rec = memberRecord(ctx, owner);
   const level = typeof fields.level === 'string' ? fields.level : null;
@@ -510,6 +531,22 @@ function prefsFromRegisters(regs) {
   return out;
 }
 
+/** `YYYY-MM`. The only shape `layout.js:25` can parse (`parseISO(\`${startMonth}-01\`)`). */
+const MONTH_KEY_RE = /^\d{4}-(?:0[1-9]|1[0-2])$/;
+
+/**
+ * Thrown when the projection cannot produce a settings object the v1 renderer can survive.
+ * It is a THROW and not a repaired default because there is no honest repair available in here:
+ * every candidate value for `startMonth` is a clock read, and `core/` may not read a clock
+ * (ADR 005 §2). The caller — which does have a clock — must pass `ctx.defaultSettings`.
+ */
+export class MaterializeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'MaterializeError';
+  }
+}
+
 /**
  * Defaults, overridden by the prefs, with `layers` merged one level deep — `store.js:76-80`'s
  * defensive nested spread, verbatim, so a board written before a layer existed still gets it.
@@ -517,12 +554,22 @@ function prefsFromRegisters(regs) {
  * The spread ORDER is also v1's, which is what makes the key order of the result identical to
  * v1's: every default first, in `defaultState()`'s order, then any extra key the prefs carry.
  *
- * NOT reproduced here, deliberately, and both are tested as absences:
- *  · `store.js:89-91`'s "no Bundesland ⇒ schulferien off" normalization, and
- *  · `store.js:88`'s `paletteRef` backfill (which needs `palette.js`, outside core/).
- * Both live in v1's `migrate()`, which runs ONCE at load and never again — v1 does not re-apply
- * them on every mutation, so a materializer that did would not be reproducing v1, it would be
- * changing it.
+ * TWO OF v1's LOAD-TIME REPAIRS ARE PROJECTION INVARIANTS HERE, and one is not.
+ *
+ *  · `store.js:86`'s `lastCategoryId` dangling-reference repair — below, with the same argument
+ *    as the entry-level repair in step 7.
+ *  · `store.js:89-91`'s "no Bundesland ⇒ schulferien off" (story 7.5) — below. THIS WAS THE
+ *    ATT-30 DEFECT. It was left out on the reasoning that v1 applies it once, in `migrate()`, and
+ *    a materializer that re-applied it would be changing v1 rather than reproducing it. That
+ *    reasoning was wrong about v1: `replaceAll()` (`store.js`, import 11.3 and snapshot restore
+ *    11.5) runs `migrate()` on EVERY incoming board, so v1 re-normalises on every whole-board
+ *    load, and v2 rebuilds the whole board on every single projection. Without this line the
+ *    invariant survives exactly until the first import and is then gone forever — a shipped v1
+ *    guarantee dropped silently. `ferienIndex` is skipped by `layout.js:107` when there is no
+ *    Bundesland anyway, so the layer could only ever render as a pressed toggle shading nothing.
+ *  · `store.js:88`'s `paletteRef` backfill is still NOT reproduced: it needs `nextFreeRef` from
+ *    `palette.js`, which is outside `core/` (ADR 005 §2). It stays the retrofit's job and is
+ *    tested here as an absence.
  */
 function buildSettings(regs, ctx, categories) {
   const d = ctx.defaultSettings || DEFAULT_SETTINGS;
@@ -537,6 +584,32 @@ function buildSettings(regs, ctx, categories) {
   if (categories.length) {
     const ids = new Set(categories.map((c) => c.id));
     if (!ids.has(settings.lastCategoryId)) settings.lastCategoryId = categories[0].id;
+  }
+
+  // ATT-30 / story 7.5 — `store.js:89-91`, as a projection invariant. `settings.layers` is the
+  // fresh object spread three lines up, so this mutates nothing the caller owns.
+  if (!settings.bundesland) settings.layers.schulferien = false;
+
+  // ATT-97 — THE HANG, CLOSED STRUCTURALLY.
+  //
+  // `DEFAULT_SETTINGS.startMonth` is `null`, because v1 computes it from the wall clock and
+  // `core/` may not read one. The ADR called that "repaired downstream by the caller"; nothing
+  // enforced it. A caller who omits `ctx.defaultSettings` therefore gets `startMonth: null`, and
+  // `layout.js:25` then does `parseISO('null-01')` → `{y: NaN, m: NaN}` → `holidays.js:51`'s
+  // `while (dow(year, 11, d) !== 3) d -= 1;` never terminates. Not a wrong pixel: the app hangs.
+  //
+  // Only `mode === 'pinned'` reads `startMonth` (`layout.js:24`), so that is exactly the
+  // condition that is refused — loudly, at the projection, with the ctx key that fixes it named
+  // in the message. A `'rolling'` board is untouched, which is what keeps a headless fold (a
+  // test, a checkpoint verifier, a sync worker) working with a bare ctx.
+  if (settings.mode === 'pinned' && !MONTH_KEY_RE.test(settings.startMonth)) {
+    throw new MaterializeError(
+      'materialize: settings.mode is "pinned" but settings.startMonth is '
+      + `${JSON.stringify(settings.startMonth)}, which layout.js:25 cannot parse. `
+      + 'Pass ctx.defaultSettings (v1 defaultState().settings) — core/ may not read a clock, '
+      + 'so it cannot invent a start month, and rendering this board would hang the app '
+      + '(holidays.js:51 loops forever on a NaN year).',
+    );
   }
   return settings;
 }
@@ -627,7 +700,7 @@ export function materialize(regs, ctx = {}) {
       case 'cat': {
         const cells = cellsOf(regs, key);
         if (cells.size === 0) break;
-        const { fields, used } = projectCells(cells, 'cat', (f) => (f === '_alive' ? 'alive' : f));
+        const { fields, used } = projectCells(cells, 'cat', (f) => (f === '_alive' ? 'alive' : f), parsed.id);
         if (fields.alive === false) break;             // a deleted category is gone from the legend
         categories.push(finish(Object.assign(fields, {
           id: parsed.id,
@@ -682,36 +755,111 @@ export function materialize(regs, ctx = {}) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. The v1 shape — the export / persist / snapshot seam (ADR 001 §8.3, §8.4)
+//
+// ATT-80 / ATT-81. v1's `exportJSON()` is `JSON.stringify(this.state, null, 2)` — the state
+// VERBATIM — and 11.2 mails that file to somebody. Over a MATERIALIZED state that file would
+// carry `ownerId` (a MemberId), `_born` (whose last 16 characters are this device's `deviceShort`
+// fingerprint), `entityKey`, `updatedBy`, and `schemaVersion: 2` — which `migrateV1` then refuses
+// on the way back in. Two bugs, one cause: nothing turned the v2 state back into a v1 board.
+//
+// `toV1Board` / `exportV1JSON` below are that seam. They are exported from THIS file because
+// this file is what decides which fields are additive.
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * The v2-additive fields, so a test — and `store.js`'s v1-compatibility persist — can compare a
- * materialized board against a v1 one. This is the `stripV2Fields` of ADR 001 §8.3's acceptance
- * criterion; it lives here because this file is what decides which fields are additive.
- * @type {readonly string[]}
+ * The v1 product fields, per v1 entity kind, `id` first — v1's own key order.
+ *
+ * THIS IS THE ONLY HAND-WRITTEN LIST IN THE STRIP, and it is a list of what v1 HAD: a closed,
+ * finished set that cannot grow, because v1 is not being developed. Everything else is DERIVED.
+ * The list that must never be hand-written is the complementary one — "the v2 fields" — because
+ * that one grows every time somebody adds a row to `FIELDS`, and a privacy strip that forgets a
+ * field leaks it silently into a file the user mails to somebody.
+ * @type {Readonly<Object<string, readonly string[]>>}
  */
-export const V2_ENTRY_FIELDS = Object.freeze([
-  'uuid', 'entityKey', 'ownerId', 'isForeign', 'visibility', 'level', 'coEdit',
-  'memberColorRef', 'initial', 'redacted', 'createdAt', 'updatedAt', 'updatedBy',
-  'isNew', 'exposure', '_born',
-  'defaultVisibility',   // cat, 16.4 / ADR 004 §3 — a v2 field on a v1 entity
+export const V1_ENTRY_FIELDS = Object.freeze({
+  note: Object.freeze(['id', 'date', 'text', 'categoryId', 'repeatsYearly']),
+  bar: Object.freeze(['id', 'startDate', 'endDate', 'label', 'categoryId']),
+  cat: Object.freeze(['id', 'name', 'nameEn', 'paletteRef', 'visible']),
+});
+
+/** Everything `materialize` decorates an entry with in step 4 (ADR 001 §5 step 4). */
+const DECORATIONS = Object.freeze([
+  'uuid', 'entityKey', 'ownerId', 'isForeign', 'level', 'redacted',
+  'memberColorRef', 'initial', 'exposure', 'isNew',
+  'createdAt', 'updatedAt', 'updatedBy',
 ]);
 
 /**
- * Drop every v2-additive field from a materialized board, leaving the v1 shape.
- * Foreign entries are dropped entirely — v1 has no representation for one.
+ * Every key a materialized entry can carry that a v1 entry cannot — DERIVED, not listed.
+ *
+ * The three sources are exhaustive by construction:
+ *   1. `FIELDS[note|bar|cat]`      — every truth register that can be projected (step 1),
+ *   2. `FIELDS[fnote|fbar]` renamed — every `pub.*` register a foreign entry projects (step 2),
+ *   3. `DECORATIONS`               — step 4, which is this file's own doing,
+ * minus `V1_ENTRY_FIELDS`, plus `alive` and `_alive` (the tombstone marker `finish()` strips,
+ * belt and braces). A field added to `FIELDS` next year is therefore in this set the day it is
+ * added, and `toV1Board` drops it without anyone remembering to update a list.
+ * @type {readonly string[]}
+ */
+export const V2_ENTRY_FIELDS = Object.freeze((() => {
+  // The union of the three v1 lists: a v1 field is a v1 field on every kind that declares it,
+  // and `pub.date` → `date` must not be mistaken for a v2 addition just because it arrived
+  // through the family space.
+  const v1 = new Set(Object.values(V1_ENTRY_FIELDS).flat());
+  const all = new Set([
+    ...['note', 'bar', 'cat'].flatMap((k) => Object.keys(FIELDS[k])),
+    ...['fnote', 'fbar'].flatMap((k) => Object.keys(FIELDS[k]).map(displayName)),
+    ...DECORATIONS,
+    'alive', '_alive',
+  ]);
+  return [...all].filter((f) => !v1.has(f)).sort();
+})());
+
+/**
+ * Drop every v2-additive field from a materialized board, leaving the v1 shape at
+ * `schemaVersion: 1`. Foreign entries are dropped entirely — v1 has no representation for one.
+ *
+ * The filter is a WHITELIST (`V1_ENTRY_FIELDS`), not a blacklist. A blacklist that misses a key
+ * leaks it; a whitelist that misses a key loses it, and the §8.3 round-trip test goes red the
+ * same day. Both failure modes are caught by a test, but only one of them is a privacy incident,
+ * so the strip is built to fail in the other direction. `V2_ENTRY_FIELDS` remains exported (it is
+ * what `undo.js:shadowContent` subtracts) and is asserted to be the exact complement.
+ *
  * @param {Object} state @returns {Object} a new object; `state` is not touched
  */
 export function stripV2Fields(state) {
-  const strip = (e) => {
-    const o = {};
-    for (const k of Object.keys(e)) if (!V2_ENTRY_FIELDS.includes(k)) o[k] = e[k];
-    return o;
+  const keepOnly = (kind) => {
+    const allow = new Set(V1_ENTRY_FIELDS[kind]);
+    return (e) => {
+      const o = {};
+      for (const k of Object.keys(e)) if (allow.has(k)) o[k] = e[k];
+      return o;
+    };
   };
   return {
     schemaVersion: 1,
-    notes: state.notes.filter((n) => !n.isForeign).map(strip),
-    bars: state.bars.filter((b) => !b.isForeign).map(strip),
-    categories: state.categories.map(strip),
+    notes: state.notes.filter((n) => !n.isForeign).map(keepOnly('note')),
+    bars: state.bars.filter((b) => !b.isForeign).map(keepOnly('bar')),
+    categories: state.categories.map(keepOnly('cat')),
     scratchpads: { ...state.scratchpads },
     settings: { ...state.settings, layers: { ...state.settings.layers } },
   };
 }
+
+/**
+ * THE SEAM WP-3 CALLS. `store.exportJSON()` (11.2), `store.persist()`'s `board.json` (§8.4) and
+ * `store._rollSnapshot()`'s `snapshots.json` (11.5) all need the SAME thing: the v1 board, at
+ * `schemaVersion: 1`, with nothing device-identifying in it. Alias, not a copy.
+ * @param {Object} state a materialized state @returns {Object} the v1 board shape
+ */
+export const toV1Board = stripV2Fields;
+
+/**
+ * `store.exportJSON()`, v2 edition — byte-for-byte v1's `JSON.stringify(state, null, 2)`, over
+ * the STRIPPED board. The result re-imports through `migrateV1` (it says `schemaVersion: 1`) and
+ * carries no MemberId, no entity key, no stamp and no device fingerprint.
+ * @param {Object} state @param {number} [indent] @returns {string}
+ */
+export const exportV1JSON = (state, indent = 2) => JSON.stringify(toV1Board(state), null, indent);

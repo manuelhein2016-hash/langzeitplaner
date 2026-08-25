@@ -502,12 +502,33 @@ describe('mutate() (5.4)', () => {
     assert.deepEqual(store.mutate('x', () => ({ ok: true })), { ok: true });
   });
 
+  // DISCREPANCY / ATT-5 — THE ONE v1 BEHAVIOUR THE OP-LOG RETROFIT DELIBERATELY DOES NOT KEEP.
+  //
+  // v1's mutate() asks exactly one question — `if (r === false) return r` (store.js:150) — and
+  // never asks whether the callback CHANGED anything. So the original form of this test,
+  // `store.mutate('falsy', () => v)` on an untouched board, recorded an undo entry whose
+  // pre-image equalled its post-image: a ⌘Z step that undoes nothing visible.
+  //
+  // v2's core asks both questions. `src/js/core/undo.js`'s push() records no step for a
+  // transaction that wrote no undoable register, so that empty-callback step is gone on purpose,
+  // and the reasoning is written out beside that guard. It could not be kept: "zero undoable ops
+  // is a decline" is the signalling channel rule U6's pref-only transactions and the ATT-88
+  // delete gate both use, and v1's rule would put an empty undo entry on the stack for every one
+  // of them. An undo that undoes nothing is a bug the user reads as "⌘Z is broken".
+  //
+  // So this characterization is narrowed to the half that IS about the return value and that both
+  // stores agree on: a falsy-but-not-`false` return does not decline a REAL change. The callback
+  // now makes one, so the assertion means the same thing before and after the retrofit.
   test('only a strict `false` declines — other falsy returns still record a step', () => {
     for (const v of [0, '', null, undefined, NaN]) {
-      const before = store.canUndo();
-      store.mutate('falsy', () => v);
+      assert.equal(store.canUndo(), false, 'each round starts from an empty stack');
+      store.mutate('falsy', (s) => {
+        s.notes.push({ id: uid(), date: '2026-03-04', text: String(v),
+          categoryId: s.categories[0].id, repeatsYearly: false });
+        return v;
+      });
       assert.equal(store.canUndo(), true, `${String(v)} recorded a step`);
-      void before;
+      store.undo();
     }
   });
 

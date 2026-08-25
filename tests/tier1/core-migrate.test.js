@@ -37,14 +37,20 @@ import {
   MIGRATION_GID,
   MIGRATION_LABEL,
   MigrationError,
+  DEFAULT_PALETTE_REF,
+  MigrationLossyError,
   SCHEMA_VERSION_V2,
+  V1_DEFAULT_CATEGORIES,
   V1_FIELDS,
   V2_ADDITIONS,
   migrateSnapshots,
   migrateV1,
   shouldMigrate,
+  toV1Snapshot,
+  v1ShapeViolations,
 } from '../../src/js/core/migrate1to2.js';
 import { classifyOp, fieldsOf, FIELDS, LOCAL_SPACE, PERSONAL_PLACEHOLDER } from '../../src/js/core/ops.js';
+import { nextFreeRef, PALETTE } from '../../src/js/palette.js';
 import {
   parseEntityKey,
   renderable,
@@ -60,6 +66,7 @@ import { fold as realFold } from '../../src/js/core/registers.js';
 import { materialize as realMaterialize, stripV2Fields as realStrip } from '../../src/js/core/materialize.js';
 import { store, defaultState } from '../../src/js/store.js';
 import { boardState, CAT, note, bar } from '../helpers/fixtures.js';
+import { generateBoard } from '../helpers/gen.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures and helpers
@@ -69,8 +76,15 @@ const ME = 'mem_' + 'A'.repeat(22);
 const OTHER_MEMBER = 'mem_' + 'Z'.repeat(22);
 const MAC_A = 'dev_' + 'A'.repeat(22);
 const MAC_B = 'dev_' + 'B'.repeat(22);
-const CTX = Object.freeze({ memberId: ME, deviceId: MAC_A });
-const CTX_B = Object.freeze({ memberId: ME, deviceId: MAC_B });
+// `acceptLossy: true` is the "I have read the report and I am proceeding" flag ATT-82 added:
+// a migration that loses something no longer completes silently, it throws MigrationLossyError
+// unless the caller either takes the report (`onLossy`) or says this. Most of the hostile-board
+// tests below are ABOUT loss, so the shared ctx accepts it; the gate itself is tested separately,
+// with a ctx that does not.
+const CTX = Object.freeze({ memberId: ME, deviceId: MAC_A, acceptLossy: true });
+const CTX_B = Object.freeze({ memberId: ME, deviceId: MAC_B, acceptLossy: true });
+/** A ctx that has NOT acknowledged loss — the shape a store that forgot would pass. */
+const CTX_STRICT = Object.freeze({ memberId: ME, deviceId: MAC_A });
 
 const clone = (v) => structuredClone(v);
 const j = (v) => JSON.stringify(v);
@@ -294,10 +308,14 @@ function roundTrip(raw, ctx = CTX) {
 /**
  * The P8 comparison. v1's own migrate() is the reference; the v2 side is compared AFTER the
  * deterministic sort, which is what ADR 001 §8.3 says ("including array order after the
- * deterministic sort"). Notes and categories are compared in EXACT v1 array order, because
- * `_born = GENESIS(index)` is supposed to reproduce it. Bars are compared against
- * `sortBars(v1.bars)`, because ADR 001 §5 step 5 deliberately re-sorts bars into the comparator
- * `assignLanes` already uses at `layout.js:43` — a documented, intended v2 reordering.
+ * deterministic sort"). All THREE arrays are compared in EXACT v1 array order, because
+ * `_born = GENESIS(index)` is supposed to reproduce it.
+ *
+ * ATT-50 / ATT-52, cross-file: bars used to be compared against `sortBars(v1.bars)`, on the
+ * reading that ADR 001 §5 step 5's `(startDate asc, endDate desc, id asc)` was a deliberate v2
+ * reordering. It was not — §8.3's "deep-equals for every field INCLUDING array order" is the
+ * binding criterion, and a date sort throws the v1 index away. `cmpBars` is now `(_born asc,
+ * id asc)` like notes and categories, so the expectation is simply v1's own array.
  */
 function assertLossless(raw, ctx = CTX) {
   const before = stripV2Fields({ ...v1Migrate(raw), schemaVersion: undefined });
@@ -305,7 +323,7 @@ function assertLossless(raw, ctx = CTX) {
   assert.equal(lossy, false, `migration reported itself lossy: ${warnings.join(' | ')}`);
   assert.deepEqual(state.categories, before.categories, 'categories (v1 array order)');
   assert.deepEqual(state.notes, before.notes, 'notes (v1 array order)');
-  assert.deepEqual(state.bars, sortBars(before.bars), 'bars (ADR 001 §5 step 5 order)');
+  assert.deepEqual(state.bars, before.bars, 'bars (v1 array order — ATT-50/ATT-52)');
   assert.deepEqual(state.scratchpads, sortScratchpads(before.scratchpads), 'scratchpads');
   assert.deepEqual(state.settings, before.settings, 'settings');
   return state;
@@ -449,12 +467,47 @@ describe('the emitted ops (ADR 001 §8.2)', () => {
     assert.notDeepEqual(opsA.map((o) => o.f), opsB.map((o) => o.f));
   });
 
-  test('two different members migrating the same export do not collide on op ids', () => {
+  test('M2 — the op id is a function of the FILE: two DIFFERENT members derive the same ids', () => {
+    // INVERTED (M2). This used to assert the opposite — that the acting member is mixed into the
+    // derivation "so two members migrating the same shared export do not collide". That reading
+    // broke ADR 001 §8.1 property 2 for the configuration the product ships in: solo mode has no
+    // minted MemberId (§11), so my two Macs hold different placeholders until they pair, and
+    // "byte-identical" was therefore false for the same file on the same person's two machines.
+    // A collision is not a hazard — migration ops only ever go to a PERSONAL space, so two
+    // different people's migrations never meet — and between my own two Macs it is the POINT:
+    // `opId` is the server's idempotency key.
     const board = richBoard();
-    const mine = migrateV1(board, CTX).ops.map((o) => o.id);
-    const theirs = migrateV1(board, { memberId: OTHER_MEMBER, deviceId: MAC_A }).ops.map((o) => o.id);
+    const mine = migrateV1(board, CTX).ops;
+    const theirs = migrateV1(board, { memberId: OTHER_MEMBER, deviceId: MAC_B, acceptLossy: true }).ops;
     assert.equal(mine.length, theirs.length);
-    for (let i = 0; i < mine.length; i++) assert.notEqual(mine[i], theirs[i]);
+    for (let i = 0; i < mine.length; i++) {
+      assert.equal(theirs[i].id, mine[i].id, `op ${i} (${mine[i].e}) derived a different id`);
+      assert.equal(theirs[i].ts, mine[i].ts);
+      assert.equal(theirs[i].e, mine[i].e);
+      assert.deepEqual(theirs[i].f, mine[i].f);
+    }
+    // `act` and `dev` are provenance, and they are the ONLY two fields allowed to differ.
+    for (let i = 0; i < mine.length; i++) {
+      const { act: a1, dev: d1, ...restMine } = mine[i];
+      const { act: a2, dev: d2, ...restTheirs } = theirs[i];
+      assert.equal(a1, ME); assert.equal(a2, OTHER_MEMBER);
+      assert.equal(d1, MAC_A); assert.equal(d2, MAC_B);
+      assert.deepEqual(restTheirs, restMine, `op ${i} differs beyond act/dev`);
+    }
+  });
+
+  test('M2 — the derivation reads neither ctx.memberId nor ctx.deviceId at all', () => {
+    // A structural check rather than a sampled one: the id is derived from (index, kind, key),
+    // so a change to either ctx field cannot move a single character of a single op id.
+    const board = richBoard();
+    const ids = (ctx) => migrateV1(board, { ...ctx, acceptLossy: true }).ops.map((o) => o.id);
+    const base = ids(CTX);
+    for (const ctx of [
+      { memberId: OTHER_MEMBER, deviceId: MAC_A },
+      { memberId: ME, deviceId: MAC_B },
+      { memberId: OTHER_MEMBER, deviceId: MAC_B },
+      { memberId: ME, deviceId: MAC_A, personalSpaceId: 'psp_' + 'Q'.repeat(22) },
+    ]) assert.deepEqual(ids(ctx), base, j(ctx));
   });
 
   test('the index runs categories → notes → bars → scratchpads → prefs, contiguously from 0', () => {
@@ -1124,19 +1177,140 @@ describe('a v0 board (the pre-schemaVersion shape store.js:migrate handles)', ()
     assert.equal(state.settings.layers.schulferien, false, '7.5 — no Bundesland normalisation ran in v1');
   });
 
-  test('a board with NO categories warns rather than inventing four random ones', () => {
-    // Inventing them needs crypto.randomUUID(), and two migrations would then disagree — the
-    // exact failure R12 is about. v1's own migrate() supplies the defaults; this does not.
-    const { ops, warnings, lossy } = migrateV1({ notes: [], bars: [], categories: [], scratchpads: {}, settings: { mode: 'rolling' } }, CTX);
-    assert.equal(ops.filter((o) => o.k === 'cat.set').length, 0);
-    assert.equal(lossy, false);
-    assert.match(warnings.join('\n'), /no categories/);
+  test('ATT-15 — a board with NO categories gets v1’s four defaults, at DERIVED ids', () => {
+    // INVERTED (ATT-15 / ATT-41). This used to assert that migration emits no category at all,
+    // on the reasoning that inventing the four defaults needs `crypto.randomUUID()` and two
+    // migrations would then disagree (R12). The premise was right and the conclusion was wrong:
+    // the answer is to DERIVE the four ids, not to skip a repair v1 performs on every single
+    // load (`store.js:73`). Skipping it produced a board v1 cannot produce and the v1 UI cannot
+    // survive — `store.category(x)` returns undefined, `legend.js`/`popover.js` read
+    // `.paletteRef` off it, and §5 step 7 has nothing to repair the dangling ids TO.
+    const board = { notes: [{ id: 'n1', date: '2026-03-01', text: 'a', categoryId: 'ghost' }], bars: [], categories: [], scratchpads: {}, settings: { mode: 'rolling', lastCategoryId: 'ghost' } };
+    const { ops, warnings, lossy } = migrateV1(board, CTX);
+    const cats = ops.filter((o) => o.k === 'cat.set');
+    assert.equal(cats.length, 4, 'the four v1 defaults');
+    assert.equal(lossy, false, 'a repair is not a loss');
+    assert.match(warnings.join('\n'), /four default categories were substituted/);
+
+    // the four are v1's four, field for field, minus the id
+    assert.deepEqual(cats.map((o) => o.f.name), ['Arbeit', 'Familie', 'Reisen', 'Deadlines']);
+    assert.deepEqual(cats.map((o) => o.f.paletteRef), ['blau', 'gruen', 'orange', 'magenta']);
+    assert.deepEqual(cats.map((o) => o.f.nameEn), ['Work', 'Family', 'Travel', 'Deadlines']);
+    assert.ok(cats.every((o) => o.f.visible === true));
+
+    // …and the whole point: the board is usable. The dangling note and the dead lastCategoryId
+    // both resolve to the first category, exactly as v1's own migrate() resolves them.
+    const state = materializeSolo(fold(ops));
+    assert.equal(state.categories.length, 4);
+    assert.equal(state.notes[0].categoryId, state.categories[0].id);
+    assert.equal(state.settings.lastCategoryId, state.categories[0].id);
+    assert.equal(v1Migrate(board).categories.length, 4, 'and v1 does the same thing');
   });
 
-  test('an entirely empty object migrates to nothing but warnings', () => {
-    const { ops, warnings } = migrateV1({}, CTX);
-    assert.deepEqual(ops, []);
+  test('ATT-15 — the invented ids are DERIVED, so two Macs invent the same four (R12)', () => {
+    const empty = () => ({ notes: [], bars: [], categories: [], scratchpads: {}, settings: { mode: 'rolling' } });
+    const a = migrateV1(empty(), CTX).ops;
+    const b = migrateV1(empty(), CTX_B).ops;
+    assert.deepEqual(b.map((o) => o.e), a.map((o) => o.e), 'the two Macs invented different ids');
+    assert.deepEqual(b.map((o) => o.id), a.map((o) => o.id));
+    for (const op of a.filter((o) => o.k === 'cat.set')) {
+      assert.match(op.e, /^cat:[A-Za-z0-9_-]{22}$/, 'a derived id must still be a legal entity uuid');
+    }
+    // and it is a pure function of the NAME, so re-ordering the constant would be a visible change
+    assert.notEqual(a[0].e, a[1].e);
+  });
+
+  test('ATT-14 — a category with no paletteRef is back-filled exactly as v1 back-fills it', () => {
+    // INVERTED (ATT-14). `nextFreeRef([])` (`palette.js:33`) over an empty used-set is always
+    // `PALETTE[0].ref`, so v1's `store.js:88` writes one fixed string and so does this.
+    const board = { schemaVersion: 1, notes: [], bars: [], categories: [{ id: 'c1', name: 'Alt' }], scratchpads: {}, settings: { mode: 'rolling' } };
+    const { ops, lossy, warnings } = migrateV1(clone(board), CTX);
+    const cat = ops.find((o) => o.k === 'cat.set');
+    assert.equal(cat.f.paletteRef, DEFAULT_PALETTE_REF);
+    assert.equal(lossy, false);
+    assert.match(warnings.join('\n'), /back-filled/);
+    // the constant is pinned to v1's own computation, so palette.js and this file cannot drift
+    assert.equal(DEFAULT_PALETTE_REF, nextFreeRef([]));
+    assert.equal(v1Migrate(clone(board)).categories[0].paletteRef, DEFAULT_PALETTE_REF);
+  });
+
+  test('ATT-14 — an EMPTY-STRING paletteRef is back-filled too (v1 tests falsiness)', () => {
+    const board = { schemaVersion: 1, notes: [], bars: [], categories: [{ id: 'c1', name: 'Alt', paletteRef: '' }], scratchpads: {}, settings: {} };
+    assert.equal(migrateV1(board, CTX).ops[0].f.paletteRef, DEFAULT_PALETTE_REF);
+  });
+
+  test('ATT-41 — the four v1 migrate() repairs all survive the v2 round trip', () => {
+    // v1 runs migrate() over every board it loads AND every board that comes in through
+    // replaceAll() — an import (11.3) or a snapshot restore (11.5). A board that has been through
+    // it satisfies four invariants the rest of v1 never re-checks. This is all four, in one
+    // board, compared against v1's own answer.
+    const dirty = () => ({
+      schemaVersion: 1,
+      notes: [{ id: 'n1', date: '2026-03-01', text: 'a', categoryId: 'ghost', repeatsYearly: false }],
+      bars: [{ id: 'b1', startDate: '2026-03-01', endDate: '2026-03-05', label: 'x', categoryId: 'ghost' }],
+      categories: [{ id: 'c9', name: 'Alt', nameEn: 'Old', visible: true }],   // no paletteRef
+      scratchpads: {},
+      settings: { mode: 'rolling', bundesland: '', lastCategoryId: 'ghost', layers: { schulferien: true } },
+    });
+    const before = v1Migrate(dirty());
+    const { state } = roundTrip(dirty());
+    assert.equal(state.categories[0].paletteRef, before.categories[0].paletteRef, '2 — paletteRef');
+    assert.equal(state.notes[0].categoryId, 'c9', '3 — dangling note categoryId');
+    assert.equal(state.bars[0].categoryId, 'c9', '3 — dangling bar categoryId');
+    assert.equal(state.settings.lastCategoryId, 'c9', '4 — lastCategoryId');
+    assert.equal(state.settings.layers.schulferien, false, '7.5 — Ferien without a Bundesland');
+    assert.equal(before.settings.layers.schulferien, false, 'and that is v1’s own answer');
+    assert.deepEqual(state.categories, before.categories);
+    assert.deepEqual(state.notes, before.notes);
+    assert.deepEqual(state.settings, before.settings);
+  });
+
+  test('ATT-41 — lastCategoryId is repaired in the LOG, not only in the projection', () => {
+    // §5 step 7 repairs it on the way out, and that stays. But a `pref` register is device-local
+    // and is never re-derived from anything, so the value the next „neue Notiz" reads is the one
+    // in the log — which is why v1 repairs it in `migrate()` rather than at render.
+    const b = { schemaVersion: 1, notes: [], bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau' }], scratchpads: {}, settings: { lastCategoryId: 'ghost' } };
+    const pref = migrateV1(b, CTX).ops.find((o) => o.k === 'pref.set');
+    assert.equal(pref.f.lastCategoryId, 'c1');
+  });
+
+  test('ATT-41 — a LIVE lastCategoryId and a live categoryId are left completely alone', () => {
+    const b = { schemaVersion: 1, notes: [{ id: 'n1', date: '2026-01-01', text: 'x', categoryId: 'c2' }], bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau' }, { id: 'c2', name: 'B', paletteRef: 'gruen' }], scratchpads: {}, settings: { lastCategoryId: 'c2', bundesland: 'HH', layers: { schulferien: true } } };
+    const { ops, warnings } = migrateV1(b, CTX);
+    const pref = ops.find((o) => o.k === 'pref.set');
+    assert.equal(pref.f.lastCategoryId, 'c2');
+    assert.equal(pref.f['layers.schulferien'], true, 'a Bundesland is set — the layer means something');
+    assert.equal(ops.find((o) => o.e === 'note:n1').f.categoryId, 'c2');
+    assert.deepEqual(warnings, [], 'nothing to repair, nothing to say');
+  });
+
+  test('ATT-12 — a DANGLING categoryId is repaired in the projection and NOT rewritten in the log', () => {
+    // Deliberately not lifted into migrate1to2 even though the other three repairs were. ADR 001
+    // §5 step 7 puts this one in the PROJECTION, which is strictly stronger than v1's
+    // rewrite-on-load: it is idempotent, and it still holds when one Mac deletes a category
+    // concurrently with the other creating an entry in it — a case v1's load-time rewrite cannot
+    // see at all. Rewriting the log as well would make the two mechanisms disagree about which
+    // one is the truth.
+    const b = { schemaVersion: 1, notes: [{ id: 'n1', date: '2026-01-01', text: 'x', categoryId: 'ghost' }], bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau' }], scratchpads: {}, settings: {} };
+    const { ops } = migrateV1(b, CTX);
+    assert.equal(ops.find((o) => o.e === 'note:n1').f.categoryId, 'ghost', 'the log records what the FILE said');
+    assert.equal(materializeSolo(fold(ops)).notes[0].categoryId, 'c1', 'and the projection repairs it');
+  });
+
+  test('an entirely empty object migrates to a USABLE empty board', () => {
+    // INVERTED (ATT-15). `{}` is what `store.js:migrate()` is handed when the file is missing or
+    // unreadable, and v1 answers it with `defaultState()` — four categories and nothing else.
+    // Answering it with a board that has no legend at all was a v1 regression on the emptiest
+    // possible input.
+    const { ops, warnings, lossy } = migrateV1({}, CTX);
+    assert.deepEqual(ops.map((o) => o.k), ['cat.set', 'cat.set', 'cat.set', 'cat.set']);
+    assert.equal(lossy, false, 'an empty board loses nothing');
     assert.ok(warnings.length >= 2, warnings.join(' | '));
+    assert.deepEqual(
+      materializeSolo(fold(ops)).categories.map((c) => c.name),
+      v1Migrate({}).categories.map((c) => c.name),
+      'the same four legend rows v1 would have shown',
+    );
   });
 });
 
@@ -1186,32 +1360,90 @@ describe('hostile and hand-edited boards', () => {
     assert.equal(warnings.filter((w) => /unusable id/.test(w)).length, 2);
   });
 
-  test('a duplicate id is migrated once, loudly — two registers cannot share a key', () => {
+  test('ATT-90 — a duplicate id is RE-KEYED, not discarded: two registers cannot share a key', () => {
+    // INVERTED (ATT-90). Two registers genuinely cannot share an entity key — the second would
+    // LWW over the first — but "keep the first, drop the second" is data loss on an entry v1
+    // renders. A v1 entity id is opaque: nothing outside the entry refers to a note or bar id, so
+    // the second copy can simply be given a fresh one. Derived, not minted, or two migrations of
+    // the same file would disagree (R12).
     const b = base();
     b.notes = [
       { id: 'dup', date: '2026-01-01', text: 'first', categoryId: 'c1' },
       { id: 'dup', date: '2026-02-02', text: 'second', categoryId: 'c1' },
+      { id: 'dup', date: '2026-03-03', text: 'third', categoryId: 'c1' },
     ];
-    const { ops, warnings, lossy } = migrateV1(b, CTX);
+    const { ops, warnings, lossy } = migrateV1(clone(b), CTX);
     const notes = ops.filter((o) => o.k === 'note.set');
-    assert.equal(notes.length, 1);
-    assert.equal(notes[0].f.text, 'first');
-    assert.equal(lossy, true);
-    assert.match(warnings.join('\n'), /appears more than once/);
+    assert.equal(notes.length, 3, 'all three of the user’s notes survive');
+    assert.deepEqual(notes.map((o) => o.f.text), ['first', 'second', 'third']);
+    assert.equal(notes[0].e, 'note:dup', 'the FIRST occurrence keeps the id it had');
+    assert.equal(new Set(notes.map((o) => o.e)).size, 3, 'three distinct entity keys');
+    assert.equal(lossy, false, 'nothing was lost, so this is a repair and not a loss');
+    assert.match(warnings.join('\n'), /RE-KEYED/);
+
+    // the board a user actually sees: three notes, in v1's array order
+    const state = materializeSolo(fold(ops));
+    assert.deepEqual(state.notes.map((n) => n.text), ['first', 'second', 'third']);
+    assert.equal(v1Migrate(clone(b)).notes.length, 3, 'which is what v1 renders too');
   });
 
-  test('a value v2 cannot represent is dropped with a lossy warning, and the entity survives', () => {
+  test('ATT-90 — the re-key is deterministic: two Macs agree on the new id (R12)', () => {
+    const b = () => {
+      const x = base();
+      x.notes = [
+        { id: 'dup', date: '2026-01-01', text: 'first', categoryId: 'c1' },
+        { id: 'dup', date: '2026-02-02', text: 'second', categoryId: 'c1' },
+      ];
+      x.bars = [
+        { id: 'dupb', startDate: '2026-01-01', endDate: '2026-01-02', label: 'a', categoryId: 'c1' },
+        { id: 'dupb', startDate: '2026-02-01', endDate: '2026-02-02', label: 'b', categoryId: 'c1' },
+      ];
+      x.categories.push({ id: 'c1', name: 'Zweimal', paletteRef: 'rot', visible: true });
+      return x;
+    };
+    const a = migrateV1(b(), CTX).ops;
+    const c = migrateV1(b(), CTX_B).ops;
+    assert.deepEqual(c.map((o) => o.e), a.map((o) => o.e));
+    assert.deepEqual(c.map((o) => o.id), a.map((o) => o.id));
+    assert.equal(a.filter((o) => o.k === 'cat.set').length, 2, 'the duplicate CATEGORY survives too');
+    assert.equal(a.filter((o) => o.k === 'note.set').length, 2);
+    assert.equal(a.filter((o) => o.k === 'bar.set').length, 2);
+    assert.equal(new Set(a.map((o) => o.e)).size, a.length, 'every entity key is distinct');
+    // a re-keyed id is a legal entity uuid, or the op would not have validated
+    for (const op of a) assert.deepEqual(classifyOp(op, { nowMs: Date.now() }), { status: 'admit' });
+  });
+
+  test('ATT-90 — a THIRD copy of the same id gets a third distinct key', () => {
+    const b = base();
+    b.notes = [1, 2, 3, 4].map((n) => ({ id: 'dup', date: `2026-0${n}-01`, text: `t${n}`, categoryId: 'c1' }));
+    const ops = migrateV1(b, CTX).ops.filter((o) => o.k === 'note.set');
+    assert.equal(new Set(ops.map((o) => o.e)).size, 4);
+    assert.deepEqual(ops.map((o) => o.f.text), ['t1', 't2', 't3', 't4']);
+  });
+
+  test('ATT-82 — a value v2 cannot represent is dropped, but a TOO-LONG STRING is truncated', () => {
+    // INVERTED (ATT-82). `repeatsYearly: 'yes'` and `visible: 'true'` are still dropped — there is
+    // no honest coercion for either. A 300-character `text` is different in kind: v1's 80 is a DOM
+    // `maxLength` (`interact.js:466`, `popover.js:146`) that never applied to a FILE, so a real
+    // board can hold one, v1 renders it, and dropping the register took the note off the board
+    // entirely — `text` is half of a note's renderability (§5 step 3).
     const b = base();
     b.notes = [{ id: 'n1', date: '2026-01-01', text: 'x'.repeat(300), categoryId: 'c1', repeatsYearly: 'yes' }];
     b.categories[0].visible = 'true';
     const { ops, warnings, lossy } = migrateV1(b, CTX);
     const n = ops.find((o) => o.k === 'note.set');
-    assert.equal(n.f.text, undefined, 'a 300-char text has no str80 register');
-    assert.equal(n.f.repeatsYearly, undefined);
+    assert.equal(n.f.text, 'x'.repeat(80), 'truncated to the str80 limit, not dropped');
+    assert.equal(n.f.repeatsYearly, undefined, 'a non-boolean has no honest truncation');
     assert.equal(n.f.date, '2026-01-01', 'the rest of the entity still migrates');
     assert.equal(ops.find((o) => o.k === 'cat.set').f.visible, undefined);
-    assert.equal(lossy, true);
-    assert.equal(warnings.filter((w) => /not representable/.test(w)).length, 3);
+    assert.equal(lossy, true, 'a truncation IS a loss and says so');
+    assert.equal(warnings.filter((w) => /not representable/.test(w)).length, 2);
+    assert.equal(warnings.filter((w) => /TRUNCATED/.test(w)).length, 1);
+
+    // and the note is still on the board, which is the whole point
+    const state = materializeSolo(fold(ops));
+    assert.equal(state.notes.length, 1);
+    assert.equal(state.notes[0].date, '2026-01-01');
   });
 
   test('an unknown v1 field on an entry is reported, never silently discarded', () => {
@@ -1430,7 +1662,7 @@ describe('P8 against the REAL registers.js and materialize.js', () => {
     const { state } = realRoundTrip(board);
     assert.deepEqual(state.categories.map(bare), before.categories, 'categories');
     assert.deepEqual(state.notes.map(bare), before.notes, 'notes');
-    assert.deepEqual(state.bars.map(bare), sortBars(before.bars), 'bars');
+    assert.deepEqual(state.bars.map(bare), before.bars, 'bars — v1 array order (ATT-50/ATT-52)');
     assert.deepEqual(state.scratchpads, sortScratchpads(before.scratchpads), 'scratchpads');
     assert.deepEqual(state.settings, before.settings, 'settings');
   });
@@ -1470,5 +1702,392 @@ describe('P8 against the REAL registers.js and materialize.js', () => {
       j(realMaterialize(realFold([...opsA, ...opsB]), { me: ME })),
       j(realMaterialize(realFold([...opsB, ...opsA]), { me: ME })),
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE UPGRADE-DAY DEFECTS — ATT-82, ATT-83, ATT-53, and the gate that makes a
+// lossy migration impossible to complete in silence.
+//
+// Every test in this block would FAIL against the code as it was before the fix
+// pass; the comment on each says what the old behaviour was.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('ATT-82 / ATT-83 — a long field must never take the entry with it', () => {
+  const withNote = (text) => ({
+    schemaVersion: 1,
+    notes: [{ id: 'n1', date: '2026-03-04', text, categoryId: 'c1', repeatsYearly: false }],
+    bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+    scratchpads: {}, settings: { mode: 'rolling' },
+  });
+
+  test('ATT-82 — a 140-character note is TRUNCATED and stays on the board (was: it vanished)', () => {
+    // OLD BEHAVIOUR: `fieldAccepted` said no, the `text` register was omitted, §5 step 3 found a
+    // note with no text, and the note was not in `state.notes` at all. One of the user's entries
+    // disappeared from the board on upgrade day, with the original file already replaced.
+    const long = 'x'.repeat(140);
+    const { ops, lossy, report } = migrateV1(withNote(long), CTX);
+    const state = materializeSolo(fold(ops));
+
+    assert.equal(state.notes.length, 1, 'THE NOTE IS STILL THERE');
+    assert.equal(state.notes[0].text, 'x'.repeat(80));
+    assert.equal(state.notes[0].date, '2026-03-04', 'on its day, in its category');
+    assert.equal(state.notes[0].categoryId, 'c1');
+    assert.equal(lossy, true, 'the 60 lost characters are still a loss');
+
+    // and the loss is recoverable from the report, not merely announced
+    const cut = report.losses.find((l) => l.reason === 'truncated');
+    assert.ok(cut, j(report.losses));
+    assert.equal(cut.field, 'text');
+    assert.equal(cut.kept + cut.dropped, long, 'the report reconstructs the original exactly');
+    assert.equal(cut.dropped.length, 60);
+  });
+
+  test('ATT-82 — the note v1 shows and the note v2 shows differ only in the tail', () => {
+    const long = 'Zahnarzt ' + 'sehr '.repeat(30) + 'spät';
+    const before = v1Migrate(clone(withNote(long)));
+    const { state } = roundTrip(withNote(long), { ...CTX, acceptLossy: true });
+    assert.equal(before.notes[0].text, long, 'v1 loads and renders the whole thing');
+    assert.equal(state.notes.length, 1);
+    assert.ok(long.startsWith(state.notes[0].text));
+    assert.equal(state.notes[0].text.length, 80);
+    assert.deepEqual({ ...state.notes[0], text: long }, before.notes[0], 'every other field is identical');
+  });
+
+  test('ATT-82 — the cut is at the limit ops.js declares, discovered and not written down here', () => {
+    for (const n of [80, 81, 120, 500, 5000]) {
+      const { ops } = migrateV1(withNote('y'.repeat(n)), CTX);
+      const text = ops.find((o) => o.k === 'note.set').f.text;
+      assert.equal(text.length, Math.min(n, 80), `${n} characters`);
+      assert.equal(FIELDS.note.text.t, 'str80', 'the limit is the declared one');
+    }
+  });
+
+  test('ATT-82 — an emoji is never cut in half', () => {
+    // 'a'*79 + '😀' is 81 UTF-16 units; slicing at 80 would leave a lone high surrogate, which is
+    // not a character but a rendering artefact the user would have to delete by hand.
+    const text = 'a'.repeat(79) + '\u{1F600}';
+    assert.equal(text.length, 81);
+    const out = migrateV1(withNote(text), CTX).ops.find((o) => o.k === 'note.set').f.text;
+    assert.equal(out, 'a'.repeat(79), 'the whole emoji went, not half of it');
+    assert.equal([...out].length, out.length, 'no lone surrogate survived');
+  });
+
+  test('ATT-82 — truncation is deterministic, so two Macs truncate identically (R12)', () => {
+    const b = () => withNote('ü'.repeat(200));
+    assert.equal(j(migrateV1(b(), CTX).ops), j(migrateV1(b(), CTX).ops));
+    const { dev: _a, act: _b, ...one } = migrateV1(b(), CTX).ops[1];
+    const { dev: _c, act: _d, ...two } = migrateV1(b(), CTX_B).ops[1];
+    assert.deepEqual(two, one);
+  });
+
+  test('ATT-83 — a 90-character bar label is truncated to 40; the bar keeps its name', () => {
+    // OLD BEHAVIOUR: the label register was dropped and the bar survived UNNAMED — a silent
+    // partial loss, and the one field that tells the user what the bar is.
+    const b = {
+      schemaVersion: 1, notes: [],
+      bars: [{ id: 'b1', startDate: '2026-03-01', endDate: '2026-03-10', label: 'y'.repeat(90), categoryId: 'c1' }],
+      categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+      scratchpads: {}, settings: { mode: 'rolling' },
+    };
+    const { ops, lossy, report } = migrateV1(b, CTX);
+    const state = materializeSolo(fold(ops));
+    assert.equal(state.bars.length, 1);
+    assert.equal(state.bars[0].label, 'y'.repeat(40), 'named, not blank');
+    assert.equal(lossy, true);
+    const cut = report.losses.find((l) => l.field === 'label');
+    assert.equal(cut.kept.length + cut.dropped.length, 90);
+  });
+
+  test('ATT-82/83 — a value that is not a string is still dropped, never coerced', () => {
+    const b = {
+      schemaVersion: 1,
+      notes: [{ id: 'n1', date: '2026-03-04', text: 42, categoryId: 'c1' }],
+      bars: [{ id: 'b1', startDate: '2026-03-01', endDate: '2026-03-10', label: { s: 1 }, categoryId: 'c1' }],
+      categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+      scratchpads: {}, settings: {},
+    };
+    const { ops, report } = migrateV1(b, CTX);
+    assert.equal(ops.find((o) => o.k === 'note.set').f.text, undefined);
+    assert.equal(ops.find((o) => o.k === 'bar.set').f.label, undefined);
+    assert.deepEqual(report.losses.filter((l) => l.field).map((l) => [l.field, l.reason]),
+      [['text', 'dropped'], ['label', 'dropped']], j(report.losses));
+    assert.equal(report.losses.some((l) => l.reason === 'truncated'), false, 'nothing was coerced');
+  });
+
+  test('ATT-82 — a malformed DATE is NOT "truncated" into a plausible one', () => {
+    // The longest accepted prefix of '2026-01-01T09:00' is '2026-01-01'. Inventing a date the
+    // user never wrote is worse than dropping a value: only str40/str80 fields are truncatable.
+    const b = {
+      schemaVersion: 1,
+      notes: [{ id: 'n1', date: '2026-01-01T09:00', text: 'x', categoryId: 'c1' }],
+      bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+      scratchpads: {}, settings: {},
+    };
+    const { ops, report } = migrateV1(b, CTX);
+    assert.equal(ops.find((o) => o.k === 'note.set').f.date, undefined);
+    assert.equal(report.losses[0].reason, 'dropped');
+  });
+
+  test('ATT-53 — a note with NO text key migrates as \'\', so v1’s rendering is preserved', () => {
+    // OLD BEHAVIOUR: absent stayed absent, §5 step 3 called the note unrenderable and dropped it.
+    // v1 renders it — `popover.js:193` is `n.text || '…'`, which is also what it renders for '',
+    // so '' is not an invention: it is the value that makes the two builds draw the same row.
+    const b = {
+      schemaVersion: 1,
+      notes: [{ id: 'n1', date: '2026-03-04', categoryId: 'c1', repeatsYearly: false }],
+      bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+      scratchpads: {}, settings: { mode: 'rolling' },
+    };
+    const { ops, lossy } = migrateV1(clone(b), CTX);
+    assert.equal(ops.find((o) => o.k === 'note.set').f.text, '');
+    assert.equal(lossy, false, 'nothing was lost — an absent text is not a loss');
+    const state = materializeSolo(fold(ops));
+    assert.equal(state.notes.length, 1, 'the note is on the board, as it is in v1');
+    assert.equal(state.notes[0].text, '');
+    assert.equal(v1Migrate(clone(b)).notes.length, 1);
+  });
+
+  test('ATT-53 — every OTHER absent field still stays absent', () => {
+    const b = {
+      schemaVersion: 1,
+      notes: [{ id: 'n1', date: '2026-03-04', text: 'x' }],       // no categoryId, no repeatsYearly
+      bars: [{ id: 'b1', startDate: '2026-03-01', endDate: '2026-03-02' }],   // no label
+      categories: [{ id: 'c1', name: 'A', paletteRef: 'blau' }],  // no nameEn, no visible
+      scratchpads: {}, settings: {},
+    };
+    const { ops } = migrateV1(b, CTX);
+    const has = (k, name) => Object.prototype.hasOwnProperty.call(ops.find((o) => o.k === k).f, name);
+    assert.equal(has('note.set', 'categoryId'), false);
+    assert.equal(has('note.set', 'repeatsYearly'), false);
+    assert.equal(has('bar.set', 'label'), false, 'a bar with no label is renderable — leave it absent');
+    assert.equal(has('cat.set', 'nameEn'), false);
+    assert.equal(has('cat.set', 'visible'), false);
+  });
+});
+
+describe('ATT-82 — a lossy migration may not complete in silence', () => {
+  const lossyBoard = () => ({
+    schemaVersion: 1,
+    notes: [{ id: 'n1', date: '2026-03-04', text: 'x'.repeat(140), categoryId: 'c1' }],
+    bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+    scratchpads: {}, settings: { mode: 'rolling' },
+  });
+
+  test('a store that ignores `lossy` gets a THROW, not a quietly shortened board', () => {
+    // `const { ops } = migrateV1(board, ctx)` is the shortest thing a store can write and the
+    // thing a store WILL write. A boolean nobody is obliged to read is not a safety mechanism.
+    assert.throws(() => migrateV1(lossyBoard(), CTX_STRICT), MigrationLossyError);
+    assert.throws(() => migrateV1(lossyBoard(), CTX_STRICT), MigrationError, 'and it is a MigrationError');
+  });
+
+  test('…and the throw discards NOTHING — the whole result is on error.result', () => {
+    // Refusing to open the user's board would be worse than opening it with a warning. This
+    // refuses to open it QUIETLY: a caller that catches still has every op.
+    let err = null;
+    try { migrateV1(lossyBoard(), CTX_STRICT); } catch (e) { err = e; }
+    assert.ok(err instanceof MigrationLossyError);
+    assert.equal(err.result.ops.length, migrateV1(lossyBoard(), CTX).ops.length);
+    assert.equal(j(err.result.ops), j(migrateV1(lossyBoard(), CTX).ops), 'byte-identical to the accepted run');
+    assert.equal(err.result.lossy, true);
+    assert.ok(err.report.losses.length >= 1);
+    assert.match(err.message, /error\.result/);
+    assert.equal(materializeSolo(fold(err.result.ops)).notes.length, 1, 'the board opens from the error');
+  });
+
+  test('ctx.onLossy receives the report and the call returns normally', () => {
+    const seen = [];
+    const r = migrateV1(lossyBoard(), { memberId: ME, deviceId: MAC_A, onLossy: (rep) => seen.push(rep) });
+    assert.equal(seen.length, 1, 'called exactly once');
+    assert.equal(seen[0], r.report);
+    assert.equal(seen[0].losses[0].reason, 'truncated');
+    assert.equal(seen[0].warnings, r.warnings);
+  });
+
+  test('onLossy is NOT called when nothing was lost', () => {
+    let calls = 0;
+    const clean = { schemaVersion: 1, notes: [], bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }], scratchpads: {}, settings: { mode: 'rolling' } };
+    const r = migrateV1(clean, { memberId: ME, deviceId: MAC_A, onLossy: () => { calls += 1; } });
+    assert.equal(calls, 0);
+    assert.equal(r.lossy, false);
+    assert.equal(r.report.losses.length, 0);
+  });
+
+  test('a REPAIR is not a loss: a repaired board returns normally to an unacknowledged caller', () => {
+    // The gate is about the user losing something, not about the migration doing work. A
+    // re-keyed duplicate, a back-filled paletteRef and the four substituted defaults all leave
+    // the user with everything they had, so they must not make the migration refuse to complete.
+    const repaired = {
+      schemaVersion: 1,
+      notes: [{ id: 'dup', date: '2026-01-01', text: 'a', categoryId: 'c1' }, { id: 'dup', date: '2026-02-01', text: 'b', categoryId: 'c1' }],
+      bars: [], categories: [{ id: 'c1', name: 'A' }], scratchpads: {},
+      settings: { lastCategoryId: 'ghost', bundesland: '', layers: { schulferien: true } },
+    };
+    const r = migrateV1(repaired, CTX_STRICT);
+    assert.equal(r.lossy, false);
+    assert.ok(r.report.repairs.length >= 4, j(r.report.repairs.map((x) => x.what)));
+    assert.deepEqual(
+      [...new Set(r.report.repairs.map((x) => x.what))].sort(),
+      ['lastCategoryId', 'paletteRef', 'rekeyed', 'schulferien'],
+    );
+  });
+
+  test('ctx.onLossy and ctx.acceptLossy are validated like every other ctx field', () => {
+    assert.throws(() => migrateV1(lossyBoard(), { ...CTX_STRICT, onLossy: 'yes' }), MigrationError);
+    assert.throws(() => migrateV1(lossyBoard(), { ...CTX_STRICT, acceptLossy: 'yes' }), MigrationError);
+  });
+
+  test('`lossy` and `report.losses` can never disagree — every lossy path records one', () => {
+    // The error message counts `report.losses`, and a store showing the user a list reads it. A
+    // path that set the flag without recording the loss would produce "0 losses" on a board that
+    // lost something, which is worse than either half alone.
+    const boards = [
+      { notes: 'nope', bars: [], categories: [], scratchpads: {}, settings: {} },
+      { notes: [{ id: 'n1', date: '2026-01-01', text: 'x'.repeat(99), categoryId: 'c1' }], bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau' }], scratchpads: {}, settings: {} },
+      { notes: [{ date: '2026-01-01', text: 'no id' }], bars: [], categories: [], scratchpads: {}, settings: {} },
+      { notes: [], bars: [], categories: [], scratchpads: { nope: 'x', '2026-01': 42 }, settings: {} },
+      { notes: [], bars: [], categories: [], scratchpads: {}, settings: { a: [1, 2] } },
+      { notes: [{ id: 'n1', text: 'kein Datum', categoryId: 'c1' }], bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau' }], scratchpads: {}, settings: {} },
+      { notes: [{ id: 'n1', date: '2026-01-01', text: 'x', categoryId: 'c1', colour: '#f00' }], bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau' }], scratchpads: {}, settings: {} },
+      { notes: ['not an object'], bars: [], categories: [], scratchpads: {}, settings: {} },
+    ];
+    for (const b of boards) {
+      const r = migrateV1(b, CTX);
+      assert.equal(r.lossy, r.report.losses.length > 0, j(b).slice(0, 70));
+      assert.ok(r.report.losses.every((l) => typeof l.reason === 'string' && typeof l.where === 'string'), j(r.report.losses));
+    }
+  });
+
+  test('the report is deterministic — it is part of what two Macs must agree on', () => {
+    const a = migrateV1(lossyBoard(), CTX).report;
+    const b = migrateV1(lossyBoard(), CTX_B).report;
+    assert.equal(j(a), j(b));
+  });
+});
+
+describe('M1 — the scratchpad key order may not reach the ops', () => {
+  const padBoard = (pads) => ({
+    schemaVersion: 1, notes: [], bars: [],
+    categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+    scratchpads: pads, settings: { mode: 'rolling' },
+  });
+
+  test('reordering the scratchpads object changes NOTHING (was: different stamps and op ids)', () => {
+    // OLD BEHAVIOUR: `Object.keys(pads)` is the parsed file's own order and it fed the global
+    // index counter, so the same three pads written in a different order produced different
+    // `_born` stamps AND different derived op ids — ADR 001 §8.1 property 2 broken by an editor
+    // round-trip, a re-export, or any whole-file rewrite.
+    const a = migrateV1(padBoard({ '2026-03': 'Milch', '2026-04': 'Brot', '2026-05': 'Käse' }), CTX);
+    const b = migrateV1(padBoard({ '2026-05': 'Käse', '2026-03': 'Milch', '2026-04': 'Brot' }), CTX);
+    assert.equal(j(a.ops), j(b.ops), 'byte-identical');
+    assert.deepEqual(a.ops.filter((o) => o.k === 'pad.set').map((o) => o.e),
+      ['pad:2026-03', 'pad:2026-04', 'pad:2026-05'], 'and the counter walks them in key order');
+  });
+
+  test('every permutation of the same pads migrates to the same bytes', () => {
+    const keys = ['2026-01', '2026-02', '2026-03', '2026-12'];
+    const gold = j(migrateV1(padBoard(Object.fromEntries(keys.map((k) => [k, `t${k}`]))), CTX).ops);
+    for (let seed = 1; seed <= 40; seed++) {
+      const order = shuffled(keys, seed);
+      const pads = Object.fromEntries(order.map((k) => [k, `t${k}`]));
+      assert.equal(j(migrateV1(padBoard(pads), CTX).ops), gold, `order ${order.join(',')}`);
+    }
+  });
+
+  test('a JSON round trip of a board whose pads are out of order changes nothing', () => {
+    const b = padBoard({ '2026-12': 'z', '2026-01': 'a' });
+    assert.equal(j(migrateV1(b, CTX).ops), j(migrateV1(JSON.parse(JSON.stringify(b)), CTX).ops));
+  });
+});
+
+describe('ATT-101 — snapshots.json stays in the v1 shape (ADR 001 §8.4)', () => {
+  /** What `store.js:229` will hold once the board is register-backed: a MATERIALIZED v2 state. */
+  const v2State = () => realMaterialize(realFold(migrateV1({
+    schemaVersion: 1,
+    notes: [{ id: 'n1', date: '2026-03-04', text: 'a', categoryId: 'c1', repeatsYearly: false }],
+    bars: [{ id: 'b1', startDate: '2026-03-01', endDate: '2026-03-05', label: 'x', categoryId: 'c1' }],
+    categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+    scratchpads: { '2026-03': 'Milch' }, settings: { mode: 'rolling' },
+  }, CTX).ops), { me: ME, defaultSettings: defaultState().settings });
+
+  test('toV1Snapshot gives the shape 11.5’s restore UI and a v1 build both read', () => {
+    // §8.4 promises snapshots.json "stays BYTE-IDENTICAL in the v1 shape". Nothing enforced it:
+    // `rollSnapshot` clones the state, and from the first v2 launch that state carries `_born`,
+    // `ownerId`, `visibility`, `updatedBy`, `entityKey` and `schemaVersion: 2` on every entry.
+    const snap = toV1Snapshot(v2State());
+    assert.equal(snap.schemaVersion, 1);
+    assert.deepEqual(v1ShapeViolations(snap), [], 'v1-shaped by its own predicate');
+    for (const entry of [...snap.notes, ...snap.bars, ...snap.categories]) {
+      for (const leak of ['_born', 'entityKey', 'ownerId', 'createdAt', 'updatedAt', 'updatedBy', 'visibility', 'coEdit', 'isForeign', 'defaultVisibility']) {
+        assert.equal(leak in entry, false, `${leak} leaked into a snapshot`);
+      }
+    }
+    assert.deepEqual(Object.keys(snap.notes[0]).sort(), ['categoryId', 'date', 'id', 'repeatsYearly', 'text']);
+    assert.deepEqual(Object.keys(snap).sort(), ['bars', 'categories', 'notes', 'scratchpads', 'schemaVersion', 'settings'].sort());
+  });
+
+  test('a v1 snapshot restores through migrateV1 unchanged — the safety net still works', () => {
+    const snap = toV1Snapshot(v2State());
+    const { ops, lossy } = migrateV1(clone(snap), CTX);
+    assert.equal(lossy, false, 'a snapshot this app wrote must migrate without loss');
+    assert.deepEqual(materializeSolo(fold(ops)).notes.map((n) => n.text), ['a']);
+  });
+
+  test('v1ShapeViolations NAMES a v2-shaped snapshot instead of letting it through', () => {
+    const bad = v1ShapeViolations(v2State());
+    assert.ok(bad.length >= 2, j(bad));
+    assert.match(bad[0], /schemaVersion is 2, not 1/);
+    assert.match(bad.join('\n'), /_born/);
+  });
+
+  test('migrateSnapshots reports a snapshots.json already written in the v2 shape', () => {
+    const out = migrateSnapshots([{ day: '2026-08-25', at: 'x', state: v2State() }]);
+    assert.equal(out.snapshots[0].state.notes[0]._born !== undefined, true, 'still returned untouched');
+    assert.equal(out.warnings.length, 1);
+    assert.match(out.warnings[0], /not in the v1 shape/);
+    assert.match(out.warnings[0], /toV1Snapshot/);
+  });
+
+  test('a v1-shaped snapshots.json is still silent — no new noise for the common case', () => {
+    const out = migrateSnapshots([{ day: '2026-08-25', at: 'x', state: toV1Snapshot(v2State()) }]);
+    assert.deepEqual(out.warnings, []);
+  });
+
+  test('toV1Snapshot refuses anything that is not a board', () => {
+    for (const bad of [null, 42, 'x', {}, { notes: [], bars: [] }]) {
+      assert.throws(() => toV1Snapshot(bad), MigrationError, j(bad));
+    }
+  });
+});
+
+describe('R12 over the generated corpus — the property, with two DIFFERENT members (M2)', () => {
+  // The property suite runs this with ONE member id on both Macs, which is the case that was
+  // already true. M2 is about the case the product actually ships: solo mode has no minted
+  // MemberId, so my two Macs hold different placeholders until they pair.
+  const CORPUS = 300;
+
+  test(`two Macs with different memberIds AND deviceIds migrate byte-identically, ${CORPUS} boards`, () => {
+    for (let seed = 1; seed <= CORPUS; seed++) {
+      const b = generateBoard(seed, { defaults: defaultState() });
+      const a = migrateV1(clone(b), { memberId: ME, deviceId: MAC_A, acceptLossy: true }).ops;
+      const c = migrateV1(clone(b), { memberId: OTHER_MEMBER, deviceId: MAC_B, acceptLossy: true }).ops;
+      assert.equal(a.length, c.length, `seed ${seed}`);
+      for (let i = 0; i < a.length; i++) {
+        const { act: _a1, dev: _d1, ...restA } = a[i];
+        const { act: _a2, dev: _d2, ...restC } = c[i];
+        assert.deepEqual(restC, restA, `seed ${seed}, op ${i} (${a[i].e})`);
+      }
+      // …so pairing the two migrated Macs converges to the one board, with no doubling.
+      const merged = realFold([...a, ...c]);
+      assert.equal(merged.size, realFold(a).size, `seed ${seed}: the join doubled an entity`);
+    }
+  });
+
+  test(`the generated corpus migrates without loss, ${CORPUS} boards`, () => {
+    // If a board out of the corpus were lossy, the byte-identity assertion above would be
+    // passing on the wrong thing (two identically DAMAGED migrations).
+    for (let seed = 1; seed <= CORPUS; seed++) {
+      const r = migrateV1(generateBoard(seed, { defaults: defaultState() }), CTX_STRICT);
+      assert.equal(r.lossy, false, `seed ${seed}: ${r.warnings.join(' | ')}`);
+    }
   });
 });

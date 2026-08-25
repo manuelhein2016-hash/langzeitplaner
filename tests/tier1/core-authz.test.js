@@ -36,7 +36,7 @@ import assert from 'node:assert/strict';
 
 import {
   foldAuthorized, snapshot, AuthzError, STAGES, REJECT_REASONS, isRejectReason,
-  parseAttestationBlob, unsharePatch, isAdminUnsharePatch, registerOf, registerValue,
+  parseAttestationBlob, unsharePatch, isAdminUnsharePatch, classifyUnsharePatch, registerOf, registerValue,
 } from '../../src/js/core/authz.js';
 
 import { fmt, cmp } from '../../src/js/core/stamp.js';
@@ -817,7 +817,14 @@ test('the admin unshare is admissible, and reverts the entry to owner-private', 
   assert.equal(reason(foldAuthorized(ops, CTX()), unshare), null, 'the owner may of course write it too');
 });
 
-test('an unshare with one extra field, or one missing field, is not an unshare', () => {
+test('an unshare that carries a non-withdrawal is PARKED, and one that is no unshare at all is rejected', () => {
+  // The predicate is a property of the PATCH, never a diff against this build's field table. Two
+  // outcomes, and neither of them is "silently still shared":
+  //   * `_born` alongside the withdrawals — a value this build cannot read as a withdrawal, and
+  //     therefore possibly a shape a LATER build gives meaning to. Parked: retained, not applied,
+  //     re-evaluated after an app update. An admin still gets no general write primitive out of
+  //     it, because a parked op is never folded.
+  //   * the level set to `belegt` rather than `privat` — not an unshare in any version. Rejected.
   const f2 = family();
   const pub2 = pubOp('fnote', PAPA, U1, {
     'pub.level': 'geteilt', 'pub.coEdit': false, 'pub.alive': true,
@@ -825,16 +832,44 @@ test('an unshare with one extra field, or one missing field, is not an unshare',
   }, S(BASE + 20, 0, D[PAPA].short), { act: PAPA });
   const extra = pubOp('fnote', PAPA, U1, { ...unsharePatch('fnote'), _born: S(BASE, 0, D[ME].short) },
     S(BASE + 700, 0, D[ME].short), { act: ME });
-  const short = { ...unsharePatch('fnote') };
-  delete short['pub.text'];
-  const missing = pubOp('fnote', PAPA, U1, short, S(BASE + 701, 0, D[ME].short), { act: ME });
   const wrongLevel = pubOp('fnote', PAPA, U1, { ...unsharePatch('fnote'), 'pub.level': 'belegt' },
     S(BASE + 702, 0, D[ME].short), { act: ME });
-  const r = foldAuthorized([...f2.ops, pub2, extra, missing, wrongLevel], CTX());
-  assert.equal(reason(r, extra), REJECT_REASONS.NOT_AN_UNSHARE, 'an admin with a general write primitive is not an admin');
-  assert.equal(reason(r, missing), REJECT_REASONS.NOT_AN_UNSHARE, 'omission is not withdrawal (ADR 004 §5.1)');
+  const r = foldAuthorized([...f2.ops, pub2, extra, wrongLevel], CTX());
+
+  assert.equal(reason(r, extra), null, 'a near-miss is not REJECTED — a rejection is final');
+  assert.equal(r.parkReasonOf(extra.id), 'unshareShape', 'it is parked, for re-evaluation after an update');
   assert.equal(reason(r, wrongLevel), REJECT_REASONS.NOT_AN_UNSHARE);
-  assert.equal(registerValue(r.regs, familyKey('fnote', PAPA, U1), 'pub.text'), 'geheim');
+  assert.equal(registerValue(r.regs, familyKey('fnote', PAPA, U1), 'pub.text'), 'geheim',
+    'neither op was applied: parked is not admitted');
+  assert.equal(registerValue(r.regs, familyKey('fnote', PAPA, U1), 'pub.level'), 'geteilt');
+});
+
+test('an unshare from an OLDER build — one pub field short — still unshares', () => {
+  // THE VERSION-SKEW CASE. A build that predates a `pub.*` field emits an unshare without it. If
+  // the newer client demanded an exact match against its own table it would REJECT that op — and a
+  // rejection is final, so the entry the admin unshared would stay published on the newer client
+  // while it is hidden on the older one. That is ADR 001 §4.1's "previously-hidden content
+  // reappears", reached through a staggered app update instead of a hostile relay.
+  //
+  // What matters is that the level goes to privat and that everything the patch DOES carry is a
+  // withdrawal. `pub.text` here is the field the older build never knew: it is not withdrawn by
+  // this op, and ADR 004 §5.3 mechanism 2 (the forget pass, `oplog.js:forget`) is what blanks the
+  // residue once the level lands on privat.
+  const f2 = family();
+  const pub2 = pubOp('fnote', PAPA, U1, {
+    'pub.level': 'geteilt', 'pub.coEdit': false, 'pub.alive': true,
+    'pub.date': '2026-09-10', 'pub.text': 'geheim', 'pub.repeatsYearly': false,
+  }, S(BASE + 20, 0, D[PAPA].short), { act: PAPA });
+  const short = { ...unsharePatch('fnote') };
+  delete short['pub.text'];
+  const older = pubOp('fnote', PAPA, U1, short, S(BASE + 701, 0, D[ME].short), { act: ME });
+  const r = foldAuthorized([...f2.ops, pub2, older], CTX());
+  const key = familyKey('fnote', PAPA, U1);
+
+  assert.equal(reason(r, older), null, 'admitted — the unshare is not version-coupled');
+  assert.equal(registerValue(r.regs, key, 'pub.level'), 'privat', 'THE POINT: it really is unshared');
+  assert.equal(registerValue(r.regs, key, 'pub.date'), null, 'and everything it carried IS withdrawn');
+  assert.equal(registerValue(r.regs, key, 'pub.alive'), null);
 });
 
 test('a non-admin cannot use the unshare shape', () => {
@@ -849,12 +884,42 @@ test('a non-admin cannot use the unshare shape', () => {
   assert.equal(registerValue(r.regs, familyKey('fnote', PAPA, U1), 'pub.text'), 'geheim');
 });
 
-test('isAdminUnsharePatch is exact in both directions', () => {
+test('isAdminUnsharePatch reads the patch, not this build\'s field table', () => {
   assert.equal(isAdminUnsharePatch('fnote', unsharePatch('fnote')), true);
   assert.equal(isAdminUnsharePatch('fbar', unsharePatch('fbar')), true);
-  assert.equal(isAdminUnsharePatch('fnote', unsharePatch('fbar')), false);
+
+  // A patch this build's table does not generate is still an unshare: it sets the level to privat
+  // and every other field it carries is a withdrawal. That is what makes the predicate survive a
+  // staggered rollout in BOTH directions — one field short (an older build) and one field extra
+  // (a newer one).
+  assert.equal(isAdminUnsharePatch('fnote', unsharePatch('fbar')), true, 'a foreign kind\'s pub fields');
+  assert.equal(isAdminUnsharePatch('fnote', { 'pub.level': 'privat' }), true, 'the minimum');
+  assert.equal(isAdminUnsharePatch('fnote', { ...unsharePatch('fnote'), 'pub.futureField': null }), true,
+    'a pub field only a newer build knows, correctly withdrawn');
+
+  // And what is NOT an unshare: a non-null value beside the level (the general-write-primitive
+  // hole), a level that is not privat, and a patch with no level at all.
   assert.equal(isAdminUnsharePatch('fnote', { ...unsharePatch('fnote'), 'pub.text': 'x' }), false);
+  assert.equal(isAdminUnsharePatch('fnote', { ...unsharePatch('fnote'), 'pub.level': 'belegt' }), false);
+  assert.equal(isAdminUnsharePatch('fnote', { 'pub.text': null }), false);
   assert.equal(isAdminUnsharePatch('fnote', {}), false);
+  assert.equal(isAdminUnsharePatch('fnote', null), false);
+});
+
+test('classifyUnsharePatch separates park-it from drop-it', () => {
+  // The tri-state is the whole point: only a patch that cannot be an unshare in any version is
+  // rejected, because a rejection is final and a wrongly-final rejection means "still shared".
+  assert.equal(classifyUnsharePatch('fnote', unsharePatch('fnote')), 'unshare');
+  assert.equal(classifyUnsharePatch('fnote', { 'pub.level': 'privat', 'pub.text': null }), 'unshare');
+
+  assert.equal(classifyUnsharePatch('fnote', { 'pub.level': 'privat', 'pub.text': '' }), 'skew',
+    'a future build that withdraws with a sentinel instead of null');
+  assert.equal(classifyUnsharePatch('fnote', { 'pub.level': 'privat', _born: 1 }), 'skew',
+    'a non-pub field alongside the withdrawals');
+
+  assert.equal(classifyUnsharePatch('fnote', { 'pub.level': 'geteilt' }), 'no');
+  assert.equal(classifyUnsharePatch('fnote', { 'pub.alive': null }), 'no');
+  assert.equal(classifyUnsharePatch('fnote', []), 'no');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1383,8 +1448,11 @@ test('every declared reason code is actually reachable — except the one that i
     S(BASE + 60, 0, D[MAMA].short), { act: MAMA })], CTX()));           // lostAdminChain
   collect(foldAuthorized([...ops, pub, pubOp('fnote', PAPA, U1, { 'pub.level': 'privat' },
     S(BASE + 60, 0, D[MAMA].short), { act: MAMA })], CTX()));           // notOwner
+  // notAnUnshare — the patch does not set the level to privat at all, so it is not an unshare in
+  // ANY version. (A patch that MEANS to unshare but carries something this build cannot read as a
+  // withdrawal is PARKED, not rejected — see the version-skew tests above.)
   collect(foldAuthorized([...ops, pub, pubOp('fnote', PAPA, U1,
-    { ...unsharePatch('fnote'), _born: S(BASE, 0, D[ME].short) }, S(BASE + 60, 0, D[ME].short), { act: ME })], CTX())); // notAnUnshare
+    { ...unsharePatch('fnote'), 'pub.level': 'belegt' }, S(BASE + 60, 0, D[ME].short), { act: ME })], CTX())); // notAnUnshare
   collect(foldAuthorized([...ops, pubOp('fnote', PAPA, U1, { 'pub.level': 'geteilt', 'pub.coEdit': false },
     S(BASE + 20, 0, D[PAPA].short), { act: PAPA }),
   pubOp('fnote', PAPA, U1, { 'pub.text': 'x' }, S(BASE + 60, 0, D[MAMA].short), { act: MAMA })], CTX())); // noCoEdit

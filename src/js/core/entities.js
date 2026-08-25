@@ -598,14 +598,29 @@ export const cmpNotes = (a, b) => cmp(bornOf(a), bornOf(b)) || byId(a, b);
 export const cmpCategories = (a, b) => cmp(bornOf(a), bornOf(b)) || byId(a, b);
 
 /**
- * `(startDate asc, endDate desc, id asc)` — deliberately the comparator `assignLanes` already
- * uses at `layout.js:43`, which is what makes the per-column lane rescue order-independent too.
+ * `(_born asc, id asc)` — the SAME comparator as notes and categories, and for the same reason.
+ *
+ * THIS USED TO BE `(startDate asc, endDate desc, id asc)`, the comparator `assignLanes` already
+ * applies at `layout.js:43`, and that was wrong (ATT-50 / ATT-52). ADR 001 §8.3's acceptance
+ * criterion is `materialize(fold(migrateV1(b).ops))` deep-equals the v1 board "for every field
+ * INCLUDING array order". Notes and categories satisfied it because `_born` carries the v1 array
+ * index (§8.1); bars did not, because a date sort throws that index away. The failure was
+ * invisible in the WP-1 gate only because that fixture's bars happened to already be in date
+ * order — a test that could not fail.
+ *
+ * Sorting by `_born` costs NOTHING at render time: `assignLanes` sorts its input by
+ * `(startDate, endDate desc, id)` internally (`layout.js:38-44`), so lane assignment is
+ * order-independent either way. What array order still decides downstream is `seg.labelRow` —
+ * which row inside a multi-row bar the label is drawn on — and on upgrade day the user's own
+ * file order is the answer that does not move anything.
+ *
+ * ADR CORRECTION, noted for the pass that amends the text: ADR 001 §5 step 5 still says
+ * `bars — (startDate asc, endDate desc, id asc)`. The code is now the §8.3 reading; §5 step 5
+ * must be amended to `(_born asc, id asc)`.
+ *
  * @param {Object} a @param {Object} b @returns {number}
  */
-export const cmpBars = (a, b) =>
-  (a.startDate < b.startDate ? -1 : a.startDate > b.startDate ? 1 : 0) ||
-  (b.endDate < a.endDate ? -1 : b.endDate > a.endDate ? 1 : 0) ||
-  byId(a, b);
+export const cmpBars = (a, b) => cmp(bornOf(a), bornOf(b)) || byId(a, b);
 
 /** @param {Object[]} notes @returns {Object[]} a new array */
 export const sortNotes = (notes) => [...notes].sort(cmpNotes);

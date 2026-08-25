@@ -203,6 +203,26 @@ test('the opId breaks a stamp tie, and the value breaks an opId tie', () => {
   assert.equal(cmpWrites(c, a), 1);
 });
 
+test('a MISSING opId ranks above every real one — an unattributed write is absorbing', () => {
+  // The second key gets the same treatment `valueKey` gives `null`, and for the same reason. A
+  // register with no opId used to rank `''`, i.e. BELOW every real opId, so any op re-delivered at
+  // the identical stamp beat it. Applied to the ADR 004 §5.3 forget blank — value `null`, stamp
+  // AND opId retained deliberately so the blank wins its own tie — that turned a re-pull into an
+  // UN-BLANKING of retracted plaintext: INV-R4 (a downgrade removes) silently not holding.
+  //
+  // `deserializeRegisters` now refuses a register without an opId outright, so this rank is the
+  // defence in depth behind that refusal rather than the only line. Absorbing, not immovable: a
+  // GREATER stamp — the owner publishing again — still wins.
+  const s = stampAt(4242, 5);
+  const blank = { stamp: s, value: null };                      // no `op` at all
+  const real = { stamp: s, op: 'z'.repeat(22), value: 'Krebsvorsorge' };
+  assert.equal(cmpWrites(blank, real), 1, 'the unattributed write wins the tie');
+  assert.equal(cmpWrites(real, blank), -1);
+  assert.equal(cmpWrites({ ...blank, op: '' }, real), 1, 'and `\'\'` is treated as missing, not as least');
+  assert.equal(cmpWrites(blank, { ...real, stamp: stampAt(4243, 0) }), -1, 'a greater stamp still wins');
+  assert.equal(cmpWrites(blank, { stamp: s, value: 'x' }), 1, 'two missing opIds tie and fall to the value');
+});
+
 test('cmpWrites returns 0 only for genuinely identical writes', () => {
   const w = { stamp: stampAt(1), op: 'q'.repeat(22), value: null };
   assert.equal(cmpWrites(w, { ...w }), 0);
@@ -1298,6 +1318,11 @@ test('deserializeRegisters refuses a corrupt checkpoint rather than poisoning th
     [bend((b) => { delete b.regs[NOTE].text.value; }), 'no value'],
     [bend((b) => { b.regs[NOTE].text.value = { a: 1 }; }), 'scalar'],
     [bend((b) => { b.regs[NOTE].text.op = 'short'; }), 'op id'],
+    // `op` is MANDATORY, exactly like stamp / author / value: it is SHAPE, not vocabulary,
+    // and `serializeRegisters` has always written it. Accepting a register without one and
+    // storing `''` is what let a re-pull UN-BLANK a retracted field — see the comparator test
+    // below and `tests/attack/convergence-comparator.test.js` C1.
+    [bend((b) => { delete b.regs[NOTE].text.op; }), 'op id'],
   ];
   for (const [blob, needle] of cases) {
     assert.throws(() => deserializeRegisters(blob),

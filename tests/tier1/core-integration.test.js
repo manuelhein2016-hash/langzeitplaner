@@ -96,7 +96,10 @@ class IntegrationStore {
       newOpId: () => this._id('u'),
       newGid: () => this._id('g'),
       space: PERSONAL_PLACEHOLDER,
-      shadow: opts.shadow ?? false,
+      // `?? false` removed for ATT-96: the harness must inherit the process-wide DEV default
+      // (`createUndoStacks` uses `cfg.shadow ?? DEV`), or arming the flag changes nothing for the
+      // suites that matter most. An explicit `opts.shadow` still wins in both directions.
+      shadow: opts.shadow,
     });
 
     this.events = [];

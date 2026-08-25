@@ -156,6 +156,52 @@ test('the tier-2 runner picks up every tier-2 file', () => {
   assert.ok(tier2Files.length >= 4, `only ${tier2Files.length} tier-2 files found`);
 });
 
+// ── added in the WP-1 fix pass: the attack suite, and the R5 flag that arms the shadow guard ──
+
+test('the attack suite is wired into package.json and nothing in it is stranded', () => {
+  // Same trap as the property suite below, one directory further along. `tests/attack/` is the
+  // adversarial suite; several of its rows are the only assertion anywhere that a fixed defect
+  // stays fixed, so a run that silently skips it is worse than not having it.
+  const dir = path.join(TESTS, 'attack');
+  if (!fs.existsSync(dir)) return;
+
+  const pkg = JSON.parse(fs.readFileSync(path.join(TESTS, '..', 'package.json'), 'utf8'));
+  assert.ok(pkg.scripts['test:attack'], 'tests/attack/ exists but npm has no way to run it');
+  assert.match(pkg.scripts['test:attack'], /tests\/attack\/\*\.test\.js/);
+  assert.match(pkg.scripts['test:all'], /test:attack/,
+    'test:all does not run the attack suite, so CI would not either');
+
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js') && !f.startsWith('_'));
+  assert.ok(files.length > 0, 'tests/attack/ is empty');
+  for (const f of files) {
+    assert.match(f, /\.test\.js$/,
+      `tests/attack/${f} looks like a test but the runner's glob cannot see it`);
+  }
+});
+
+test('every node --test script arms the DEV flag, so the R5 shadow guard is never quietly off', () => {
+  // ATT-96. `src/js/core/dev.js` reads `globalThis.__LZP_DEV` ONCE at import time, so the flag has
+  // to be set before any core module loads — which no test file can do for another test file.
+  // `--import` is the only seam that reaches a whole run, and PLAN.md's R5 depends on the guard
+  // being ON for the suite ("the shadow-undo assertion turns 'did we cover every mutation?' into a
+  // test failure"; WP-3's exit criterion is "WP-2 stays green WITH THE SHADOW-UNDO ASSERTION ON").
+  //
+  // This lives here, reading package.json, rather than as an `assert(DEV === true)` inside a test
+  // file: that form passes or fails depending on how the file was invoked, and would fail for
+  // anyone running a single file directly. This form cannot be sidestepped.
+  const pkg = JSON.parse(fs.readFileSync(path.join(TESTS, '..', 'package.json'), 'utf8'));
+  const runners = Object.entries(pkg.scripts).filter(([, v]) => v.includes('node --test'));
+  assert.ok(runners.length >= 3, `expected the tier-1, property and attack runners, found ${runners.length}`);
+  for (const [name, cmd] of runners) {
+    assert.match(cmd, /--import \.\/tests\/helpers\/dev-flag\.mjs/,
+      `npm script "${name}" runs node --test without arming the DEV flag`);
+  }
+  // …and the file it imports really does set the global. An --import of a no-op would satisfy the
+  // regex above and arm nothing.
+  const flag = fs.readFileSync(path.join(TESTS, 'helpers', 'dev-flag.mjs'), 'utf8');
+  assert.match(flag, /globalThis\.__LZP_DEV\s*=\s*true/, 'dev-flag.mjs does not set the flag');
+});
+
 // ── added in WP-1 integration: the property suite is a THIRD place tests can be stranded ─────
 
 test('the property suite is wired into package.json and nothing in it is stranded', () => {

@@ -47,6 +47,7 @@ import {
 import * as registers from '../../src/js/core/registers.js';
 
 import { createClock, fmt, cmp, MAX_FUTURE_DRIFT_MS } from '../../src/js/core/stamp.js';
+import { canonicalJSON } from '../../src/js/core/canon.js';
 import { ZERO_DEVICE_SHORT } from '../../src/js/core/ids.js';
 import { PARK_REASONS, noteSet, catSet, prefSet, pubSet, makeOp } from '../../src/js/core/ops.js';
 import { noteKey, familyKey, PREF_KEY } from '../../src/js/core/entities.js';
@@ -284,20 +285,103 @@ test('duplicating an entire stream 4x folds to what one copy folds to', () => {
   assert.equal(many.size, once.size);
 });
 
-test('the same opId with DIFFERENT content is a conflict; the first one stands', () => {
+test('the same opId with DIFFERENT content is a conflict, resolved CONTENT-ADDRESSABLY', () => {
   // opId is the server's idempotency key. Two bodies under one id is corruption or forgery —
-  // silently keeping either one and calling it a duplicate would hide it.
+  // silently keeping either one and calling it a duplicate would hide it, so it is still
+  // reported as a CONFLICT. What it may NOT be is resolved by arrival order: `authz.js` picks
+  // the body whose canonical form sorts higher "so every device picks the same one", and a log
+  // that picked the first arrival instead would leave two honest Macs that received the two
+  // envelopes in opposite orders permanently disagreeing from an identical op set.
   const wall = makeWall();
-  const l = log(wall);
   const a = makeAuthor({ tag: 'a', wall });
   const first = (a.txn(), a.note(U1, { text: 'Zahnarzt' }));
   const forged = { ...first, f: { text: 'Etwas anderes' } };
-  l.append(first);
-  const r = l.append(forged);
-  assert.equal(r.status, APPEND.CONFLICT);
-  assert.match(r.reason, /different content/);
-  assert.equal(val(l, noteKey(U1), 'text'), 'Zahnarzt');
-  assert.equal(l.size, 1);
+  const [lo, hi] = canonicalJSON(first) < canonicalJSON(forged) ? [first, forged] : [forged, first];
+
+  for (const [order, arrival] of [['lo first', [lo, hi]], ['hi first', [hi, lo]]]) {
+    const l = log(makeWall(wall.ms));
+    assert.equal(l.append(arrival[0]).status, APPEND.APPENDED);
+    const r = l.append(arrival[1]);
+    assert.equal(r.status, APPEND.CONFLICT, order);
+    assert.match(r.reason, /different content/);
+    assert.equal(l.size, 1, order);
+    assert.equal(val(l, noteKey(U1), 'text'), hi.f.text, `${order}: the canonical max must stand`);
+    assert.deepEqual(l.get(hi.id).f, hi.f, order);
+    assert.deepEqual(l.splicedIds(), [first.id], `${order}: the splice must be reported`);
+  }
+});
+
+test('the splice winner is the same on two devices that saw the envelopes in opposite orders', () => {
+  // A1, end to end: this is the assertion that the defect is closed.
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'a', wall });
+  const bodyA = (a.txn(), a.note(U1, { date: '2026-09-10', text: 'Zahnarzt' }));
+  const bodyB = { ...bodyA, f: { date: '2026-09-10', text: 'GEFAELSCHT' } };
+
+  const one = log(makeWall(wall.ms));
+  one.append(bodyA); one.append(bodyB);
+  const two = log(makeWall(wall.ms));
+  two.append(bodyB); two.append(bodyA);
+  assert.equal(snap(one), snap(two), 'two devices, one op set, two different boards');
+
+  // …and re-delivery cannot change either the winner or the report (it is a function of the SET).
+  for (const op of [bodyA, bodyB, bodyA, bodyA, bodyB]) one.append(op);
+  assert.equal(snap(one), snap(two));
+  assert.deepEqual(one.splicedIds(), two.splicedIds());
+  assert.deepEqual(one.splicedIds(), [bodyA.id]);
+});
+
+test('a spliced op that PARKS is resolved by the same content-addressable rule', () => {
+  // A6 in this module: parking must not become a back door for arrival-order resolution. A
+  // parked op is retained precisely so it can be applied after an app update, so keeping
+  // "whichever arrived first" would only defer the divergence to the update.
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'a', wall });
+  const base = (a.txn(), a.note(U1, { date: '2026-09-10', text: 'A' }));
+  const bodyA = { ...base, k: 'reminder.set' };                    // unknown kind ⇒ parks
+  const bodyB = { ...base, k: 'reminder.set', f: { date: '2026-09-10', text: 'B' } };
+  const hi = canonicalJSON(bodyA) > canonicalJSON(bodyB) ? bodyA : bodyB;
+
+  for (const arrival of [[bodyA, bodyB], [bodyB, bodyA]]) {
+    const l = log(makeWall(wall.ms));
+    assert.equal(l.append(arrival[0]).status, APPEND.PARKED);
+    const r = l.append(arrival[1]);
+    assert.equal(r.status, APPEND.CONFLICT);
+    assert.equal(l.parkedSize, 1);
+    assert.equal(l.parkReasonOf(base.id), PARK_REASONS.UNKNOWN_KIND, 'the park reason must survive a splice');
+    assert.deepEqual(l.get(base.id).f, hi.f, 'the retained parked body must be the canonical max');
+  }
+});
+
+test('a splice that arrives while the loser is LIVE is un-applied, not merged on top', () => {
+  // Replacing the body must re-fold, or the loser's writes would linger in the registers under
+  // the winner's id — a checkpoint that no set of ops can reproduce.
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'a', wall });
+  const lo = (a.txn(), a.note(U1, { date: '2026-09-10', text: 'A' }));
+  const hi = { ...lo, f: { text: 'zzz' } };                        // canonically greater, and no `date`
+  assert.ok(canonicalJSON(hi) > canonicalJSON(lo));
+  const l = log(makeWall(wall.ms));
+  l.append(lo);
+  assert.equal(l.append(hi).status, APPEND.CONFLICT);
+  assert.equal(val(l, noteKey(U1), 'text'), 'zzz');
+  assert.equal(val(l, noteKey(U1), 'date'), MISSING, "the losing body's writes survived the splice");
+
+  const clean = log(makeWall(wall.ms));
+  clean.append(hi);
+  assert.equal(snap(l), snap(clean), 'the spliced log does not equal the log that only ever saw the winner');
+});
+
+test('a malformed second body neither wins nor disturbs the one we hold', () => {
+  const wall = makeWall();
+  const l = log(wall);
+  const a = makeAuthor({ tag: 'a', wall });
+  const good = (a.txn(), a.note(U1, { date: '2026-09-10' }));
+  l.append(good);
+  const r = l.append({ ...good, f: { date: 42 } });                // a declared type broken
+  assert.equal(r.status, APPEND.REJECTED, 'a protocol violation may not enter the splice contest');
+  assert.equal(val(l, noteKey(U1), 'date'), '2026-09-10');
+  assert.deepEqual(l.splicedIds(), []);
 });
 
 test('a protocol violation is REJECTED and not stored', () => {
@@ -524,8 +608,10 @@ test('an unknown op KIND is parked, retained and not applied', () => {
   assert.equal(l.size, 0);
   assert.equal(l.parkedSize, 1);
   assert.equal(l.has(fromTheFuture.id), true, 'a parked op must be RETAINED');
-  assert.deepEqual(l.ops(), []);
+  assert.deepEqual(l.ops({ liveOnly: true }), [], 'a parked op is not an APPLIED op');
+  assert.deepEqual(l.ops({ includeParked: false }), [], 'the older spelling of liveOnly still works');
   assert.equal(l.ops({ includeParked: true }).length, 1);
+  assert.equal(l.ops().length, 1, 'ops() defaults to every LINE — a parked line is a line on disk');
 });
 
 test('an unknown FIELD parks the WHOLE op — never half of it', () => {
@@ -649,6 +735,47 @@ test('park() moves a live op back to the parked set', () => {
   assert.equal(l.size, 0);
   assert.equal(l.parkedSize, 1);
   assert.equal(val(l, noteKey(U1), 'date'), MISSING, 'parking an op left its writes in the registers');
+});
+
+test('park() REFUSES an op that has already been folded into the checkpoint', () => {
+  // Parking means NOT APPLIED. After compaction the op's line is gone and its writes are merged
+  // into the checkpoint inseparably, so "park" could only be cosmetic — `isParked()` true while
+  // the register it wrote sits there unchanged. Rebuilding the checkpoint from the surviving
+  // lines is not an option (compaction dropped them; that is §7.2's whole point), so between
+  // lying and losing data this throws and the caller finds out.
+  const wall = makeWall();
+  const l = log(wall);
+  const a = makeAuthor({ tag: 'a', wall });
+  const op = (a.txn(), a.note(U1, { date: '2026-09-10', text: 'A' }));
+  l.append(op);
+  l.compact();
+  assert.equal(l.size, 0);
+
+  assert.throws(() => l.park(op, PARK_REASONS.EPOCH), OpLogError);
+  assert.throws(() => l.park(op, PARK_REASONS.EPOCH), /folded into the checkpoint/);
+  assert.equal(l.isParked(op.id), false, 'the refused park left the op in the parked set anyway');
+  assert.equal(val(l, noteKey(U1), 'text'), 'A', 'the refusal must not half-apply anything either');
+
+  // The point of the refusal: silently accepting it would put this log out of step with a peer
+  // that parked the same op BEFORE compacting, from an identical op set.
+  const other = log(makeWall(wall.ms));
+  other.park(op, PARK_REASONS.EPOCH);
+  assert.equal(other.registers().has(noteKey(U1)), false);
+  assert.notEqual(snap(l), snap(other), 'the two logs must be visibly different — that is why this throws');
+
+  // A LATE op below the horizon is still a live line, and parking it is exact, so it is allowed.
+  const b = makeAuthor({ tag: 'b', short: SHORT_B, act: MEM_B, dev: DEV_B, wall: makeWall(wall.ms - 5000) });
+  const late = (b.txn(), b.note(U2, { date: '2026-08-01' }));
+  assert.equal(cmp(late.ts, l.horizon()), -1, 'the late op must be below the horizon for this half to mean anything');
+  assert.equal(l.append(late).status, APPEND.APPENDED);
+  l.park(late, PARK_REASONS.EPOCH);
+  assert.equal(l.isParked(late.id), true);
+  assert.equal(val(l, noteKey(U2), 'date'), MISSING, 'parking a live pre-horizon line must un-apply it exactly');
+
+  // An op we have never seen is not in the checkpoint either, so it may be parked freely.
+  const unseen = (b.txn(), b.note(U3, { date: '2026-08-02' }));
+  l.park(unseen, PARK_REASONS.EPOCH);
+  assert.equal(l.isParked(unseen.id), true);
 });
 
 test('park() refuses a reason that is not a park reason', () => {
@@ -891,6 +1018,62 @@ test('load(checkpoint + tail) equals the fold of every op', () => {
   assert.equal(restored.horizon(), cut);
 });
 
+test('the documented persist pair {checkpoint(), ops()} round-trips PARKED ops losslessly', () => {
+  // The whole cycle, because the failure this closes needed no adversary: `checkpoint()` folds
+  // only what is APPLIED, so a parked op survives a relaunch ONLY if it is in the tail. When
+  // `ops()` omitted it, an ordinary quit-and-reopen destroyed every parked write — the exact
+  // "loses the new thing" failure §7.4 and §12.5 exist to prevent — and the peer that did not
+  // relaunch kept it, so the two devices diverged the moment wall time passed the stamp.
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'a', short: SHORT_A, wall });
+  const b = makeAuthor({ tag: 'b', short: SHORT_B, act: MEM_B, dev: DEV_B, wall });
+  const onTime = (a.txn(), a.note(U1, { date: '2026-09-10', text: 'heute' }));
+  // A peer whose clock runs 48 h fast, and an op from a build we do not know yet: both PARKED.
+  const fromFuture = { ...(b.txn(), b.note(U1, { text: 'aus der Zukunft' })), ts: fmt(wall.ms + 2 * DAY, 0, SHORT_B) };
+  const fromNewerBuild = skewed((a.txn(), a.note(U2, { date: '2026-09-11' })), { k: 'reminder.set' });
+
+  const before = log(makeWall(wall.ms));
+  before.append(onTime, { seq: '7' });
+  assert.equal(before.append(fromFuture).status, APPEND.PARKED);
+  assert.equal(before.append(fromNewerBuild).status, APPEND.PARKED);
+  assert.equal(before.parkedSize, 2);
+
+  // Exactly the pair the module documents, through JSON, exactly as `ops.jsonl` would be.
+  const persisted = JSON.parse(JSON.stringify({ checkpoint: before.checkpoint(), tail: before.ops() }));
+  assert.equal(persisted.tail.length, 3, 'ops() silently omitted the parked lines');
+
+  const after = log(makeWall(wall.ms));
+  after.load(persisted);
+  assert.equal(after.parkedSize, 2, 'a relaunch destroyed the parked ops');
+  assert.equal(after.has(fromFuture.id), true);
+  assert.equal(after.has(fromNewerBuild.id), true);
+  assert.equal(after.parkReasonOf(fromFuture.id), PARK_REASONS.FUTURE, 'the tail is RE-classified, not trusted');
+  assert.equal(after.parkReasonOf(fromNewerBuild.id), PARK_REASONS.UNKNOWN_KIND);
+  assert.equal(snap(after), snap(before), 'the reloaded registers differ from the ones we persisted');
+
+  // …and the RELOADED op still re-evaluates when its prerequisite arrives: the clock passes it,
+  // `unpark()` promotes it, and it competes for LWW like any other write.
+  const relaunchWall = makeWall(wall.ms);
+  const relaunched = log(relaunchWall);
+  relaunched.load(persisted);
+  assert.equal(relaunched.parkedSize, 2);
+  relaunchWall.advance(3 * DAY);
+  assert.deepEqual(relaunched.unpark((o) => o.id === fromFuture.id).map((o) => o.id), [fromFuture.id]);
+  assert.equal(val(relaunched, noteKey(U1), 'text'), 'aus der Zukunft');
+
+  // …and it lands exactly where the peer that never relaunched lands. THIS is the divergence the
+  // old behaviour produced: on the relaunched Mac the write simply did not exist any more.
+  const neverRelaunched = log(makeWall(wall.ms));
+  neverRelaunched.append(onTime, { seq: '7' });
+  neverRelaunched.append(fromFuture);
+  neverRelaunched.append(fromNewerBuild);
+  const stillUpWall = makeWall(wall.ms + 3 * DAY);
+  const stillUp = log(stillUpWall);
+  stillUp.load({ checkpoint: neverRelaunched.checkpoint(), tail: neverRelaunched.ops() });
+  stillUp.unpark((o) => o.id === fromFuture.id);
+  assert.equal(snap(relaunched), snap(stillUp), 'the relaunched Mac and the one that stayed up disagree');
+});
+
 test('load() re-classifies the tail rather than trusting yesterdays verdict', () => {
   // An op parked as `unknownKind` by yesterday's build must become live after an app update with
   // nobody writing a migration; and a stamp that was 23 h in the future must re-park if the
@@ -1052,7 +1235,14 @@ function tombstoneWorld() {
   return { l, create, del, nowMs, wall, a };
 }
 
-const guard = (l, nowMs, minDeviceSeq) => ({ nowMs, minDeviceSeq, seqOf: l.seqOf });
+/**
+ * Condition 3's two halves. `minDeviceSeq` is the fleet minimum of `lastSeenSeq` (READ progress);
+ * `minPushedSeq` is the fleet minimum of `lastPushedSeq` (WRITE progress — the global seq
+ * high-water at which each device last confirmed a DRAINED outbox). Both are required, and the
+ * tests that only care about one half pass the same number for both.
+ */
+const guard = (l, nowMs, minDeviceSeq, minPushedSeq = minDeviceSeq) => (
+  { nowMs, minDeviceSeq, minPushedSeq, seqOf: l.seqOf });
 
 test('all three conditions satisfied — the tombstone is collectable', () => {
   const { l, nowMs } = tombstoneWorld();
@@ -1103,18 +1293,29 @@ test('condition 3 cannot be evaluated away by simply not passing the data', () =
   assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { nowMs, seqOf: l.seqOf }), /minDeviceSeq/);
   assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { nowMs, minDeviceSeq: 101n }), /seqOf/);
   assert.throws(() => tombstoneCollectable(regs, noteKey(U1), null), TombstoneGuardError);
-  assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { minDeviceSeq: 1n, seqOf: l.seqOf }), /nowMs/);
-  assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { nowMs, minDeviceSeq: 101, seqOf: l.seqOf }),
+  assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { minDeviceSeq: 1n, minPushedSeq: 1n, seqOf: l.seqOf }), /nowMs/);
+  assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { nowMs, minDeviceSeq: 101, minPushedSeq: 101n, seqOf: l.seqOf }),
     /BigInt/, 'a Number minDeviceSeq must not be silently coerced');
   assert.throws(() => tombstoneCollectable({}, noteKey(U1), guard(l, nowMs, 1n)), TombstoneGuardError);
+
+  // …and the WRITE half of condition 3 is guarded exactly as hard as the read half, because
+  // omitting it is what "optimizing condition 3 away" looks like once the read half is in place.
+  assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { nowMs, minDeviceSeq: 101n, seqOf: l.seqOf }),
+    /minPushedSeq/, 'GC ran without knowing whether any device still has an unpushed outbox');
+  assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { nowMs, minDeviceSeq: 101n, minPushedSeq: 101, seqOf: l.seqOf }),
+    /BigInt/, 'a Number minPushedSeq must not be silently coerced');
+  assert.throws(() => tombstoneCollectable(regs, noteKey(U1), { nowMs, minDeviceSeq: 101n, minPushedSeq: -1n, seqOf: l.seqOf }),
+    /may not be negative/);
+  assert.throws(() => l.collectTombstones({ nowMs, minDeviceSeq: 101n }), /minPushedSeq/,
+    'collectTombstones must not supply a permissive default for the caller who omits it');
 });
 
 test('an UNKNOWN seq never means yes', () => {
   // Our own write that the server has not acked yet, or an op compacted before we tracked seqs.
   const { l, nowMs } = tombstoneWorld();
-  const blind = { nowMs, minDeviceSeq: 10n ** 9n, seqOf: () => null };
+  const blind = { nowMs, minDeviceSeq: 10n ** 9n, minPushedSeq: 10n ** 9n, seqOf: () => null };
   assert.equal(tombstoneCollectable(l.registers(), noteKey(U1), blind), false);
-  const wrongType = { nowMs, minDeviceSeq: 10n ** 9n, seqOf: () => 101 };
+  const wrongType = { nowMs, minDeviceSeq: 10n ** 9n, minPushedSeq: 10n ** 9n, seqOf: () => 101 };
   assert.equal(tombstoneCollectable(l.registers(), noteKey(U1), wrongType), false);
 });
 
@@ -1140,10 +1341,10 @@ test('a family entity is judged on pub.alive, and pref / space are never collect
 
 test('collectTombstones honours all three conditions and drops the lines too', () => {
   const { l, nowMs } = tombstoneWorld();
-  assert.deepEqual(l.collectTombstones({ nowMs, minDeviceSeq: 100n }), [], 'GC ran while a device was behind');
+  assert.deepEqual(l.collectTombstones({ nowMs, minDeviceSeq: 100n, minPushedSeq: 100n }), [], 'GC ran while a device was behind');
   assert.equal(l.registers().has(noteKey(U1)), true);
 
-  const collected = l.collectTombstones({ nowMs, minDeviceSeq: 101n });
+  const collected = l.collectTombstones({ nowMs, minDeviceSeq: 101n, minPushedSeq: 101n });
   assert.deepEqual(collected, [noteKey(U1)]);
   assert.equal(l.registers().has(noteKey(U1)), false, 'the entity survived collection');
   assert.equal(l.ops({ entity: noteKey(U1) }).length, 0, 'the lines survived collection');
@@ -1169,7 +1370,7 @@ test('R15 — collecting a tombstone too early RESURRECTS a deleted entry', () =
   assert.equal(cmp(drawerEdit.ts, del.ts), -1, 'the drawer edit must predate the delete for this to be the R15 case');
 
   // 1. the rule is obeyed: condition 3 refuses, and the tombstone stays.
-  assert.deepEqual(obedient.collectTombstones({ nowMs, minDeviceSeq: 100n }), []);
+  assert.deepEqual(obedient.collectTombstones({ nowMs, minDeviceSeq: 100n, minPushedSeq: 100n }), []);
 
   // 2. the rule is violated: the same GC, with condition 3 struck out.
   const violated = log(makeWall(nowMs));
@@ -1207,15 +1408,97 @@ test('R15 — collecting a tombstone too early RESURRECTS a deleted entry', () =
 
 test('once the long-offline device catches up, the same tombstone IS collectable', () => {
   const { l, nowMs } = tombstoneWorld();
-  assert.deepEqual(l.collectTombstones({ nowMs, minDeviceSeq: 100n }), []);
-  assert.deepEqual(l.collectTombstones({ nowMs, minDeviceSeq: 101n }), [noteKey(U1)]);
+  assert.deepEqual(l.collectTombstones({ nowMs, minDeviceSeq: 100n, minPushedSeq: 100n }), []);
+  assert.deepEqual(l.collectTombstones({ nowMs, minDeviceSeq: 101n, minPushedSeq: 101n }), [noteKey(U1)]);
   assert.equal(l.registers().size, 0);
+});
+
+test('R15 — CONDITION 3(b): an UNPUSHED write resurrects the entry the GC collected around it', () => {
+  // The half of condition 3 that ADR 001 §7.3 does not state, narrated end to end.
+  //
+  //   • Papa creates "Zahnarzt" and deletes it; both ops reach the relay (seq 100, 101).
+  //   • Mama's MacBook has PULLED everything — its lastSeenSeq is current, so the read half of
+  //     condition 3 says yes — but it has been unable to PUSH for 500 days, and its outbox holds
+  //     one edit of that entry.
+  //   • The register the delete wrote is what absorbs that edit. Collect the entity and there is
+  //     no stamp left to absorb anything with, so the edit does not lose the join — it RECREATES
+  //     the entry, however old it is. The read half cannot see this coming: the outbox is not
+  //     lastSeenSeq.
+  const { l: gcd, nowMs, wall } = tombstoneWorld();
+
+  const mama = makeAuthor({ tag: 'm', short: SHORT_B, act: MEM_B, dev: DEV_B, wall: makeWall(wall.ms + 5 * DAY) });
+  const stuckInOutbox = (mama.txn(), mama.note(U1, { text: 'Zahnarzt verschoben' }));
+
+  // Reads are fully caught up (500 ≫ 101). Writes are not: Mama last drained her outbox at 99.
+  assert.equal(tombstoneCollectable(gcd.registers(), noteKey(U1), guard(gcd, nowMs, 500n, 99n)), false,
+    'a device with an unacked outbox did NOT block collection — this is R15 through the other door');
+  assert.deepEqual(gcd.collectTombstones({ nowMs, minDeviceSeq: 500n, minPushedSeq: 99n }), []);
+  assert.equal(gcd.registers().has(noteKey(U1)), true);
+
+  // The peer that never GC'd, for the comparison.
+  const kept = log(makeWall(nowMs));
+  kept.load({ checkpoint: JSON.parse(JSON.stringify(gcd.checkpoint())), tail: [] });
+
+  // Mama finally pushes. §12.5: both logs ADMIT the op, however old it is.
+  assert.equal(gcd.append(stuckInOutbox, { seq: '900' }).status, APPEND.APPENDED);
+  assert.equal(kept.append(stuckInOutbox, { seq: '900' }).status, APPEND.APPENDED);
+
+  assert.equal(val(gcd, noteKey(U1), '_alive'), false, 'THE RESURRECTION: the deleted entry is back');
+  assert.equal(snap(gcd), snap(kept), 'the device that GC\'d and the device that did not disagree');
+
+  // Once every device has drained its outbox past the tombstone, the same GC is allowed.
+  assert.equal(tombstoneCollectable(gcd.registers(), noteKey(U1), guard(gcd, nowMs, 500n, 500n)), false,
+    'the fresh push is newer than 400 days, so condition 2 now blocks it — collection is merely deferred');
+});
+
+test('an entity whose own registers are not all acked is never collectable', () => {
+  // The mirror image: the unacked write is in OUR outbox. Its stamp is in the registers with no
+  // seq, so condition 3 cannot be evaluated for it at all — and unknown never means yes.
+  const { l, nowMs, wall } = tombstoneWorld();
+  const b = makeAuthor({ tag: 'u', short: SHORT_B, act: MEM_B, dev: DEV_B, wall: makeWall(wall.ms - 30_000) });
+  l.append((b.txn(), b.note(U1, { categoryId: 'cat-9' })));       // no seq: still in our outbox
+  assert.equal(l.seqOf(l.get([...l.ops({ liveOnly: true })].at(-1).id).ts), null);
+  assert.equal(tombstoneCollectable(l.registers(), noteKey(U1), guard(l, nowMs, 10n ** 9n)), false,
+    'an entity with an unacked register was collected');
+  assert.deepEqual(l.collectTombstones({ nowMs, minDeviceSeq: 10n ** 9n, minPushedSeq: 10n ** 9n }), []);
+});
+
+test('collectTombstones never deletes a PARKED op, and an entity with one is not collectable', () => {
+  // §7.3's three conditions all reason about the entity's REGISTERS. A parked op is by
+  // construction not in them: it never contributed to condition 2's max(stamps) and never
+  // contributed to condition 3, and it may carry a stamp NEWER than every register the entity
+  // has. Deleting it would destroy a newer sibling's write retained precisely so the next app
+  // update could apply it — "loses the new thing", §7.4's whole reason to exist — and it would
+  // leave a device that has GC'd applying a different op set from one that has not.
+  const { l, nowMs, wall } = tombstoneWorld();
+  const a = makeAuthor({ tag: 'n', short: SHORT_C, wall: makeWall(wall.ms + 1000) });
+  const fromNewerBuild = skewed((a.txn(), a.note(U1, { date: '2026-09-10' })),
+    { f: { date: '2026-09-10', reminderMinutes: 30 } });
+  assert.equal(l.append(fromNewerBuild, { seq: '105' }).status, APPEND.PARKED);
+  assert.equal(l.parkedSize, 1);
+
+  assert.deepEqual(l.collectTombstones({ nowMs, minDeviceSeq: 999n, minPushedSeq: 999n }), [],
+    'the tombstone was collected while a parked op for that entity was still waiting');
+  assert.equal(l.parkedSize, 1, 'the retained forward-compatibility op was destroyed by the GC');
+  assert.equal(l.get(fromNewerBuild.id).id, fromNewerBuild.id);
+  assert.equal(l.registers().has(noteKey(U1)), true);
+
+  // A sibling that has not GC'd holds exactly the same thing — no divergence.
+  const sibling = log(makeWall(nowMs));
+  sibling.load({ checkpoint: JSON.parse(JSON.stringify(l.checkpoint())), tail: l.ops() });
+  assert.equal(sibling.parkedSize, 1);
+  assert.equal(snap(sibling), snap(l));
+
+  // …and once the op is understood, the tombstone becomes collectable again on its own terms.
+  const other = log(makeWall(nowMs));
+  other.load({ checkpoint: JSON.parse(JSON.stringify(l.checkpoint())), tail: [] });
+  assert.deepEqual(other.collectTombstones({ nowMs, minDeviceSeq: 999n, minPushedSeq: 999n }), [noteKey(U1)]);
 });
 
 test('a device that never returns blocks GC forever — and that is the safe outcome', () => {
   const { l, nowMs } = tombstoneWorld();
   for (const years of [1, 3, 10, 40]) {
-    assert.deepEqual(l.collectTombstones({ nowMs: nowMs + years * 365 * DAY, minDeviceSeq: 100n }), [],
+    assert.deepEqual(l.collectTombstones({ nowMs: nowMs + years * 365 * DAY, minDeviceSeq: 100n, minPushedSeq: 100n }), [],
       `GC gave up after ${years} years and collected anyway`);
   }
 });
@@ -1362,6 +1645,83 @@ test('forget also purges a PARKED line for that entity', () => {
   assert.equal(l.parkedSize, 1);
   assert.equal(l.forget(key, FSP), 3);
   assert.equal(l.parkedSize, 0, 'a parked line is still a line on disk');
+});
+
+test('forget REFUSES an entity that is still live — the blank would be unrecoverable', () => {
+  // The liveness guard. Because `registers.js:valueKey` ranks `null` above every value, the
+  // blank wins the exact (stamp, opId) tie a cold re-delivery produces — which is what makes a
+  // retraction a retraction, and which also makes an unscoped forget on a STILL-PUBLISHED entity
+  // irreversible: nothing can put the value back, while every peer that did not run the pass
+  // still shows it. ADR 004 §5.3 fires this pass only on a retraction or a nulled content field,
+  // so a forget on a live entity is outside the mechanism it implements, and it is refused.
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'v', wall });
+  const key = familyKey('fnote', MEM_A, U1);
+  const share = (a.txn(), a.pub('fnote', MEM_A, U1,
+    { 'pub.level': 'belegt', 'pub.alive': true, 'pub.date': '2026-09-10' }, { born: true }));
+  const l = log(makeWall(wall.ms));
+  l.append(share);
+
+  assert.throws(() => l.forget(key, FSP), OpLogError);
+  assert.throws(() => l.forget(key, FSP), /still live/);
+  assert.throws(() => l.forget(key, FSP, { values: 'content' }), /still live/);
+  assert.equal(val(l, key, 'pub.date'), '2026-09-10', 'the refused forget blanked something anyway');
+  assert.equal(l.ops({ entity: key }).length, 1, 'the refused forget purged a line anyway');
+
+  // A peer that did nothing holds exactly the same board — which is the whole point.
+  const peer = log(makeWall(wall.ms));
+  peer.append(share);
+  assert.equal(snap(l), snap(peer));
+
+  // Two escape hatches, both explicit. (i) the §5.3 trigger (ii) downgrade: scoped to the field
+  // mechanism 1 already nulled, on an entity that legitimately stays visible.
+  wall.advance(1000);
+  const down = (a.txn(), a.pub('fnote', MEM_A, U1, { 'pub.text': null }));
+  l.append(down);
+  assert.equal(l.forget(key, FSP, { fields: ['pub.text'] }), 2);
+  assert.equal(val(l, key, 'pub.date'), '2026-09-10', 'a scoped forget must not touch the other registers');
+
+  // (ii) the deliberate hard purge.
+  const hard = log(makeWall(wall.ms));
+  hard.append(share);
+  assert.equal(hard.forget(key, FSP, { values: 'all' }), 1);
+  assert.equal(val(hard, key, 'pub.date'), null);
+  assert.equal(val(hard, key, 'pub.alive'), null);
+});
+
+test('forget accepts a retraction by EITHER signal — alive:false or level:privat', () => {
+  // ADR 004 §5.3's two triggers. `pub.alive:false` is a delete; `pub.level:'privat'` is an
+  // un-share with the entry still alive on the owner's own board. Both are retractions.
+  const mk = (patch) => {
+    const wall = makeWall();
+    const a = makeAuthor({ tag: 'w', wall });
+    const key = familyKey('fnote', MEM_A, U1);
+    const pub = (a.txn(), a.pub('fnote', MEM_A, U1,
+      { 'pub.level': 'geteilt', 'pub.date': '2026-09-10', 'pub.text': 'Zahnarzt', 'pub.alive': true }, { born: true }));
+    wall.advance(1000);
+    const r = (a.txn(), a.pub('fnote', MEM_A, U1, patch));
+    const l = log(makeWall(wall.ms));
+    l.append(pub); l.append(r);
+    return { l, key };
+  };
+  const gone = mk({ 'pub.alive': false });
+  assert.equal(gone.l.forget(gone.key, FSP), 2);
+  assert.equal(val(gone.l, gone.key, 'pub.date'), null);
+
+  const unshared = mk({ 'pub.level': 'privat', 'pub.text': null });
+  assert.equal(unshared.l.forget(unshared.key, FSP), 2);
+  assert.equal(val(unshared.l, unshared.key, 'pub.date'), null);
+  assert.equal(val(unshared.l, unshared.key, 'pub.level'), 'privat', 'the governing signal must survive');
+
+  // A personal entity is judged on `_alive`; there is no level to fall back on.
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'x', wall });
+  const l = log(makeWall(wall.ms));
+  l.append((a.txn(), a.note(U1, { date: '2026-09-10', text: 'Zahnarzt', _alive: true }, { born: true })));
+  assert.throws(() => l.forget(noteKey(U1), PSP), /still live/);
+  wall.advance(1000);
+  l.append((a.txn(), a.note(U1, { _alive: false })));
+  assert.equal(l.forget(noteKey(U1), PSP), 2);
 });
 
 test('forget refuses an entity that does not live in that space', () => {

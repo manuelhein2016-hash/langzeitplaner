@@ -115,6 +115,22 @@ export const FIELDS = deepFreeze({
   // Free-form, local, never undoable, never synced. Nested v1 settings (`layers.*`) and the v2
   // additions (`lastSeenSeq.*`, `hiddenMembers.*`) are carried as DOTTED KEYS with scalar values,
   // because `f` is scalars-only by contract (ADR 001 §2) and `pref` may not be the one exception.
+  //
+  // `null` ON A PREF MEANS "BACK TO THE v1 DEFAULT", AND THAT IS THE CONTRACT — not a defect.
+  // ATT-32 read it as one: `materialize.js:prefsFromRegisters` skips a null register, so
+  // `buildSettings` supplies `defaultState().settings`'s value and "explicitly cleared" is
+  // indistinguishable from "never set". For a CONTENT field that conflation would be a bug (ADR
+  // 004 §5.1 needs `null` to mean redacted, distinct from absent, because a blank note text is a
+  // legitimate value). For a pref it is the only coherent reading: every pref has a default and
+  // the renderer needs a value, so there is no third state for the register to lose. The attack's
+  // own words — "no v1 site does this today" — describe a shape that could not be observed.
+  //
+  // It is also LOAD-BEARING, so do not "tighten" it. The proposed repair was to make `prefSet`
+  // reject `null`; that would break import and snapshot restore. `replace.js:buildPrefOp` writes
+  // exactly this — `{bundesland: null, rowHeight: null}` for a pref this device holds that the
+  // incoming file does not carry — because v1's `replaceAll()` installs the settings object
+  // WHOLESALE, so a key the file omits must revert to its default rather than survive the import
+  // (ADR 001 §8.5 step 5). Rejecting `null` here would leave `replace.js` no way to say that.
   pref: { '*': { t: 'any', local: true } },
 
   fnote: {                                      // family space — THE PUBLICATION
@@ -281,6 +297,20 @@ export const PARK_REASONS = Object.freeze({
   FUTURE: 'future',
   /** Sealed under an epoch key we do not hold yet. Re-evaluated on the next key fetch. */
   EPOCH: 'epoch',
+  /**
+   * An admin's §4.3 stage-3a patch sets the level to `privat` but carries something this build
+   * cannot read as a withdrawal (a non-null value, or a name that is not `pub.*`). Re-evaluated
+   * after an app update, exactly like the other version-skew reasons.
+   *
+   * It is deliberately NOT `VERSION`: that reason is defined as "`Op.v` is not a version this
+   * build understands" and is set from `op.v`. Reusing it for a verdict derived from the PATCH
+   * would make the diagnostic lie about where the park came from, and `oplog.js:park()` — which
+   * validates against `isParkReason` — would happily accept the wrong story. The distinction
+   * matters at the unpark seam: this is the one park reason whose op was already found to be a
+   * governance write on somebody else's entity, so a future build that unparks it must re-run
+   * stage 3a and must never treat "parked" as "previously approved".
+   */
+  UNSHARE_SHAPE: 'unshareShape',
 });
 
 const PARKABLE = new Set(Object.values(PARK_REASONS));
@@ -490,6 +520,11 @@ export class OpError extends Error {
  * @property {string} [space]          the personal space id; defaults to the 'personal'
  *                                     placeholder solo mode uses (ADR 001 §8.2)
  * @property {string|null} [familySpaceId]  null in solo mode; required for family kinds
+ * @property {Map<string,Map<string,Object>>} [regs]  OPTIONAL read-only register view — the
+ *                                     RegisterMap as it stands BEFORE this transaction. Supplied,
+ *                                     the delete constructors use it to decline a delete of an
+ *                                     entity that does not exist (ATT-88, see §6's `knows`).
+ *                                     Omitted, they cannot judge and build as before.
  */
 
 function requireCtx(ctx) {
@@ -622,7 +657,51 @@ export const layerSet = (ctx, patch) => prefSet(ctx, flattenPref(patch, 'layers'
 // `return false` decline protocol (`store.js:150`) survives verbatim in `store.txn()`, and it
 // already prevents 16 no-op mutations from reaching the log. A constructor is called only after
 // the caller has decided there is a change.
+//
+// WITH ONE EXCEPTION, ADDED FOR ATT-88 AND SCOPED TO IT: a DELETE constructor handed a register
+// view (`ctx.regs`) declines — returns `[]` — when its target has no registers at all. That is
+// not the constructor second-guessing the caller about a change; it is the constructor refusing
+// to CREATE an entity in order to tombstone it. See the block above `lastCat` for why a log has
+// no no-op deletes.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ── ATT-88: THE EXISTENCE GATE ON THE DELETE CONSTRUCTORS ───────────────────
+//
+// A tombstone is a WRITE. `note.set{_alive:false}` on an id that has no registers does not
+// "delete nothing": it MINTS a register for an entity that never existed, permanently, and the
+// family relay then synchronises that phantom to every sibling device. It converges (everybody
+// agrees the ghost is dead) and it is invisible on the board (§5 step 3 filters `_alive:false`),
+// so nothing ever cleans it up — a stale selection or a double-fire of ⌫ grows the log without
+// bound. v1 could afford the same gesture because its delete is `notes.filter(…)`, which is a
+// genuine no-op on a missing id; a log has no no-ops.
+//
+// So the delete constructors ask the register view first. `ctx.regs` is OPTIONAL because a call
+// site that has no view (the op-vocabulary tests, a builder used outside a transaction) must
+// still be able to build a legal op: with no view the constructor cannot judge and builds as
+// before. WITH a view, an unknown target DECLINES.
+//
+// THE DECLINE IS AN EMPTY OP ARRAY, which is this module's existing "nothing to emit" idiom
+// (`lastCat`, `unhide` below) and is exactly the same signal v1's `return false` produces one
+// layer up: `store.txn()` returns early on `tx.ops.length === 0` and `undo.js`'s `push()` records
+// no step for a group with no undoable register (see the ATT-5 note there). Zero ops IS the
+// decline protocol in v2, so a delete constructor does not need a second one.
+//
+// It is NOT an authorisation check and NOT a liveness check: an already-tombstoned entity still
+// HAS registers, so re-deleting it is admitted and stays idempotent under LWW.
+
+/** The empty op list a declining constructor returns. Frozen: it is shared. */
+const DECLINED = Object.freeze([]);
+
+/**
+ * Does the (optional) register view in `ctx` know this entity at all?
+ * @param {OpCtx} ctx @param {string} entityKey @returns {boolean} true when it exists, and true
+ *   when no view was supplied — "I cannot tell" must not be read as "it is missing".
+ */
+const knows = (ctx, entityKey) => {
+  const regs = ctx && ctx.regs;
+  if (!regs || typeof regs.has !== 'function') return true;
+  return regs.has(entityKey);
+};
 
 /** Helper: the optional `[L]` pref op. Returns [] when the site did not touch lastCategoryId. */
 const lastCat = (ctx, catId) => (catId == null ? [] : [prefSet(ctx, { lastCategoryId: catId })]);
@@ -636,13 +715,18 @@ export const MUTATIONS = deepFreeze({
   /**
    * The v1 label says `delete`, and it lied: the same site deletes a note OR a bar depending on
    * `selection.type`. The op does not lie.
+   *
+   * ATT-88: `selection` is the one input here that routinely goes stale — the entry can have been
+   * deleted on another device, or by a previous ⌫ the user did not see land — so this is the site
+   * the existence gate was found on. With `ctx.regs` supplied it declines rather than tombstoning
+   * a ghost.
    * @param {OpCtx} ctx @param {{type:'note'|'bar', id:string}} a
    */
   deleteSelected: {
     sites: ['interact.js:72'], label: 'delete', kinds: ['note.set', 'bar.set'],
     build: (ctx, { type, id }) => {
-      if (type === 'note') return [noteSet(ctx, id, { _alive: false })];
-      if (type === 'bar') return [barSet(ctx, id, { _alive: false })];
+      if (type === 'note') return knows(ctx, noteKey(id)) ? [noteSet(ctx, id, { _alive: false })] : DECLINED;
+      if (type === 'bar') return knows(ctx, barKey(id)) ? [barSet(ctx, id, { _alive: false })] : DECLINED;
       throw new OpError(`deleteSelected: type must be 'note' or 'bar', got ${JSON.stringify(type)}`);
     },
   },
@@ -710,7 +794,8 @@ export const MUTATIONS = deepFreeze({
   editNoteInline: {
     sites: ['interact.js:565'], label: 'edit-note', kinds: ['note.set', 'pref.set'],
     build: (ctx, { id, text, categoryId = null, lastCategoryId = null }) => {
-      if (text === '') return [noteSet(ctx, id, { _alive: false })];
+      // the empty-text branch IS a delete, so it takes the ATT-88 gate with it
+      if (text === '') return knows(ctx, noteKey(id)) ? [noteSet(ctx, id, { _alive: false })] : DECLINED;
       const f = { text };
       if (categoryId != null) f.categoryId = categoryId;
       return [noteSet(ctx, id, f), ...lastCat(ctx, lastCategoryId)];
@@ -791,7 +876,7 @@ export const MUTATIONS = deepFreeze({
   // 14 ───────────────────────────────────────────────────────────────────────
   deleteNotePopover: {
     sites: ['popover.js:217'], label: 'delete-note', kinds: ['note.set'],
-    build: (ctx, { id }) => [noteSet(ctx, id, { _alive: false })],
+    build: (ctx, { id }) => (knows(ctx, noteKey(id)) ? [noteSet(ctx, id, { _alive: false })] : DECLINED),
   },
 
   // 15 ───────────────────────────────────────────────────────────────────────
@@ -809,8 +894,10 @@ export const MUTATIONS = deepFreeze({
    *  "as #7 `[L]`" over-reaches and it is reported as an ADR error. */
   editNotePopover: {
     sites: ['popover.js:266'], label: 'edit-note', kinds: ['note.set'],
-    build: (ctx, { id, text }) =>
-      (text === '' ? [noteSet(ctx, id, { _alive: false })] : [noteSet(ctx, id, { text })]),
+    build: (ctx, { id, text }) => {
+      if (text !== '') return [noteSet(ctx, id, { text })];
+      return knows(ctx, noteKey(id)) ? [noteSet(ctx, id, { _alive: false })] : DECLINED;   // ATT-88
+    },
   },
 
   // 17 ───────────────────────────────────────────────────────────────────────
@@ -863,10 +950,10 @@ export const MUTATIONS = deepFreeze({
    *  last-used one (`legend.js:154`). */
   deleteCategory: {
     sites: ['legend.js:152'], label: 'delete-category', kinds: ['cat.set', 'pref.set'],
-    build: (ctx, { id, lastCategoryId = null }) => [
-      catSet(ctx, id, { _alive: false }),
-      ...lastCat(ctx, lastCategoryId),
-    ],
+    build: (ctx, { id, lastCategoryId = null }) => {
+      if (!knows(ctx, catKey(id))) return DECLINED;                       // ATT-88
+      return [catSet(ctx, id, { _alive: false }), ...lastCat(ctx, lastCategoryId)];
+    },
   },
 
   // 22 ───────────────────────────────────────────────────────────────────────
@@ -884,6 +971,11 @@ export const MUTATIONS = deepFreeze({
     sites: ['legend.js:197'], label: 'delete-category', kinds: ['note.set', 'bar.set', 'cat.set', 'pref.set'],
     build: (ctx, { id, targetId, noteIds = [], barIds = [], lastCategoryId = null }) => {
       if (targetId === id) throw new OpError('deleteCategoryReassign: cannot reassign a category to itself');
+      // ATT-88 — the WHOLE group declines. The reassignments are the delete's consequence
+      // (4.4: deleting a category never silently drops entries), so with no category to delete
+      // there is nothing to reassign either, and emitting the reassigns alone would rewrite live
+      // entries to point at `targetId` on the strength of a selection that has already gone.
+      if (!knows(ctx, catKey(id))) return DECLINED;
       return [
         ...noteIds.map((n) => noteSet(ctx, n, { categoryId: targetId })),
         ...barIds.map((b) => barSet(ctx, b, { categoryId: targetId })),
@@ -898,7 +990,26 @@ export const MUTATIONS = deepFreeze({
 function padOps(ctx, { month, text, born = false }) {
   if (typeof text !== 'string') throw new OpError('pad: `text` must be a string');
   // v1: `if (val.trim()) s.scratchpads[key] = val; else delete s.scratchpads[key];`
-  if (!text.trim()) return [padSet(ctx, month, { _alive: false })];
+  //
+  // ATT-88 APPLIES HERE TOO, and this was the last path still open. Blanking a month that never
+  // had a scratchpad is `delete` on a missing key in v1 — a genuine no-op — and a phantom
+  // `pad:<month>` register here, which is exactly the defect ATT-88 names. It is also the MOST
+  // REACHABLE phantom in the app: `interact.js:631` fires on blur, so clicking into an empty
+  // scratchpad and clicking out again is enough to mint one, and the family relay then
+  // synchronises it to every sibling device forever.
+  //
+  // It was left open by the ATT-88 pass because `tests/attack/v1-fidelity-core.test.js`'s ATT-61
+  // asserted the ungated behaviour as v1 PARITY. That parity is real but it is the ATT-5 case:
+  // v1's `mutate()` asks only `r === false` and never whether anything changed, so it records an
+  // undo step whose pre-image equals its post-image — a ⌘Z that undoes nothing. v2 declines
+  // instead, deliberately and in exactly one documented way (zero ops), and the seven other
+  // delete constructors above already make that trade. Leaving this one site ungated would have
+  // been the incoherent outcome: the same defect refused in seven places and minted in the
+  // eighth, for a parity the suite has already decided not to keep.
+  if (!text.trim()) {
+    if (!knows(ctx, padKey(month))) return DECLINED;
+    return [padSet(ctx, month, { _alive: false })];
+  }
   return [padSet(ctx, month, { text, _alive: true }, { born })];
 }
 
