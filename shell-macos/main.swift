@@ -16,21 +16,65 @@ import ServiceManagement
 let APP_SCHEME = "app"
 let APP_HOST = "localhost"
 
+// ── headless modes ───────────────────────────────────────────────────────────
+//
+//   --smoke                 load the board, print one line of what it rendered
+//   --test <file.js>        load the board, run <file.js> against the live DOM,
+//                           print TAP, exit non-zero on any failure
+//   --scratch <dir>         where the bridge's board.json/snapshots.json go in
+//                           a headless run (default: a per-mode temp dir)
+//
+// Both headless modes are HERMETIC: every bridge write is redirected into a
+// scratch directory, so a test run can never reach the user's real board. That
+// is enforced by `resolveScratchDir()` below, which aborts rather than fall
+// back to Application Support.
+
+private func argValue(_ flag: String) -> String? {
+    let a = CommandLine.arguments
+    guard let i = a.firstIndex(of: flag), i + 1 < a.count else { return nil }
+    let v = a[i + 1]
+    return v.hasPrefix("--") ? nil : v
+}
+
 let isSmokeRun = CommandLine.arguments.contains("--smoke")
+let testFilePath: String? = CommandLine.arguments.contains("--test") ? argValue("--test") : nil
+let isTestRun = testFilePath != nil
+let isHeadless = isSmokeRun || isTestRun
 
 // ── paths ────────────────────────────────────────────────────────────────────
 
-func appSupportDir() -> URL {
-    // --smoke exercises the real bridge including save_board — that write must
-    // land in a scratch directory, never in the user's actual board.json.
-    if isSmokeRun {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LangzeitPlaner-smoke", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
+/// The real, user-owned board directory. Only ever used by a normal launch.
+private func realAppSupportDir() -> URL {
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-    let dir = base.appendingPathComponent("LangzeitPlaner", isDirectory: true)
+    return base.appendingPathComponent("LangzeitPlaner", isDirectory: true)
+}
+
+/// Scratch directory for headless runs. `--scratch` wins; otherwise a fixed
+/// per-mode temp dir. The guard is the point: if this ever resolved to the real
+/// board directory we abort the process instead of writing there.
+private func resolveScratchDir() -> URL {
+    let dir: URL
+    if let override = argValue("--scratch") {
+        dir = URL(fileURLWithPath: (override as NSString).expandingTildeInPath, isDirectory: true)
+    } else {
+        dir = FileManager.default.temporaryDirectory.appendingPathComponent(
+            isTestRun ? "LangzeitPlaner-test" : "LangzeitPlaner-smoke", isDirectory: true)
+    }
+    let resolved = dir.standardizedFileURL.path
+    let real = realAppSupportDir().standardizedFileURL.path
+    if resolved == real || resolved.hasPrefix(real + "/") {
+        FileHandle.standardError.write(Data(
+            "FATAL: headless scratch dir resolved inside the real board directory (\(resolved)). Refusing to run.\n"
+                .utf8))
+        exit(70)
+    }
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    return dir
+}
+
+func appSupportDir() -> URL {
+    if isHeadless { return resolveScratchDir() }
+    let dir = realAppSupportDir()
     try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
 }
@@ -338,7 +382,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     /// rendered and whether the __TAURI__ bridge round-trips, then exits. It is
     /// how this shell is tested without a screen.
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard CommandLine.arguments.contains("--smoke") else { return }
+        if isTestRun { runTestFile(webView); return }
+        guard isSmokeRun else { return }
         let probe = """
         // boot() awaits store.init(), which awaits a bridge round-trip, so the
         // board is not on screen yet when the navigation finishes.
@@ -366,6 +411,205 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             case .failure(let e): print("SMOKE FAILED \(e)")
             }
             NSApp.terminate(nil)
+        }
+    }
+
+    // ── --test: a real-browser assertion runner ──────────────────────────────
+    //
+    // `LangzeitPlaner --test <file.js>` boots the identical board in the same
+    // WKWebView the shipping app uses, evaluates <file.js> against the LIVE
+    // DOM, prints TAP 13 and exits 0/1. Storage is redirected to a scratch dir
+    // (see resolveScratchDir) so nothing a test does can reach the real board.
+    //
+    // Test files are plain scripts, NOT modules — they are spliced into an
+    // async function body, so top-level `await` works but `import` statements
+    // and top-level `return` do not. Use `await importApp('layout.js')` to
+    // reach a real ES module from inside the page.
+
+    /// Globals a DOM test file may use. Kept small on purpose: the value of
+    /// tier 2 is the real engine, not a large bespoke API.
+    private static let harnessJS = """
+    const __tests = [];
+    const test = (name, fn) => { __tests.push({ name, fn }); };
+    // A test may stand down when the thing it characterizes is genuinely not
+    // present in this run — the bundled Schulferien table expiring is the only
+    // real case. It must NOT then print a bare `ok`: a suite that silently
+    // stops testing something is exactly the failure mode this suite exists to
+    // prevent. skip() reports TAP `# SKIP`, which is visible in the output and
+    // counted separately by run-dom-tests.sh.
+    class SkipSignal extends Error {}
+    const skip = (reason) => { throw new SkipSignal(reason || 'no reason given'); };
+    // Every assert() bumps this. A test that finishes having asserted nothing
+    // is reported as `not ok` — see the runner below.
+    let __asserts = 0;
+    // Anything a test wants on stdout. Printed as TAP `#` comments, which is
+    // also where console.log inside the page is forwarded — WKWebView's console
+    // otherwise goes nowhere a CI job can read.
+    const __diag = [];
+    const diag = (...a) => __diag.push(
+      a.map(x => (typeof x === 'string' ? x : (() => { try { return JSON.stringify(x); } catch { return String(x); } })())).join(' '));
+    console.log = (...a) => diag(...a);
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const $  = (sel, root = document) => root.querySelector(sel);
+    const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+    /// Import one of the app's real ES modules, resolved against the bundle.
+    const importApp = (p) => import(new URL('./src/js/' + p, location.href).href);
+    async function waitFor(fn, { timeout = 4000, interval = 25, what = 'condition' } = {}) {
+      const t0 = Date.now();
+      for (;;) {
+        const v = await fn();
+        if (v) return v;
+        if (Date.now() - t0 > timeout) throw new Error('waitFor timed out: ' + what);
+        await sleep(interval);
+      }
+    }
+    const __show = (v) => {
+      try { return typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v) ?? String(v); }
+      catch { return String(v); }
+    };
+    const __deep = (a, b) => {
+      if (a === b) return true;
+      if (typeof a !== typeof b || a === null || b === null || typeof a !== 'object') return false;
+      if (Array.isArray(a) !== Array.isArray(b)) return false;
+      const ka = Object.keys(a), kb = Object.keys(b);
+      if (ka.length !== kb.length) return false;
+      return ka.every(k => __deep(a[k], b[k]));
+    };
+    class AssertionError extends Error {}
+    const __assert = {
+      ok(v, msg) { if (!v) throw new AssertionError(msg || ('expected truthy, got ' + __show(v))); },
+      equal(a, b, msg) { if (a !== b) throw new AssertionError(msg || (__show(a) + ' !== ' + __show(b))); },
+      notEqual(a, b, msg) { if (a === b) throw new AssertionError(msg || ('expected not ' + __show(b))); },
+      deepEqual(a, b, msg) { if (!__deep(a, b)) throw new AssertionError(msg || (__show(a) + ' deep!== ' + __show(b))); },
+      match(s, re, msg) { if (!re.test(String(s))) throw new AssertionError(msg || (__show(s) + ' does not match ' + re)); },
+      includes(hay, needle, msg) {
+        if (!(hay && hay.includes && hay.includes(needle)))
+          throw new AssertionError(msg || (__show(hay) + ' does not include ' + __show(needle)));
+      },
+      fail(msg) { throw new AssertionError(msg || 'failed'); },
+    };
+    // Same API, but every call is counted so the runner can catch a test body
+    // that asserted nothing at all.
+    const assert = Object.fromEntries(Object.entries(__assert).map(([k, fn]) =>
+      [k, (...a) => { __asserts++; return fn(...a); }]));
+    // boot() awaits store.init(), which awaits a bridge round-trip, so the
+    // board is not on screen yet when the navigation finishes.
+    await waitFor(() => document.querySelector('.board .col'),
+                  { timeout: 8000, what: 'the board to render' });
+    """
+
+    private static let runnerJS = """
+    const __results = [];
+    for (const t of __tests) {
+      const t0 = Date.now();
+      const __before = __asserts;
+      try {
+        await t.fn();
+        if (__asserts === __before) {
+          // Green with nothing asserted is worse than red: it looks like
+          // coverage and is not. Either assert something or skip() explicitly.
+          __results.push({
+            name: t.name, ok: false, ms: Date.now() - t0,
+            error: 'VACUOUS: the test body ran to completion without asserting anything. '
+                 + 'Assert something, or call skip(reason) to stand down visibly.',
+            stack: '',
+          });
+        } else {
+          __results.push({ name: t.name, ok: true, ms: Date.now() - t0,
+                           asserts: __asserts - __before });
+        }
+      } catch (e) {
+        if (e instanceof SkipSignal) {
+          __results.push({ name: t.name, ok: true, skip: String(e.message),
+                           ms: Date.now() - t0 });
+        } else {
+          __results.push({
+            name: t.name, ok: false, ms: Date.now() - t0,
+            error: (e && e.name ? e.name + ': ' : '') + (e && e.message ? e.message : String(e)),
+            stack: e && e.stack ? String(e.stack).split('\\n').slice(0, 6).join('\\n') : '',
+          });
+        }
+      }
+    }
+    return JSON.stringify({ results: __results, diag: __diag,
+                            pageErrors: window.__lzpErrors || [] });
+    """
+
+    private func runTestFile(_ webView: WKWebView) {
+        guard let path = testFilePath else { return }
+        guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
+            print("Bail out! cannot read test file: \(path)")
+            fflush(stdout)
+            exit(2)
+        }
+        let name = (path as NSString).lastPathComponent
+        let body = AppDelegate.harnessJS + "\n// ── \(name) ──\n" + source + "\n" + AppDelegate.runnerJS
+
+        webView.callAsyncJavaScript(body, in: nil, in: .page) { result in
+            var failed = 0
+            var skipped = 0
+            print("TAP version 13")
+            print("# \(path)")
+            print("# storage scratch: \(appSupportDir().path)")
+
+            switch result {
+            case .failure(let e):
+                // A syntax error or a throw outside any test() — the whole file
+                // is unrunnable, which TAP calls a bail-out.
+                print("Bail out! \(name): \(e.localizedDescription)")
+                failed = 1
+
+            case .success(let value):
+                guard
+                    let json = value as? String,
+                    let data = json.data(using: .utf8),
+                    let top = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                    let results = top["results"] as? [[String: Any]]
+                else {
+                    print("Bail out! \(name): runner returned an unreadable payload")
+                    failed = 1
+                    break
+                }
+
+                for line in (top["diag"] as? [String] ?? []) {
+                    for sub in line.split(separator: "\n", omittingEmptySubsequences: false) {
+                        print("# \(sub)")
+                    }
+                }
+                print("1..\(results.count)")
+                for (i, r) in results.enumerated() {
+                    let title = r["name"] as? String ?? "?"
+                    let ms = r["ms"] as? Int ?? 0
+                    if let reason = r["skip"] as? String {
+                        skipped += 1
+                        print("ok \(i + 1) - \(title) # SKIP \(reason)")
+                    } else if r["ok"] as? Bool == true {
+                        print("ok \(i + 1) - \(title) # \(ms)ms")
+                    } else {
+                        failed += 1
+                        print("not ok \(i + 1) - \(title) # \(ms)ms")
+                        print("  ---")
+                        print("  message: \((r["error"] as? String ?? "").replacingOccurrences(of: "\n", with: " "))")
+                        if let st = r["stack"] as? String, !st.isEmpty {
+                            print("  stack: |")
+                            for line in st.split(separator: "\n") { print("    \(line)") }
+                        }
+                        print("  ...")
+                    }
+                }
+                // Uncaught page errors are a failure even if every assert
+                // passed — v1 booting with an exception is a regression.
+                if let errs = top["pageErrors"] as? [String], !errs.isEmpty {
+                    failed += errs.count
+                    for e in errs { print("not ok - uncaught page error: \(e)") }
+                }
+                let passed = results.filter { $0["ok"] as? Bool == true && $0["skip"] == nil }.count
+                print("# pass \(passed)")
+                print("# fail \(failed)")
+                if skipped > 0 { print("# skip \(skipped)") }
+            }
+            fflush(stdout)
+            exit(failed == 0 ? 0 : 1)
         }
     }
 
