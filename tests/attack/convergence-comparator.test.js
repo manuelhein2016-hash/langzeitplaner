@@ -6,7 +6,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { fold, emptyRegisters, applyOp, cmpWrites, deserializeRegisters, serializeRegisters } from '../../src/js/core/registers.js';
+import {
+  fold, emptyRegisters, applyOp, cmpWrites, deserializeRegisters, deserializeRepairs, serializeRegisters,
+} from '../../src/js/core/registers.js';
 import { foldAuthorized } from '../../src/js/core/authz.js';
 import { isAdminUnsharePatch, unsharePatch } from '../../src/js/core/authz.js';
 import { noteKey, familyKey, memberKey, spaceKey } from '../../src/js/core/entities.js';
@@ -61,16 +63,28 @@ test('CONTROL — a forged deviceShort collision still resolves: opId is the thi
 // so the blank wins its own tie — losing the opId meant the retracted plaintext came BACK on the
 // next re-pull. INV-R4 (a downgrade removes) silently not holding, one optional key away.
 //
-// Closed at BOTH ends, because a privacy retraction should not rest on one check:
-//   1. `deserializeRegisters` now REFUSES a register with no OpId. `op` is SHAPE, not vocabulary,
-//      and the module's stated doctrine is strict on shape; `serializeRegisters` has always
-//      written it, and `oplog.js`'s forget pass already documents its dependence on it.
-//   2. `cmpWrites` ranks a MISSING opId ABOVE every real one, so if an unattributed write is ever
-//      constructed some other way it is ABSORBING rather than weakest. Only a genuinely greater
-//      stamp — the owner publishing again — can displace it.
+// ROUND 2 — THE DOOR REPAIRS, IT NO LONGER REFUSES (REG-26), AND C1 IS STILL CLOSED.
+//
+// The first fix closed this at both ends: `deserializeRegisters` REFUSED an op-less register, and
+// `cmpWrites` ranked a missing opId ABOVE every real one as defence in depth. The refusal was then
+// removed on purpose, and the reason is a bigger failure than the one it prevented: the previously
+// shipped build wrote `"op": ""` for a missing id, so real users have such a register on disk
+// today, sitting among several thousand well-formed ones — and throwing turns one lost
+// attribution into a REFUSAL OF THE ENTIRE BOARD FILE, with no partial load and no repair path.
+// Eleven years of appointments against one 22-character id is the wrong trade.
+//
+// So the loader now REPAIRS: value, stamp and author are taken verbatim, `op` is normalised to
+// `null` ("attribution known-lost"), and the event is REPORTED per register via
+// `deserializeRepairs`. Nothing is silent and nothing is refused.
+//
+// What is asserted below is that this did not reopen C1. The whole safety now rests on ONE
+// mechanism instead of two, so that mechanism is tested harder, not less: `cmpWrites` ranks an
+// unattributed write ABSORBING, so a re-delivered op at the identical stamp cannot displace it,
+// and the ADR 004 §5.3 forget blank holds. Only a genuinely GREATER stamp — the owner publishing
+// again — can move it, which is a decision, not a leak.
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('C1 CLOSED: a checkpoint register with no `op` is refused, and cannot un-blank a retraction', () => {
+test('C1 CLOSED: a checkpoint register with no `op` is REPAIRED and reported, and still cannot un-blank a retraction', () => {
   const op = M(DEV.meDesk);
   const published = op('note.set', KEY, { text: 'Krebsvorsorge', date: '2026-09-10' }, { ms: BASE_MS, space: PSP });
 
@@ -82,13 +96,46 @@ test('C1 CLOSED: a checkpoint register with no `op` is refused, and cannot un-bl
   applyOp(withOpId, published);
   assert.equal(withOpId.get(KEY).get('text').value, null, 'the blank holds — this always worked');
 
-  // (1) The same file with the `op` key dropped is now a CORRUPT file, not a weak register.
+  // (1) The same file with the `op` key dropped LOADS — and the retraction still holds. That is
+  // the whole of REG-26: the board is not refused, and the privacy property is not weakened.
   const lossy = JSON.parse(JSON.stringify(blanked, (k, v) => (k === 'op' ? undefined : v)));
-  assert.throws(() => deserializeRegisters(lossy),
-    (e) => /op id/.test(e.message), 'the unattributed register never gets into the map at all');
+  const reported = [];
+  const repaired = deserializeRegisters(lossy, { onRepair: (r) => reported.push(r) });
 
-  // (2) Defence in depth: hand-build the register the loader now refuses and re-deliver the very
-  // op whose value was blanked. Under the old `a.op ?? ''` rank this put 'Krebsvorsorge' back.
+  assert.equal(repaired.get(KEY).get('text').op, null, 'the attribution is cleared, not faked');
+  assert.equal(repaired.get(KEY).get('text').value, null, 'and the blank itself is untouched');
+  assert.equal(repaired.get(KEY).get('text').stamp, published.ts, 'as are stamp…');
+  assert.equal(repaired.get(KEY).get('text').author, ME, '…and author');
+
+  // NOT SILENT. „Wir haben einen Teil deiner Datei repariert" is precisely the class of event
+  // principle 6 requires the app to be able to say, and it is available two ways: the callback,
+  // and `deserializeRepairs` for the one-arg callers (`oplog.js:load`).
+  // The replacer above stripped `op` from EVERY register in the file, so every one is repaired
+  // and every one is named — a report that only mentioned the first would be the silent half of
+  // the same defect.
+  const cells = [...repaired.values()].reduce((n, m) => n + m.size, 0);
+  assert.equal(reported.length, cells, 'every repaired register is reported, not just the first');
+  const textRepair = reported.find((r) => r.entity === KEY && r.field === 'text');
+  assert.ok(textRepair, `no report for ${KEY}.text: ${JSON.stringify(reported)}`);
+  assert.equal(textRepair.reason, 'unattributed-register');
+  assert.deepEqual(deserializeRepairs(repaired), reported, 'and is retrievable from the map alone');
+  assert.deepEqual(deserializeRepairs(deserializeRegisters(blanked)), [],
+    'non-vacuity: a clean file reports nothing');
+
+  // The attack, run against the REPAIRED map: re-deliver the very op whose value was blanked.
+  // Under the old `a.op ?? ''` rank this put 'Krebsvorsorge' back on the board.
+  applyOp(repaired, published);
+  assert.equal(repaired.get(KEY).get('text').value, null,
+    'a repaired register is ABSORBING — the retraction holds through the repair');
+
+  // Idempotent, so the file's bytes stop drifting: saving the repaired map and loading it again
+  // repairs to the same thing and reports it again rather than reading `null` as a real id.
+  const again = deserializeRegisters(JSON.parse(JSON.stringify(serializeRegisters(repaired))));
+  assert.equal(again.get(KEY).get('text').op, null);
+  assert.equal(deserializeRepairs(again).length, cells, 'the same repairs, not a growing set');
+
+  // (2) The same rank, reached the other way: hand-build an unattributed register directly, so
+  // the property is asserted independently of how the loader happens to spell "no opId".
   const handBuilt = new Map([[KEY, new Map([
     ['text', Object.freeze({ value: null, stamp: published.ts, author: ME })],
   ])]]);

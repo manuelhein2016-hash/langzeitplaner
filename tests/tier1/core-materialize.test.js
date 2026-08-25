@@ -49,7 +49,10 @@ import {
 } from '../../src/js/core/materialize.js';
 import { fmt } from '../../src/js/core/stamp.js';
 import { FIELDS, flattenPref } from '../../src/js/core/ops.js';
-import { familyKey } from '../../src/js/core/entities.js';
+import {
+  familyKey, pinnedMonthsRenderable, yearIsRenderable, dow, monthOrdinal, addMonths,
+} from '../../src/js/core/entities.js';
+import * as v1dates from '../../src/js/dates.js';
 import { fold, foldAll, mergeMaps, applyOp, emptyRegisters } from '../../src/js/core/registers.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1222,12 +1225,43 @@ test('layers are merged over the defaults one level deep — store.js:76-80 verb
   assert.equal(s.layers.ferienPattern, false);
 });
 
-test('a cleared pref falls back to the default, it does not become null', () => {
+test("a cleared pref takes v1's reading of null — the default, or false where v1 reads a boolean", () => {
+  // `rowHeight` is v1's `layout.js:92` `s.rowHeight || 22`, so v1's reading of a null rowHeight
+  // IS 22. `replace.js:buildPrefOp` also writes exactly this null to mean "the imported file does
+  // not carry rowHeight, revert to the default" (ATT-32 / ADR 001 §8.5 step 5), and the two
+  // readings coincide — which is why nothing here changes for a pref like this one.
   const regs = foldOps([
     op(GENESIS(0), ME, PREF_ENTITY, { rowHeight: 30 }),
     op(fmt(1, 0, DEV_A), ME, PREF_ENTITY, { rowHeight: null }),
   ]);
   assert.equal(materialize(regs, soloCtx()).settings.rowHeight, 22);
+
+  // REG-8 — A PREF v1 READS AS A BOOLEAN IS `false` WHEN IT IS NULL, NOT THE DEFAULT.
+  // `store.js:76-80` is a spread, so `layers.feiertage: null` reaches `state.settings` intact and
+  // `layout.js:104`'s `s.layers.feiertage ?` reads it as OFF. Falling back to
+  // `defaultState()`'s `true` turned the layer back ON on upgrade day, silently, and the next
+  // export wrote `true` into the user's file. Same for `menuBarIcon` (`main.js:320`, `!!`).
+  const off = foldOps([
+    op(GENESIS(0), ME, PREF_ENTITY, { 'layers.feiertage': true, menuBarIcon: true, paper: 'a3' }),
+    op(fmt(1, 0, DEV_A), ME, PREF_ENTITY, { 'layers.feiertage': null, menuBarIcon: null, paper: null }),
+  ]);
+  const s = materialize(off, soloCtx()).settings;
+  assert.equal(s.layers.feiertage, false, 'the Feiertage layer flipped ON — REG-8 is back');
+  assert.equal(s.menuBarIcon, false, 'the menu-bar icon came back — REG-8 is back');
+  assert.equal(s.paper, 'a4', "`print.js:25` is `s.paper || 'a4'`, so v1's reading is the default");
+  // The other three layers are untouched: this reads a CLEARED register, not every boolean.
+  assert.deepEqual(s.layers, { feiertage: false, schulferien: false, otherStates: false, ferienPattern: false });
+  assert.equal(materialize(foldOps([
+    op(GENESIS(0), ME, PREF_ENTITY, { 'layers.otherStates': true }),
+  ]), soloCtx()).settings.layers.otherStates, true, 'a pref that CARRIES true still says true');
+
+  // A cleared pref with NO default is still absent — there is no v1 reader and nothing to
+  // reproduce, and `settings.hiddenMembers` must not spring into existence as an empty object.
+  const extra = materialize(foldOps([
+    op(GENESIS(0), ME, PREF_ENTITY, { density: null, [`hiddenMembers.${MAMA}`]: null }),
+  ]), soloCtx()).settings;
+  assert.equal('density' in extra, false);
+  assert.equal('hiddenMembers' in extra, false);
 });
 
 test('settings key order is deterministic across arrival orders (board.json is byte-compared)', () => {
@@ -1307,6 +1341,27 @@ test('ATT-30 — "no Bundesland ⇒ schulferien off" (7.5) IS a projection invar
   assert.equal('paletteRef' in out.categories[0], false);
 });
 
+test('REG-9 — the three date primitives the hang guard is built on are dates.js, verbatim', () => {
+  // `pinnedMonthsRenderable` reproduces `layout.js:visibleStart` and `layout.js:98-103`. It can
+  // only do that if `dow`, `monthOrdinal` and `addMonths` in core/entities.js ARE the v1 ones —
+  // `core/` may not import a v1 module (ADR 005 §2), so they are copies, and this is their pin.
+  // core-ops.test.js pins the older primitives the same way; these three arrived with REG-9.
+  for (const [y, m] of [[2026, 1], [2026, 13], [2026, 0], [26, 1], [0, 1], [1999, 12], [2000, 6]]) {
+    for (const n of [-24, -13, -1, 0, 1, 11, 12, 25]) {
+      assert.deepEqual(addMonths(y, m, n), v1dates.addMonths(y, m, n), `addMonths(${y},${m},${n})`);
+    }
+    assert.equal(monthOrdinal(y, m), v1dates.monthOrdinal(y, m), `monthOrdinal(${y},${m})`);
+  }
+  for (let y = 1998; y <= 2042; y++) {
+    for (const [m, d] of [[1, 1], [2, 29], [11, 22], [12, 31]]) {
+      assert.equal(dow(y, m, d), v1dates.dow(y, m, d), `dow(${y},${m},${d})`);
+    }
+  }
+  // …and the copies agree on the shapes the guard actually judges, where v1 returns NaN.
+  assert.ok(Number.isNaN(addMonths(NaN, 1, 0).y) && Number.isNaN(v1dates.addMonths(NaN, 1, 0).y));
+  assert.ok(Number.isNaN(dow(NaN, 11, 22)) && Number.isNaN(v1dates.dow(NaN, 11, 22)));
+});
+
 test('ATT-97 — a pinned board with no startMonth is REFUSED, never projected', () => {
   // THE HANG. `DEFAULT_SETTINGS.startMonth` is null (core/ may not read a clock), so a caller
   // who omits `ctx.defaultSettings` used to get `settings.startMonth: null`. `layout.js:25` then
@@ -1321,12 +1376,51 @@ test('ATT-97 — a pinned board with no startMonth is REFUSED, never projected',
   assert.throws(() => materialize(pinned, { defaultSettings: DEFAULT_SETTINGS }), MaterializeError,
     'DEFAULT_SETTINGS is the headless fallback and is NOT a usable ctx.defaultSettings');
 
-  // Garbage is refused on the same line — the guard is "layout.js can parse it", not "not null".
-  for (const bad of ['2026-13', '2026', 'null', '2026-1', '', 0]) {
+  // REG-9 — THE GUARD IS THE HANG CONDITION, NOT A FORMAT RULE.
+  //
+  // This list used to read ['2026-13', '2026', 'null', '2026-1', '', 0] and every one of them was
+  // refused, because the guard was `/^\d{4}-(0[1-9]|1[0-2])$/`. Four of those six are boards v1
+  // opens with twelve correct columns (see the v1-oracle half of REG-9 in
+  // tests/attack/regression-v1-fidelity.test.js), so the guard was turning openable boards into
+  // an unopenable app. What is refused now is exactly what makes `holidays.js:51` spin.
+  for (const bad of ['null', 'undefined', 'abc', 'nope-01', '20x6-01', '999999-01', null, true]) {
     assert.throws(
       () => materialize(foldOps([op(GENESIS(0), ME, PREF_ENTITY, flattenPref({ mode: 'pinned', startMonth: bad }))]), {}),
-      MaterializeError, `startMonth ${JSON.stringify(bad)} was projected`);
+      MaterializeError, `startMonth ${JSON.stringify(bad)} was projected and hangs holidays.js`);
   }
+
+  // …and these PROJECT, because v1 renders every one of them. `visibleStart` is v1's own, so the
+  // month each of them lands on is asserted against the real implementation, not a copy.
+  for (const [good, first] of [['2026-1', '2026-1'], ['2026-13', '2027-1'], ['2026-00', '2025-12'],
+    ['26-01', '26-1'], ['2026-01', '2026-1'], ['2026', '2026-1'], ['', '0-1'], [0, '0-1']]) {
+    const st = materialize(
+      foldOps([op(GENESIS(0), ME, PREF_ENTITY, flattenPref({ mode: 'pinned', startMonth: good }))]), {});
+    assert.equal(st.settings.startMonth, good, `startMonth ${JSON.stringify(good)} was rewritten`);
+    const v = visibleStart(st.settings, '2026-03-04');
+    assert.equal(`${v.y}-${v.m}`, first, `visibleStart(${JSON.stringify(good)})`);
+    assert.ok(Number.isInteger(v.y) && Number.isInteger(v.m));
+  }
+
+  // `pageYears` is part of the question: `visibleStart` adds `pageYears * 12` months, so a huge
+  // page offset hangs the same loop from a perfectly well-formed startMonth. The regex could not
+  // see this field at all.
+  assert.throws(
+    () => materialize(foldOps([op(GENESIS(0), ME, PREF_ENTITY,
+      flattenPref({ mode: 'pinned', startMonth: '2026-01', pageYears: 1e9 }))]), {}),
+    MaterializeError, 'a 1e9 page offset walks holidays.js off the end of Date');
+  assert.equal(materialize(foldOps([op(GENESIS(0), ME, PREF_ENTITY,
+    flattenPref({ mode: 'pinned', startMonth: '2026-01', pageYears: 3 }))]), {}).settings.pageYears, 3);
+
+  // The predicate itself, directly: it is a property of the YEAR, and the boundary is the range
+  // `Date` can express — no threshold to tune and nothing about string format in it.
+  assert.equal(yearIsRenderable(2026), true);
+  assert.equal(yearIsRenderable(26), true);
+  assert.equal(yearIsRenderable(0), true);
+  assert.equal(yearIsRenderable(NaN), false);
+  assert.equal(yearIsRenderable(1e9), false);
+  assert.equal(pinnedMonthsRenderable('2026-1', 0), true);
+  assert.equal(pinnedMonthsRenderable(null, 0), false);
+  assert.equal(pinnedMonthsRenderable(Symbol('x'), 0), false, 'a predicate must refuse, not throw');
 
   // A real caller passes v1's own defaults and everything works.
   assert.equal(materialize(pinned, soloCtx()).settings.startMonth, V1_DEFAULT_SETTINGS.startMonth);

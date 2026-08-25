@@ -32,10 +32,17 @@ const board = () => ({
     { id: 'b1', startDate: '2026-02-10', endDate: '2026-04-20', label: 'Projekt', categoryId: 'cat-a' },
   ],
   scratchpads: { '2026-03': 'Milch', '2026-04': 'Brot', '2026-05': 'Kaese' },
-  // `startMonth` is REQUIRED alongside `mode: 'pinned'` — ATT-97: `materialize` refuses a pinned
-  // board it cannot give `layout.js:25` a parseable month for, because the alternative is
-  // `parseISO('null-01')` → `{y: NaN, m: NaN}` → an infinite loop in `holidays.js:51`. Added by
-  // the ATT-97 fix (materialize.js), not by this file's owner; nothing else here changes.
+  // `startMonth` alongside `mode: 'pinned'` must be RENDERABLE — ATT-97 / REG-9: `materialize`
+  // refuses a pinned board whose visible years `holidays.js:51` cannot finish a Buß- und Bettag
+  // walk for, because the alternative is `dow(NaN, …)` → `NaN !== 3` forever → the app freezes
+  // with no error and no frame.
+  //
+  // ROUND 2: "required" overstated it. The first fix guarded the FORMAT with
+  // `/^\d{4}-(0[1-9]|1[0-2])$/`, which refused boards v1 opens perfectly well — `'2026-1'`,
+  // `'2026-13'`, `'2026-00'`, `'26-01'` — turning openable boards into an unopenable app. The
+  // guard is now `entities.js:pinnedMonthsRenderable`, which runs v1's own arithmetic and asks
+  // only whether every visible year is one the date arithmetic can express. `'2026-01'` below is
+  // still the right fixture; it is simply no longer the only accepted shape.
   settings: { mode: 'pinned', startMonth: '2026-01', rowHeight: 30, layers: { feiertage: false, schulferien: true } },
 });
 

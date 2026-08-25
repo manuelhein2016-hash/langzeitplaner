@@ -47,7 +47,7 @@ import {
   getRegister, getValue, hasRegister, registersOf, entityKeys, fieldNames, registerCount,
   createdAt, updatedAt, updatedBy,
   pubFieldFor, truthFieldFor, promoteRegister, promoteEntity, withdrawnByOther,
-  serializeRegisters, deserializeRegisters,
+  serializeRegisters, deserializeRegisters, deserializeRepairs,
 } from '../../src/js/core/registers.js';
 
 import { createClock, fmt, cmp } from '../../src/js/core/stamp.js';
@@ -210,15 +210,18 @@ test('a MISSING opId ranks above every real one — an unattributed write is abs
   // AND opId retained deliberately so the blank wins its own tie — that turned a re-pull into an
   // UN-BLANKING of retracted plaintext: INV-R4 (a downgrade removes) silently not holding.
   //
-  // `deserializeRegisters` now refuses a register without an opId outright, so this rank is the
-  // defence in depth behind that refusal rather than the only line. Absorbing, not immovable: a
-  // GREATER stamp — the owner publishing again — still wins.
+  // Since REG-26 this rank is the WHOLE defence rather than a backstop: `deserializeRegisters`
+  // REPAIRS an op-less checkpoint register (`op: null`) and loads the board instead of refusing
+  // the file, so an unattributed write can exist inside this build by design. Absorbing, not
+  // immovable: a GREATER stamp — the owner publishing again — still wins.
   const s = stampAt(4242, 5);
   const blank = { stamp: s, value: null };                      // no `op` at all
   const real = { stamp: s, op: 'z'.repeat(22), value: 'Krebsvorsorge' };
   assert.equal(cmpWrites(blank, real), 1, 'the unattributed write wins the tie');
   assert.equal(cmpWrites(real, blank), -1);
   assert.equal(cmpWrites({ ...blank, op: '' }, real), 1, 'and `\'\'` is treated as missing, not as least');
+  assert.equal(cmpWrites({ ...blank, op: null }, real), 1,
+    '`op: null` is what REG-26\'s repair writes — it must rank absorbing too, or the repair leaks');
   assert.equal(cmpWrites(blank, { ...real, stamp: stampAt(4243, 0) }), -1, 'a greater stamp still wins');
   assert.equal(cmpWrites(blank, { stamp: s, value: 'x' }), 1, 'two missing opIds tie and fall to the value');
 });
@@ -1317,18 +1320,82 @@ test('deserializeRegisters refuses a corrupt checkpoint rather than poisoning th
     [bend((b) => { b.regs[NOTE].text.author = 'nope'; }), 'author'],
     [bend((b) => { delete b.regs[NOTE].text.value; }), 'no value'],
     [bend((b) => { b.regs[NOTE].text.value = { a: 1 }; }), 'scalar'],
-    [bend((b) => { b.regs[NOTE].text.op = 'short'; }), 'op id'],
-    // `op` is MANDATORY, exactly like stamp / author / value: it is SHAPE, not vocabulary,
-    // and `serializeRegisters` has always written it. Accepting a register without one and
-    // storing `''` is what let a re-pull UN-BLANK a retracted field — see the comparator test
-    // below and `tests/attack/convergence-comparator.test.js` C1.
-    [bend((b) => { delete b.regs[NOTE].text.op; }), 'op id'],
   ];
   for (const [blob, needle] of cases) {
     assert.throws(() => deserializeRegisters(blob),
       (e) => e instanceof RegisterError && e.message.includes(needle),
       `expected a RegisterError mentioning "${needle}"`);
   }
+});
+
+test('REG-26: a register with no op id is REPAIRED and reported — the file still loads', () => {
+  // INVERTED. This case used to sit in the refusal table above, asserting that a missing `op`
+  // threw. The safety it was protecting is real (an unattributed register must not rank as the
+  // weakest possible write, or a re-delivered op at the same stamp un-blanks an ADR 004 §5.3
+  // retraction) but the failure mode was a refusal of the WHOLE checkpoint over one missing
+  // 22-character id — on a file the previous shipped build both read and wrote.
+  //
+  // The safety now lives entirely in `opKey`, which ranks an unattributed write ABSORBING, and
+  // the door repairs: value, stamp and author verbatim, `op` normalised to `null`, the event
+  // reported. Every OTHER register in the file must come through untouched.
+  const mac = device('laptop');
+  const good = serializeRegisters(foldOf([
+    mac.note({ text: 'Zahnarzt', date: '2026-03-01' }),
+    mac.emit('cat.set', CAT, { name: 'Arbeit', visible: true }),
+  ]));
+  for (const damage of [(r) => { delete r.op; }, (r) => { r.op = ''; }, (r) => { r.op = 'short'; },
+    (r) => { r.op = 7; }, (r) => { r.op = null; }]) {
+    const blob = JSON.parse(JSON.stringify(good));
+    damage(blob.regs[NOTE].text);
+
+    const seen = [];
+    const back = deserializeRegisters(blob, { onRepair: (rep) => seen.push(rep) });
+
+    assert.equal(getValue(back, NOTE, 'text'), 'Zahnarzt', 'the damaged register lost its VALUE');
+    assert.equal(getRegister(back, NOTE, 'text').stamp, blob.regs[NOTE].text.stamp);
+    assert.equal(getRegister(back, NOTE, 'text').author, ME);
+    assert.equal(getRegister(back, NOTE, 'text').op, null, 'the attribution was not normalised');
+
+    // Everything else in the file is untouched — the point of the whole exercise.
+    assert.equal(getValue(back, NOTE, 'date'), '2026-03-01');
+    assert.equal(getValue(back, CAT, 'name'), 'Arbeit');
+    assert.equal(registerCount(back), registerCount(deserializeRegisters(good)));
+
+    // …and it is reported, on the callback AND on the map, once, naming the exact cell.
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen, [...deserializeRepairs(back)]);
+    assert.equal(seen[0].entity, NOTE);
+    assert.equal(seen[0].field, 'text');
+    assert.match(seen[0].message, /op id/);
+  }
+  assert.deepEqual([...deserializeRepairs(deserializeRegisters(good))], [],
+    'a clean checkpoint reported a repair');
+});
+
+test('REG-26: the repaired register is ABSORBING, and the repair is idempotent on disk', () => {
+  // The safety the refusal was there for, asserted on the repaired map rather than on the door.
+  // A re-delivered op at the identical stamp must NOT beat a register whose attribution was lost
+  // — that is the un-blanking path (ADR 004 §5.3, INV-R4).
+  const mac = device('laptop');
+  const o = mac.note({ text: 'Krebsvorsorge' });
+  const blob = JSON.parse(JSON.stringify(serializeRegisters(foldOf([o]))));
+  blob.regs[NOTE].text.value = null;                       // the forget blank
+  delete blob.regs[NOTE].text.op;                          // …that lost its attribution
+
+  const back = deserializeRegisters(blob);
+  assert.equal(getValue(back, NOTE, 'text'), null);
+  const redelivered = cloneRegisters(back);
+  applyOp(redelivered, o);                                 // the very op that wrote it, again
+  assert.equal(getValue(redelivered, NOTE, 'text'), null,
+    'a re-delivered op un-blanked a retracted field — the repair is not absorbing');
+
+  // Round-tripping the repaired map writes `"op":null`, and loading THAT repairs to the same
+  // thing: the file's bytes stop drifting after one save instead of oscillating.
+  const written = JSON.parse(JSON.stringify(serializeRegisters(back)));
+  assert.equal(written.regs[NOTE].text.op, null);
+  const again = deserializeRegisters(written);
+  assert.deepEqual(again, back);
+  assert.equal(deserializeRepairs(again).length, 1, 'the second load did not report the repair');
 });
 
 test('deserializeRegisters is TOLERANT of a field name this build does not know', () => {

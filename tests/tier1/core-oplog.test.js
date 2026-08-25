@@ -182,6 +182,13 @@ test('createOpLog returns every method ops.contract.js §8 declares', () => {
   for (const m of ['append', 'ops', 'checkpoint', 'compact', 'load', 'park', 'unpark', 'forget']) {
     assert.equal(typeof l[m], 'function', `OpLog.${m} is missing`);
   }
+  // Additive to ops.contract.js §8, and each one closes a round-2 finding rather than adding a
+  // convenience: `lines()` is the explicit persistence accessor `ops()`'s default used to be
+  // (REG-29), and `seqOfOp()` is the seq resolver §7.3 condition 3 must use, because a stamp is
+  // not unique across devices and a migrated board's stamps collide by construction (A7).
+  for (const m of ['lines', 'seqOfOp', 'seqOf', 'splicedIds', 'collectTombstones']) {
+    assert.equal(typeof l[m], 'function', `OpLog.${m} is missing`);
+  }
   assert.equal(typeof tombstoneCollectable, 'function');
 });
 
@@ -353,23 +360,51 @@ test('a spliced op that PARKS is resolved by the same content-addressable rule',
   }
 });
 
-test('a splice that arrives while the loser is LIVE is un-applied, not merged on top', () => {
-  // Replacing the body must re-fold, or the loser's writes would linger in the registers under
-  // the winner's id — a checkpoint that no set of ops can reproduce.
+test('INVERTED (A1 round 2) — a splice is resolved by the JOIN: the loser is absorbed, never un-applied', () => {
+  // This test used to assert the opposite — that the losing body is UN-APPLIED and its writes
+  // vanish. That is the rule that could not survive §7.2, and it is why A1 re-opened: once a body
+  // has been folded into a checkpoint, the value it displaced is gone, so a device that compacted
+  // between the two envelopes CANNOT un-apply the first one and a device that did not CAN. Same
+  // op set, permanently different registers, decided by a compaction §7.2 promises is invisible
+  // to state.
+  //
+  // The resolution therefore has to be monotone with respect to the fold, and the fold is the
+  // register join: every admitted body is applied and `≺` decides field by field. The canonical
+  // max still keeps the LINE (so the retained plaintext is the same everywhere and `kept:` still
+  // means something), and the loser is absorbed into the checkpoint exactly as `compact()` would
+  // have absorbed it. What is given up: the loser's `date` no longer disappears. What is bought:
+  // the four logs below agree, which they did not before, and no compaction can change any of it.
   const wall = makeWall();
   const a = makeAuthor({ tag: 'a', wall });
   const lo = (a.txn(), a.note(U1, { date: '2026-09-10', text: 'A' }));
   const hi = { ...lo, f: { text: 'zzz' } };                        // canonically greater, and no `date`
   assert.ok(canonicalJSON(hi) > canonicalJSON(lo));
+
   const l = log(makeWall(wall.ms));
   l.append(lo);
   assert.equal(l.append(hi).status, APPEND.CONFLICT);
-  assert.equal(val(l, noteKey(U1), 'text'), 'zzz');
-  assert.equal(val(l, noteKey(U1), 'date'), MISSING, "the losing body's writes survived the splice");
+  assert.equal(l.size, 1, 'the canonical max is the only LINE');
+  assert.deepEqual(l.get(hi.id).f, hi.f, 'and it is the body the log retains');
+  assert.equal(val(l, noteKey(U1), 'text'), 'zzz', 'the canonical max wins the field both bodies write');
+  assert.equal(val(l, noteKey(U1), 'date'), '2026-09-10',
+    "the loser's write is absorbed, not un-applied — that is what survives compaction");
 
-  const clean = log(makeWall(wall.ms));
-  clean.append(hi);
-  assert.equal(snap(l), snap(clean), 'the spliced log does not equal the log that only ever saw the winner');
+  // THE POINT: every order, and every compaction point, lands on the same registers.
+  const variants = [];
+  for (const order of [[lo, hi], [hi, lo]]) {
+    for (const cut of [0, 1, 2]) {                    // compact before / between / after
+      const v = log(makeWall(wall.ms));
+      if (cut === 0) v.compact();
+      v.append(order[0]);
+      if (cut === 1) v.compact();
+      v.append(order[1]);
+      if (cut === 2) v.compact();
+      variants.push(snap(v));
+    }
+  }
+  assert.equal(new Set(variants).size, 1,
+    'a compaction between the two envelopes still decides state — A1 is open again');
+  assert.equal(variants[0], snap(l));
 });
 
 test('a malformed second body neither wins nor disturbs the one we hold', () => {
@@ -611,7 +646,14 @@ test('an unknown op KIND is parked, retained and not applied', () => {
   assert.deepEqual(l.ops({ liveOnly: true }), [], 'a parked op is not an APPLIED op');
   assert.deepEqual(l.ops({ includeParked: false }), [], 'the older spelling of liveOnly still works');
   assert.equal(l.ops({ includeParked: true }).length, 1);
-  assert.equal(l.ops().length, 1, 'ops() defaults to every LINE — a parked line is a line on disk');
+  // INVERTED (REG-29). `ops()` defaults to the APPLIED set again, because `fold(log.ops())` is
+  // the obvious way to rebuild a register map and a parked line makes it THROW. The persistence
+  // pair does not need the default: the parked lines ride in `checkpoint()`, with their reasons.
+  assert.deepEqual(l.ops(), [], 'ops() defaults to the ADMITTED ops — a parked op was never applied');
+  assert.equal(l.lines().length, 1, 'lines() is the explicit "every line on disk" accessor');
+  assert.equal(l.lines()[0].park, PARK_REASONS.UNKNOWN_KIND, 'and it carries the park reason');
+  assert.doesNotThrow(() => registers.foldAll(registers.emptyRegisters(), l.ops()),
+    'fold(log.ops()) must never throw on a parked line (REG-29)');
 });
 
 test('an unknown FIELD parks the WHOLE op — never half of it', () => {
@@ -1038,9 +1080,14 @@ test('the documented persist pair {checkpoint(), ops()} round-trips PARKED ops l
   assert.equal(before.append(fromNewerBuild).status, APPEND.PARKED);
   assert.equal(before.parkedSize, 2);
 
-  // Exactly the pair the module documents, through JSON, exactly as `ops.jsonl` would be.
+  // Exactly the pair the module documents, through JSON, exactly as `ops.jsonl` would be. The
+  // parked lines ride in the CHECKPOINT since REG-29 — with their reasons, which is what A2
+  // round 2 needed anyway — so `ops()` can go back to meaning the applied set.
   const persisted = JSON.parse(JSON.stringify({ checkpoint: before.checkpoint(), tail: before.ops() }));
-  assert.equal(persisted.tail.length, 3, 'ops() silently omitted the parked lines');
+  assert.equal(persisted.tail.length, 1, 'ops() is the APPLIED set');
+  assert.equal(persisted.checkpoint.parked.length, 2, 'the checkpoint silently omitted the parked lines');
+  assert.deepEqual(persisted.checkpoint.parked.map((p) => p.reason).sort(),
+    [PARK_REASONS.FUTURE, PARK_REASONS.UNKNOWN_KIND].sort(), 'and their reasons travel with them');
 
   const after = log(makeWall(wall.ms));
   after.load(persisted);
@@ -1489,9 +1536,13 @@ test('collectTombstones never deletes a PARKED op, and an entity with one is not
   assert.equal(sibling.parkedSize, 1);
   assert.equal(snap(sibling), snap(l));
 
-  // …and once the op is understood, the tombstone becomes collectable again on its own terms.
+  // …and a device that never received the forward-compatible op collects it on its own terms.
+  // (`parked: []` is how that is spelled since the parked lines started riding in the checkpoint;
+  // dropping them from the tail no longer drops them.)
+  const withoutIt = JSON.parse(JSON.stringify(l.checkpoint()));
+  withoutIt.parked = [];
   const other = log(makeWall(nowMs));
-  other.load({ checkpoint: JSON.parse(JSON.stringify(l.checkpoint())), tail: [] });
+  other.load({ checkpoint: withoutIt, tail: [] });
   assert.deepEqual(other.collectTombstones({ nowMs, minDeviceSeq: 999n, minPushedSeq: 999n }), [noteKey(U1)]);
 });
 
@@ -1552,7 +1603,12 @@ test('forget survives re-delivery of the op it purged, in-session', () => {
   l.forget(key, FSP);
   assert.equal(val(l, key, 'pub.text'), null);
   assert.equal(val(l, key, 'pub.date'), null);
-  assert.equal(l.append(pub).status, APPEND.DUPLICATE, 'dedupe by opId is what protects this case');
+  // The re-delivered publication is RE-FOLDED, not deduped: `forget()` deliberately keeps no
+  // fingerprint of the body it purged (a hash of the retracted plaintext is exactly the derived
+  // residue ADR 004 §5.3 exists to remove), so this is the tie rule doing the work and not the
+  // dedupe optimisation. `registers.js:valueKey` ranks the blank above the value at the identical
+  // (stamp, opId), so the blank wins and forget is absorbing.
+  assert.equal(l.append(pub).status, APPEND.APPENDED, 'the op must be admitted; the question is whether it WINS');
   assert.equal(val(l, key, 'pub.text'), null);
   assert.equal(val(l, key, 'pub.date'), null);
 });
@@ -1637,14 +1693,23 @@ test('forget works whether or not the entity has been compacted', () => {
   assert.equal(val(compacted.l, compacted.key, 'pub.text'), null);
 });
 
-test('forget also purges a PARKED line for that entity', () => {
+test('INVERTED (A2-b) — forget NEVER purges a parked line, exactly as tombstone GC never does', () => {
+  // This used to assert that forget purges parked lines too. `collectTombstones` refuses to touch
+  // them and says why in full: a parked op is retained precisely so an app update can apply it,
+  // it may carry a stamp NEWER than every register the entity holds, and deleting it is "loses
+  // the new thing" — §7.4's whole reason to exist. `forget()` deleted from the SAME map with no
+  // such rule, and the loss is unrecoverable: the id stays in `seen`, so re-delivery is deduped.
+  // §7.4 beats ADR 004 §5.3 here exactly as it beats §7.3 there.
   const { l, key } = publishedWorld();
   const a = makeAuthor({ tag: 'p', wall: makeWall() });
   const base = (a.txn(), a.pub('fnote', MEM_A, U1, { 'pub.level': 'belegt' }));
-  l.append({ ...base, id: oid('pk', 1), f: { 'pub.level': 'belegt', 'pub.mood': 'happy' } });
+  const fromNewerBuild = { ...base, id: oid('pk', 1), f: { 'pub.level': 'belegt', 'pub.mood': 'happy' } };
+  l.append(fromNewerBuild);
   assert.equal(l.parkedSize, 1);
-  assert.equal(l.forget(key, FSP), 3);
-  assert.equal(l.parkedSize, 0, 'a parked line is still a line on disk');
+  assert.equal(l.forget(key, FSP), 2, 'the ADMITTED lines are purged — that part is unchanged');
+  assert.equal(l.parkedSize, 1, "a newer sibling's retained op was destroyed by the forget pass");
+  assert.equal(l.get(fromNewerBuild.id).id, fromNewerBuild.id, 'and its bytes are still there');
+  assert.equal(val(l, key, 'pub.date'), null, 'the retraction itself still happened');
 });
 
 test('forget REFUSES an entity that is still live — the blank would be unrecoverable', () => {
@@ -1773,8 +1838,11 @@ test('a compacted opId is still deduped in-session', () => {
   assert.equal(l.size, 0, 'a compacted op was re-added as a new line');
 });
 
-test('re-appending a compacted op after a cold start is CORRECT, just not free', () => {
-  // Dedupe is a performance optimisation only (ADR 001 §6). Correctness may never depend on it.
+test('re-appending a compacted op after a cold start is CORRECT — and, since A1, free', () => {
+  // Dedupe is a performance optimisation only (ADR 001 §6). Correctness may never depend on it —
+  // which is why BOTH halves are asserted. `checkpoint().bodies` carries a 96-bit fingerprint per
+  // absorbed opId, so a cold-started log recognises a re-delivered body as a duplicate; and a log
+  // whose fingerprints are stripped RE-FOLDS the same ops and lands in exactly the same place.
   const wall = makeWall();
   const a = makeAuthor({ tag: 'a', wall });
   a.txn();
@@ -1782,10 +1850,19 @@ test('re-appending a compacted op after a cold start is CORRECT, just not free',
   const warm = log(makeWall(wall.ms));
   for (const op of ops) warm.append(op);
   warm.compact();
+  const file = JSON.parse(JSON.stringify(warm.checkpoint()));
+  assert.equal(Object.keys(file.bodies).length, 2, 'the checkpoint carries no body fingerprints');
+
   const cold = log(makeWall(wall.ms));
-  cold.load({ checkpoint: JSON.parse(JSON.stringify(warm.checkpoint())), tail: [] });
-  for (const op of ops) assert.equal(cold.append(op).status, APPEND.APPENDED);
+  cold.load({ checkpoint: file, tail: [] });
+  for (const op of ops) assert.equal(cold.append(op).status, APPEND.DUPLICATE);
+  assert.equal(cold.size, 0, 'a re-delivered body was re-added as a new line');
   assert.equal(snap(cold), snap(warm), 're-folding a compacted op changed the state');
+
+  const stripped = log(makeWall(wall.ms));
+  stripped.load({ checkpoint: { ...file, bodies: {} }, tail: [] });
+  for (const op of ops) assert.equal(stripped.append(op).status, APPEND.APPENDED);
+  assert.equal(snap(stripped), snap(warm), 're-folding a compacted op changed the state');
 });
 
 test('registersCopy() is detached from the log', () => {

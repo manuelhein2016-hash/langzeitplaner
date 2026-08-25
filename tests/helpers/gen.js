@@ -705,6 +705,187 @@ export function generateBoard(seed, o) {
   };
 }
 
+/**
+ * The UGLY corpus — every v1 board shape the fix pass closed, generated on purpose.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * WHY THIS EXISTS AS A SECOND GENERATOR RATHER THAN A WIDER `generateBoard`
+ *
+ * REG-32 recorded the hole precisely: `generateBoard` is sanitised of exactly the inputs that
+ * were being fixed — no duplicate id, no empty category list, no null setting, no non-string
+ * text, nothing over 80 characters, no unknown key — so "losslessness over 500 seeds" (P8) was a
+ * statement about a corpus that could not reach a single one of the repaired paths.
+ *
+ * The tempting fix is to make `generateBoard` uglier, and it is wrong. P8 asserts
+ * `materialize(fold(migrateV1(b))) deepEqual b`, which is FALSE by construction for a board that
+ * cannot be represented without loss: a truncated note is not the note that went in. Widening
+ * that corpus turns P8 red instead of exercising the new code, and the reflex fix — relaxing
+ * P8's assertion — would destroy the one property in the suite that says migration loses nothing.
+ *
+ * So: two corpora and two properties. `generateBoard` stays the REPRESENTABLE corpus and P8 keeps
+ * asserting exact losslessness over it. This one is the NON-REPRESENTABLE corpus, and the
+ * properties over it assert the things that must hold when a board CANNOT be carried intact:
+ * every loss is reported, no entry disappears in silence, and both doors do the same thing.
+ *
+ * Every shape below is generated INDEPENDENTLY, at a rate that puts each one in a healthy
+ * fraction of the seeds without any seed being nothing but damage — a corpus of all-broken boards
+ * exercises the error paths and never the interaction between a broken field and a good one.
+ * `uglyShapesIn` reports what a given board actually got, and the property suite asserts the
+ * observed frequency of every shape is non-zero, so a future edit that quietly sanitises this
+ * generator fails the suite instead of silently shrinking it back to `generateBoard`.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * @param {number} seed @param {{ defaults: Object }} o v1's `defaultState()`
+ * @returns {Object} a v1 board that a real hand-edited / third-party / pre-maxLength file could be
+ */
+export function generateUglyBoard(seed, o) {
+  const b = generateBoard(seed, o);
+  const rnd = pcg32((seed ^ 0x1eaf) >>> 0);
+
+  // ── 1. OVER-LENGTH text and label ───────────────────────────────────────────────────────────
+  // v1's 80 (note) and 40 (bar) are DOM `maxLength` attributes (`interact.js:466`,
+  // `popover.js:146`) and never applied to a file. A board written before the attribute existed,
+  // hand-edited, or produced by any other tool legitimately holds this — and it is the shape that
+  // used to make an imported note VANISH (ATT-82 / RECHECK-82-1).
+  for (const n of b.notes) {
+    if (chance(rnd, 0.20)) n.text = `${n.text} ${'ß'.repeat(60 + int(rnd, 200))}`;
+    // Emoji specifically: the cut must land on a character, never through a surrogate pair.
+    else if (chance(rnd, 0.06)) n.text = '\u{1F600}'.repeat(45 + int(rnd, 30));
+  }
+  for (const x of b.bars) {
+    if (chance(rnd, 0.20)) x.label = `${x.label} ${'y'.repeat(30 + int(rnd, 120))}`;
+  }
+
+  // ── 2. NON-STRING text ──────────────────────────────────────────────────────────────────────
+  // A hand-edited file, or a tool that wrote a number. `null` matters most: it is what an
+  // "empty" field looks like after a round-trip through several tools, and the presence rule
+  // (`entities.js:renderable`) treats `null` as ABSENT while `''` is present and renders.
+  const NOT_STRINGS = [null, 42, true, { text: 'nested' }, ['a']];
+  for (const n of b.notes) {
+    if (chance(rnd, 0.12)) n.text = pick(rnd, NOT_STRINGS);
+  }
+  for (const x of b.bars) {
+    if (chance(rnd, 0.08)) x.label = pick(rnd, NOT_STRINGS);
+  }
+
+  // ── 3. DUPLICATE ids ────────────────────────────────────────────────────────────────────────
+  // v1 tolerates two entries sharing an id and RENDERS BOTH; v2 cannot, because one entity key is
+  // one register set. Both doors must re-key rather than drop (REG-22 / ATT-90).
+  if (b.notes.length > 1 && chance(rnd, 0.25)) {
+    b.notes[int(rnd, b.notes.length)].id = b.notes[0].id;
+  }
+  if (b.bars.length > 1 && chance(rnd, 0.18)) {
+    b.bars[int(rnd, b.bars.length)].id = b.bars[0].id;
+  }
+  if (chance(rnd, 0.10)) b.categories[1 + int(rnd, b.categories.length - 1)].id = b.categories[0].id;
+
+  // ── 4. EMPTY category list ──────────────────────────────────────────────────────────────────
+  // v1's `migrate()` substitutes four defaults (`store.js:74`) and every other v1 site is written
+  // as if that already happened — `store.category()` never returns undefined. A board that
+  // reaches the UI with no categories is one v1 THROWS on (REG-21 / ATT-15 / ATT-41).
+  if (chance(rnd, 0.10)) {
+    b.categories = [];
+    // …which leaves every categoryId dangling, which is the other half of the shape.
+  } else if (chance(rnd, 0.08)) {
+    for (const n of b.notes) if (chance(rnd, 0.5)) n.categoryId = 'cat-does-not-exist';
+  }
+
+  // ── 5. NULL settings ────────────────────────────────────────────────────────────────────────
+  // The REG-8 shape. v1 reads a null pref as `!!null` at its consuming call site, i.e. OFF for a
+  // boolean, and reverts to the default for everything else — so a cleared pref and a null pref
+  // are DIFFERENT BOARDS for exactly the prefs whose default is `true`.
+  const NULLABLE = ['rowHeight', 'colWidth', 'paper', 'pageYears', 'language', 'bundesland',
+    'lastCategoryId', 'menuBarIcon'];
+  for (const key of NULLABLE) {
+    if (key in b.settings && chance(rnd, 0.09)) b.settings[key] = null;
+  }
+  if (chance(rnd, 0.09)) b.settings.layers = { ...b.settings.layers, feiertage: null };
+  if (chance(rnd, 0.05)) b.settings.layers = null;
+  // `startMonth` is generated null on purpose but rarely: it is the ONE pref whose absence makes
+  // the board unrenderable rather than merely different (REG-9 — `layout.js` cannot compute a
+  // visible year and `holidays.js:51` spins forever). A corpus that never produced it would not
+  // exercise the hang guard at all; a corpus that produced it often would be a corpus of boards
+  // that cannot be opened.
+  if (chance(rnd, 0.04)) b.settings.startMonth = null;
+
+  // ── 6. UNKNOWN keys ─────────────────────────────────────────────────────────────────────────
+  // v1 copies the arrays wholesale (`store.js:69-76`) and the export writes back whatever the
+  // state carries, so an unknown key really does survive a v1 round trip — which is why dropping
+  // one is a LOSS and has to be reported on both doors (RECHECK-82-6).
+  if (chance(rnd, 0.15)) b.holidays = { '2026-12-25': 'Weihnachten' };
+  if (chance(rnd, 0.10)) b.customLayers = [{ name: 'Urlaub', color: '#abc' }];
+  for (const n of b.notes) if (chance(rnd, 0.10)) n.priority = int(rnd, 5);
+  for (const x of b.bars) if (chance(rnd, 0.08)) x.icon = 'star';
+
+  // ── 6b. AN ENTRY THAT CANNOT BE DRAWN AT ALL ────────────────────────────────────────────────
+  // A missing or malformed DATE is the one incompleteness neither door may repair: `truncateToFit`
+  // and `coerceToV1Text` both refuse dates on purpose, because the longest accepted prefix of
+  // `'2026-01-01T09:00'` is a perfectly plausible `'2026-01-01'` and inventing a day the user
+  // never wrote is worse than dropping a value they cannot see. So the entry migrates, and then
+  // is not on the board (ADR 001 §5 step 3) — which the user is entitled to be TOLD, on both
+  // doors, before the file that held it stops being the board.
+  //
+  // Generated because nothing else in this corpus reaches that path: after the REG-5/REG-6
+  // coercion a note's `text` is always present, so `renderable()` only ever fails on a date.
+  for (const n of b.notes) {
+    if (chance(rnd, 0.05)) delete n.date;
+    else if (chance(rnd, 0.04)) n.date = '2026-01-01T09:00';
+  }
+  for (const x of b.bars) {
+    if (chance(rnd, 0.05)) delete x.endDate;
+  }
+
+  // ── 7. A scratchpad shape neither door had a test for ───────────────────────────────────────
+  if (chance(rnd, 0.12)) b.scratchpads['2026-06'] = '';          // the REG-23 shape
+  if (chance(rnd, 0.06)) b.scratchpads['nicht-ein-monat'] = 'x'; // not YYYY-MM
+  if (chance(rnd, 0.06)) b.scratchpads['2026-09'] = 12345;       // not a string
+
+  return b;
+}
+
+/**
+ * Which ugly shapes a board actually carries. The property suite prints the observed frequency of
+ * every one of these across the whole seed range and asserts NONE is zero — because a generator
+ * that has been quietly sanitised back into `generateBoard` still passes every property it feeds,
+ * and passes them vacuously. This is the check that makes the corpus falsifiable.
+ *
+ * @param {Object} b @returns {Object<string, boolean>}
+ */
+export function uglyShapesIn(b) {
+  const entries = [...b.notes, ...b.bars, ...b.categories];
+  const ids = entries.map((e) => e.id);
+  const known = ['schemaVersion', 'notes', 'bars', 'categories', 'scratchpads', 'settings', '_v2'];
+  const entryFields = {
+    note: ['id', 'date', 'text', 'categoryId', 'repeatsYearly'],
+    bar: ['id', 'startDate', 'endDate', 'label', 'categoryId'],
+  };
+  const flatSettings = (o, out = []) => {
+    for (const v of Object.values(o || {})) {
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) flatSettings(v, out);
+      else out.push(v);
+    }
+    return out;
+  };
+  return {
+    'duplicate ids': new Set(ids).size !== ids.length,
+    'empty categories': b.categories.length === 0,
+    'null settings': flatSettings(b.settings).includes(null) || b.settings.layers === null,
+    'non-string text': [...b.notes].some((n) => typeof n.text !== 'string')
+      || [...b.bars].some((x) => typeof x.label !== 'string'),
+    'over-length text/label': b.notes.some((n) => typeof n.text === 'string' && n.text.length > 80)
+      || b.bars.some((x) => typeof x.label === 'string' && x.label.length > 40),
+    'unknown keys': Object.keys(b).some((k) => !known.includes(k))
+      || b.notes.some((n) => Object.keys(n).some((k) => !entryFields.note.includes(k)))
+      || b.bars.some((x) => Object.keys(x).some((k) => !entryFields.bar.includes(k))),
+    'dangling categoryId': b.notes.some((n) => !b.categories.some((c) => c.id === n.categoryId)),
+    'empty scratchpad': Object.values(b.scratchpads).some((v) => v === ''),
+    'unrenderable startMonth': b.settings.startMonth === null,
+    'undrawable entry': b.notes.some((n) => typeof n.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(n.date))
+      || b.bars.some((x) => typeof x.endDate !== 'string'),
+  };
+}
+
+
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // 8. Adversarial ops — the input P9 (structural ownership, risk R10) has to survive
 // ═════════════════════════════════════════════════════════════════════════════════════════════

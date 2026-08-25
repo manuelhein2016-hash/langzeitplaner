@@ -156,9 +156,12 @@ const byString = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
  *
  * A WRITE WITH NO OPID RANKS ABOVE EVERY REAL ONE — the same "when a tie is reachable at all, the
  * absorbing side wins" rule `valueKey` applies to `null`, and it is here for the same reason.
- * `deserializeRegisters` now REFUSES a checkpoint register without an OpId (see there), so within
- * this build an unattributed write cannot exist; this rank is the defence in depth behind that
- * refusal. Ranking a missing opId LOWEST — which is what `a.op ?? ''` used to do — made every real
+ * This rank is the WHOLE of the defence, not a backstop behind a door that refuses: REG-26 turned
+ * `deserializeRegisters`'s refusal of an op-less checkpoint register into a REPAIR (it normalises
+ * `op` to `null` and reports it), because refusing meant losing the user's whole board over one
+ * missing 22-character id. An unattributed write therefore CAN exist inside this build, by
+ * design, and this comparator is what makes that safe.
+ * Ranking a missing opId LOWEST — which is what `a.op ?? ''` used to do — made every real
  * op at the same stamp beat it, so a single dropped optional key anywhere upstream turned the ADR
  * 004 §5.3 forget blank (value `null`, stamp AND opId retained precisely so the blank wins its own
  * tie) back into the retracted plaintext on the next re-pull. INV-R4 says a downgrade removes; a
@@ -619,17 +622,88 @@ export function serializeRegisters(regs) {
 }
 
 /**
- * @param {Object} blob @returns {RegisterMap}
- *
- * STRICT on shape, TOLERANT on vocabulary. A register whose stamp, author or value is malformed
- * throws — the file is corrupt and pretending otherwise would poison the order. A register whose
- * FIELD NAME or ENTITY KIND this build does not know is retained verbatim, because a checkpoint
- * is our own already-admitted state and dropping it is how a downgrade to an older build (ADR
- * 001 §8.4's "cheap insurance against a bad background update") turns "does not show the new
- * thing" into "loses the new thing". `applyOp` is stricter precisely because an OP is untrusted
- * input from a peer and has a park/reject triage of its own.
+ * Where a checkpoint repair is recorded. A Symbol, and non-enumerable, so it is invisible to
+ * `JSON.stringify`, to `assert.deepEqual` and to every existing reader of a RegisterMap —
+ * `deserializeRegisters` keeps its `(blob) => RegisterMap` signature, and a caller that never
+ * heard of repairs (`oplog.js:load`) is unaffected.
  */
-export function deserializeRegisters(blob) {
+const REPAIRS = Symbol('registers.repairs');
+
+/** @type {readonly Object[]} */
+const NO_REPAIRS = Object.freeze([]);
+
+/**
+ * What `deserializeRegisters` had to repair to load this map — `[]` for a clean file.
+ *
+ * The report is the second half of REG-26's fix and is not decoration: "we quietly rewrote part
+ * of your board" is exactly the class of event principle 6 („nichts geht verloren") requires the
+ * app to be able to SAY. The store surfaces it; a diagnostic prints it; a test asserts on it.
+ *
+ * @param {RegisterMap} regs a map returned by `deserializeRegisters`
+ * @returns {readonly {entity:string, field:string, reason:string, was:string, message:string}[]}
+ */
+export function deserializeRepairs(regs) {
+  if (!(regs instanceof Map)) throw new RegisterError('deserializeRepairs: expected a RegisterMap');
+  return /** @type {any} */ (regs)[REPAIRS] ?? NO_REPAIRS;
+}
+
+/** A hostile checkpoint may put anything in `op`; a report is prose and must stay bounded. */
+function brief(v) {
+  let s;
+  try { s = typeof v === 'string' ? JSON.stringify(v) : String(v); } catch { s = '(unprintable)'; }
+  return s.length > 40 ? `${s.slice(0, 37)}…` : s;
+}
+
+/**
+ * @param {Object} blob
+ * @param {{ onRepair?: (repair: Object) => void }} [o] `onRepair` is called once per repaired
+ *        register, in file order, after the whole blob has loaded. The same records are
+ *        retrievable from the returned map with `deserializeRepairs`, which is how the one-arg
+ *        callers (`oplog.js:load`) reach them.
+ * @returns {RegisterMap}
+ *
+ * STRICT on shape, TOLERANT on vocabulary, and — for the ONE field whose loss costs attribution
+ * rather than correctness — REPAIRING. A register whose stamp, author or value is malformed
+ * throws: those three decide where the write sits in `≺`, and pretending a corrupt one is fine
+ * would poison the order for every future merge. A register whose FIELD NAME or ENTITY KIND this
+ * build does not know is retained verbatim, because a checkpoint is our own already-admitted
+ * state and dropping it is how a downgrade to an older build (ADR 001 §8.4's "cheap insurance
+ * against a bad background update") turns "does not show the new thing" into "loses the new
+ * thing". `applyOp` is stricter precisely because an OP is untrusted input from a peer and has a
+ * park/reject triage of its own.
+ *
+ * REG-26 — WHY THE MISSING `op` IS REPAIRED AND NOT REFUSED.
+ *
+ * The previous shipped build (496fa0d) read `const op = r.op === undefined ? '' : r.op` and then
+ * WROTE THE `''` BACK, so a user who ran last week's build can have such a register on disk
+ * today, sitting among several thousand well-formed ones. The fix pass before this one made `op`
+ * mandatory and threw. The safety reasoning was right — an unattributed register must not rank as
+ * the weakest possible write, because `''` ranked BELOW every real opId and let a re-delivered op
+ * at the identical stamp beat the ADR 004 §5.3 forget blank, un-blanking retracted plaintext —
+ * but throwing turns one lost attribution into a REFUSAL OF THE WHOLE BOARD FILE, with no partial
+ * load and no repair path. That trade is upside down: eleven years of appointments against one
+ * missing 22-character id.
+ *
+ * So the safety is kept exactly where it belongs — in `opKey`, which ranks an unattributed write
+ * ABOVE every real one, making it absorbing, so only a genuinely GREATER stamp (the owner
+ * publishing again) can displace it — and the door repairs instead of refusing:
+ *
+ *   · the value, the stamp and the author are taken as they are; nothing the user can see moves;
+ *   · `op` is normalised to `null`, i.e. "attribution known-lost", which `opKey` reads as
+ *     absorbing and which is honest on the next save (`serializeRegisters` writes `"op":null`,
+ *     and re-loading that repairs it to the same thing — the repair is idempotent and the file's
+ *     bytes stop drifting);
+ *   · the event is REPORTED, per register, so nothing about it is silent.
+ *
+ * Losing one attribution beats losing the file.
+ */
+export function deserializeRegisters(blob, o = {}) {
+  if (o === null || typeof o !== 'object' || Array.isArray(o)) {
+    throw new RegisterError('deserializeRegisters: options must be an object');
+  }
+  if (o.onRepair !== undefined && typeof o.onRepair !== 'function') {
+    throw new RegisterError('deserializeRegisters: onRepair must be a function');
+  }
   if (blob === null || typeof blob !== 'object' || Array.isArray(blob)) {
     throw new RegisterError('deserializeRegisters: blob is not an object');
   }
@@ -642,6 +716,8 @@ export function deserializeRegisters(blob) {
   }
 
   const out = new Map();
+  /** @type {Object[]} */
+  const repairs = [];
   for (const e of Object.keys(src)) {
     if (typeof e !== 'string' || e.length === 0 || !e.includes(':')) {
       throw new RegisterError(`deserializeRegisters: ${JSON.stringify(e)} is not an entity key`);
@@ -663,24 +739,36 @@ export function deserializeRegisters(blob) {
       if (!isMemberId(r.author)) throw new RegisterError(`deserializeRegisters: ${e}.${f} has no valid author`);
       if (!('value' in r)) throw new RegisterError(`deserializeRegisters: ${e}.${f} has no value (absent is not null — R9)`);
       if (!isScalar(r.value)) throw new RegisterError(`deserializeRegisters: ${e}.${f} value is not a JSON scalar or null`);
-      // `op` IS MANDATORY, exactly like stamp / author / value. It is SHAPE, not vocabulary, and
-      // the doctrine above is "strict on shape". `serializeRegisters` has always written it, and
-      // `oplog.js`'s forget pass already documents its dependence on it ("registers.js refuses a
-      // checkpoint whose `op` is not an OpId"), so nothing legitimate produces a register without
-      // one — only a truncated writer, a lossy JSON round-trip or a hostile checkpoint does.
-      //
-      // Accepting one and storing `''` is what let a re-pull UN-BLANK a retracted field: `''`
-      // ranked BELOW every real opId, so any re-delivered op at the identical stamp beat the
-      // ADR 004 §5.3 forget blank that deliberately kept that stamp. Refusing the file is the
-      // safer of the two available fixes, because it stops the unattributed register at the door
-      // instead of reasoning about how it ranks once it is inside; `opKey` above then ranks a
-      // missing opId highest as the defence in depth behind this check, so the two failure modes
-      // are "the corrupt file is refused" and, if one ever slips past, "the retraction holds" —
-      // never "the retraction is undone".
-      if (!isOpId(r.op)) throw new RegisterError(`deserializeRegisters: ${e}.${f} has a malformed op id`);
-      ent.set(f, Object.freeze({ value: r.value, stamp: r.stamp, author: r.author, op: r.op }));
+      // `op` is REPAIRED, not refused — REG-26, and the long note on this function says why.
+      // Everything the user can see (value, stamp, author) is already validated above and is
+      // taken verbatim; only the 22-character attribution is missing, and it is normalised to
+      // `null` so `opKey` ranks the write ABSORBING instead of weakest. A truncated writer, a
+      // lossy JSON round-trip, a hostile checkpoint and — the case that actually happens — a file
+      // written by build 496fa0d, which coerced a missing `op` to `''` and wrote it back, all
+      // land here and all load.
+      let op = r.op;
+      if (!isOpId(op)) {
+        repairs.push(Object.freeze({
+          entity: e,
+          field: f,
+          reason: 'unattributed-register',
+          was: brief(op),
+          message:
+            `${e}.${f} carries no usable op id (${brief(op)}); its value, stamp and author were ` +
+            'kept and the attribution was cleared. It now ranks ABOVE every attributed write at ' +
+            'the same stamp, so a re-delivered op cannot undo it (ADR 004 §5.3).',
+        }));
+        op = null;
+      }
+      ent.set(f, Object.freeze({ value: r.value, stamp: r.stamp, author: r.author, op }));
     }
     out.set(e, ent);
+  }
+  if (repairs.length) {
+    Object.defineProperty(out, REPAIRS, {
+      value: Object.freeze(repairs), enumerable: false, writable: false, configurable: false,
+    });
+    if (o.onRepair) for (const rep of repairs) o.onRepair(rep);
   }
   return out;
 }

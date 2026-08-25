@@ -97,7 +97,8 @@ import {
   noteSet, barSet, catSet, padSet, prefSet,
 } from './ops.js';
 import {
-  PREF_KEY, parseEntityKey, isMemberId, isDeviceId, isSpaceId, isEntityUuid, isMonthKey,
+  PREF_KEY, parseEntityKey, familyKeyFor, renderable,
+  isMemberId, isDeviceId, isSpaceId, isEntityUuid, isMonthKey,
 } from './entities.js';
 import { fmt } from './stamp.js';
 // One import, one frozen array of names, no behaviour. `materialize.js` is the single authority
@@ -107,6 +108,25 @@ import { fmt } from './stamp.js';
 // the answer decides whether re-importing my own export is reported as DATA LOSS.
 import { V2_ENTRY_FIELDS } from './materialize.js';
 import { ZERO_DEVICE_SHORT, opId as defaultOpId, groupId as defaultGroupId } from './ids.js';
+// THE OTHER DOOR. `migrate1to2.js` and this file both turn a v1 board into ops — migration at
+// launch (ADR 001 §8.2), this module at import (11.3) and snapshot restore (11.5) — and in v1
+// they are LITERALLY THE SAME FUNCTION: `store.replaceAll(next)` is `this.state = migrate(next)`
+// (`store.js:194`). v1 has one door. The split into two modules here is a v2 implementation
+// detail, so every place where the two answered the same bytes differently was a v2 regression
+// with no v1 behind it (REG-20…REG-23).
+//
+// The four behaviours below are therefore IMPORTED, not re-implemented. A second copy of
+// `truncateToFit` would be a second answer to "how long is too long"; a second `rekeyed` would
+// give the same duplicate id a different replacement on each door, so the same file restored
+// twice would build two different boards; a second set of default categories would mint a second
+// four. Shared code is the only form of "the two doors agree" that cannot drift.
+//
+// `CARRIED_FIELDS` below is still a deliberate second declaration — see its docblock. The
+// difference is that a drift in a field LIST is caught by `checkCoverage`, while a drift in a
+// BEHAVIOUR is caught by nothing.
+import {
+  truncateToFit, coerceToV1Text, defaultCategories, rekeyed, V1_BOARD_KEYS,
+} from './migrate1to2.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Errors and the vocabulary this module is allowed to touch
@@ -120,6 +140,36 @@ export class ReplaceError extends Error {
   constructor(message) {
     super(message);
     this.name = 'ReplaceError';
+  }
+}
+
+/**
+ * A replace transaction that LOSES SOMETHING may not complete silently — RECHECK-82-2, and the
+ * exact twin of `migrate1to2.js`'s `MigrationLossyError`, which exists for the exact reason
+ * stated one file away: "a boolean nobody is obliged to read is not a safety mechanism."
+ *
+ * `replaceAllOps()` — the entry point `ops.contract.js` §9 declares — used to return a bare array
+ * and drop `warnings` and `lossy` on the floor, so nothing in the system was obliged to notice
+ * that a note had been truncated or a section discarded. On THIS door that is worse than on the
+ * migration door: story 11.5 is snapshot restore, so the board the transaction replaces is gone
+ * the moment it lands, and the user is being shown a "restore" that quietly lost something.
+ *
+ * The whole plan rides on the error, so nothing is discarded by the throw: a caller that means
+ * "I know, proceed" catches it and reads `.plan`, or passes `ctx.acceptLossy` / `ctx.onLossy`.
+ */
+export class ReplaceLossyError extends Error {
+  /** @param {Object} plan the full `ReplacePlan` */
+  constructor(plan) {
+    super(
+      `replaceAll: this import cannot be represented without loss (${plan.warnings.length} `
+      + `warning${plan.warnings.length === 1 ? '' : 's'}). Pass ctx.acceptLossy or ctx.onLossy to `
+      + `proceed; the whole plan is on this error as .plan.\n  - ${plan.warnings.join('\n  - ')}`,
+    );
+    this.name = 'ReplaceLossyError';
+    /** @type {Object} the complete plan — ops, warnings, gid, written, removed */
+    this.plan = plan;
+    /** @type {string[]} */
+    this.warnings = plan.warnings;
   }
 }
 
@@ -156,14 +206,24 @@ export const CARRIED_FIELDS = Object.freeze({
 });
 
 /**
- * The fields that get a VALUE when the import does not supply one — never `null`.
+ * The v2-additive fields. Every one of them is FORCED — written from this table and never taken
+ * from the file — which is `migrate1to2.js`'s `V2_ADDITIONS` rule verbatim (`f[name] = add[name]`,
+ * no branch), and for the same reasons.
  *
- * `visibility: 'privat'` is story 16.1 stated as a constant, and it is the one default in here
- * that is load-bearing for privacy: an imported entry with no visibility register would be an
- * entry whose exposure is decided by whatever code reads the absence, and ADR 004 exists to stop
- * exactly that. `_alive: true` is what "present in the import" MEANS — it is forced, not
- * defaulted, so a hand-edited `_alive: false` on an entry the file also lists cannot produce an
- * entity that is imported and dead at the same time.
+ * RECHECK-40-3. `visibility` and `coEdit` used to be DEFAULTS: `patch[name] = ok ? value :
+ * defaults[name]`, so a `board.json` carrying `visibility: "geteilt", coEdit: true` set the two
+ * truth registers a publisher reads, and the family saw an entry the moment the user restored a
+ * snapshot. The file decided the user's exposure. Every argument in this table's own text —
+ * "story 16.1 stated as a constant", "the one default in here that is load-bearing for privacy" —
+ * argued for forcing them and the code defaulted them; the migration door forced them all along.
+ *
+ * A hand-edited value is not silently ignored: the file said something, and `buildPatch` warns
+ * that it was overruled. It is not `lossy`, because nothing the user can SEE was lost — an
+ * exposure this device never granted is not the user's data, and refusing the whole restore over
+ * it would be worse. Sharing again is one click; un-sharing after the family has read it is not.
+ *
+ * `_alive: true` is what "present in the import" MEANS, so a hand-edited `_alive: false` on an
+ * entry the file also lists cannot produce an entity that is imported and dead at the same time.
  */
 export const IMPORT_DEFAULTS = Object.freeze({
   note: Object.freeze({ visibility: 'privat', coEdit: false, _alive: true }),
@@ -192,8 +252,8 @@ const ALIVE = '_alive';
  */
 export const PRESERVED_PREF_PREFIXES = Object.freeze(['lastSeenSeq', 'hiddenMembers']);
 
-/** Top-level `board.json` keys this module knows. `_v2` is ADR 001 §8.4's one additive key. */
-const KNOWN_BOARD_KEYS = Object.freeze(['schemaVersion', 'notes', 'bars', 'categories', 'scratchpads', 'settings', '_v2']);
+/** Top-level `board.json` keys. One list, shared with the migration door — see `V1_BOARD_KEYS`. */
+const KNOWN_BOARD_KEYS = V1_BOARD_KEYS;
 
 /** The undo label a store should use for the transaction, if it records one at all. */
 export const REPLACE_ALL_LABEL = 'replaceAll';
@@ -314,6 +374,10 @@ const isLive = (regs, e) => valueOf(regs, e, ALIVE) !== false;
  * @property {string} [gid]                   supply one to pin it in a test; otherwise minted
  * @property {() => string} [newOpId]         defaults to `ids.opId`
  * @property {() => string} [newGid]          defaults to `ids.groupId`
+ * @property {Object} [defaultSettings]       v1's `defaultState().settings`. Supply it: it is what
+ *                                            lets an omitted pref be reset to its v1 DEFAULT
+ *                                            instead of cleared, which are different boards for
+ *                                            every boolean whose default is on (REG-8).
  */
 
 /**
@@ -328,6 +392,15 @@ const isLive = (regs, e) => valueOf(regs, e, ALIVE) !== false;
  * @property {string} label        `REPLACE_ALL_LABEL`
  * @property {string[]} written    entity keys the import wrote, in emission order
  * @property {string[]} removed    entity keys tombstoned because the import does not have them
+ * @property {string[]} retractions FAMILY keys (`fnote:<me>/…`, `fbar:<me>/…`) that are still
+ *                                  PUBLISHED and whose personal truth this transaction just
+ *                                  tombstoned. This module may not write them (see the header's
+ *                                  scope gate); the publisher must re-derive exposure for each
+ *                                  one after the transaction lands, or the family keeps seeing
+ *                                  an entry its owner has deleted (RECHECK-40-4).
+ * @property {{key:string, visibility:string|null, coEdit:boolean|null}[]} reshares
+ *                                  exposure the FILE asked for, which this transaction wrote as
+ *                                  PRIVATE instead. Nothing is shared until the user confirms.
  */
 
 /**
@@ -340,7 +413,7 @@ const isLive = (regs, e) => valueOf(regs, e, ALIVE) !== false;
  * @returns {ReplacePlan}
  */
 export function planReplaceAll(regs, incoming, ctx) {
-  const { act, dev, space, gid, newOpId } = checkCtx(ctx);
+  const { act, dev, space, gid, newOpId, defaultPrefs } = checkCtx(ctx);
   if (regs !== null && regs !== undefined && !(regs instanceof Map)) {
     throw new ReplaceError('planReplaceAll: regs must be a RegisterMap (Map<EntityKey, Map<field, Register>>)');
   }
@@ -355,6 +428,30 @@ export function planReplaceAll(regs, incoming, ctx) {
   const ops = [];
   const written = [];
   const removed = [];
+  const retractions = [];
+  /**
+   * Exposure the FILE asked for and this transaction refused to grant (see IMPORT_DEFAULTS).
+   *
+   * Forcing `privat` closes RECHECK-40-3, and on its own it would open a smaller hole in the
+   * other direction: story 11.5 restores MY OWN snapshot, which is a v2 export of my own board
+   * carrying the visibilities I chose, and silently resetting all of them to private is
+   * „etwas geht verloren" — principle 6 — even though nothing is exposed by it.
+   *
+   * Both are answered by never deciding it here. The registers are written private, so no file
+   * can grant exposure; the request is handed back so the store can ask („Diese Datei möchte 3
+   * Einträge wieder mit deiner Familie teilen."). Silently granting and silently dropping are
+   * both refused; the user decides, which is what ADR 004 says exposure is.
+   */
+  const reshares = [];
+  const askedFor = new Map();
+  const asked = (key, field, value) => {
+    if (!askedFor.has(key)) {
+      const rec = { key, visibility: null, coEdit: null };
+      askedFor.set(key, rec);
+      reshares.push(rec);
+    }
+    askedFor.get(key)[field === 'defaultVisibility' ? 'visibility' : field] = value;
+  };
   /** Every entity key the import claims — the complement of this set is step 3's sweep. */
   const present = new Set();
 
@@ -368,6 +465,9 @@ export function planReplaceAll(regs, incoming, ctx) {
   }
 
   // ── step 2a — the three collections ───────────────────────────────────────
+  /** The category ids that survived step 2a — v1's `store.js:83` id set. */
+  const catIds = new Set();
+
   for (const { kind, from, set, singular } of COLLECTIONS) {
     const list = takeArray(incoming[from], from, warn);
     const seen = new Set();
@@ -376,32 +476,88 @@ export function planReplaceAll(regs, incoming, ctx) {
         warn(`a ${singular} in the import is not an object (${q(entry)}) and was DROPPED`, true);
         continue;
       }
-      const id = entry.id;
+      let id = entry.id;
       if (!isEntityUuid(id)) {
         warn(`a ${singular} in the import has no usable id (${q(id)}) and was DROPPED`, true);
         continue;
       }
       if (seen.has(id)) {
-        // Two registers cannot share an entity key; the second would LWW over the first inside a
-        // single transaction and silently merge two entries. v1's arrays tolerate this, v2 cannot.
-        warn(`${singular} ${q(id)} appears more than once in the import; only the first was taken`, true);
-        continue;
+        // REG-22. Two registers cannot share an entity key; the second would LWW over the first
+        // inside a single transaction and silently merge two entries. v1's arrays tolerate this
+        // and v1 RENDERS BOTH — so taking only the first is an entry the user could see before
+        // the restore and cannot see after it (ATT-90). Re-key, exactly as the migration door
+        // does, with the same derived function: a v1 entity id is opaque, nothing outside the
+        // entry refers to a note or bar id, and a `categoryId` keeps pointing at the FIRST
+        // occurrence — which is the category v1's own `find()` would have resolved it to.
+        //
+        // `rekeyed` is DERIVED, not minted, which is what makes the two doors agree: the same
+        // duplicate through import and through migration gets the same replacement id, on this
+        // Mac and on the other one (R12).
+        const fresh = rekeyed(kind, id, seen);
+        warn(
+          `${singular} ${q(id)} appears more than once in the import; the second copy was `
+          + `RE-KEYED to ${q(fresh)} so that both survive`,
+          false,
+        );
+        id = fresh;
       }
       seen.add(id);
+      if (kind === 'cat') catIds.add(id);
       const key = `${kind}:${id}`;
       present.add(key);
-      emit(set(opCtx, id, buildPatch(kind, entry, regs, key, `${singular} ${q(id)}`, warn), { born: true }));
+      const patch = buildPatch(kind, entry, regs, key, `${singular} ${q(id)}`, warn, asked);
+
+      // Found by the widened property corpus (P16), and it is the same class as REG-20…23: the
+      // migration door reports an entry that will not be renderable as a LOSS and this one did
+      // not check at all, so the same bytes were `lossy` through one door and clean through the
+      // other — and a store that refuses a lossy import would have refused the launch migration
+      // while quietly accepting the restore of the identical file.
+      //
+      // ADR 001 §5 step 3 decides renderability from EXPLICIT fields and never infers it from
+      // absence; v1 is laxer (it paints a text-less note as „…", `popover.js:193`). So an entry
+      // that arrives incomplete DOES land in the log and WILL NOT be shown, and the user is
+      // entitled to know that before the board this is replacing is gone. The op is still
+      // emitted, for migration's reason: the register set is complete the moment the missing
+      // field is supplied, and dropping the op would make that unrecoverable.
+      if ((kind === 'note' || kind === 'bar') && !renderable(kind, patch)) {
+        warn(
+          `${singular} ${q(id)} will not be renderable after the import (ADR 001 §5 step 3): `
+          + `it is missing ${kind === 'note' ? 'a date or a text' : 'a start or an end date'}`,
+          true,
+        );
+      }
+      emit(set(opCtx, id, patch, { born: true }));
       written.push(key);
     }
-    if (kind === 'cat' && list.length && seen.size === 0) {
-      warn('no category in the import survived; every imported entry will fall back to a category that does not exist', true);
-    }
-    if (kind === 'cat' && !list.length) {
-      // v1's `migrate()` substitutes `defaultState().categories` here, minting four random uuids
-      // (`store.js:73`). This module must not: `core/` may not read a CSPRNG directly (ADR 005
-      // §2), and inventing ids inside a transaction two devices both receive would give each
-      // device a different four categories.
-      warn('the imported board carries no categories; the board will have none until one is created', false);
+    // REG-21. v1's `migrate()` substitutes `defaultState().categories` for an empty or unusable
+    // list (`store.js:74`), and v1 runs `migrate()` on EVERY import, so v1 substitutes here too.
+    // Every other v1 site is written as if the substitution has already happened —
+    // `store.category()` never returns undefined, so `legend.js` and `popover.js` read
+    // `.paletteRef` off it with no guard — which makes a categoryless board not merely degraded
+    // but one the v1 UI throws on, with nothing for ADR 001 §5 step 7 to repair the dangling
+    // `categoryId`s to either.
+    //
+    // The objection this module used to record — "core/ may not read a CSPRNG (ADR 005 §2), and
+    // inventing ids would give each device a different four categories" — is real and is already
+    // ANSWERED by the sibling module in this directory: `defaultCategories()` DERIVES the four
+    // ids. Importing it (rather than deriving a second four here) is what makes the two doors
+    // produce the same four category ids for the same file, which is the whole point: a board
+    // migrated at launch and the same board restored from a snapshot must not end up with eight.
+    if (kind === 'cat' && seen.size === 0) {
+      for (const c of defaultCategories()) {
+        const key = `cat:${c.id}`;
+        present.add(key);
+        emit(catSet(opCtx, c.id, buildPatch('cat', c, regs, key, `default category ${q(c.name)}`, warn, asked), { born: true }));
+        written.push(key);
+        seen.add(c.id);
+        catIds.add(c.id);
+      }
+      warn(
+        list.length
+          ? "no category in the import was usable; v1's four default categories were substituted (store.js:74)"
+          : "the imported board carries no categories; v1's four default categories were substituted (store.js:74)",
+        false,
+      );
     }
   }
 
@@ -424,9 +580,20 @@ export function planReplaceAll(regs, incoming, ctx) {
       warn(`scratchpad ${q(month)} is not a string (${q(text)}) and was DROPPED`, true);
       continue;
     }
+    // REG-23. ADR 001 §8.2 — "one `pad.set` per NON-EMPTY scratchpad key" — and the migration
+    // door obeys it. This one used to keep the `''`, on the reasoning that v1's `replaceAll`
+    // installs the payload's `scratchpads` object verbatim; it does not, it installs
+    // `migrate(payload)`'s (`store.js:194`), so there was never a v1 behind the divergence.
+    //
+    // Nothing the user can see moves: v1 renders a pad as `state.scratchpads[key] || ''`
+    // (`layout.js:259`), so `''` and absent paint the same empty textarea, and v1's own editor
+    // DELETES the key when the text is blank (`interact.js:620,634`) — a `''` only ever reaches
+    // us from a hand-edited file. Not a loss, and not warned: reporting it would make `lossy`
+    // noisy on a difference with no rendered consequence.
+    if (text === '') continue;
     const key = `pad:${month}`;
     present.add(key);
-    emit(padSet(opCtx, month, buildPatch('pad', { text }, regs, key, `scratchpad ${q(month)}`, warn), { born: true }));
+    emit(padSet(opCtx, month, buildPatch('pad', { text }, regs, key, `scratchpad ${q(month)}`, warn, asked), { born: true }));
     written.push(key);
   }
 
@@ -448,10 +615,35 @@ export function planReplaceAll(regs, incoming, ctx) {
       : parsed.kind === 'bar' ? barSet : padSet;
     emit(setter(opCtx, parsed.id, { [ALIVE]: false }));
     removed.push(key);
+
+    // RECHECK-40-4 — THE RETRACTION THIS TRANSACTION IS NOT ALLOWED TO MAKE.
+    //
+    // Tombstoning `note:n1` removes the entry from MY board. If I had published it, the family's
+    // copy lives at `fnote:<me>/n1` in the family space, and this module may not touch it: the
+    // scope gate above (and the post-build invariant) is the mechanism that stops one person's
+    // snapshot restore from blanking the family's board, and it must stay.
+    //
+    // But "correctly scoped" and "complete" are different things. Without this list the entry
+    // disappears from my board and stays on theirs, `pub.text` and all, and NOTHING anywhere
+    // says a retraction is owed — the `removed` list was the only trace and it is personal keys,
+    // not publications. So the plan names them explicitly, and the publisher (WP-3) re-derives
+    // exposure for exactly these keys after the transaction lands. Naming it is what turns a
+    // silent hole into a handover.
+    if (parsed.kind !== 'note' && parsed.kind !== 'bar') continue;
+    const fkey = familyKeyFor(key, act);
+    if (cellsOf(regs, fkey).size === 0) continue;              // never published
+    if (valueOf(regs, fkey, 'pub.alive') === false) continue;  // already retracted
+    retractions.push(fkey);
   }
 
   // ── step 3b — settings, in the LOCAL space (§8.5 step 5's other half) ─────
-  const prefOp = buildPrefOp(regs, incoming, opCtx, warn);
+  //
+  // v1's dangling-reference fallback (`store.js:84`): the FIRST category, after the sort. The
+  // categories are emitted first, so it is the first `cat:` op — the same derivation
+  // `migrate1to2.js` uses, over the same list.
+  const firstCat = ops.find((o) => o.e.startsWith('cat:'));
+  const fallbackCatId = firstCat ? firstCat.e.slice('cat:'.length) : null;
+  const prefOp = buildPrefOp(regs, incoming, opCtx, warn, fallbackCatId, catIds, defaultPrefs);
   if (prefOp) emit(prefOp);
 
   // ── the invariant, re-checked against what was actually built ─────────────
@@ -484,6 +676,8 @@ export function planReplaceAll(regs, incoming, ctx) {
     label: REPLACE_ALL_LABEL,
     written,
     removed,
+    retractions,
+    reshares: reshares.map((r) => Object.freeze({ ...r })),
   };
 }
 
@@ -501,7 +695,15 @@ export function planReplaceAll(regs, incoming, ctx) {
  * @returns {Object[]} the ops
  */
 export function replaceAllOps(regs, incoming, ctx) {
-  return planReplaceAll(regs, incoming, ctx).ops;
+  const plan = planReplaceAll(regs, incoming, ctx);
+  // RECHECK-82-2. See `ReplaceLossyError`. `planReplaceAll` still returns the flag and never
+  // throws — a caller that wants the diagnostics asks for them — but the SHORT entry point, the
+  // one a retrofit reaches for because it only wants the ops, may not lose data in silence.
+  if (plan.lossy) {
+    if (typeof ctx.onLossy === 'function') ctx.onLossy(plan);
+    else if (ctx.acceptLossy !== true) throw new ReplaceLossyError(plan);
+  }
+  return plan.ops;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -527,9 +729,11 @@ export function replaceAllOps(regs, incoming, ctx) {
  *
  * @param {string} kind @param {Object} entry @param {Map} regs @param {string} key
  * @param {string} where @param {(m:string,l:boolean)=>void} warn
+ * @param {(key:string, field:string, value:any) => void} asked records an exposure the FILE
+ *        requested and this module refused to grant — see `ReplacePlan.reshares`.
  * @returns {Object} the field patch (`_born` is added by `makeOp`)
  */
-function buildPatch(kind, entry, regs, key, where, warn) {
+function buildPatch(kind, entry, regs, key, where, warn, asked) {
   const defaults = IMPORT_DEFAULTS[kind];
   const carried = CARRIED_FIELDS[kind];
   const patch = {};
@@ -540,30 +744,72 @@ function buildPatch(kind, entry, regs, key, where, warn) {
     const supplied = Object.prototype.hasOwnProperty.call(entry, name);
     const value = entry[name];
     const ok = supplied && value !== undefined && accepts(kind, name, value);
+    // REG-5 / REG-6. Computed HERE rather than in the `!ok` branch below, because a literal
+    // `null` in the file is ACCEPTED — `null` is the "cleared" register value — and it is exactly
+    // the accepted value that costs the entry: `materialize` skips a cleared register, so a null
+    // `note.text` fails renderability and the note leaves the board. `coerceToV1Text` answers
+    // `null` only for the fields renderability actually depends on, so a hand-edited
+    // `cat.nameEn: null` is still carried to the log verbatim (ADR 001 §2).
+    //
+    // `supplied` is the guard that keeps this off the CLEAR at the end of this loop: a field the
+    // file OMITS is a deliberate `null` meaning "gone", and that is a different thing entirely.
+    const coerced = supplied ? coerceToV1Text(kind, name, value) : null;
 
     if (Object.prototype.hasOwnProperty.call(defaults, name)) {
-      if (name === ALIVE) {
-        // Forced, never taken from the file: presence in the import IS aliveness.
-        if (supplied && value !== true) {
-          warn(`${where}: the import lists it AND marks it ${q(name)} = ${q(value)}; it is imported ALIVE`, false);
-        }
-        patch[name] = defaults[name];
-        continue;
+      // FORCED, never taken from the file — `migrate1to2.js`'s V2_ADDITIONS rule. See the
+      // IMPORT_DEFAULTS docblock: `_alive` is what presence MEANS, and `visibility`/`coEdit`/
+      // `defaultVisibility` are the privacy floor a file may not raise (RECHECK-40-3).
+      if (supplied && value !== defaults[name]) {
+        warn(
+          `${where}: the import carries ${q(name)} = ${q(value)}; v2 writes ${q(defaults[name])} `
+          + (name === ALIVE
+            ? 'because presence in the import is what aliveness means'
+            : 'because an imported file does not decide who may see this entry (story 16.1); '
+              + 'it is offered back on the plan as a re-share you can confirm'),
+          false,
+        );
+        if (name !== ALIVE) asked(key, name, value);
       }
-      if (supplied && !ok) {
-        warn(`${where}: field ${q(name)} = ${q(value)} is not representable in v2; the default ${q(defaults[name])} was used instead`, true);
-      }
-      patch[name] = ok ? value : defaults[name];
+      patch[name] = defaults[name];
       continue;
     }
 
     if (!carried.includes(name)) continue;             // unreachable — pinned by checkCoverage()
 
+    if (coerced) {
+      warn(
+        `${where}: field ${q(name)} is `
+        + `${typeof value === 'object' && value !== null ? 'an object' : q(value)}, which v2 `
+        + `cannot store as text; it was kept as the text v1 paints for it (${q(coerced.kept)}) `
+        + 'rather than dropped, which would have removed the entry from the board',
+        true,
+      );
+      patch[name] = coerced.kept;
+      continue;
+    }
     if (ok) {
       patch[name] = value;
       continue;
     }
     if (supplied && value !== undefined) {
+      // REG-20 / RECHECK-82-1. TRUNCATE, never drop — `migrate1to2.js`'s own words for why:
+      // "the user's note did not get shorter on upgrade day, it disappeared". Dropping `text`
+      // makes the note unrenderable (ADR 001 §5 step 3) so it leaves the board entirely;
+      // dropping `label` leaves the user's bar on the board with no name. On THIS door it is
+      // worse than on the migration door, because 11.5 is snapshot restore: the board being
+      // replaced is gone the moment the transaction lands.
+      const cut = truncateToFit(kind, name, value);
+      if (cut) {
+        warn(
+          `${where}: field ${q(name)} is ${value.length} characters and v2 stores at most `
+          + `${cut.kept.length}; it was TRUNCATED, not dropped (${cut.dropped.length} character`
+          + `${cut.dropped.length === 1 ? '' : 's'} cut). v1's limit was a DOM maxLength and `
+          + 'never applied to a file',
+          true,
+        );
+        patch[name] = cut.kept;
+        continue;
+      }
       warn(`${where}: field ${q(name)} = ${q(value)} is not representable in v2 and was DROPPED`, true);
     }
     // The clear. Only where there is something to clear — see the docblock.
@@ -602,8 +848,15 @@ function buildPatch(kind, entry, regs, key, where, warn) {
 // row height. "My entire board syncs between my devices" means BOARD = CONTENT (`ops.js` §5).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** @returns {Object|null} the op, or null when there is nothing to write */
-function buildPrefOp(regs, incoming, opCtx, warn) {
+/**
+ * @param {Map} regs @param {Object} incoming @param {Object} opCtx
+ * @param {(m:string,l:boolean)=>void} warn
+ * @param {string|null} fallbackCatId v1's `store.js:84` dangling-reference fallback
+ * @param {Set<string>} catIds the category ids that survived the import — v1's `store.js:83` set
+ * @param {Object<string, any>|null} defaultPrefs `ctx.defaultSettings`, FLATTENED — see checkCtx
+ * @returns {Object|null} the op, or null when there is nothing to write
+ */
+function buildPrefOp(regs, incoming, opCtx, warn, fallbackCatId, catIds, defaultPrefs) {
   const settings = incoming.settings;
   if (settings !== undefined && !isPlainObject(settings)) {
     warn(`settings is not an object (${q(typeof settings)}); treated as empty`, true);
@@ -631,16 +884,73 @@ function buildPrefOp(regs, incoming, opCtx, warn) {
     }
   }
 
-  // The clears: a pref this device holds that the imported board does not carry reverts to its
-  // v1 DEFAULT, because that is what v1's whole-object replacement does. `null` is how a register
-  // log says that — `materialize.js` skips a cleared register and `buildSettings` then supplies
-  // `defaultState().settings`'s value. See PRESERVED_PREF_PREFIXES for the two families that are
-  // bookkeeping rather than settings and are therefore left alone.
+  // ── v1's two settings repairs (`store.js:86,90`), which run on EVERY import ────────────────
+  // `replaceAll(next)` is `this.state = migrate(next)`, and `migrate` performs both. They are
+  // done on the FLATTENED patch, i.e. on what actually reaches the log, exactly as the migration
+  // door does them — see `migrate1to2.js` §5 step 4.
+  if (Object.prototype.hasOwnProperty.call(next, 'lastCategoryId')
+      && fallbackCatId !== null && next.lastCategoryId !== fallbackCatId
+      && !catIds.has(next.lastCategoryId)) {
+    warn(
+      `settings.lastCategoryId ${q(next.lastCategoryId)} names no category in the import; `
+      + `repaired to ${q(fallbackCatId)} (v1 store.js:86)`,
+      false,
+    );
+    next.lastCategoryId = fallbackCatId;
+  }
+  // 7.5 — „ein Ferien-Layer ohne Bundesland kann nichts bedeuten". v1 normalises this on every
+  // load AND every import (`store.js:90`).
+  if (next['layers.schulferien'] === true && !next.bundesland) {
+    warn('settings.layers.schulferien is on with no Bundesland; normalised to off (7.5, v1 store.js:90)', false);
+    next['layers.schulferien'] = false;
+  }
+
+  // ── The clears ─────────────────────────────────────────────────────────────────────────────
+  //
+  // A pref this device holds that the imported board does not carry reverts to its v1 DEFAULT,
+  // because that is what v1's whole-object replacement does: `migrate()` spreads
+  // `{...d.settings, ...(s.settings||{})}` (`store.js:76-80`), so an omitted key comes back as
+  // `defaultState().settings`'s value — not as `null`, and not as absent.
+  //
+  // REG-8, and this is the half of it that lives in THIS file. Writing `null` was an attempt to
+  // say "revert to the default" in a register, and a register cannot distinguish that from "the
+  // file literally says null". They are not the same board: v1 reads a null `layers.feiertage`
+  // as OFF (`layout.js:243`, `s.layers.feiertage &&`) and a MISSING one as ON (the default).
+  // `materialize.js:applyClearedPrefs` resolves a null register the only way it can — as v1's
+  // reading of null — so a clear meaning "default" and a clear meaning "null" would land on
+  // opposite settings for the two prefs whose default is `true` (`layers.feiertage`,
+  // `menuBarIcon`), and an import that simply omitted `layers` would silently turn the holiday
+  // layer OFF.
+  //
+  // So the ambiguity is removed at the source: write the DEFAULT VALUE. `null` survives only for
+  // a register with no default at all (a v2 extra, a pref this build has never heard of), where
+  // "gone" really is the whole meaning and there is nothing else to say.
+  //
+  // See PRESERVED_PREF_PREFIXES for the two families that are bookkeeping rather than settings
+  // and are therefore left alone.
+  let clearedWithoutDefault = 0;
   for (const name of cellsOf(regs, PREF_KEY).keys()) {
     if (Object.prototype.hasOwnProperty.call(next, name)) continue;
     if (!carries(regs, PREF_KEY, name)) continue;              // already cleared; nothing to clear
     if (PRESERVED_PREF_PREFIXES.some((p) => name === p || name.startsWith(`${p}.`))) continue;
+    if (defaultPrefs && Object.prototype.hasOwnProperty.call(defaultPrefs, name)) {
+      next[name] = defaultPrefs[name];
+      continue;
+    }
+    if (defaultPrefs) { next[name] = null; continue; }         // a v2 extra: "gone" is the meaning
+    clearedWithoutDefault += 1;
     next[name] = null;
+  }
+  if (clearedWithoutDefault) {
+    // Not lossy — the board is intact either way — but not silent either. A store that does not
+    // supply `ctx.defaultSettings` gets v1's reading of `null` for these, which differs from
+    // v1's reading of an OMITTED pref for exactly the booleans whose default is `true`.
+    warn(
+      `${clearedWithoutDefault} setting${clearedWithoutDefault === 1 ? '' : 's'} this device holds `
+      + 'and the import does not were CLEARED rather than reset to their v1 default, because no '
+      + 'ctx.defaultSettings was supplied; a boolean setting whose default is on will read as off',
+      false,
+    );
   }
 
   const names = Object.keys(next).sort();
@@ -656,7 +966,10 @@ function buildPrefOp(regs, incoming, opCtx, warn) {
 // 8. ctx
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** @returns {{act:string, dev:string, space:string, gid:string, newOpId:()=>string}} */
+/**
+ * @returns {{act:string, dev:string, space:string, gid:string, newOpId:()=>string,
+ *            defaultPrefs: Object<string,any>|null}}
+ */
 function checkCtx(ctx) {
   if (!isPlainObject(ctx)) throw new ReplaceError('planReplaceAll: a ctx {mint, me, deviceId} is required');
   if (typeof ctx.mint !== 'function') {
@@ -683,7 +996,34 @@ function checkCtx(ctx) {
   // failures, and only the first one is the spec's.
   const gid = ctx.gid ?? newGid();
 
-  return { act: ctx.me, dev: ctx.deviceId, space, gid, newOpId };
+  // `ctx.defaultSettings` — v1's `defaultState().settings`, the same object the store already
+  // hands `materialize()`. OPTIONAL, because `core/` may not read `store.js` (ADR 005 §2) and a
+  // caller that has not been retrofitted yet must still get a working transaction; a caller that
+  // omits it is told, once, in the warnings — see the clear loop in `buildPrefOp`.
+  //
+  // Flattened HERE rather than in that loop so a malformed one is a CALLER error, refused before
+  // a single op is built, rather than a per-key warning buried in a 400-op transaction.
+  let defaultPrefs = null;
+  if (ctx.defaultSettings !== undefined && ctx.defaultSettings !== null) {
+    if (!isPlainObject(ctx.defaultSettings)) {
+      throw new ReplaceError(`planReplaceAll: ctx.defaultSettings must be a settings object, got ${q(ctx.defaultSettings)}`);
+    }
+    defaultPrefs = {};
+    for (const key of Object.keys(ctx.defaultSettings)) {
+      if (FORBIDDEN_KEY(key)) continue;
+      try {
+        Object.assign(defaultPrefs, flattenPref({ [key]: ctx.defaultSettings[key] }));
+      } catch (e) {
+        if (!(e instanceof OpError)) throw e;
+        throw new ReplaceError(`planReplaceAll: ctx.defaultSettings.${key} is not a settings value: ${e.message}`);
+      }
+    }
+    for (const name of Object.keys(defaultPrefs)) {
+      if (FORBIDDEN_KEY(name) || !accepts('pref', name, defaultPrefs[name])) delete defaultPrefs[name];
+    }
+  }
+
+  return { act: ctx.me, dev: ctx.deviceId, space, gid, newOpId, defaultPrefs };
 }
 
 /** @returns {Object[]} the array, or `[]` with a warning */

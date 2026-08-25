@@ -189,6 +189,19 @@ function derive(domain, parts) {
  */
 export const MIGRATION_GID = derive('lzp.migrate.gid', [MIGRATION_LABEL]);
 
+/**
+ * Every top-level key of a `board.json` this build understands. `_v2` is ADR 001 §8.4's one
+ * additive key.
+ *
+ * EXPORTED, and `replace.js` imports it rather than declaring its own, because a key that is
+ * "unknown" on one door and known on the other is precisely the two-doors defect class: the same
+ * bytes would be reported as a loss through import and discarded in silence through migration
+ * (RECHECK-82-6). One list, one answer, both doors.
+ */
+export const V1_BOARD_KEYS = Object.freeze([
+  'schemaVersion', 'notes', 'bars', 'categories', 'scratchpads', 'settings', '_v2',
+]);
+
 /** @param {number} index @param {string} kind @param {string} entityKey */
 function deriveOpId(index, kind, entityKey) {
   return derive('lzp.migrate.op', [MIGRATION_LABEL, String(index), kind, entityKey]);
@@ -211,7 +224,7 @@ function deriveOpId(index, kind, entityKey) {
  * @param {string} kind @param {string} id the colliding v1 id @param {Set<string>} taken
  * @returns {string} 22 base64url characters, unused
  */
-function rekeyed(kind, id, taken) {
+export function rekeyed(kind, id, taken) {
   for (let n = 2; n < 1000; n++) {
     const fresh = derive('lzp.migrate.rekey', [kind, id, String(n)]);
     if (!taken.has(fresh)) return fresh;
@@ -303,7 +316,7 @@ export const V1_DEFAULT_CATEGORIES = Object.freeze([
 ]);
 
 /** The four defaults with deterministic ids — the same four on both of my Macs, forever. */
-function defaultCategories() {
+export function defaultCategories() {
   return V1_DEFAULT_CATEGORIES.map((c) => ({ ...c, id: derive('lzp.migrate.defaultcat', [c.name]) }));
 }
 
@@ -398,7 +411,97 @@ function fieldAccepted(kind, name, value) {
  *
  * @returns {{kept: string, dropped: string}|null} null when no prefix is acceptable
  */
-function truncateToFit(kind, name, value) {
+/**
+ * Per kind, the fields whose ABSENCE (or null) makes the entity unrenderable — ADR 001 §5 step 3,
+ * discovered by asking the real `renderable()` rather than restating its rule.
+ *
+ * A null register is skipped by `materialize`, so writing `null` into one of these fields is
+ * indistinguishable from never having written it, and the entry silently leaves the board. Every
+ * other field may hold a null quite happily and does (`cat.nameEn`, ADR 001 §2).
+ *
+ * @type {Object<string, Set<string>>}
+ */
+const RENDER_REQUIRED = (() => {
+  const out = {};
+  for (const kind of ['note', 'bar']) {
+    const full = {};
+    for (const name of fieldsOf(kind)) {
+      const spec = FIELDS[kind][name];
+      if (!spec) continue;
+      if (spec.t === 'date') full[name] = '2026-03-01';
+      else if (spec.t === 'bool') full[name] = true;
+      else if (String(spec.t).startsWith('str')) full[name] = 'x';
+    }
+    if (!renderable(kind, full)) continue;                 // the probe itself is broken; say nothing
+    const req = new Set();
+    for (const name of Object.keys(full)) {
+      if (!String(FIELDS[kind][name].t).startsWith('str')) continue;
+      if (!renderable(kind, { ...full, [name]: null })) req.add(name);
+    }
+    out[kind] = req;
+  }
+  return out;
+})();
+
+/**
+ * A TEXT field the file holds as something other than a string, rendered the way v1 renders it.
+ *
+ * REG-5 / REG-6, and the same argument as ATT-82 one step further along. `truncateToFit` covers
+ * the LENGTH failure only — it returns null for a non-string — so `text: 12345` and `text: null`
+ * took the "drop the field" path, `text` was then absent, `renderable()` (ADR 001 §5 step 3)
+ * failed, and the note was gone from the board AND from the next export. That is verbatim the
+ * disaster ATT-82's own comment says it exists to prevent: "the user's note did not get shorter
+ * on upgrade day, it disappeared."
+ *
+ * v1 keeps and draws all of them, through one expression: `popover.js:193` is `n.text || '…'`.
+ * So this is that expression, and nothing more:
+ *
+ *   · FALSY (`null`, `0`, `false`, `''`) → `''`, which is v1's „…" and is exactly what ATT-53
+ *     already established for an ABSENT text. Three spellings of "no usable text" now have one
+ *     outcome instead of three.
+ *   · TRUTHY non-string (`12345`, an object, an array) → `String(value)`, which is the string v1
+ *     actually paints into the cell.
+ *
+ * TEXT FIELDS ONLY (`str`, `str40`, `str80`). A malformed DATE is still not repaired: the whole
+ * reason `truncateToFit` refuses dates is that inventing one the user never wrote is worse than
+ * dropping a value they cannot see anyway, and `String()` of a date-shaped object would be
+ * inventing one. `_alive`, `visibility` and the rest are governed elsewhere and are never guessed.
+ *
+ * The original value is not lost: every caller reports it in the loss record.
+ *
+ * AND `null` IS NOT A NON-STRING HERE. `null` is a first-class register value (ADR 001 §2) and a
+ * hand-edited `nameEn: null` is carried to the log verbatim — that is a decision this module
+ * already made and it stays made. The exception is the one field where carrying it costs the
+ * whole entry: `materialize` skips a null register, so a null `note.text` fails renderability and
+ * the note leaves the board. Which fields those are is not written down here — it is PROBED from
+ * the real `renderable()` (see `RENDER_REQUIRED`), the same way the length limit is probed from
+ * the real constructor, so a later change to §5 step 3 cannot leave a stale list behind.
+ *
+ * @param {string} kind @param {string} name @param {unknown} value
+ * @returns {{kept: string}|null} null when the field is not a text field, or already a string
+ */
+export function coerceToV1Text(kind, name, value) {
+  if (typeof value === 'string') return null;              // `truncateToFit`'s business, not this
+  if (value === undefined) return null;                    // absence is ATT-53's business
+  if (value === null && !RENDER_REQUIRED[kind]?.has(name)) return null;   // null is a value (§2)
+  const spec = FIELDS[kind]?.[name];
+  if (!spec || (spec.t !== 'str' && spec.t !== 'str40' && spec.t !== 'str80')) return null;
+  let text;
+  if (!value) text = '';                                   // v1's `|| '…'` branch
+  else {
+    try { text = String(value); } catch { text = ''; }     // a throwing toString is a falsy result
+    if (typeof text !== 'string') text = '';
+  }
+  // The coerced string may itself be too long for the register (an object with a long toString),
+  // in which case the ATT-82 rule applies to it in turn. Only then: `truncateToFit` documents
+  // that its caller has ALREADY probed the value and found it rejected, and handing it an
+  // accepted string makes its binary search return the empty prefix.
+  if (fieldAccepted(kind, name, text)) return { kept: text };
+  const cut = truncateToFit(kind, name, text);
+  return { kept: cut ? cut.kept : '' };
+}
+
+export function truncateToFit(kind, name, value) {
   if (typeof value !== 'string') return null;
   const spec = FIELDS[kind]?.[name];
   if (!spec || (spec.t !== 'str40' && spec.t !== 'str80')) return null;
@@ -568,6 +671,26 @@ export function migrateV1(v1board, ctx) {
         if (!(kind === 'note' && name === 'text')) continue;   // absent in v1 stays absent in v2
         value = '';
       }
+      {
+        // BEFORE `fieldAccepted`, on purpose. A literal `null` in a v1 file PASSES validation —
+        // `null` is a legal register value, the one that means "cleared" — so `text: null` used
+        // to be written as a cleared register, which `materialize` skips, which makes the note
+        // unrenderable, which takes it off the board (REG-6). In a v1 FILE there is nothing to
+        // clear: `null` there just means "no text", and v1 draws „…" for it exactly as it does
+        // for an absent one (ATT-53). Same field, same meaning, same outcome.
+        const coerced = coerceToV1Text(kind, name, value);
+        if (coerced) {
+          // REG-5 / REG-6 — see `coerceToV1Text`. v1 renders this; dropping it deletes the note.
+          loss(
+            `${where}: field ${q(name)} is ${typeof value === 'object' && value !== null ? 'an object' : q(value)}, `
+            + `which v2 cannot store; it was kept as the text v1 paints for it (${q(coerced.kept)}) `
+            + 'rather than dropped, which would have removed the entry from the board',
+            where, name, 'coerced', { value, kept: coerced.kept },
+          );
+          f[name] = coerced.kept;
+          continue;
+        }
+      }
       if (!fieldAccepted(kind, name, value)) {
         const cut = truncateToFit(kind, name, value);
         if (cut) {
@@ -604,6 +727,22 @@ export function migrateV1(v1board, ctx) {
     }
     return f;
   };
+
+  // ── 0. whole sections this build has no register for ──────────────────────
+  //
+  // RECHECK-82-6. `replace.js` has always reported these and migration did not, which made the
+  // asymmetry worst exactly where it hurts most: after a successful migration the v1 file is no
+  // longer the board, so a `holidays` or `customLayers` section discarded here is discarded for
+  // good — and with `lossy` false, `MigrationLossyError` never fires and nobody is asked.
+  //
+  // It is a LOSS, not a repair: v1's own `migrate()` keeps an unknown top-level key on the state
+  // object (`store.js:69-76` rebuilds the six it knows, and the export writes back whatever the
+  // state carries), so a section this build drops is a section the user really had.
+  for (const key of Object.keys(v1board)) {
+    if (V1_BOARD_KEYS.includes(key)) continue;
+    loss(`the board carries an unknown top-level key ${q(key)}; it has no v2 register and was DROPPED`,
+      'board', key, 'unknown-section', { value: v1board[key] });
+  }
 
   // ── 1. categories ─────────────────────────────────────────────────────────
   // First, because `categories[0]` is v1's dangling-reference fallback (`store.js:84`) and §5

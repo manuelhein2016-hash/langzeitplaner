@@ -24,6 +24,12 @@
 //          fold(checkpoint ∪ tail) === fold(all ops) for ANY partition — including an op older
 //          than the horizon arriving after compaction. Compaction is therefore lossless with
 //          respect to materialized state, and needs no coordination with any peer.
+//          COMPACTION MAY NEVER DECIDE STATE, which is a stronger claim than "lossless" and is
+//          what attack A1 broke twice. Two things carry it: `checkpoint().bodies`, a fingerprint
+//          per absorbed opId, so a second body under an absorbed id is still recognised as a
+//          splice rather than answered `duplicate`; and the splice resolution itself, which is
+//          the register join and therefore monotone — a resolution that un-applies a body cannot
+//          survive its own compaction, because the value it displaced is gone. See `append`.
 //
 // I/O. There is none. This is `core/` (ADR 005 §2): no file handle, no timer, no wall clock.
 // `ports.now` is the injected clock (used only for `checkpoint().at` and for the 24 h future
@@ -32,8 +38,9 @@
 // `txn → apply → materialize → emit` path (ADR 001 §0.9).
 
 import { cmp, msOf, fmt, isStamp } from './stamp.js';
-import { ZERO_DEVICE_SHORT } from './ids.js';
-import { canonicalJSON } from './canon.js';
+import { ZERO_DEVICE_SHORT, sha256 } from './ids.js';
+import { canonicalJSON, utf8 } from './canon.js';
+import { b64u } from './b64.js';
 import { OP_KINDS, PARK_REASONS, isParkReason, classifyOp, opKindForEntity, spaceClassOf, fieldSpec } from './ops.js';
 import { kindOfEntity, parseEntityKey } from './entities.js';
 import {
@@ -63,13 +70,32 @@ export const APPEND = Object.freeze({
   REJECTED: 'rejected',
   /**
    * this opId is in the log with DIFFERENT content — envelope splicing (ADR 002 §5.1).
-   * Resolved CONTENT-ADDRESSABLY, never by arrival order: the body whose `canonicalJSON` sorts
-   * higher is the one that stands, which is the identical rule `authz.js` applies, so two Macs
-   * that received the two envelopes in opposite orders hold the same body. The result carries
-   * `kept: 'existing' | 'incoming'` and the id joins `splicedIds()`.
+   *
+   * RESOLVED BY THE REGISTER JOIN, which is the only resolution that survives §7.2 (see the long
+   * note on `append`). EVERY well-formed body that arrives under a spliced opId is folded, and
+   * `registers.js`'s `≺` — stamp, then opId, then value — decides field by field. No body is ever
+   * un-applied. `kept: 'existing' | 'incoming'` reports which body remains a LINE (the canonical
+   * max, the identical rule `authz.js` applies, so the retained plaintext is the same everywhere);
+   * the other body's writes stay in the fold. The id joins `splicedIds()`.
    */
   CONFLICT: 'conflict',
 });
+
+/**
+ * The body fingerprint: 96 bits of SHA-256 over the canonical form, 16 base64url characters.
+ *
+ * It is what makes dedupe-by-opId SOUND rather than merely fast. ADR 001 §6 calls dedupe "a
+ * performance optimisation only", and that is true exactly as long as the second delivery carries
+ * the SAME body — a second, DIFFERENT body under one opId is envelope splicing, and answering it
+ * `duplicate` because the first one happened to be compacted is a state decision made by a
+ * compaction §7.2 promises is invisible to state (attack A1, round 2). The fingerprint is small
+ * enough to survive compaction in the checkpoint, and a hash rather than the body itself because
+ * ADR 004 §5.3's forget pass must be able to get the plaintext off this disk.
+ * @param {string} canon @returns {string}
+ */
+export function bodyFingerprint(canon) {
+  return b64u(sha256(utf8(canon)).subarray(0, 12));
+}
 
 export class OpLogError extends Error {
   constructor(message) { super(message); this.name = 'OpLogError'; }
@@ -161,9 +187,21 @@ function aliveFieldFor(kind) {
  *     compacted before we started tracking) makes the entity NOT collectable. Unknown never
  *     means yes, and it never means yes for any register, not just the newest one.
  *
- * @param {Map<string, Map<string, {value:any, stamp:string, author:string}>>} regs
+ * WHICH SEQ, AND WHY NOT THE STAMP'S (attack A7, round 2). A stamp is unique per (device, ms,
+ * ctr) — which our own clock guarantees for our own ops and guarantees for NOBODY else's. Two
+ * boards migrated into one personal space collide by construction, because §8.1 stamps every
+ * migrated op `GENESIS(index)` with the all-zeros device short. A seq index keyed by STAMP
+ * therefore answers this rule with an unrelated op's seq, and if that op's seq is LOWER the
+ * tombstone is collected early — R15 through the front door, no adversary required. `ctx.seqOfOp`
+ * resolves by the register's own winning OPID and is preferred whenever it is supplied;
+ * `ctx.seqOf` remains as the fallback for a caller (or a checkpoint) that only has stamps, and
+ * that fallback is the MAXIMUM over every op sharing the stamp — over-reporting the seq can only
+ * refuse a collection, never permit one early.
+ *
+ * @param {Map<string, Map<string, {value:any, stamp:string, author:string, op?:string}>>} regs
  * @param {string} e  entityKey
- * @param {{ nowMs:number, minDeviceSeq:bigint, minPushedSeq:bigint, seqOf:(s:string)=>(bigint|null) }} ctx
+ * @param {{ nowMs:number, minDeviceSeq:bigint, minPushedSeq:bigint,
+ *           seqOf:(s:string)=>(bigint|null), seqOfOp?:(id:string)=>(bigint|null) }} ctx
  * @returns {boolean}
  */
 export function tombstoneCollectable(regs, e, ctx) {
@@ -212,12 +250,26 @@ export function tombstoneCollectable(regs, e, ctx) {
   if (ctx.minDeviceSeq < 0n) throw new TombstoneGuardError('tombstoneCollectable: minDeviceSeq may not be negative');
   if (ctx.minPushedSeq < 0n) throw new TombstoneGuardError('tombstoneCollectable: minPushedSeq may not be negative');
 
+  // Resolve a register's server seq by the OPID that wrote it (see the note above); fall back to
+  // the stamp only when the caller supplied no opId resolver or the opId is unknown to it — a
+  // pre-A7 checkpoint whose `seqs` map is keyed by stamp is exactly that case.
+  const seqOfCell = (r) => {
+    if (typeof ctx.seqOfOp === 'function' && typeof r.op === 'string' && r.op !== '') {
+      const byId = ctx.seqOfOp(r.op);
+      if (typeof byId === 'bigint') return byId;
+    }
+    return ctx.seqOf(r.stamp);
+  };
+
   // Every register this entity still holds must itself be ACKED. An unacked stamp is one of our
   // OWN writes that never reached the relay — collecting around it drops the very stamp that
   // would have absorbed it, and it comes back on the next push.
-  for (const r of cells.values()) if (typeof ctx.seqOf(r.stamp) !== 'bigint') return false;
-
-  const seq = ctx.seqOf(newest);
+  let seq = null;
+  for (const r of cells.values()) {
+    const s = seqOfCell(r);
+    if (typeof s !== 'bigint') return false;
+    if (r.stamp === newest && (seq === null || s > seq)) seq = s;
+  }
   if (typeof seq !== 'bigint') return false;          // unknown seq ⇒ NOT collectable, always
   return ctx.minDeviceSeq >= seq && ctx.minPushedSeq >= seq;
 }
@@ -264,9 +316,23 @@ export function createOpLog(ports = {}) {
   /** every opId ever appended, INCLUDING ones compacted away. Dedupe is a performance
    *  optimisation only (ADR 001 §6): re-appending a compacted op merges to the same registers. */
   let seen = new Set();
-  /** stamp → server seq. Pruned on compaction to the stamps the checkpoint still holds, which is
-   *  exactly the set `tombstoneCollectable` can ask about. */
+  /**
+   * opId → the fingerprints of the bodies that opId has been ADMITTED under and whose LINE is
+   * gone (compacted, absorbed by a splice, or purged by `forget`). This is what lets `append()`
+   * tell an honest duplicate from a second body after the first has been compacted — see
+   * `bodyFingerprint` and the splice note on `append`. Persisted as `checkpoint().bodies`.
+   * @type {Map<string, Set<string>>}
+   */
+  let bodies = new Map();
+  /** opId → server seq. THE authoritative seq index (attack A7: a stamp is not unique). */
+  let seqById = new Map();
+  /** opId → the stamp that op carries, for the stamp-keyed compatibility view below. */
+  let tsById = new Map();
+  /** stamp → server seq, the MAXIMUM over every op sharing the stamp. Derived from `seqById`
+   *  plus whatever a pre-A7, stamp-keyed checkpoint carried. Never lowered. */
   let seqByStamp = new Map();
+  /** stamp → seq entries read from a pre-A7 checkpoint, which carries no opIds to key them by. */
+  let legacySeqByStamp = new Map();
   /** the checkpoint: the fold of every op at or below `horizon` */
   let regs = R.emptyRegisters();
   /** @type {string|null} */
@@ -293,10 +359,39 @@ export function createOpLog(ports = {}) {
     return op;
   }
 
+  /** Raise the stamp view for `ts` to `seq`. NEVER lowers it — see `noteSeq`. */
+  function bumpStamp(ts, seq) {
+    const prev = seqByStamp.get(ts);
+    if (prev === undefined || seq > prev) seqByStamp.set(ts, seq);
+  }
+
+  /**
+   * Record what we know about one op's server seq. The seq is keyed by OPID, and it is only ever
+   * raised: a well-formed op that happens to reuse another op's stamp may not drag the seq the
+   * §7.3 tombstone rule is evaluated against DOWNWARDS, because down is the unsafe direction
+   * (attack A7, round 2 — and it is reachable with no adversary at all, because §8.1 stamps every
+   * migrated op `GENESIS(index)` with `ZERO_DEVICE_SHORT`).
+   */
+  function noteSeq(id, ts, seq) {
+    if (typeof id === 'string' && typeof ts === 'string') tsById.set(id, ts);
+    if (typeof seq !== 'bigint') return;
+    const prev = seqById.get(id);
+    if (prev === undefined || seq > prev) seqById.set(id, seq);
+    if (typeof ts === 'string') bumpStamp(ts, seqById.get(id));
+  }
+
+  /** This body's line is gone but its writes are folded — remember the fingerprint. */
+  function rememberBody(id, canon) {
+    if (canon === null) return;
+    let set = bodies.get(id);
+    if (set === undefined) { set = new Set(); bodies.set(id, set); }
+    set.add(bodyFingerprint(canon));
+  }
+
   function admit(op, seq) {
     live.set(op.id, { op: retain(op), seq });
     seen.add(op.id);
-    if (!seqByStamp.has(op.ts) || seq !== null) seqByStamp.set(op.ts, seq);
+    noteSeq(op.id, op.ts, seq);
     invalidate();
   }
 
@@ -307,6 +402,7 @@ export function createOpLog(ports = {}) {
       if (c.fields) entry.fields = c.fields;
       parked.set(op.id, entry);
       seen.add(op.id);
+      noteSeq(op.id, op.ts, seq);
       invalidate();
       return result(APPEND.PARKED, {
         reason: c.reason, parkReason: c.parkReason, ...(c.fields ? { fields: c.fields } : {}),
@@ -314,6 +410,19 @@ export function createOpLog(ports = {}) {
     }
     admit(op, seq);
     return result(APPEND.APPENDED, {});
+  }
+
+  /**
+   * Fold a body into the checkpoint and keep no line for it: exactly what `compact()` does, done
+   * early for the losing body of a splice. The writes stay in the fold (which is what makes the
+   * splice resolution survive a later compaction — see `append`), the plaintext line does not.
+   */
+  function absorb(op, seq, canon) {
+    R.applyOp(regs, op);
+    noteSeq(op.id, op.ts, seq);
+    rememberBody(op.id, canon);
+    seen.add(op.id);
+    invalidate();
   }
 
   function matches(op, q) {
@@ -361,22 +470,67 @@ export function createOpLog(ports = {}) {
     return out;
   }
 
+  /**
+   * `checkpoint().seqs`, keyed by OPID since A7. A pre-A7 file keyed them by stamp; `load()`
+   * accepts both and tells them apart by shape (a stamp is 37 characters and `isStamp` proves it,
+   * an OpId is 22 base64url characters), so the format migration needs no version flag and no
+   * migration pass.
+   */
   function seqsObject() {
     const out = {};
-    for (const s of [...seqByStamp.keys()].sort()) {
-      const v = seqByStamp.get(s);
-      if (typeof v === 'bigint') out[s] = String(v);
+    for (const id of [...seqById.keys()].sort()) {
+      const v = seqById.get(id);
+      if (typeof v === 'bigint') out[id] = String(v);
+    }
+    for (const s of [...legacySeqByStamp.keys()].sort()) {
+      if (out[s] === undefined) out[s] = String(legacySeqByStamp.get(s));
     }
     return out;
   }
 
-  /** Keep only the stamps a surviving register still holds, plus the stamps of retained lines. */
+  /**
+   * `checkpoint().bodies` — the fingerprints of absorbed bodies, sorted for a stable file.
+   * An id that is a LINE again is skipped: its body travels in the tail, and listing it here too
+   * would make `load()` answer that very line `duplicate` and drop it.
+   */
+  function bodiesObject() {
+    const out = {};
+    for (const id of [...bodies.keys()].sort()) {
+      if (live.has(id) || parked.has(id)) continue;
+      const set = bodies.get(id);
+      if (set && set.size > 0) out[id] = [...set].sort();
+    }
+    return out;
+  }
+
+  /** Rebuild the derived stamp view from the opId index plus the legacy entries. */
+  function rebuildStampIndex() {
+    seqByStamp = new Map(legacySeqByStamp);
+    for (const [id, seq] of seqById) {
+      const ts = tsById.get(id);
+      if (typeof ts === 'string') bumpStamp(ts, seq);
+    }
+  }
+
+  /** Keep only the ops a surviving register attributes, plus the retained lines. */
   function pruneSeqIndex() {
-    const keep = new Set();
-    for (const cells of regs.values()) for (const r of cells.values()) keep.add(r.stamp);
-    for (const { op } of live.values()) keep.add(op.ts);
-    for (const { op } of parked.values()) keep.add(op.ts);
-    for (const s of [...seqByStamp.keys()]) if (!keep.has(s)) seqByStamp.delete(s);
+    const keepIds = new Set();
+    const keepStamps = new Set();
+    for (const cells of regs.values()) {
+      for (const r of cells.values()) {
+        keepStamps.add(r.stamp);
+        if (typeof r.op === 'string' && r.op !== '') {
+          keepIds.add(r.op);
+          if (!tsById.has(r.op)) tsById.set(r.op, r.stamp);
+        }
+      }
+    }
+    for (const { op } of live.values()) { keepIds.add(op.id); keepStamps.add(op.ts); }
+    for (const { op } of parked.values()) { keepIds.add(op.id); keepStamps.add(op.ts); }
+    for (const id of [...seqById.keys()]) if (!keepIds.has(id)) seqById.delete(id);
+    for (const id of [...tsById.keys()]) if (!keepIds.has(id)) tsById.delete(id);
+    for (const s of [...legacySeqByStamp.keys()]) if (!keepStamps.has(s)) legacySeqByStamp.delete(s);
+    rebuildStampIndex();
   }
 
   const api = {
@@ -397,20 +551,43 @@ export function createOpLog(ports = {}) {
      * There is NO lower bound. An op stamped at the beginning of the epoch is admitted at any
      * `nowMs`: risk R11, the joiner who must see Oma's birthday.
      *
-     * ENVELOPE SPLICING (ADR 002 §5.1) — two DIFFERENT bodies under one opId — is resolved
-     * CONTENT-ADDRESSABLY: the body whose `canonicalJSON` sorts higher stands, whichever arrived
-     * first. That is byte-for-byte the rule `authz.js` already applies to the same situation, and
-     * it has to be the same rule: resolving by arrival order means two honest Macs that received
-     * the two envelopes in opposite orders hold different registers, from an identical op set,
-     * for ever. The resolution runs for PARKED bodies too — a parked op is retained precisely so
-     * it can be applied after an app update, so "whichever arrived first" would merely defer the
-     * divergence rather than avoid it. Either way the id joins `splicedIds()`.
+     * ENVELOPE SPLICING (ADR 002 §5.1) — two DIFFERENT bodies under one opId — IS RESOLVED BY THE
+     * REGISTER JOIN, and this is the round-2 correction to attack A1. Every body that classifies
+     * `admit` is FOLDED; `registers.js`'s `≺` (stamp, then opId, then value) decides field by
+     * field; no body is ever un-applied. The whole-body canonical max — the identical rule
+     * `authz.js` applies — still decides which body remains a LINE, so the plaintext this log
+     * retains is the same on every device and `kept:` still reports it. The loser's line is
+     * ABSORBED into the checkpoint at once: exactly what `compact()` would have done to it, done
+     * early.
      *
-     * ONE RESIDUAL LIMIT, stated rather than hidden: once an opId has been COMPACTED its body is
-     * gone, so a second body arriving afterwards is indistinguishable from an honest duplicate
-     * and is reported as one. Nothing in the log can compare against a body it no longer holds.
-     * Splices are a forgery/corruption signal, not a steady-state event, and the window is the
-     * one in which the two envelopes are separated by a compaction.
+     * WHY IT HAD TO CHANGE, and why no smaller fix exists. Round 1 resolved a splice by DELETING
+     * the losing body and re-folding, and admitted "one residual limit": after compaction the log
+     * no longer holds the first body, so the second was answered `duplicate`. That is not a
+     * reporting limit, it is permanent divergence — device A, which ran its ordinary §7.2 tail
+     * trim between the two envelopes, keeps the FIRST body while device B, which did not, keeps
+     * the canonical max, from an identical op set, for ever, and A's next checkpoint bakes it onto
+     * disk. §7.2 exists so that compaction is invisible to state; there it decided state.
+     *
+     * The un-apply cannot be made to survive compaction: once a body is folded into the
+     * checkpoint, the value it displaced is gone, so no bounded amount of retained metadata can
+     * put it back. A resolution that is stable under compaction must therefore be MONOTONE with
+     * respect to the fold — and the fold is the register join. Folding every admitted body makes
+     * the state a function of the op SET again, under any delivery order and any interleaving of
+     * compaction, because compaction is nothing but partial evaluation of that same join. What is
+     * given up is only that the losing body's fields no longer vanish; what is bought is
+     * convergence, which §12.2 does not make optional. A parked body is still not applied — a park
+     * is a promise not to fold, and it is kept — so two bodies of which one parks converge too;
+     * a parked body that also LOSES the contest for the line contributes nothing to state on any
+     * device, so its bytes go with the line. That is not §12.5's "discarded for being old": it is
+     * the losing half of one opId, and every device drops the same half, by content.
+     *
+     * DEDUPE IS SOUND AGAIN. ADR 001 §6 calls dedupe-by-opId "a performance optimisation only",
+     * which is true of a REPEATED body and false of a SECOND one. `checkpoint().bodies` therefore
+     * carries a 96-bit `bodyFingerprint` per absorbed opId, so an id whose line is gone can still
+     * tell an honest duplicate (same fingerprint → DUPLICATE, free) from a splice (different
+     * fingerprint → folded, reported, `splicedIds()`). An id whose fingerprint is not known —
+     * a pre-A1 checkpoint, or a body dropped by tombstone GC — is RE-FOLDED rather than assumed
+     * duplicate, which is correct, just not free.
      *
      * @param {Object} op
      * @param {{seq?:string|number|bigint, haveEpochKey?:boolean}} [meta]
@@ -421,37 +598,69 @@ export function createOpLog(ports = {}) {
         return result(APPEND.REJECTED, { reason: 'op is not an object' });
       }
       const seq = toSeq(meta.seq);
-
-      const known = typeof op.id === 'string' ? (live.get(op.id) ?? parked.get(op.id)) : undefined;
-      if (!known && typeof op.id === 'string' && seen.has(op.id)) return result(APPEND.DUPLICATE, {});
+      const id = typeof op.id === 'string' ? op.id : null;
+      const known = id === null ? undefined : (live.get(id) ?? parked.get(id));
 
       // Classify BEFORE resolving a splice: a body that is a protocol violation is not stored at
       // all, so it may not win — or even disturb — a splice against a well-formed one.
       const c = classifyOp(op, { nowMs: now(), haveEpochKey: meta.haveEpochKey });
       if (c.status === 'reject') return result(APPEND.REJECTED, { reason: c.reason });
 
+      const theirs = canonOf(op);
+      const spliceReason = `opId ${op.id} is already in the log with different content — envelope `
+        + 'splicing (ADR 002 §5.1); every admitted body is folded and the register join decides '
+        + 'field by field, so the resolution survives compaction; the canonical max keeps the line';
+
+      // ── the id is in `seen` but no line is held: it was compacted, absorbed or purged ───────
+      if (!known && id !== null && (bodies.has(id) || seen.has(id))) {
+        const fps = bodies.get(id);
+        if (theirs !== null && fps !== undefined && fps.has(bodyFingerprint(theirs))) {
+          noteSeq(id, op.ts, seq);                     // a re-pull may be telling us the seq
+          return result(APPEND.DUPLICATE, {});
+        }
+        if (theirs !== null && fps !== undefined) {
+          // A SECOND body under an absorbed opId. The first one's writes are already in the fold;
+          // folding this one lands on the same registers as a peer that never compacted.
+          spliced.add(id);
+          const placed = place(op, seq, c);
+          return result(APPEND.CONFLICT, {
+            reason: spliceReason,
+            kept: 'incoming',
+            ...(placed.status === APPEND.PARKED ? { parkReason: placed.parkReason } : {}),
+          });
+        }
+        if (fps === undefined && theirs === null) return result(APPEND.DUPLICATE, {});
+        // No fingerprint to compare against: re-fold rather than guess. Idempotent either way.
+        return place(op, seq, c);
+      }
+
       if (known) {
         const mine = canonOf(known.op);
-        const theirs = canonOf(op);
         if (theirs !== null && theirs === mine) {
-          if (seq !== null && known.seq === null) { known.seq = seq; seqByStamp.set(known.op.ts, seq); }
+          if (seq !== null && known.seq === null) known.seq = seq;
+          noteSeq(known.op.id, known.op.ts, seq);
           return result(APPEND.DUPLICATE, {});
         }
         spliced.add(op.id);
-        const reason = `opId ${op.id} is already in the log with different content — envelope splicing `
-          + '(ADR 002 §5.1); the body whose canonical form sorts higher stands, on every device';
         if (theirs === null || (mine !== null && mine > theirs)) {
-          return result(APPEND.CONFLICT, { reason, kept: 'existing' });
+          // The body we hold keeps the line. The incoming one is still folded, unless it parks —
+          // a park is a promise not to fold and it is kept on both sides of the splice.
+          if (c.status !== 'park') absorb(op, seq, theirs);
+          return result(APPEND.CONFLICT, { reason: spliceReason, kept: 'existing' });
         }
-        // The incoming body is the content-addressable max. Drop the one we hold and re-fold:
-        // `registers()` is `checkpoint ⊕ live`, so removing the loser from `live` un-applies it
-        // exactly (nothing below the horizon can be reached here — see the compaction note above).
+        // The incoming body is the canonical max, so it takes the line. The body we hold is
+        // absorbed into the checkpoint exactly as `compact()` would absorb it: its writes stay in
+        // the fold — which is what makes this resolution survive a later compaction — its
+        // plaintext line goes. A PARKED loser was never folded, so only its line goes.
+        const wasParked = parked.has(op.id);
+        if (!wasParked) absorb(known.op, known.seq, mine);
+        else rememberBody(op.id, mine);
         live.delete(op.id);
         parked.delete(op.id);
         invalidate();
         const placed = place(op, seq ?? known.seq, c);
         return result(APPEND.CONFLICT, {
-          reason,
+          reason: spliceReason,
           kept: 'incoming',
           ...(placed.status === APPEND.PARKED ? { parkReason: placed.parkReason } : {}),
         });
@@ -468,16 +677,19 @@ export function createOpLog(ports = {}) {
     splicedIds() { return [...spliced].sort(); },
 
     /**
-     * Every LINE the log holds — live ops in arrival order, then parked ones. This is the content
-     * of `ops.jsonl`, and it is what `{checkpoint(), ops()}` has to mean for that documented pair
-     * to round-trip: `checkpoint()` folds only what is APPLIED, so if `ops()` also omitted the
-     * parked lines then an ordinary relaunch would silently destroy every parked op — the exact
-     * "loses the new thing" failure §7.4 and §12.5 exist to prevent, with no adversary and no
-     * corruption required. `load()` re-classifies the whole tail anyway (it must: yesterday's
-     * `unknownKind` is today's ordinary op), so a parked line simply re-parks.
+     * The ADMITTED ops — what has actually been folded — in arrival order.
      *
-     * Pass `{liveOnly:true}` — or the older `{includeParked:false}` — for the ADMITTED ops alone,
-     * which is what a caller reasoning about applied state wants.
+     * THE DEFAULT IS THE APPLIED SET, and it is deliberate (regression REG-29). Round 1 reversed
+     * it to "every LINE" so that the documented persist pair `{checkpoint(), ops()}` would stop
+     * destroying parked ops, and that silently changed every OTHER reader: `fold(log.ops())` — the
+     * obvious way to rebuild a register map — throws `RegisterError` the moment any op is parked
+     * for an unknown FIELD, which happens the first time a sibling on a newer build sends one. So
+     * the persist pair got its own carrier instead: the parked lines now ride in `checkpoint()`,
+     * WITH their park reasons (which is what A2 round 2 needed anyway, since `load()` cannot
+     * re-derive `epoch`). Neither reader can now get the wrong set by accident.
+     *
+     * Pass `{includeParked:true}` for every LINE the log holds — live first, then parked.
+     * `{liveOnly:true}` is the explicit spelling of the default.
      *
      * NOTHING may depend on this order (ADR 001 §0.2: state is a function of the SET); it is the
      * order that makes a log file readable by a human, and there is a test that the fold does not
@@ -487,10 +699,32 @@ export function createOpLog(ports = {}) {
      * @returns {Object[]} a fresh array; mutating it cannot touch the log
      */
     ops(q = {}) {
-      const wantParked = q.liveOnly === true ? false : (q.includeParked ?? true);
+      const wantParked = q.liveOnly === true ? false : (q.includeParked === true);
       const out = [];
       for (const { op } of live.values()) if (matches(op, q)) out.push(op);
       if (wantParked) for (const { op } of parked.values()) if (matches(op, q)) out.push(op);
+      return out;
+    },
+
+    /**
+     * EVERY LINE the log holds, with the two facts a bare op cannot carry: its server seq and, for
+     * a parked line, the reason it is parked. This is the explicit persistence accessor — the one
+     * `ops()` used to be by default — and it exists so that a caller who means "the content of
+     * `ops.jsonl`" can say so instead of relying on a default that a fold-shaped caller also
+     * relies on (REG-29). `{checkpoint(), ops()}` remains a complete pair on its own, because the
+     * checkpoint carries the parked lines; `lines()` is for a store that would rather keep the
+     * tail file self-describing.
+     * @returns {Array<{op:Object, seq:string|null, park:string|null, fields?:string[]}>} JSON-safe
+     */
+    lines() {
+      const out = [];
+      for (const e of live.values()) out.push({ op: e.op, seq: e.seq === null ? null : String(e.seq), park: null });
+      for (const e of parked.values()) {
+        out.push({
+          op: e.op, seq: e.seq === null ? null : String(e.seq), park: e.reason,
+          ...(e.fields ? { fields: e.fields.slice() } : {}),
+        });
+      }
       return out;
     },
 
@@ -508,19 +742,53 @@ export function createOpLog(ports = {}) {
     registersCopy() { return R.cloneRegisters(api.registers()); },
 
     /**
-     * The fold of a prefix (ADR 001 §7.2). Pure: it does not mutate the log.
+     * The fold of a prefix (ADR 001 §7.2), plus everything about the log that is NOT a folded op
+     * and would otherwise not survive a relaunch. Pure: it does not mutate the log.
+     *
      * @param {{horizon?:string}} [opts] default: fold everything currently held
-     * @returns {{horizon:string, regs:Object, cursors:Object, seqs:Object, at:number}}
-     *   `seqs` is additive to ops.contract.js §8: without persisting stamp→seq, tombstone GC
-     *   silently stops working after every relaunch, because condition 3 becomes unevaluable.
+     * @returns {{horizon:string, regs:Object, cursors:Object, seqs:Object, bodies:Object,
+     *            parked:Array, spliced:string[], at:number}}
+     *
+     *   `seqs` is additive to ops.contract.js §8: without persisting op→seq, tombstone GC silently
+     *   stops working after every relaunch, because condition 3 becomes unevaluable. Keyed by
+     *   OPID since A7 round 2 — a stamp is not unique across devices and a migrated board's
+     *   stamps collide by construction. Pre-A7 files keyed it by stamp and still load.
+     *
+     *   `bodies` is the splice guard (A1 round 2): one 96-bit `bodyFingerprint` per opId whose
+     *   line has been absorbed, so that dedupe-by-opId can still tell a re-delivery from a second
+     *   body after the first has been compacted. Without it a compaction decides state.
+     *
+     *   `parked` carries the parked LINES and — the part round 1 lost — their REASONS (A2 round
+     *   2). `load()` re-classifies every line on purpose, so that yesterday's `unknownKind`
+     *   becomes today's ordinary op with nobody writing a migration; but `epoch` is by definition
+     *   the reason the classifier CANNOT re-derive, because core/ holds no key material. Round 1
+     *   saved the parked bytes and lost the meaning: an op parked under `epoch` came back live and
+     *   APPLIED, and `parkedOps({reason:'epoch'})` could not even tell the store it still needed a
+     *   key. The reason rides here, and `load()` feeds it back through the classifier.
+     *
+     *   `spliced` is the ADR 002 §5.1 tamper evidence (REG-28). It is the only report that an
+     *   opId ever arrived under two bodies, and it cannot be re-derived from the tail, so a
+     *   restart used to erase it.
      */
     checkpoint(opts = {}) {
       const h = resolveHorizon(opts, 'read');
+      const parkedLines = [];
+      for (const e of parked.values()) {
+        parkedLines.push({
+          op: e.op,
+          seq: e.seq === null ? null : String(e.seq),
+          reason: e.reason,
+          ...(e.fields ? { fields: e.fields.slice() } : {}),
+        });
+      }
       return Object.freeze({
         horizon: h,
         regs: R.serializeRegisters(foldTo(h)),
         cursors: cursorsObject(),
         seqs: seqsObject(),
+        bodies: bodiesObject(),
+        parked: parkedLines,
+        spliced: [...spliced].sort(),
         at: Math.floor(now()),
       });
     },
@@ -540,7 +808,15 @@ export function createOpLog(ports = {}) {
       horizon = h;
       let dropped = 0;
       for (const [id, entry] of [...live]) {
-        if (cmp(entry.op.ts, h) <= 0) { live.delete(id); dropped++; }
+        if (cmp(entry.op.ts, h) <= 0) {
+          // The body's line goes; its FINGERPRINT stays, so that a second body arriving under the
+          // same opId afterwards is still recognised as a splice rather than answered `duplicate`
+          // (A1 round 2). Compaction must be invisible to state, and answering `duplicate` here
+          // made it decide state.
+          rememberBody(id, canonOf(entry.op));
+          live.delete(id);
+          dropped++;
+        }
       }
       pruneSeqIndex();
       invalidate();
@@ -552,14 +828,20 @@ export function createOpLog(ports = {}) {
      * an op parked as `unknownKind` by yesterday's build must become live after an app update
      * without anybody writing a migration, and an op that was live under a stamp 23 h in the
      * future must re-park if the user's clock jumped backwards.
-     * @param {{checkpoint?:Object, tail?:Array}} o  tail entries are ops, or `{op, seq}` pairs
+     * A tail entry is an op, a `{op, seq}` pair, or a `lines()` record `{op, seq, park}`; a
+     * `park` of `'epoch'` is fed back through the classifier as `haveEpochKey:false`, because it
+     * is the one verdict core/ cannot reach on its own.
+     * @param {{checkpoint?:Object, tail?:Array}} o
      * @returns {Map} the full register map
      */
     load(o = {}) {
-      live = new Map(); parked = new Map(); seen = new Set(); seqByStamp = new Map();
+      live = new Map(); parked = new Map(); seen = new Set();
+      seqById = new Map(); tsById = new Map(); seqByStamp = new Map(); legacySeqByStamp = new Map();
+      bodies = new Map();
       regs = R.emptyRegisters(); horizon = null; cursors = new Map(); spliced = new Set(); invalidate();
 
       const cp = o.checkpoint;
+      let parkedLines = [];
       if (cp) {
         if (cp.regs !== undefined && cp.regs !== null) regs = R.deserializeRegisters(cp.regs);
         if (cp.horizon !== undefined && cp.horizon !== null) {
@@ -569,14 +851,46 @@ export function createOpLog(ports = {}) {
         if (cp.cursors && typeof cp.cursors === 'object') {
           for (const [s, v] of Object.entries(cp.cursors)) if (!isForbiddenKey(s)) cursors.set(s, toSeq(v));
         }
-        if (cp.seqs && typeof cp.seqs === 'object') {
-          for (const [s, v] of Object.entries(cp.seqs)) if (isStamp(s)) seqByStamp.set(s, toSeq(v));
+        // The stamps a surviving register attributes to an opId — the bridge that lets a
+        // stamp-keyed reader (`seqOf`) still answer after the index moved to opIds.
+        for (const cells of regs.values()) {
+          for (const r of cells.values()) {
+            if (typeof r.op === 'string' && r.op !== '' && !tsById.has(r.op)) tsById.set(r.op, r.stamp);
+          }
         }
+        if (cp.seqs && typeof cp.seqs === 'object') {
+          for (const [k, v] of Object.entries(cp.seqs)) {
+            if (isForbiddenKey(k)) continue;
+            const n = toSeq(v);
+            if (n === null) continue;
+            if (isStamp(k)) legacySeqByStamp.set(k, n);            // a pre-A7 checkpoint
+            else seqById.set(k, n);
+          }
+          rebuildStampIndex();
+        }
+        if (cp.bodies && typeof cp.bodies === 'object') {
+          for (const [k, v] of Object.entries(cp.bodies)) {
+            if (isForbiddenKey(k)) continue;
+            const list = Array.isArray(v) ? v : [v];
+            const set = new Set();
+            for (const fp of list) if (typeof fp === 'string' && fp !== '') set.add(fp);
+            if (set.size > 0) { bodies.set(k, set); seen.add(k); }
+          }
+        }
+        if (Array.isArray(cp.spliced)) for (const s of cp.spliced) if (typeof s === 'string') spliced.add(s);
+        if (Array.isArray(cp.parked)) parkedLines = cp.parked;
       }
-      for (const line of o.tail ?? []) {
-        if (line && typeof line === 'object' && line.op) api.append(line.op, { seq: line.seq });
-        else api.append(line);
-      }
+      const feed = (line) => {
+        if (line === null || typeof line !== 'object') { api.append(line); return; }
+        if (!line.op) { api.append(line); return; }
+        const reason = typeof line.park === 'string' ? line.park : (typeof line.reason === 'string' ? line.reason : null);
+        api.append(line.op, {
+          seq: line.seq,
+          ...(reason === PARK_REASONS.EPOCH ? { haveEpochKey: false } : {}),
+        });
+      };
+      for (const line of parkedLines) feed(line);
+      for (const line of o.tail ?? []) feed(line);
       return api.registers();
     },
 
@@ -731,12 +1045,19 @@ export function createOpLog(ports = {}) {
 
       // (a) LIVENESS GUARD. An unscoped forget blanks content registers irreversibly (see the
       //     note above), so it may only run on an entity the owner has actually retracted.
+      //
+      //     IT RUNS WHETHER OR NOT THERE IS A FOLD (A2-b, round 2). It used to be written
+      //     `if (!all && only === null && current)`, and `current` is the FOLD — so an entity that
+      //     exists ONLY as a parked line has no fold, the guard was skipped entirely, and one
+      //     unscoped `forget(e, space)` deleted a newer sibling's retained op. An entity with no
+      //     registers has no retraction either, so this now refuses, which is the same answer it
+      //     gives every other unretracted entity.
       const current = api.registers().get(e);
-      if (!all && only === null && current) {
+      if (!all && only === null) {
         const aliveName = aliveFieldFor(parsed.kind);
         const levelName = aliveName === 'pub.alive' ? 'pub.level' : null;
-        const dead = aliveName !== null && current.get(aliveName)?.value === false;
-        const privat = levelName !== null && current.get(levelName)?.value === 'privat';
+        const dead = aliveName !== null && current?.get(aliveName)?.value === false;
+        const privat = levelName !== null && current?.get(levelName)?.value === 'privat';
         if (!dead && !privat) {
           throw new OpLogError(`forget: ${e} is still live — ${aliveName ?? 'its tombstone register'} is not false`
             + `${levelName ? ` and ${levelName} is not 'privat'` : ''}. An unscoped forget blanks its content `
@@ -756,21 +1077,54 @@ export function createOpLog(ports = {}) {
         }
         regs.set(e, cells);
       }
-      // (b) then: purge the lines. Both maps — a parked op for this entity is still a line.
+      // (b) then: purge the lines — the ADMITTED ones only.
+      //
+      //     A PARKED LINE IS NEVER TOUCHED (A2-b, round 2), for the reason `collectTombstones`
+      //     already gives in full: a parked op is retained precisely so that an app update can
+      //     apply it, it may carry a stamp NEWER than every register this entity holds, and
+      //     deleting it destroys a newer sibling's write — "loses the new thing", which is the
+      //     whole reason §7.4 exists. It is also unrecoverable, because the id stays in `seen` and
+      //     the fingerprint index answers a re-delivery `duplicate`. §7.4 beats ADR 004 §5.3 here
+      //     exactly as it beats §7.3 there. The residue is that a parked op's plaintext survives a
+      //     retraction until it can be classified; the store re-runs the pass after `unpark()`.
+      //     NO FINGERPRINT IS KEPT for a purged body, unlike compaction's. A fingerprint of the
+      //     retracted plaintext is precisely the derived residue §5.3 exists to get off this disk,
+      //     and it buys nothing: what makes forget absorbing is that `registers.js:valueKey` ranks
+      //     the blank above the value at the identical (stamp, opId), so a re-delivery is RE-FOLDED
+      //     and still loses. Dedupe is never what protects this case.
       let purged = 0;
       for (const [id, entry] of [...live]) {
-        if (entry.op.e === e && entry.op.space === space) { live.delete(id); purged++; }
+        if (entry.op.e === e && entry.op.space === space) { bodies.delete(id); live.delete(id); purged++; }
       }
-      for (const [id, entry] of [...parked]) {
-        if (entry.op.e === e && entry.op.space === space) { parked.delete(id); purged++; }
-      }
+      if (current) for (const r of current.values()) if (typeof r.op === 'string') bodies.delete(r.op);
       invalidate();
       return purged;
     },
 
     // ── tombstone GC (ADR 001 §7.3) ──────────────────────────────────────────
 
-    /** @returns {bigint|null} the server seq of the op that minted `stamp`, or null if unknown. */
+    /**
+     * The server seq of one OP. This is the accessor §7.3 condition 3 should be evaluated with:
+     * an opId identifies exactly one op, a stamp does not (attack A7).
+     * @param {string} id @returns {bigint|null}
+     */
+    seqOfOp(id) {
+      const v = seqById.get(id);
+      return typeof v === 'bigint' ? v : null;
+    },
+
+    /**
+     * The server seq for a STAMP — the MAXIMUM over every op that carries it.
+     *
+     * A stamp is unique per (device, ms, ctr), which our own clock guarantees for our own ops and
+     * for nobody else's: one well-formed op reusing a stamp used to overwrite this entry, and a
+     * LOWER seq collapsed the value §7.3 condition 3 is compared against and collected a tombstone
+     * hundreds of seqs early (R15). It needs no adversary either — §8.1 stamps every migrated op
+     * `GENESIS(index)` with `ZERO_DEVICE_SHORT`, so two boards migrated into one personal space
+     * collide by construction. Taking the maximum can only make a collection HARDER, which is the
+     * safe direction; `seqOfOp` is the exact answer and is what `collectTombstones` uses.
+     * @returns {bigint|null}
+     */
     seqOf(stamp) {
       const v = seqByStamp.get(stamp);
       return typeof v === 'bigint' ? v : null;
@@ -790,23 +1144,36 @@ export function createOpLog(ports = {}) {
      * would leave a device that has GC'd applying a different op set from one that has not.
      * §7.4 therefore beats §7.3: the tombstone waits until the op is understood.
      *
-     * @param {{nowMs:number, minDeviceSeq:bigint, minPushedSeq:bigint, seqOf?:(s:string)=>(bigint|null)}} ctx
+     * AND NEITHER IS AN UNPUSHED LIVE LINE (A7-b, round 2). The "every register must be acked"
+     * guard inside `tombstoneCollectable` cannot see a write of ours that LOST the join to the
+     * tombstone: a losing write leaves no register behind to check. Such a line was then deleted
+     * here — an op discarded for being old, which §12.5 forbids outright — and deleting it is not
+     * even the safe half of the choice, because RETAINING it while dropping the entity's registers
+     * would fold it back into a live entity, which is R15 itself. The only correct answer is the
+     * one §7.3 condition 3(b) already gives: an entity we still hold an unpushed line for is NOT
+     * collectable. It becomes collectable the moment that line is acked.
+     *
+     * @param {{nowMs:number, minDeviceSeq:bigint, minPushedSeq:bigint,
+     *          seqOf?:(s:string)=>(bigint|null), seqOfOp?:(id:string)=>(bigint|null)}} ctx
      * @returns {string[]} the entity keys collected
      */
     collectTombstones(ctx) {
       const full = api.registers();
-      const guard = { ...ctx, seqOf: ctx?.seqOf ?? api.seqOf };
-      const hasParked = new Set();
-      for (const { op } of parked.values()) hasParked.add(op.e);
+      const guard = { ...ctx, seqOf: ctx?.seqOf ?? api.seqOf, seqOfOp: ctx?.seqOfOp ?? api.seqOfOp };
+      const blocked = new Set();
+      for (const { op } of parked.values()) blocked.add(op.e);        // §7.4 beats §7.3
+      for (const e of live.values()) if (e.seq === null) blocked.add(e.op.e);   // §12.5 beats §7.3
       const dropped = [];
       for (const e of full.keys()) {
-        if (hasParked.has(e)) continue;                 // §7.4 beats §7.3 — see above
+        if (blocked.has(e)) continue;
         if (tombstoneCollectable(full, e, guard)) dropped.push(e);
       }
       if (dropped.length === 0) return dropped;
       const gone = new Set(dropped);
       for (const e of dropped) regs.delete(e);
-      for (const [id, entry] of [...live]) if (gone.has(entry.op.e)) live.delete(id);
+      for (const [id, entry] of [...live]) {
+        if (gone.has(entry.op.e)) { rememberBody(id, canonOf(entry.op)); live.delete(id); }
+      }
       pruneSeqIndex();
       invalidate();
       return dropped;
@@ -838,7 +1205,8 @@ export function createOpLog(ports = {}) {
       const entry = live.get(id) ?? parked.get(id);
       if (!entry) return false;
       entry.seq = toSeq(seq);
-      seqByStamp.set(entry.op.ts, entry.seq);
+      noteSeq(id, entry.op.ts, entry.seq);
+      invalidate();                 // an acked line can un-block a §7.3 collection
       return true;
     },
 

@@ -127,7 +127,11 @@ test('A2 CLOSED — a relaunch through {checkpoint(), ops()} preserves every par
 
   // The persist pair, exactly as the module documents it, through JSON as a real file would be.
   const persisted = JSON.parse(JSON.stringify({ checkpoint: before.checkpoint(), tail: before.ops() }));
-  assert.equal(persisted.tail.length, 2, 'ops() silently omitted the parked line');
+  // REG-29 moved the parked lines out of `ops()` and into `checkpoint()`, WITH their reasons —
+  // `ops()` is the applied set again, because `fold(log.ops())` must not throw on a parked line.
+  // The pair is still complete, which is all A2 ever asked for.
+  assert.equal(persisted.tail.length, 1, 'ops() is the applied-ops view');
+  assert.equal(persisted.checkpoint.parked.length, 1, 'the checkpoint silently omitted the parked line');
   assert.equal(before.ops({ liveOnly: true }).length, 1, 'liveOnly is the applied-ops view');
 
   const after = createOpLog({ now });

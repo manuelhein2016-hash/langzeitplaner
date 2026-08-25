@@ -116,10 +116,21 @@ export const FIELDS = deepFreeze({
   // additions (`lastSeenSeq.*`, `hiddenMembers.*`) are carried as DOTTED KEYS with scalar values,
   // because `f` is scalars-only by contract (ADR 001 §2) and `pref` may not be the one exception.
   //
-  // `null` ON A PREF MEANS "BACK TO THE v1 DEFAULT", AND THAT IS THE CONTRACT — not a defect.
-  // ATT-32 read it as one: `materialize.js:prefsFromRegisters` skips a null register, so
-  // `buildSettings` supplies `defaultState().settings`'s value and "explicitly cleared" is
-  // indistinguishable from "never set". For a CONTENT field that conflation would be a bug (ADR
+  // `null` ON A PREF MEANS "THE VALUE IS GONE", AND THAT IS THE CONTRACT — not a defect.
+  // ATT-32 read it as one: `materialize.js` resolves a null register rather than storing a third
+  // state, so "explicitly cleared" and "never set" are not two different boards.
+  //
+  // ROUND 2 — WHAT "GONE" RESOLVES TO WAS WRONG AND IS NOW RIGHT (REG-8). This comment used to
+  // say a cleared pref takes `defaultState().settings`'s value. It takes **v1's reading of
+  // `null`**, which is the default for most prefs and `false` for every pref v1 consumes as a
+  // plain boolean (`layout.js:243` is `s.layers.feiertage &&`). The two differ for exactly the
+  // booleans whose default is `true`, and reading them as the default turned the Feiertage layer
+  // ON for a board v1 draws with it OFF. See `materialize.js:applyClearedPrefs`, which owns the
+  // rule and derives it from `typeof default === 'boolean'` so a pref added later is covered.
+  //
+  // And because "gone" and "the file says null" are then the same register, nothing else may use
+  // `null` to mean "revert to the default": `replace.js:buildPrefOp` writes the DEFAULT VALUE for
+  // a pref an imported board omits (from `ctx.defaultSettings`) rather than clearing it. For a CONTENT field that conflation would be a bug (ADR
   // 004 §5.1 needs `null` to mean redacted, distinct from absent, because a blank note text is a
   // legitimate value). For a pref it is the only coherent reading: every pref has a default and
   // the renderer needs a value, so there is no third state for the register to lose. The attack's

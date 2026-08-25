@@ -1798,7 +1798,7 @@ describe('ATT-82 / ATT-83 — a long field must never take the entry with it', (
     assert.equal(cut.kept.length + cut.dropped.length, 90);
   });
 
-  test('ATT-82/83 — a value that is not a string is still dropped, never coerced', () => {
+  test('ATT-82/83 — a TEXT value that is not a string is kept as v1 paints it, never dropped', () => {
     const b = {
       schemaVersion: 1,
       notes: [{ id: 'n1', date: '2026-03-04', text: 42, categoryId: 'c1' }],
@@ -1806,12 +1806,57 @@ describe('ATT-82 / ATT-83 — a long field must never take the entry with it', (
       categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
       scratchpads: {}, settings: {},
     };
+    // INVERTED (REG-5). This asserted that `text: 42` was DROPPED — and dropping `text` makes the
+    // note unrenderable (ADR 001 §5 step 3), so the note left the board and the next export
+    // entirely. That is verbatim the disaster ATT-82's own comment says it exists to prevent:
+    // "the user's note did not get shorter on upgrade day, it disappeared." v1 keeps and paints
+    // all of these through one expression, `popover.js:193`'s `n.text || '…'`, and
+    // `coerceToV1Text` is that expression and nothing more.
     const { ops, report } = migrateV1(b, CTX);
-    assert.equal(ops.find((o) => o.k === 'note.set').f.text, undefined);
-    assert.equal(ops.find((o) => o.k === 'bar.set').f.label, undefined);
+    assert.equal(ops.find((o) => o.k === 'note.set').f.text, '42', 'what v1 paints in the cell');
+    assert.equal(ops.find((o) => o.k === 'bar.set').f.label, '[object Object]',
+      'faithful rather than tidy — it is what v1 puts on the bar');
     assert.deepEqual(report.losses.filter((l) => l.field).map((l) => [l.field, l.reason]),
-      [['text', 'dropped'], ['label', 'dropped']], j(report.losses));
-    assert.equal(report.losses.some((l) => l.reason === 'truncated'), false, 'nothing was coerced');
+      [['text', 'coerced'], ['label', 'coerced']], j(report.losses));
+    // Still a LOSS, and the original is recoverable: the report carries the value that was in the
+    // file, so „nichts geht verloren" survives the one case the register cannot hold.
+    assert.equal(report.losses.find((l) => l.field === 'text').value, 42);
+    assert.deepEqual(report.losses.find((l) => l.field === 'label').value, { s: 1 });
+
+    // The entry is on the board — the whole point.
+    const st = materializeSolo(fold(ops));
+    assert.equal(st.notes.length, 1);
+    assert.equal(st.notes[0].date, '2026-03-04');
+    assert.equal(st.bars.length, 1);
+  });
+
+  test('ATT-82/83 — but a NULL is still a value, except where it would cost the entry', () => {
+    // The line between this and the test above, asserted so neither half can drift.
+    //
+    // `null` is a first-class register value (ADR 001 §2) and a hand-edited one is carried to the
+    // log verbatim — asserted at length by "an explicit null in the FILE is carried as a null
+    // register" above, and that decision stands. The exception is the field where carrying it
+    // costs the whole entry: `materialize` skips a cleared register, so a null `note.text` fails
+    // renderability and the note leaves the board (REG-6). Which fields those are is PROBED from
+    // the real `renderable()`, not listed, so §5 step 3 cannot change out from under it.
+    const b = {
+      schemaVersion: 1,
+      notes: [{ id: 'n1', date: '2026-03-04', text: null, categoryId: 'c1' }],
+      bars: [{ id: 'b1', startDate: '2026-03-01', endDate: '2026-03-10', label: null, categoryId: 'c1' }],
+      categories: [{ id: 'c1', name: 'A', nameEn: null, paletteRef: 'blau', visible: true }],
+      scratchpads: {}, settings: {},
+    };
+    const { ops } = migrateV1(b, CTX);
+    assert.equal(ops.find((o) => o.k === 'note.set').f.text, '',
+      'the ONE field whose null costs the entry — and `\'\'` is what ATT-53 already gives an ABSENT text');
+    assert.equal(ops.find((o) => o.k === 'bar.set').f.label, null,
+      'a bar renders without a label, so its null is carried like any other value');
+    assert.equal(ops.find((o) => o.k === 'cat.set').f.nameEn, null, 'and so is a category\'s');
+
+    const st = materializeSolo(fold(ops));
+    assert.equal(st.notes.length, 1, 'the note is on the board, where v1 draws it as „…"');
+    assert.equal(st.notes[0].text, '');
+    assert.equal(st.bars.length, 1);
   });
 
   test('ATT-82 — a malformed DATE is NOT "truncated" into a plausible one', () => {

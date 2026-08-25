@@ -197,8 +197,15 @@ describe('ATT-40 — replaceAllOps exists and honours its contract signature', (
     seed(A, board({ notes: [note('n1', '2026-03-01', 'alt')] }));
     A.advance(60_000);
     const plan = planReplaceAll(A.regs, board({ notes: [note('n2', '2026-04-01', 'neu')] }), A.ctx());
+    // `retractions` and `reshares` are additive and each closes a defect: the family keys this
+    // transaction tombstoned locally but may not un-publish (RECHECK-40-4), and the exposure the
+    // FILE asked for and was refused (RECHECK-40-3). Both are lists the store shows the user
+    // before the old board is gone, which is what this test is about.
     assert.deepEqual(Object.keys(plan).sort(),
-      ['gid', 'label', 'lossy', 'ops', 'removed', 'undoable', 'warnings', 'written'].sort());
+      ['gid', 'label', 'lossy', 'ops', 'removed', 'reshares', 'retractions', 'undoable',
+        'warnings', 'written'].sort());
+    assert.deepEqual(plan.retractions, [], 'nothing was published, so nothing is owed');
+    assert.deepEqual(plan.reshares, [], 'and the file asked for no exposure');
     assert.equal(plan.lossy, false);
     assert.deepEqual(plan.warnings, []);
     assert.deepEqual(plan.written.filter((k) => k.startsWith('note:')), ['note:n2']);
@@ -401,7 +408,11 @@ describe('§8.5 step 3 — `{_alive:false}` for what the import does not have', 
     const incoming = board({ notes: [{ id: 'n1', date: '2026-03-01', text: 'x', categoryId: 'cat-1', _alive: false }] });
     const plan = planReplaceAll(A.regs, incoming, A.ctx());
     assert.equal(plan.ops.find((o) => o.e === 'note:n1').f._alive, true);
-    assert.equal(plan.warnings.some((w) => w.includes('imported ALIVE')), true);
+    // The wording changed when `visibility`/`coEdit` joined `_alive` as FORCED rather than
+    // defaulted (RECHECK-40-3): one sentence now covers all three. The rule is unchanged.
+    assert.equal(plan.warnings.some((w) => /_alive.*presence in the import/s.test(w)), true,
+      plan.warnings.join(' | '));
+    assert.deepEqual(plan.reshares, [], '`_alive` is not an exposure and is not offered back');
   });
 });
 
@@ -696,6 +707,67 @@ describe('settings are replaced too, in the LOCAL space', () => {
       'a pref the imported file does not carry reverts to the v1 default, exactly as replaceAll does');
   });
 
+  test('a pref the import omits is reset to its v1 DEFAULT VALUE, not cleared (REG-8)', () => {
+    // The two are the SAME BOARD for most prefs and OPPOSITE boards for the two that matter.
+    //
+    // v1's `replaceAll(next)` is `this.state = migrate(next)` and `migrate` spreads
+    // `{...defaultState().settings, ...(next.settings || {})}` (`store.js:76-80`), so a pref the
+    // incoming file omits comes back as v1's DEFAULT. Writing `null` was this module's attempt to
+    // say that in a register — but a register cannot distinguish "revert to the default" from
+    // "the file literally says null", and `materialize.js:applyClearedPrefs` resolves a null
+    // register as v1's reading of null, which is `false` for every pref v1 consumes as a plain
+    // boolean (`layout.js:243` is `s.layers.feiertage &&`).
+    //
+    // `layers.feiertage` and `menuBarIcon` are the only two prefs whose default is `true`, i.e.
+    // exactly the pair where the two readings differ — so an import that simply omitted `layers`
+    // used to turn the holiday layer OFF on a board v1 draws it ON. The ambiguity is removed at
+    // the source: write the DEFAULT VALUE.
+    const A = device('a', MAC_A, SHORT_A);
+    seed(A, board({ settings: { layers: { feiertage: false }, menuBarIcon: false, rowHeight: 30 } }));
+    assert.equal(getValue(A.regs, 'pref:app', 'layers.feiertage'), false, 'non-vacuity: it is OFF now');
+
+    A.advance(60_000);
+    const plan = planReplaceAll(A.regs, board({ settings: { bundesland: 'NW' } }),
+      A.ctx({ defaultSettings: defaultState().settings }));
+    const pref = plan.ops.find((o) => o.k === 'pref.set');
+
+    assert.equal(pref.f['layers.feiertage'], true, 'the v1 DEFAULT value, not a null clear');
+    assert.equal(pref.f.menuBarIcon, true);
+    // …and the prefs whose default is falsy are unaffected, which is why this went unnoticed:
+    // for every one of them the two readings coincide.
+    assert.equal(pref.f.rowHeight, 22);
+
+    foldAll(A.regs, plan.ops);
+    const s = A.state().settings;
+    assert.equal(s.layers.feiertage, true, 'the projection matches what v1 replaceAll gives');
+    assert.equal(s.menuBarIcon, true);
+    assert.equal(s.rowHeight, 22);
+
+    // The register really does hold the value — this is not `applyClearedPrefs` rescuing a null.
+    assert.equal(getValue(A.regs, 'pref:app', 'layers.feiertage'), true);
+  });
+
+  test('without ctx.defaultSettings the clears are still made, and SAID — never silently', () => {
+    // `core/` may not read `store.js` (ADR 005 §2), so the defaults have to be injected and a
+    // caller can omit them. Omitting them falls back to the `null` clear, which is right for
+    // every pref whose default is falsy and wrong for the two whose default is `true` — so it is
+    // reported rather than assumed. `lossy` stays false: the board is intact either way, and a
+    // store that refuses lossy imports must not refuse a restore over a settings default.
+    const A = device('a', MAC_A, SHORT_A);
+    seed(A, board({ settings: { layers: { feiertage: false }, rowHeight: 30 } }));
+    A.advance(60_000);
+    const plan = planReplaceAll(A.regs, board({ settings: { bundesland: 'NW' } }), A.ctx());
+
+    assert.equal(plan.ops.find((o) => o.k === 'pref.set').f['layers.feiertage'], null);
+    assert.ok(plan.warnings.some((w) => /no ctx.defaultSettings was supplied/.test(w)),
+      plan.warnings.join(' | '));
+    assert.equal(plan.lossy, false);
+
+    // And a bad one is a CALLER error, refused before a single op is built.
+    assert.throws(() => planReplaceAll(A.regs, board(), A.ctx({ defaultSettings: 'nope' })),
+      ReplaceError);
+  });
+
   test('the sync cursor and the per-member view toggles are NOT settings and survive', () => {
     const A = device('a', MAC_A, SHORT_A);
     seed(A, board());
@@ -776,9 +848,16 @@ describe('warnings and the `lossy` flag', () => {
     const plan = planReplaceAll(A.regs, board({
       notes: [{ id: 'n1', date: '2026-03-01', text: 'x'.repeat(200), categoryId: 'cat-1' }],
     }), A.ctx());
-    assert.equal(plan.lossy, true);
-    assert.equal(plan.warnings.some((w) => w.includes('not representable')), true);
-    assert.equal('text' in plan.ops.find((o) => o.e === 'note:n1').f, false);
+    // INVERTED (REG-20 / RECHECK-82-1). This used to assert that an over-long `text` was
+    // DROPPED — which makes the note unrenderable (ADR 001 §5 step 3) and removes it from the
+    // board entirely, on the one door (11.5 snapshot restore) where the board it replaces is
+    // gone afterwards. The migration door has truncated since ATT-82; both doors do now, through
+    // the same `truncateToFit`, so the same file cannot produce two different boards.
+    assert.equal(plan.lossy, true, 'still a LOSS — 120 characters really were cut');
+    assert.equal(plan.warnings.some((w) => w.includes('TRUNCATED, not dropped')), true,
+      plan.warnings.join(' | '));
+    const f = plan.ops.find((o) => o.e === 'note:n1').f;
+    assert.equal(f.text, 'x'.repeat(80), 'the note keeps 80 characters and stays on the board');
   });
 
   test('an unrepresentable GOVERNING value falls back to the privacy-safe default', () => {
@@ -790,7 +869,13 @@ describe('warnings and the `lossy` flag', () => {
     }), A.ctx());
     assert.equal(plan.ops.find((o) => o.e === 'note:n1').f.visibility, 'privat',
       'a visibility this build does not understand must never widen exposure');
-    assert.equal(plan.lossy, true);
+    // INVERTED (RECHECK-40-3). `visibility` is no longer a DEFAULT that an understood value can
+    // override — it is FORCED, so `'öffentlich'` and `'geteilt'` now take the same path and both
+    // land on `privat`. It is therefore no longer a LOSS: the value is not dropped, it is handed
+    // back on `plan.reshares` for the user to confirm. Nothing is lost and nothing is granted.
+    assert.equal(plan.lossy, false, 'refusing to widen exposure is not data loss');
+    assert.deepEqual(plan.reshares, [{ key: 'note:n1', visibility: 'öffentlich', coEdit: null }],
+      'the file said something and the user gets to see what');
   });
 
   test('a duplicate id takes the first and says so', () => {
@@ -800,10 +885,23 @@ describe('warnings and the `lossy` flag', () => {
     const plan = planReplaceAll(A.regs, board({
       notes: [note('n1', '2026-03-01', 'erste'), note('n1', '2026-03-02', 'zweite')],
     }), A.ctx());
-    assert.equal(plan.ops.filter((o) => o.e === 'note:n1').length, 1);
-    assert.equal(plan.ops.find((o) => o.e === 'note:n1').f.text, 'erste');
-    assert.equal(plan.warnings.some((w) => w.includes('more than once')), true);
-    assert.equal(plan.lossy, true);
+    // INVERTED (REG-22). v1 tolerates two entries sharing an id and RENDERS BOTH, so taking
+    // only the first deleted an entry the user could see. Both survive now, the second under a
+    // DERIVED key — the same `rekeyed` the migration door uses, so the same file gives the
+    // duplicate the same new id through either door and on either Mac (R12).
+    const notes = plan.ops.filter((o) => o.e.startsWith('note:'));
+    assert.equal(notes.length, 2, 'both entries survive');
+    assert.deepEqual(notes.map((o) => o.f.text), ['erste', 'zweite']);
+    assert.equal(notes[0].e, 'note:n1', 'the FIRST keeps the id — a categoryId still resolves');
+    assert.notEqual(notes[1].e, 'note:n1');
+    assert.equal(plan.warnings.some((w) => w.includes('RE-KEYED')), true, plan.warnings.join(' | '));
+    assert.equal(plan.lossy, false, 'nothing was lost, so nothing is reported as loss');
+
+    // Deterministic, and identical to the other door: the same board migrated gets the same id.
+    const again = planReplaceAll(A.regs, board({
+      notes: [note('n1', '2026-03-01', 'erste'), note('n1', '2026-03-02', 'zweite')],
+    }), A.ctx());
+    assert.equal(again.ops.filter((o) => o.e.startsWith('note:'))[1].e, notes[1].e);
   });
 
   test('a `notes` key that is not an array is a LOSSY warning, never a silent empty board', () => {
@@ -847,16 +945,30 @@ describe('warnings and the `lossy` flag', () => {
     assert.equal(A.state().notes[0].text, 'x');
   });
 
-  test('a v2 export keeps the visibility it was exported with', () => {
+  test('a v2 export does NOT get to keep the visibility it was exported with — it is offered back', () => {
     const A = device('a', MAC_A, SHORT_A);
     seed(A, board({ notes: [note('n1', '2026-03-01', 'x')] }));
     A.advance(60_000);
     const plan = planReplaceAll(A.regs, board({
       notes: [note('n1', '2026-03-01', 'x', { visibility: 'geteilt', coEdit: true })],
     }), A.ctx());
+    // INVERTED (RECHECK-40-3). A `board.json` is a file: it arrives by AirDrop, by mail, from a
+    // backup drive, and this module cannot tell the user's own export apart from a file somebody
+    // handed them. Honouring `visibility: geteilt` meant a file could publish private entries to
+    // the family — the exact thing ADR 004 exists to prevent — and the migration door has forced
+    // `privat` on the identical bytes all along.
+    //
+    // The cost, and why it is paid rather than absorbed: story 11.5 restores MY OWN snapshot, so
+    // silently resetting every sharing choice to private would be „etwas geht verloren" even
+    // though nothing is exposed. So it is not silent. The registers are written private and the
+    // request is handed back on `plan.reshares` for the store to confirm („Diese Datei möchte 1
+    // Eintrag wieder mit deiner Familie teilen."). Neither granting nor dropping happens behind
+    // the user's back.
     const op = plan.ops.find((o) => o.e === 'note:n1');
-    assert.equal(op.f.visibility, 'geteilt');
-    assert.equal(op.f.coEdit, true);
+    assert.equal(op.f.visibility, 'privat', 'no file grants exposure');
+    assert.equal(op.f.coEdit, false);
+    assert.deepEqual(plan.reshares, [{ key: 'note:n1', visibility: 'geteilt', coEdit: true }]);
+    assert.equal(plan.lossy, false);
   });
 });
 

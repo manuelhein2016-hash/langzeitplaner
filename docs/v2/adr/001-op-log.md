@@ -723,9 +723,23 @@ older than the horizon, which is compared against the checkpoint's retained stam
 loses by the identical rule. There is **no coordination requirement, no peer acknowledgement and
 no risk**. Property test P10 asserts exactly this, including out-of-order late ops.
 
-This alone bounds local storage to `O(entities × fields) + recent ops`. Policy: compact when the
-tail exceeds 5 000 ops, or on launch when it exceeds 2 MB, keeping a 30-day tail for
-debuggability.
+This alone bounds local storage to `O(entities × fields) + recent ops + O(dropped lines)`. Policy:
+compact when the tail exceeds 5 000 ops, or on launch when it exceeds 2 MB, keeping a 30-day tail
+for debuggability.
+
+> **The third term, added after the WP-1 round-2 hardening, and it is a real cost.** The bound used
+> to read `O(entities × fields) + recent ops`, and that was true only while a compaction was allowed
+> to decide state. It is not: once a body is folded into the checkpoint the value it displaced is
+> gone, so a device that compacted between two envelopes could not reproduce a device that had
+> not — the same op set converging to two different boards depending on when each side happened to
+> compact. Answering a *second, different* body at a re-used opId with "duplicate" is what caused
+> it, and telling the two cases apart after the line is gone needs something kept.
+>
+> So `checkpoint().bodies` retains a 96-bit fingerprint per opId whose line has been dropped:
+> ~40 bytes each, ≈400 KB/year at the sizing below, alongside the ≈400 KB/year of registers. It is
+> pruned only for entities collected by the §7.3 tombstone GC. Stated here rather than left to be
+> rediscovered: it is the price of "a compaction may not decide state", and it is the right price,
+> but the bound in this section was wrong without it.
 
 **Sizing, so nobody has to guess.** A heavy family — 8 members × 300 entries/year × ~4 ops each
 ≈ 10 000 ops/year. Plaintext ≈180 B, padded to 256 B (ADR 002 §5.3), envelope ≈380 B on the wire

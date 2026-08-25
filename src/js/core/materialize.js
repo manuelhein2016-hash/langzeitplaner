@@ -46,6 +46,7 @@
 import {
   parseEntityKey, familyKeyFor,
   projectable, sortNotes, sortBars, sortCategories, sortScratchpads,
+  pinnedMonthsRenderable,
 } from './entities.js';
 import { FIELDS, coEditableFields } from './ops.js';
 import { cmpWrites, promoteRegister, withdrawnByOther, createdAt, updatedAt, updatedBy } from './registers.js';
@@ -77,15 +78,20 @@ export { createdAt, updatedAt, updatedBy };
 // omits `ctx.defaultSettings` got `startMonth: null`; `layout.js:25` then parses `'null-01'` into
 // `{y: NaN, m: NaN}` and `holidays.js:51`'s `while (dow(year, 11, d) !== 3) d -= 1;` never
 // terminates. `buildSettings` now THROWS on exactly the combination that reaches that code —
-// `mode === 'pinned'` with an unparseable `startMonth` — so this constant cannot be used to
-// render a pinned board by accident. It is still exported: it is what a test diffs against, and
-// what a caller merges its own clock read into.
+// `mode === 'pinned'` with a `startMonth`/`pageYears` pair that selects a year `holidays.js`
+// cannot finish on (`pinnedMonthsRenderable`, entities.js §2b) — so this constant cannot be used
+// to render a pinned board by accident. It is still exported: it is what a test diffs against,
+// and what a caller merges its own clock read into.
+//
+// The guard is the HANG CONDITION and not a format rule (REG-9): `'2026-1'`, `'2026-13'`,
+// `'2026-00'` and `'26-01'` all open in v1 with twelve columns and all project here.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * v1 `defaultState().settings`, minus the two dynamic members.
- * NOT SAFE AS A `ctx.defaultSettings` for a pinned board — `startMonth` is `null` and
- * `buildSettings` refuses it. Pass v1's own `defaultState().settings` instead.
+ * NOT SAFE AS A `ctx.defaultSettings` for a pinned board — `startMonth` is `null`, which
+ * `layout.js:25` turns into a NaN year, and `buildSettings` refuses it. Pass v1's own
+ * `defaultState().settings` instead.
  * @type {Readonly<Object>}
  */
 export const DEFAULT_SETTINGS = Object.freeze({
@@ -510,10 +516,11 @@ function finish(candidate) {
  */
 function prefsFromRegisters(regs) {
   const out = {};
+  const cleared = [];
   const cells = cellsOf(regs, PREF_ENTITY);
   for (const field of [...cells.keys()].sort()) {
     const reg = cells.get(field);
-    if (!carries(reg)) continue;                       // a cleared pref falls back to the default
+    if (!carries(reg)) { cleared.push(field); continue; }   // → applyClearedPrefs, below
     const path = field.split('.');
     let node = out;
     let ok = true;
@@ -528,11 +535,80 @@ function prefsFromRegisters(regs) {
     // never seen an object there, and a thrown error would make one bad pref unbootable.
     if (ok) node[path[path.length - 1]] = reg.value;
   }
-  return out;
+  return { prefs: out, cleared };
 }
 
-/** `YYYY-MM`. The only shape `layout.js:25` can parse (`parseISO(\`${startMonth}-01\`)`). */
-const MONTH_KEY_RE = /^\d{4}-(?:0[1-9]|1[0-2])$/;
+/** `__proto__` & friends. `ops.js:431` refuses them as field names; this is the second lock. */
+const POISON_SEGMENT = (seg) => seg === '__proto__' || seg === 'constructor' || seg === 'prototype';
+
+/**
+ * REG-8 — WHAT A NULL PREF MEANS, FIELD BY FIELD, AND WHY IT IS NOT ALWAYS THE DEFAULT.
+ *
+ * A `null` pref register has always fallen back to `defaultState().settings`'s value here, and
+ * for almost every pref that is exactly what v1 does. It is NOT what v1 does for a pref v1 reads
+ * as a plain boolean, and that difference turned a layer ON:
+ *
+ *   board.json says `layers.feiertage: null`
+ *     v1   `store.js:76-80` is a SPREAD, so `null` survives `migrate()` unchanged, and
+ *          `layout.js:104`'s `s.layers.feiertage ? holidayIndex(…) : new Map()` reads it as
+ *          FALSE. Every v1 reader — layout, print.js:60, the settings toggle — sees the layer
+ *          OFF. That is what the user's file means.
+ *     v2   the register is null → skipped → `DEFAULT_SETTINGS.layers.feiertage` → `true`.
+ *          The layer the user switched off comes back ON on upgrade day, silently, with
+ *          `lossy: false`, and the next export writes `true` — so the file now says it too.
+ *
+ * Same shape for `menuBarIcon: null` (v1: `main.js:320`'s `!!s.menuBarIcon` → the icon is OFF;
+ * v2 was turning it back on). So: A CLEARED PREF THAT v1 READS AS A BOOLEAN PROJECTS AS `false`,
+ * not as the default. Everything else keeps the default, because that IS v1's answer:
+ *
+ *   rowHeight  `layout.js:92`   `s.rowHeight || 22`   → 22, the default
+ *   colWidth   `layout.js:268`  `s.colWidth || 118`   → 118, the default
+ *   paper      `print.js:25`    `s.paper || 'a4'`     → 'a4', the default
+ *   pageYears  `layout.js:26`   `s.pageYears || 0`    → 0, the default
+ *   language   `layout.js:89`   `=== 'en' ? 'en':'de'`→ 'de', the default
+ *   mode       `layout.js:24`   `=== 'pinned'`        → rolling, the default
+ *   bundesland `layout.js:105`  `holidayIndex(_, null)` treats null exactly as '' (`states ===
+ *                               null || (state !== '' && states.includes(state))` is the same
+ *                               predicate for both) and `!s.bundesland` is true for both → ''
+ *   lastCategoryId                                    → repaired by step 7 either way
+ *
+ * "READS IT AS A BOOLEAN" IS DECIDED BY THE DEFAULT'S TYPE, not by a list, so a pref added later
+ * is covered without anyone remembering this comment. Today that is the four `layers.*`,
+ * `launchAtLogin`, `menuBarIcon` and `seenFirstRun` — seven prefs, five of which already default
+ * to `false`. So the value this actually changes is `layers.feiertage` and `menuBarIcon`: the two
+ * whose default is `true`, which is precisely the pair that could flip something ON.
+ *
+ * A cleared pref with NO default (`hiddenMembers.<id>`, `lastSeenSeq.<space>`, a v2 extra) is
+ * left absent, exactly as before: there is no v1 reader and nothing to reproduce.
+ *
+ * ⚠ THE OTHER PATH THAT WRITES A NULL PREF. `replace.js:buildPrefOp` nulls a pref THIS DEVICE
+ * holds that an imported file does not carry, meaning "revert to the v1 default" (ATT-32/ATT-40,
+ * ADR 001 §8.5 step 5) — and a register cannot tell the two apart, because both are `null`. For
+ * every pref whose default is falsy the two readings coincide and there is nothing to choose;
+ * for `layers.feiertage` and `menuBarIcon` they differ, and this projection now answers with the
+ * FILE's reading. The permanent repair is not in this file: an import that means "revert to the
+ * default" should write the default VALUE rather than a clear, which is `replace.js`'s call. It
+ * is reported with this package.
+ *
+ * @param {Object} settings mutated in place — the freshly spread object, owned by buildSettings
+ * @param {string[]} cleared dotted register names whose value is null
+ */
+function applyClearedPrefs(settings, cleared) {
+  for (const field of cleared) {
+    const path = field.split('.');
+    if (path.some(POISON_SEGMENT)) continue;
+    let node = settings;
+    let ok = true;
+    for (let i = 0; i < path.length - 1; i++) {
+      const child = node[path[i]];
+      if (child === null || typeof child !== 'object') { ok = false; break; }
+      node = child;
+    }
+    if (!ok) continue;
+    const leaf = path[path.length - 1];
+    if (typeof node[leaf] === 'boolean') node[leaf] = false;
+  }
+}
 
 /**
  * Thrown when the projection cannot produce a settings object the v1 renderer can survive.
@@ -573,12 +649,15 @@ export class MaterializeError extends Error {
  */
 function buildSettings(regs, ctx, categories) {
   const d = ctx.defaultSettings || DEFAULT_SETTINGS;
-  const p = prefsFromRegisters(regs);
+  const { prefs: p, cleared } = prefsFromRegisters(regs);
   const settings = {
     ...d,
     ...p,
     layers: { ...(d.layers || {}), ...(p.layers || {}) },
   };
+  // REG-8 — a cleared pref takes v1's reading of `null`, which is the default for every pref v1
+  // does not read as a boolean and `false` for the ones it does. See applyClearedPrefs.
+  applyClearedPrefs(settings, cleared);
   // Step 7 for `lastCategoryId` — `store.js:86`, lifted into the projection like the entry-level
   // repair, so "delete the category that was last used" is idempotent and never rewrites the log.
   if (categories.length) {
@@ -590,7 +669,7 @@ function buildSettings(regs, ctx, categories) {
   // fresh object spread three lines up, so this mutates nothing the caller owns.
   if (!settings.bundesland) settings.layers.schulferien = false;
 
-  // ATT-97 — THE HANG, CLOSED STRUCTURALLY.
+  // ATT-97 / REG-9 — THE HANG, CLOSED ON THE CONDITION THAT CAUSES IT.
   //
   // `DEFAULT_SETTINGS.startMonth` is `null`, because v1 computes it from the wall clock and
   // `core/` may not read one. The ADR called that "repaired downstream by the caller"; nothing
@@ -598,14 +677,26 @@ function buildSettings(regs, ctx, categories) {
   // `layout.js:25` then does `parseISO('null-01')` → `{y: NaN, m: NaN}` → `holidays.js:51`'s
   // `while (dow(year, 11, d) !== 3) d -= 1;` never terminates. Not a wrong pixel: the app hangs.
   //
-  // Only `mode === 'pinned'` reads `startMonth` (`layout.js:24`), so that is exactly the
+  // THE FIRST FIX GUARDED THE WRONG THING (REG-9). It required `startMonth` to match
+  // `/^\d{4}-(0[1-9]|1[0-2])$/`, which is far stricter than what `layout.js` can render, so it
+  // converted four boards v1 opens with twelve correct columns into boards v2 cannot project at
+  // all — `'2026-1'` (v1: 2026-01), `'2026-13'` (2027-01), `'2026-00'` (2025-12), `'26-01'`
+  // (26-01). An upgrade that makes an openable board unopenable is a worse bug than the one it
+  // was closing. `pinnedMonthsRenderable` (entities.js §2b) replaces the regex with v1's OWN
+  // arithmetic — `visibleStart` + the twelve `addMonths` + `layout.js:103`'s year set — and asks
+  // only whether `holidays.js` can finish. It also covers `pageYears`, which the regex could not
+  // see at all and which hangs the same loop from a well-formed `startMonth`.
+  //
+  // Only `mode === 'pinned'` reads `startMonth` (`layout.js:24`), so that is still exactly the
   // condition that is refused — loudly, at the projection, with the ctx key that fixes it named
   // in the message. A `'rolling'` board is untouched, which is what keeps a headless fold (a
   // test, a checkpoint verifier, a sync worker) working with a bare ctx.
-  if (settings.mode === 'pinned' && !MONTH_KEY_RE.test(settings.startMonth)) {
+  if (settings.mode === 'pinned'
+      && !pinnedMonthsRenderable(settings.startMonth, settings.pageYears)) {
     throw new MaterializeError(
-      'materialize: settings.mode is "pinned" but settings.startMonth is '
-      + `${JSON.stringify(settings.startMonth)}, which layout.js:25 cannot parse. `
+      'materialize: settings.mode is "pinned" but settings.startMonth '
+      + `${JSON.stringify(settings.startMonth)} (pageYears ${JSON.stringify(settings.pageYears)}) `
+      + 'selects a year layout.js:25 turns into NaN — or one outside the range Date can express. '
       + 'Pass ctx.defaultSettings (v1 defaultState().settings) — core/ may not read a clock, '
       + 'so it cannot invent a start month, and rendering this board would hang the app '
       + '(holidays.js:51 loops forever on a NaN year).',

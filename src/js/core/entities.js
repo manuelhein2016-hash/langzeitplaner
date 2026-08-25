@@ -306,6 +306,18 @@ export const monthKeyOf = (s) => s.slice(0, 7);
 /** @param {number} y @param {number} m @returns {number} */
 export const daysInMonth = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
 
+/** `dates.js:dow` — 0 = Sonntag … 6 = Samstag. @param {number} y @param {number} m @param {number} d */
+export const dow = (y, m, d) => new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+
+/** `dates.js:monthOrdinal` — a month on an absolute scale. @param {number} y @param {number} m */
+export const monthOrdinal = (y, m) => y * 12 + (m - 1);
+
+/** `dates.js:addMonths`, verbatim. @param {number} y @param {number} m @param {number} n */
+export function addMonths(y, m, n) {
+  const o = monthOrdinal(y, m) + n;
+  return { y: Math.floor(o / 12), m: (o % 12) + 1 };
+}
+
 /** @param {number} y @returns {boolean} */
 export const isLeap = (y) => daysInMonth(y, 2) === 29;
 
@@ -358,6 +370,75 @@ export function reanchorRepeat(currentDate, targetDate) {
   const anchorY = currentDate.slice(0, 4);
   const tgt = parseISO(targetDate);
   return iso(Number(anchorY), tgt.m, tgt.d);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2b. THE ONE DATE SHAPE THAT HANGS THE RENDERER (ATT-97 / REG-9)
+//
+// `holidays.js:51` is `let d = 22; while (dow(year, 11, d) !== 3) d -= 1;`. It answers in at most
+// seven steps for every year `dow` can answer for, and for a NaN year — or a year below the
+// window `Date.UTC` can represent — it never answers at all: `dow` is NaN, `NaN !== 3` forever,
+// `d` runs to −∞ and the app freezes with no error and no frame.
+//
+// THAT — and nothing narrower — is the condition. The first fix pass guarded `startMonth` with
+// `/^\d{4}-(0[1-9]|1[0-2])$/`, which is far stricter than "layout.js can render it": v1 opens
+// `'2026-1'` (→ 2026-01), `'2026-13'` (→ 2027-01), `'2026-00'` (→ 2025-12) and `'26-01'`
+// (→ 26-01) with twelve columns and no hang, because `parseISO` is `split('-').map(Number)` and
+// `addMonths` normalises any month ordinal. Refusing those turned openable boards into an
+// unopenable app — a worse bug than the one being fixed. So the guard below reproduces v1's own
+// arithmetic and asks the only question that matters: is every year this board puts on screen a
+// year `holidays.js` can finish a Buß- und Bettag walk in?
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `layout.js:14` — a board is always exactly twelve columns wide (story 1.1). */
+export const MONTHS_VISIBLE = 12;
+
+/**
+ * Does `holidays.js:51` — `let d = 22; while (dow(year, 11, d) !== 3) d -= 1;` — terminate for
+ * this year, with a real date to show for it?
+ *
+ * `d` walks DOWN from 22. When `year-11-22` is a date `Date` can represent, a Wednesday is at
+ * most seven steps away and the answer is a real Buß- und Bettag. When it is not:
+ *   · NaN year, or a year below the representable window (< −271821): `dow` is NaN forever, `d`
+ *     runs to −∞ and the app freezes with no error and no frame. THAT is ATT-97.
+ *   · a year above the window (> 275759): the walk does come back down into range, but it costs
+ *     (year − 275760) × 365 iterations — 3.6e11 of them for `year` 1e9 — and what it finally
+ *     returns is a fabricated string like `"275800-11--14012"`, not a holiday. v1 "opens" such a
+ *     board only in the sense that it eventually paints corrupted holiday data.
+ * So the line is exactly this: every visible year must be one the date arithmetic can express.
+ * It is a property of the YEAR, with no threshold to tune, and it holds for every year a board a
+ * person could plausibly hand-edit will ever name.
+ *
+ * @param {number} year @returns {boolean}
+ */
+export const yearIsRenderable = (year) => Number.isFinite(dow(year, 11, 22));
+
+/**
+ * `layout.js:23-27` (`visibleStart`) and `layout.js:98-103` (the twelve `addMonths` and the year
+ * set they feed to `holidayIndex`), reproduced for a PINNED board — the only mode that reads
+ * `startMonth` — and answered with `yearIsRenderable`.
+ *
+ * Returns true for every value v1 can actually draw, `'2026-1'` and `'26-01'` included, and
+ * false only where rendering would hang. `pageYears` is part of the question because
+ * `visibleStart` multiplies it by twelve and adds it: a `pageYears` of 1e9 hangs the same loop
+ * from a perfectly well-formed `startMonth`.
+ *
+ * Never throws: it is a predicate over caller data (a register value, a `ctx.defaultSettings`
+ * key), and a hostile shape must be REFUSED, not propagated as an exception of another type.
+ *
+ * @param {unknown} startMonth @param {unknown} pageYears @returns {boolean}
+ */
+export function pinnedMonthsRenderable(startMonth, pageYears) {
+  try {
+    const { y, m } = parseISO(`${startMonth}-01`);        // layout.js:25, verbatim
+    const start = addMonths(y, m, (pageYears || 0) * 12); // layout.js:26, verbatim
+    const months = [];
+    for (let i = 0; i < MONTHS_VISIBLE; i++) months.push(addMonths(start.y, start.m, i)); // :99
+    const years = [...new Set(months.map((mo) => mo.y))]; // layout.js:103, verbatim
+    return years.every(yearIsRenderable);
+  } catch {
+    return false;                                         // a Symbol, a BigInt, a throwing toString
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

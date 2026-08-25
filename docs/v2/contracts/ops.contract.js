@@ -478,7 +478,29 @@ export function createUndoStacks(cfg) { throw new Error('not implemented'); }
  * @typedef {Object} OpLog
  * @property {(op:Op) => void} append
  * @property {(q:{space?:SpaceRef, sinceStamp?:Stamp}) => Iterable<Op>} ops
- * @property {() => {horizon:Stamp, regs:Object, cursors:Object, seqs:Object, at:number}} checkpoint
+ * [WP-1 round 2] `checkpoint()` returns
+ *   {horizon, regs, cursors, seqs, bodies, parked, spliced, at}
+ * `bodies`, `parked` and `spliced` are ADDITIVE and each one is required for a closed defect:
+ *   · `bodies`  — a 96-bit fingerprint per opId whose LINE has been folded away, so a second,
+ *                 DIFFERENT body at a re-used opId is spliced rather than answered "duplicate"
+ *                 after a compaction (A1). Costs ~40 bytes per dropped line; see the note on
+ *                 ADR 001 §7.2's storage bound below.
+ *   · `parked`  — parked lines WITH THEIR REASONS, so a relaunch can re-classify them instead of
+ *                 losing why they were parked (A2-a).
+ *   · `spliced` — splice evidence, which cannot be re-derived once the losing body is gone.
+ * `seqs` is now keyed by **opId**, not by stamp: two ops may legitimately share a stamp (§8.1
+ * stamps every migrated op `GENESIS(index)` with `ZERO_DEVICE_SHORT`, so two boards migrated into
+ * one personal space collide by construction), and a stamp-keyed index let one op's push seq
+ * satisfy the tombstone-GC guard for another. A pre-round-2, stamp-keyed file still loads: the two
+ * key shapes are distinguishable, so there is no version flag and no migration pass.
+ *
+ * [WP-1 round 2] `ops(q)` returns the APPLIED set (`{includeParked:true}` opts in), so
+ * `fold(log.ops())` is safe; `lines()` is the explicit "every line on disk" accessor, returning
+ * `{op, seq, park}`. `seqOfOp(id)` is the opId-keyed seq lookup, and `tombstoneCollectable`'s ctx
+ * gains an optional `seqOfOp`.
+ *
+ * @property {() => {horizon:Stamp, regs:Object, cursors:Object, seqs:Object, bodies:Object,
+ *                   parked:Object[], spliced:string[], at:number}} checkpoint
  *           [WP-1] `seqs` is additive and REQUIRED: condition 3 of §7.3 needs stamp→seq for a
  *           stamp that may live only in the checkpoint. Without persisting it, tombstone GC
  *           silently stops working after the first relaunch — it never throws, it just never
@@ -546,11 +568,26 @@ export function tombstoneCollectable(regs, e, ctx) { throw new Error('not implem
  *
  * @param {Object} v1board  parsed board.json (already through v1's own migrate())
  * @param {{ memberId: MemberId, deviceId: DeviceId, deviceShort: DeviceShort }} ctx
- * @returns {{ ops: Op[], warnings: string[], lossy: boolean }}
- *          [WP-1] `lossy` is additive: `f` is scalars-only, so a >80-char note text (v1's limits
- *          are DOM `maxLength` attributes and do not apply to an imported or hand-edited file) has
- *          no register and is DROPPED with a warning. The store must be able to refuse and tell
- *          the user rather than migrating quietly — the original file is about to be replaced.
+ * @returns {{ ops: Op[], warnings: string[], lossy: boolean, index: number, report: Object }}
+ *          [WP-1] `lossy` is additive: `f` is scalars-only, so a v1 board can carry more than a
+ *          register can hold (v1's limits are DOM `maxLength` attributes and do not apply to an
+ *          imported or hand-edited file). The store must be able to refuse and tell the user
+ *          rather than migrating quietly — the original file is about to be replaced.
+ *
+ *          [WP-1] A lossy migration does not merely SET the flag: it THROWS `MigrationLossyError`
+ *          (whole result on `.result`) unless the caller passed `ctx.onLossy` or
+ *          `ctx.acceptLossy`. A boolean nobody is obliged to read is not a safety mechanism.
+ *
+ *          [WP-1 round 2] Nothing that would remove an ENTRY FROM THE BOARD is dropped:
+ *          an over-long `str40`/`str80` is TRUNCATED (the cut characters are in `report.losses`),
+ *          and a TEXT field the file holds as a non-string is kept as the string v1 paints for it
+ *          (`n.text || '…'`, `popover.js:193`) — `reason: 'coerced'`, original value in the
+ *          report. A malformed DATE is still dropped, never repaired. A `null` is still a
+ *          first-class register value (ADR 001 §2) EXCEPT in a field renderability requires,
+ *          where it takes `''` — the value ATT-53 already gives an absent one.
+ *
+ *          [WP-1 round 2] An unknown TOP-LEVEL key is a reported loss, as it is on the import
+ *          door; the two doors share `V1_BOARD_KEYS`.
  */
 export function migrateV1(v1board, ctx) { throw new Error('not implemented'); }
 
@@ -559,8 +596,48 @@ export function migrateV1(v1board, ctx) { throw new Error('not implemented'); }
  * rule and is rejected (ADR 001 §8.5). Emits per-field restoring writes at FRESH stamps plus
  * `_alive:false` for entities absent from the import. Personal + local spaces ONLY; the publisher
  * re-derives family ops afterwards.
+ * [WP-1 round 2] THE TWO DOORS ARE ONE DOOR. In v1, `store.replaceAll(next)` IS
+ * `this.state = migrate(next)` (`store.js:194`) — the import path and the launch path are the
+ * same function — so every place where `replace.js` and `migrate1to2.js` answered the same bytes
+ * differently was a v2 regression with nothing in v1 behind it. `replace.js` therefore IMPORTS
+ * `truncateToFit`, `coerceToV1Text`, `rekeyed`, `defaultCategories` and `V1_BOARD_KEYS` rather
+ * than reimplementing them, and performs v1's two settings repairs (`store.js:86,90`). Property
+ * P13 asserts both doors produce the same board over 500 ugly seeds.
+ *
+ * [WP-1 round 2] `replaceAllOps` THROWS `ReplaceLossyError` (whole plan on `.plan`) on a lossy
+ * import unless `ctx.onLossy` / `ctx.acceptLossy` — the exact twin of `MigrationLossyError`, and
+ * more load-bearing here: 11.5 is snapshot restore, so the board being replaced is gone
+ * afterwards. Callers that want the diagnostics call `planReplaceAll`, which never throws.
+ *
+ * [WP-1 round 2] `IMPORT_DEFAULTS` are FORCED, not defaulted: an imported file cannot set
+ * `visibility`/`coEdit` (story 16.1, ADR 004). The exposure the file asked for is returned on
+ * `plan.reshares` for the user to confirm, so neither granting nor dropping is silent.
+ *
+ * [WP-1 round 2] `ctx.defaultSettings` (v1's `defaultState().settings`) SHOULD be supplied: it is
+ * what lets a pref the import omits be reset to its v1 DEFAULT rather than cleared. Clearing and
+ * defaulting are different boards for every pref whose default is `true` (REG-8).
+ *
  * @param {RegisterMap} regs @param {Object} incoming @param {{ mint:() => Stamp, me:MemberId,
- *          personalSpaceId:SpaceId|null, deviceId:DeviceId }} ctx
+ *          personalSpaceId:SpaceId|null, deviceId:DeviceId, defaultSettings?:Object,
+ *          acceptLossy?:boolean, onLossy?:(plan:Object)=>void }} ctx
  * @returns {Op[]}
+ * @throws {ReplaceLossyError} on a lossy import with neither `acceptLossy` nor `onLossy`
  */
 export function replaceAllOps(regs, incoming, ctx) { throw new Error('not implemented'); }
+
+/**
+ * [WP-1 round 2] The diagnostics-carrying form. Never throws for bad DATA; the store calls THIS
+ * one for an import or a restore, because two of the fields exist only here:
+ *
+ *   {ops, warnings, lossy, gid, undoable, label, written, removed, retractions, reshares}
+ *
+ *   · `retractions` — family keys (`fnote:<me>/…`) whose personal truth this transaction
+ *     tombstoned. `replace.js` may not write a family register (ADR 001 §8.5 step 5 — the scope
+ *     gate is what stops one person's restore from blanking the family board), so the PUBLISHER
+ *     must re-derive exposure for these afterwards or the family keeps seeing an entry its owner
+ *     deleted (RECHECK-40-4).
+ *   · `reshares` — exposure the FILE asked for and was refused; ask the user, then apply.
+ *
+ * @param {RegisterMap} regs @param {Object} incoming @param {Object} ctx @returns {Object} plan
+ */
+export function planReplaceAll(regs, incoming, ctx) { throw new Error('not implemented'); }

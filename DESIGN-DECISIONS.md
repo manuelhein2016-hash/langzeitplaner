@@ -309,3 +309,27 @@ both halves are stated honestly:
   others will reject — but not one they will accept. Enforcement is by convergence, not by
   gatekeeper. At family scale (2–8 people who know each other) that is the right trade, and
   it is the only one available under E2EE.
+
+> **⚠ OPEN FOR THE PO — raised by the WP-1 round-2 hardening, not decided here.**
+>
+> The last bullet is load-bearing: it is quoted whenever an attack finding is triaged, and it is
+> read as "anything a patched client can do is covered by D7". Two rounds of adversarial work have
+> now produced findings where it does **not** apply, and the wording does not say so.
+>
+> 1. **Stamp collisions are not "an op the others will reject".** Two ops can legitimately share a
+>    stamp: §8.1 stamps every migrated op `GENESIS(index)` with `ZERO_DEVICE_SHORT`, so a user who
+>    migrates two boards into one personal space produces collisions **by construction, with no
+>    adversary at all**. Such an op is well-formed, `validateOp` has no opinion about it, and every
+>    device folds it identically — it is an op the others *accept*. (The consequence, a
+>    stamp-keyed push-seq index letting one op's ack satisfy the tombstone-GC guard for another,
+>    is fixed; the wording question is not.)
+> 2. **The `ownership-authz-*` attack files carry twelve `SUCCEEDED` rows** — a self-declared
+>    membership, a forged genesis, a former admin unsharing forever — and each is an op **every
+>    honest device accepts and agrees with**. Their file headers already say they break D7's
+>    stated guarantee rather than falling under its accepted trade, and they are deferred to WP-9
+>    / WP-6 / WP-8 as work owed. That deferral is sound; what is not sound is D7 being cited as
+>    though it had already accepted them.
+>
+> Requested: either a carve-out ("D7 does not cover stamp uniqueness, or membership and admin
+> authority, which are WP-9's") or a re-wording of the last bullet. No code depends on the answer;
+> triage does.
