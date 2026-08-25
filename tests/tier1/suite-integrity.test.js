@@ -155,3 +155,46 @@ test('the tier-2 runner picks up every tier-2 file', () => {
   for (const f of tier2Files) assert.match(path.basename(f), /\.dom\.js$/);
   assert.ok(tier2Files.length >= 4, `only ${tier2Files.length} tier-2 files found`);
 });
+
+// ── added in WP-1 integration: the property suite is a THIRD place tests can be stranded ─────
+
+test('the property suite is wired into package.json and nothing in it is stranded', () => {
+  // The exact trap the "npm test actually runs every tier-1 file" test above already records:
+  // "area files were written to tests/ root while package.json globbed tests/tier1/*.test.js, so
+  // 333 tests existed and none of them gated anything." `tests/property/` (LZP-406, ADR 005 §1.7)
+  // is a new directory with its own runner, so it can fall into the same hole — and a property
+  // suite that silently does not run is worse than none, because the PLAN treats P1–P9 as a gate.
+  const dir = path.join(TESTS, 'property');
+  if (!fs.existsSync(dir)) return;                 // the directory is optional until WP-4 lands
+
+  const pkg = JSON.parse(fs.readFileSync(path.join(TESTS, '..', 'package.json'), 'utf8'));
+  assert.ok(pkg.scripts['test:property'], 'tests/property/ exists but npm has no way to run it');
+  assert.match(pkg.scripts['test:property'], /tests\/property\/\*\.test\.js/);
+  assert.match(pkg.scripts['test:all'], /test:property/,
+    'test:all does not run the property suite, so CI would not either');
+
+  // Every executable test file in there must match the glob the script uses. A file named
+  // `foo.spec.js` or `p1.js` would be invisible to the runner while looking like a test.
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js'));
+  assert.ok(files.length > 0, 'tests/property/ is empty');
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    const isTest = /^\s*import\s+test\s+from\s+'node:test'/m.test(src);
+    if (isTest) {
+      assert.match(f, /\.test\.js$/,
+        `${f} declares tests but does not match tests/property/*.test.js — it never runs`);
+    }
+  }
+});
+
+test('the property suite really does run at least 500 seeds per property', () => {
+  // PLAN.md WP-4 and LZP-406 both say "≥ 500 seeds". The number lives in one constant so it
+  // cannot be quietly lowered in one file; this asserts the constant itself, so turning the suite
+  // into a 5-seed smoke test is a visible change rather than an invisible one.
+  const dir = path.join(TESTS, 'property');
+  if (!fs.existsSync(dir)) return;
+  const harness = fs.readFileSync(path.join(dir, 'harness.js'), 'utf8');
+  const m = harness.match(/export const SEEDS\s*=\s*(\d+)/);
+  assert.ok(m, 'tests/property/harness.js no longer exports a SEEDS constant');
+  assert.ok(Number(m[1]) >= 500, `the property suite was reduced to ${m[1]} seeds (LZP-406 says ≥ 500)`);
+});

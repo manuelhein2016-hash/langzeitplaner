@@ -1,0 +1,793 @@
+// tests/helpers/gen.js — the deterministic op-stream generator every property test draws from.
+// LZP-406 · ADR 005 §1.7, §4.2 · ADR 001 §6.
+//
+// ZERO DEPENDENCIES. Two small PRNGs are written out below; there is no npm anything, and there
+// is no wall clock — every millisecond in every stamp this file produces is computed from the
+// seed (ADR 005 §5.5, "no test reads the wall clock").
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHY THIS FILE IS THE IMPORTANT ONE
+//
+// ADR 005 §4.2: "**The generator matters more than the assertions.**" A property suite over
+// uniformly random field writes proves that a map is a map. The convergence bugs this project
+// can actually ship are all SHAPED — a delete racing an edit, a downgrade racing a co-edit, a
+// category delete fanning out to fifteen notes while half the fan-out is still in flight. So
+// this generator emits *scenarios*, not noise, and §4.2's list is a checklist it satisfies
+// explicitly and asserts it satisfies (see `SCENARIOS` and `coverageOf`).
+//
+// Every op it produces is built through the REAL `makeOp`, so an op that `validateOp` would
+// refuse cannot enter a property test and quietly pass it. A generator that emits junk the fold
+// ignores is a generator that proves nothing.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+import { b64u, ub64, CROCKFORD_ALPHABET } from '../../src/js/core/b64.js';
+import { canonicalBytes } from '../../src/js/core/canon.js';
+import { fmt } from '../../src/js/core/stamp.js';
+import {
+  makeOp, validateOp, familyKey, memberKey, spaceKey, noteKey, barKey, catKey, padKey,
+} from '../../src/js/core/ops.js';
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 1. Randomness — seeded, portable, and reproducible from the printed seed alone
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * PCG-XSH-RR 32-bit, the generator this harness defaults to.
+ *
+ * Chosen over the mulberry32 already in the tier-1 files for one reason that matters at 500+
+ * seeds: PCG's output function decorrelates *streams from nearby seeds*. Property seeds are
+ * consecutive integers (0, 1, 2, …), and a weak generator hands consecutive seeds visibly
+ * correlated first outputs — so seed 0 and seed 1 explore nearly the same op stream and the
+ * suite's real coverage is a fraction of its seed count. `distinctFirstDraws` in the property
+ * suite asserts this is not happening.
+ *
+ * 64-bit LCG state via BigInt: correctness over speed, and the cost is invisible next to folding
+ * the op sets it generates.
+ *
+ * @param {number} seed @returns {() => number} uniform in [0, 1)
+ */
+export function pcg32(seed) {
+  const MUL = 6364136223846793005n;
+  const INC = 1442695040888963407n;
+  const MASK = (1n << 64n) - 1n;
+  let state = (BigInt(seed >>> 0) + INC) & MASK;
+  const step = () => { state = (state * MUL + INC) & MASK; };
+  step();
+  return function next() {
+    const old = state;
+    step();
+    const xorshifted = Number(((old >> 18n) ^ old) >> 27n & 0xffffffffn) >>> 0;
+    const rot = Number(old >> 59n);
+    const out = ((xorshifted >>> rot) | (xorshifted << ((-rot) & 31))) >>> 0;
+    return out / 4294967296;
+  };
+}
+
+/**
+ * xorshift32 — kept because it is the cheapest possible second opinion. A property that holds
+ * under PCG and fails under xorshift is a property that depends on the generator, which means
+ * the property is wrong. `P1` runs a slice of its seeds through this one for exactly that reason.
+ * @param {number} seed @returns {() => number}
+ */
+export function xorshift32(seed) {
+  let x = (seed >>> 0) || 0x9e3779b9;
+  return function next() {
+    x ^= x << 13; x >>>= 0;
+    x ^= x >>> 17;
+    x ^= x << 5; x >>>= 0;
+    return x / 4294967296;
+  };
+}
+
+/** @param {() => number} rnd @param {number} n @returns {number} 0 ≤ i < n */
+export const int = (rnd, n) => Math.floor(rnd() * n) % (n || 1);
+/** @param {() => number} rnd @param {any[]} xs */
+export const pick = (rnd, xs) => xs[int(rnd, xs.length)];
+/** @param {() => number} rnd @param {number} p */
+export const chance = (rnd, p) => rnd() < p;
+
+/** Fisher–Yates on a COPY. The input array is never mutated — property tests fold it again. */
+export function shuffle(rnd, xs) {
+  const a = xs.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = int(rnd, i + 1);
+    const t = a[i]; a[i] = a[j]; a[j] = t;
+  }
+  return a;
+}
+
+/**
+ * Re-deliver a random sub-multiset. This is what a real pull does after a cursor reset, and it is
+ * the whole of property P2.
+ * @param {() => number} rnd @param {any[]} xs @param {number} rate fraction re-delivered
+ */
+export function duplicateSome(rnd, xs, rate = 0.15) {
+  const out = xs.slice();
+  for (const x of xs) {
+    if (chance(rnd, rate)) out.splice(int(rnd, out.length + 1), 0, x);
+  }
+  return out;
+}
+
+/** Split into `n` disjoint batches — a partition, for P3 and P10. */
+export function partition(rnd, xs, n = 3) {
+  const buckets = Array.from({ length: n }, () => []);
+  for (const x of xs) buckets[int(rnd, n)].push(x);
+  return buckets;
+}
+
+/** Riffle two ordered streams, preserving each one's internal order — two peers gossiping. */
+export function interleave(rnd, a, b) {
+  const out = [];
+  let i = 0; let j = 0;
+  while (i < a.length || j < b.length) {
+    if (j >= b.length || (i < a.length && chance(rnd, 0.5))) out.push(a[i++]);
+    else out.push(b[j++]);
+  }
+  return out;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 2. The cast — members, devices, and the clock skew ADR 005 §4.2 demands
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+const pad22 = (s) => (s + 'x'.repeat(22)).slice(0, 22);
+
+/**
+ * A DeviceShort is 16 CROCKFORD base32 characters, and Crockford deliberately omits I, L, O and U
+ * (they are the digits 1, 1, 0 and V on a bad photocopy). A short built by upper-casing a device
+ * name therefore fails `fmt` on the very first stamp — which is how this helper found out.
+ * Non-alphabet characters are mapped rather than stripped, so two device names cannot collapse
+ * onto one short and silently share a stamp namespace.
+ */
+const CROCK = CROCKFORD_ALPHABET;
+export const short16 = (s) => {
+  let out = '';
+  for (const ch of s.toUpperCase()) out += CROCK.includes(ch) ? ch : CROCK[ch.charCodeAt(0) % 32];
+  return (out + '0'.repeat(16)).slice(0, 16);
+};
+
+export const ME = `mem_${pad22('ME')}`;
+export const MAMA = `mem_${pad22('MAMA')}`;
+export const PAPA = `mem_${pad22('PAPA')}`;
+export const MEMBERS = Object.freeze([ME, MAMA, PAPA]);
+
+export const PSP = `psp_${pad22('PERSONAL')}`;
+export const FSP = `fsp_${pad22('FAMILIE')}`;
+
+/** A fixed wall-clock millisecond. NEVER `Date.now()`. 2026-08-25T00:00:00Z-ish. */
+export const BASE_MS = 1787836800000;
+export const HOUR = 3600000;
+
+/**
+ * The device roster, and the skews are the point.
+ *
+ * ADR 005 §4.2 requires "stamps from devices with ±10-minute clock skew plus one at +23 h
+ * (parked-adjacent) and one at +25 h (parked)". The two extremes are not decoration:
+ *
+ *   +23 h  is INSIDE `MAX_FUTURE_DRIFT_MS`, so its ops are ADMITTED and dominate every register
+ *          they touch for the next day. If convergence depended on stamps being roughly ordered
+ *          by real time — it must not — this is the device that finds out.
+ *   +25 h  is OUTSIDE it, so `classifyOp` PARKS its ops. A parked op is retained, never dropped,
+ *          and must be able to enter the fold later (when the clock catches up) and produce the
+ *          same state as if it had arrived on time. That is what makes parking safe, and it is
+ *          only testable if something generates parked ops.
+ */
+export const DEVICES = Object.freeze([
+  { name: 'me-desktop', member: ME, skew: 0 },
+  { name: 'me-laptop', member: ME, skew: -600000 },        // −10 min
+  { name: 'mama-mac', member: MAMA, skew: +600000 },       // +10 min
+  { name: 'papa-mac', member: PAPA, skew: +23 * HOUR },    // parked-adjacent: ADMITTED
+  { name: 'papa-old', member: PAPA, skew: +25 * HOUR },    // beyond the drift clamp: PARKED
+].map((d) => Object.freeze({ ...d, id: `dev_${pad22(d.name.replace(/-/g, ''))}`, short: short16(d.name) })));
+
+const utf8 = (s) => new TextEncoder().encode(s);
+const utf8Decode = (b) => new TextDecoder().decode(b);
+
+/**
+ * The `dev.*` register value ADR 002 §2.3 fixes: `b64u(canonicalJSON(att)) + '.' + b64u(sig)`.
+ * The signature is a byte string the paired `attestVerify` below can check without WebCrypto —
+ * property tests are about the BINDING (does the payload name this member and this device?), not
+ * about the primitive, which is WP-6's and has its own P11.
+ */
+export function attestationBlob(member, dev) {
+  const att = {
+    memberId: member,
+    deviceId: dev.id,
+    deviceShort: dev.short,
+    sigPubRaw: b64u(utf8(`sigpub:${dev.id}`)),
+    kexPubRaw: b64u(utf8(`kexpub:${dev.id}`)),
+    createdAt: '2026-08-25',
+  };
+  return `${b64u(canonicalBytes(att))}.${b64u(utf8(`sig:${member}:${dev.id}`))}`;
+}
+
+/** Stands in for `crypto/identity.js:verifyAttestation`. Fails closed on anything malformed. */
+export function attestVerify(memberId, blob) {
+  if (typeof blob !== 'string') return false;
+  const dot = blob.indexOf('.');
+  if (dot < 0) return false;
+  try {
+    const att = JSON.parse(utf8Decode(ub64(blob.slice(0, dot))));
+    const sig = utf8Decode(ub64(blob.slice(dot + 1)));
+    return att.memberId === memberId && sig === `sig:${att.memberId}:${att.deviceId}`;
+  } catch {
+    return false;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 3. Op minting — deterministic ids, deterministic stamps, real validation
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+const UUIDS = Object.freeze(Array.from({ length: 12 }, (_, i) => {
+  const h = i.toString(16);
+  return `${h.repeat(8)}-${h.repeat(4)}-4${h.repeat(3)}-8${h.repeat(3)}-${h.repeat(12)}`;
+}));
+
+const CAT_UUIDS = UUIDS.slice(0, 4);
+const NOTE_UUIDS = UUIDS.slice(4, 9);
+const BAR_UUIDS = UUIDS.slice(9, 12);
+
+/** Dates chosen so the two calendar edge cases ADR 005 §4.2 names are always in range. */
+const DATES = Object.freeze([
+  '2024-02-29',   // the leap day — with repeatsYearly this is the Feb-29 series
+  '2026-02-28',   // …and where it re-anchors in a non-leap year
+  '2026-01-31',   // month-roll boundary
+  '2026-02-01',
+  '2026-03-31',
+  '2026-04-01',
+  '2026-12-24',
+  '2027-01-01',   // year roll
+]);
+
+const TEXTS = Object.freeze(['Zahnarzt', 'Elternabend', 'Yoga', 'Steuer', 'Bescherung', 'Impfung']);
+const LABELS = Object.freeze(['Projekt Nord', 'Sprint', 'Urlaub', 'Messe']);
+const NAMES = Object.freeze(['Familie', 'Arbeit', 'Sport', 'Schule', 'Termine']);
+const LEVELS = Object.freeze(['privat', 'belegt', 'geteilt']);
+
+/**
+ * One authoring context per device. `mint()` walks a per-device counter so every stamp is a pure
+ * function of (device, call index, the wall ms the scenario asked for) — no clock, no randomness
+ * that is not the seed.
+ */
+function author(dev, ctx) {
+  let n = 0;
+  let ms = BASE_MS;
+  const st = { ctr: 0, lastMs: -1 };
+  return {
+    dev,
+    member: dev.member,
+    /** Move this device's notion of "now" to `t` (before skew). */
+    at(t) { ms = t; return this; },
+    advance(d) { ms += d; return this; },
+    stamp() {
+      const at = ms + dev.skew;
+      if (at === st.lastMs) st.ctr += 1; else { st.ctr = 0; st.lastMs = at; }
+      return fmt(at, st.ctr, dev.short);
+    },
+    op(kind, entity, f, opts = {}) {
+      const c = {
+        act: opts.act ?? dev.member,
+        dev: dev.id,
+        gid: opts.gid ?? pad22(`g${ctx.gid++}`),
+        space: opts.space,
+        familySpaceId: FSP,
+        mint: () => this.stamp(),
+        newOpId: () => pad22(`${dev.short.slice(0, 3)}${++n}_${ctx.opn++}`),
+      };
+      return makeOp(c, kind, entity, f, opts);
+    },
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 4. The scenarios — ADR 005 §4.2's checklist, one emitter each
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Every scenario name §4.2 requires. `generate()` records which ones it actually emitted, and
+ * `tests/property/generator.test.js` asserts the union over a seed range is the WHOLE list — so
+ * "the generator quietly stopped producing deletes" is a test failure and not a silent loss of
+ * coverage six months from now.
+ */
+export const SCENARIOS = Object.freeze([
+  'concurrentSameField',
+  'deleteRacesEdit',
+  'resurrectAfterDelete',
+  'visibilityRacesCoEdit',
+  'categoryDeleteFanOut',
+  'concurrentCategoryRename',
+  'feb29Repeat',
+  'monthRoll',
+  'clockSkew',
+  'parkedFuture',
+]);
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 5. generate() — one seed → one realistic multi-device session
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * @typedef {Object} GeneratedWorld
+ * @property {Object[]} ops        the whole op SET, in one arbitrary but deterministic order
+ * @property {Object[]} setupOps   attestations, member records, genesis — the authz preamble
+ * @property {Object} authzCtx     ready for `foldAuthorized`
+ * @property {Object} mctx         ready for `materialize`
+ * @property {Set<string>} scenarios which of SCENARIOS this seed actually produced
+ * @property {number} seed
+ */
+
+/**
+ * Build one world.
+ *
+ * The op stream is deliberately NOT emitted in stamp order: devices author against their own
+ * skewed clocks and the caller receives them grouped by scenario. Property tests then shuffle,
+ * duplicate and partition it. If this function emitted a tidy chronological list, every shuffle
+ * would be testing the same easy case.
+ *
+ * @param {number} seed
+ * @param {{ rng?: (s:number) => (() => number), ops?: number, members?: string[] }} [opts]
+ * @returns {GeneratedWorld}
+ */
+export function generate(seed, opts = {}) {
+  const rnd = (opts.rng ?? pcg32)(seed);
+  const ctx = { gid: 0, opn: 0 };
+  const A = Object.fromEntries(DEVICES.map((d) => [d.name, author(d, ctx)]));
+  const devs = DEVICES.map((d) => A[d.name]);
+  const scenarios = new Set();
+  const setupOps = [];
+  const ops = [];
+
+  // ── the authz preamble ─────────────────────────────────────────────────────────────────────
+  // Without attestations and a genesis, `foldAuthorized` rejects every family op and the family
+  // half of the stream would be silently inert — a property suite that proves nothing about the
+  // thing it was written for.
+  let t = BASE_MS;
+  for (const m of MEMBERS) {
+    for (const d of DEVICES.filter((x) => x.member === m)) {
+      setupOps.push(A[d.name].at(t).op('member.set', memberKey(m),
+        { [`dev.${d.short}`]: attestationBlob(m, d) }, { space: FSP }));
+      t += 1000;
+    }
+    const own = DEVICES.find((x) => x.member === m);
+    setupOps.push(A[own.name].at(t).op('member.set', memberKey(m),
+      { displayName: m.slice(4, 8), colorRef: 'p1', _alive: true }, { space: FSP }));
+    t += 1000;
+  }
+  // ME is the genesis admin (`adminPrev: null`, `act === admin`, ADR 001 §4.1).
+  setupOps.push(A['me-desktop'].at(t).op('space.set', spaceKey(FSP),
+    { admin: ME, adminPrev: null, name: 'Familie' }, { space: FSP }));
+  t += 1000;
+
+  // ── the board ME starts from ───────────────────────────────────────────────────────────────
+  let clock = t;
+  const tick = (d = 250) => { clock += d; for (const a of devs) a.at(clock); return clock; };
+
+  const desktop = A['me-desktop'];
+  const laptop = A['me-laptop'];
+  const mama = A['mama-mac'];
+  const papa = A['papa-mac'];
+  const papaOld = A['papa-old'];
+
+  const liveCats = CAT_UUIDS.slice();
+  for (const c of CAT_UUIDS) {
+    tick();
+    ops.push(desktop.op('cat.set', catKey(c), {
+      name: NAMES[CAT_UUIDS.indexOf(c) % NAMES.length], paletteRef: `p${CAT_UUIDS.indexOf(c)}`,
+      visible: true, _alive: true,
+    }, { space: PSP, born: true }));
+  }
+
+  const noteState = new Map();
+  for (const u of NOTE_UUIDS) {
+    tick();
+    const date = pick(rnd, DATES);
+    const f = {
+      date,
+      text: pick(rnd, TEXTS),
+      categoryId: pick(rnd, liveCats),
+      repeatsYearly: date === '2024-02-29' ? true : chance(rnd, 0.3),
+      visibility: 'privat',
+      coEdit: false,
+      _alive: true,
+    };
+    if (date === '2024-02-29' && f.repeatsYearly) scenarios.add('feb29Repeat');
+    if (/-(01|03|05|07|08|10|12)-31$|-0[1-9]-01$/.test(date)) scenarios.add('monthRoll');
+    noteState.set(u, f);
+    ops.push(desktop.op('note.set', noteKey(u), f, { space: PSP, born: true }));
+  }
+
+  for (const u of BAR_UUIDS) {
+    tick();
+    ops.push(desktop.op('bar.set', barKey(u), {
+      startDate: '2026-02-10', endDate: '2026-04-20', label: pick(rnd, LABELS),
+      categoryId: pick(rnd, liveCats), visibility: 'privat', coEdit: false, _alive: true,
+    }, { space: PSP, born: true }));
+  }
+
+  tick();
+  ops.push(desktop.op('pad.set', padKey('2026-03'), { text: 'Milch\nBrot', _alive: true },
+    { space: PSP, born: true }));
+  tick();
+  ops.push(desktop.op('pref.set', 'pref:app', { mode: 'pinned', startMonth: '2026-01', pageYears: 0 },
+    { space: 'local' }));
+
+  // ── scenario 1: two of MY devices edit the SAME field at the same wall millisecond ──────────
+  // The stamps differ only in `deviceShort`, so the winner is decided by the last third of the
+  // stamp — the exact place a comparator bug hides.
+  {
+    const u = pick(rnd, NOTE_UUIDS);
+    const at = tick(1000);
+    desktop.at(at); laptop.at(at);
+    ops.push(desktop.op('note.set', noteKey(u), { text: 'vom Desktop' }, { space: PSP }));
+    ops.push(laptop.op('note.set', noteKey(u), { text: 'vom Laptop' }, { space: PSP }));
+    scenarios.add('concurrentSameField');
+    scenarios.add('clockSkew');
+  }
+
+  // ── scenario 2: a delete racing an edit, then scenario 3: the resurrect ────────────────────
+  // ADR 001 §6: a tombstone RETAINS its content registers, so the resurrect must bring back the
+  // NEWEST text — including one written after the delete. That is story 18.6 and it only works
+  // because there is no delete op at the merge layer.
+  {
+    const u = pick(rnd, NOTE_UUIDS);
+    const at = tick(1000);
+    desktop.at(at); laptop.at(at + 1);
+    ops.push(desktop.op('note.set', noteKey(u), { _alive: false }, { space: PSP }));
+    ops.push(laptop.op('note.set', noteKey(u), { text: 'nach dem Löschen' }, { space: PSP }));
+    scenarios.add('deleteRacesEdit');
+    if (chance(rnd, 0.7)) {
+      const back = tick(1000);
+      ops.push(desktop.at(back).op('note.set', noteKey(u), { _alive: true }, { space: PSP }));
+      scenarios.add('resurrectAfterDelete');
+    }
+  }
+
+  // ── scenario 4: a category delete with its fan-out, and half of it in flight ───────────────
+  // `legend.js:197` reassigns every entry of a deleted category in ONE group. A property test
+  // that delivers the tombstone but not the reassignments is the realistic partial-delivery
+  // case, and materialization step 7's reference repair is what has to catch the orphans.
+  if (liveCats.length > 1 && chance(rnd, 0.8)) {
+    const dead = liveCats.pop();
+    const into = liveCats[0];
+    const at = tick(1000);
+    const gid = pad22(`gfan${ctx.gid++}`);
+    ops.push(desktop.at(at).op('cat.set', catKey(dead), { _alive: false }, { space: PSP, gid }));
+    for (const [u, f] of noteState) {
+      if (f.categoryId !== dead) continue;
+      ops.push(desktop.op('note.set', noteKey(u), { categoryId: into }, { space: PSP, gid }));
+      f.categoryId = into;
+    }
+    scenarios.add('categoryDeleteFanOut');
+  }
+
+  // ── scenario 5: two of my devices rename the same category concurrently ────────────────────
+  {
+    const c = pick(rnd, liveCats);
+    const at = tick(1000);
+    desktop.at(at); laptop.at(at);
+    ops.push(desktop.op('cat.set', catKey(c), { name: 'Umbenannt A' }, { space: PSP }));
+    ops.push(laptop.op('cat.set', catKey(c), { name: 'Umbenannt B' }, { space: PSP }));
+    scenarios.add('concurrentCategoryRename');
+  }
+
+  // ── scenario 6: publish, co-edit, and a visibility flip racing the co-edit ─────────────────
+  // The one that produces the interesting register maps: `pub.level` and `pub.text` written by
+  // DIFFERENT members at nearly the same stamp, with the promotion asymmetry in the middle.
+  {
+    const u = pick(rnd, NOTE_UUIDS);
+    const fk = familyKey('fnote', ME, u);
+    const truth = noteState.get(u);
+    let at = tick(1000);
+    const gid = pad22(`gsh${ctx.gid++}`);
+    ops.push(desktop.at(at).op('note.set', noteKey(u),
+      { visibility: 'geteilt', coEdit: true }, { space: PSP, gid }));
+    ops.push(desktop.op('pub.set', fk, {
+      'pub.level': 'geteilt', 'pub.alive': true, 'pub.coEdit': true,
+      'pub.date': truth.date, 'pub.text': truth.text, 'pub.repeatsYearly': !!truth.repeatsYearly,
+    }, { space: FSP, gid, born: true }));
+
+    at = tick(1000);
+    // Mama co-edits (admissible: `pub.coEdit === true`), sometimes clearing the field outright —
+    // `null` is a first-class value and R9 says the clear must land.
+    mama.at(at);
+    ops.push(mama.op('pub.set', fk,
+      chance(rnd, 0.25) ? { 'pub.text': null } : { 'pub.text': 'von Mama' }, { space: FSP }));
+    // …while I downgrade to Belegt at very nearly the same moment. ADR 004 §5: the downgrade
+    // writes an EXPLICIT null, and the promotion asymmetry must keep MY note readable to ME.
+    desktop.at(at + (chance(rnd, 0.5) ? -1 : 1));
+    const gid2 = pad22(`gdn${ctx.gid++}`);
+    ops.push(desktop.op('note.set', noteKey(u), { visibility: 'belegt' }, { space: PSP, gid: gid2 }));
+    ops.push(desktop.op('pub.set', fk,
+      { 'pub.level': 'belegt', 'pub.text': null, 'pub.coEdit': null }, { space: FSP, gid: gid2 }));
+    scenarios.add('visibilityRacesCoEdit');
+  }
+
+  // ── scenario 7: the peers' OWN entries, including one from the +23 h device ────────────────
+  for (const [who, dev] of [[MAMA, mama], [PAPA, papa]]) {
+    const u = UUIDS[(int(rnd, 3) + 1) % UUIDS.length];
+    const fk = familyKey('fnote', who, u);
+    tick(1000);
+    ops.push(dev.op('pub.set', fk, {
+      'pub.level': pick(rnd, LEVELS.slice(1)),   // belegt | geteilt — privat would not be sent
+      'pub.alive': true,
+      'pub.date': pick(rnd, DATES),
+      'pub.text': pick(rnd, TEXTS),
+      'pub.coEdit': chance(rnd, 0.4),
+    }, { space: FSP, born: true }));
+  }
+  scenarios.add('clockSkew');
+
+  // ── scenario 8: the +25 h device — its ops MUST park, never be dropped ─────────────────────
+  {
+    const u = UUIDS[5];
+    tick(1000);
+    ops.push(papaOld.op('pub.set', familyKey('fnote', PAPA, u), {
+      'pub.level': 'geteilt', 'pub.alive': true, 'pub.date': '2027-01-01', 'pub.text': 'aus der Zukunft',
+    }, { space: FSP, born: true }));
+    scenarios.add('parkedFuture');
+  }
+
+  // ── a tail of ordinary edits, so the shaped scenarios are not the whole set ────────────────
+  const n = opts.ops ?? (12 + int(rnd, 18));
+  for (let i = 0; i < n; i++) {
+    tick(200 + int(rnd, 800));
+    const who = pick(rnd, [desktop, laptop, desktop]);   // my own devices dominate, as in life
+    const roll = rnd();
+    if (roll < 0.45) {
+      const u = pick(rnd, NOTE_UUIDS);
+      const patch = pick(rnd, [
+        { text: pick(rnd, TEXTS) },
+        { date: pick(rnd, DATES) },
+        { categoryId: pick(rnd, liveCats) },
+        { repeatsYearly: chance(rnd, 0.5) },
+      ]);
+      ops.push(who.op('note.set', noteKey(u), patch, { space: PSP }));
+    } else if (roll < 0.7) {
+      const u = pick(rnd, BAR_UUIDS);
+      const patch = pick(rnd, [
+        { label: pick(rnd, LABELS) },
+        { startDate: '2026-02-10', endDate: pick(rnd, ['2026-03-01', '2026-04-20', '2026-02-28']) },
+        { categoryId: pick(rnd, liveCats) },
+      ]);
+      ops.push(who.op('bar.set', barKey(u), patch, { space: PSP }));
+    } else if (roll < 0.82) {
+      ops.push(who.op('cat.set', catKey(pick(rnd, liveCats)),
+        pick(rnd, [{ visible: chance(rnd, 0.5) }, { name: pick(rnd, NAMES) }]), { space: PSP }));
+    } else if (roll < 0.9) {
+      ops.push(who.op('pad.set', padKey(pick(rnd, ['2026-01', '2026-03', '2026-12'])),
+        { text: `Notiz ${i}`, _alive: true }, { space: PSP, born: true }));
+    } else {
+      ops.push(who.op('pref.set', 'pref:app',
+        pick(rnd, [{ 'layers.feiertage': chance(rnd, 0.5) }, { pageYears: int(rnd, 3) }]),
+        { space: 'local' }));
+    }
+  }
+
+  const all = setupOps.concat(ops);
+  for (const op of all) {
+    const v = validateOp(op);
+    if (!v.ok) throw new Error(`gen.js emitted an invalid op (${op.k} ${op.e}): ${v.reason}`);
+  }
+
+  return {
+    seed,
+    ops: all,
+    setupOps,
+    contentOps: ops,
+    scenarios,
+    authzCtx: { me: ME, nowMs: clock, attestVerify },
+    mctx: {
+      me: ME,
+      familySpaceId: FSP,
+      members: new Map(MEMBERS.map((m) => [m, { displayName: m.slice(4, 8), colorRef: 'p1', initial: m[4] }])),
+      currentMembers: new Set(MEMBERS),
+      hiddenMembers: new Set(),
+      prefs: {},
+      lastSeenSeq: {},
+    },
+  };
+}
+
+/** The union of scenarios a seed range produces — the generator's own coverage report. */
+export function coverageOf(seeds, opts) {
+  const seen = new Set();
+  for (const s of seeds) for (const x of generate(s, opts).scenarios) seen.add(x);
+  return seen;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 6. Shrinking — delta debugging over the op array (ADR 005 §4.2, "about 30 lines, no library")
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Given a failing op set and a predicate that is TRUE when the bug still reproduces, remove ops
+ * one at a time until nothing more can go. Greedy and O(n²) in the worst case, which is fine:
+ * it runs only on a failure, and a 40-op counterexample nobody can read is a failure that gets
+ * ignored.
+ *
+ * The setup preamble is pinned: dropping an attestation makes every family op inadmissible and
+ * would "reproduce" the failure for entirely the wrong reason. Shrinking that lies is worse than
+ * not shrinking.
+ *
+ * @param {Object[]} ops @param {(ops:Object[]) => boolean} stillFails
+ * @param {{ keep?: (op:Object) => boolean }} [o]
+ * @returns {Object[]} a locally minimal failing set
+ */
+export function shrink(ops, stillFails, o = {}) {
+  const keep = o.keep ?? (() => false);
+  let best = ops.slice();
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (let i = 0; i < best.length; i++) {
+      if (keep(best[i])) continue;
+      const candidate = best.slice(0, i).concat(best.slice(i + 1));
+      if (candidate.length && stillFails(candidate)) { best = candidate; progress = true; break; }
+    }
+  }
+  return best;
+}
+
+/** A one-line, replayable description of a counterexample — printed on every property failure. */
+export function describe(ops) {
+  return ops.map((op) => `${op.ts} ${op.act.slice(4, 8)} ${op.k} ${op.e} ${JSON.stringify(op.f)}`)
+    .join('\n');
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 7. v1 board generation — the corpus P8 (migration losslessness, risk R12) draws from
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A deterministic v1 `board.json`, shaped like one a real user would have.
+ *
+ * Ids are chosen so that **uuid order is not insertion order** — `n-9`, `n-8`, `n-7`… — because
+ * that difference is the entire justification for putting the array index inside the GENESIS
+ * stamp (ADR 001 §8.1). A corpus whose ids happen to sort the way the array does would pass P8
+ * with a constant genesis and prove nothing about R12.
+ *
+ * @param {number} seed @param {{ defaults: Object }} o v1's `defaultState()`, injected so this
+ *        helper stays free of a `store.js` import and the caller keeps one source of truth
+ */
+export function generateBoard(seed, o) {
+  const rnd = pcg32(seed ^ 0x5eed);
+  const d = o.defaults;
+  const cats = d.categories.map((c, i) => ({ ...c, id: `cat-${i + 1}` }));
+  const live = cats.map((c) => c.id);
+
+  const nNotes = 3 + int(rnd, 8);
+  const notes = [];
+  for (let i = 0; i < nNotes; i++) {
+    const date = pick(rnd, DATES);
+    notes.push({
+      id: `n-${20 - i}`,                                  // descending: uuid order ≠ array order
+      date,
+      text: `${pick(rnd, TEXTS)} ${i}`,
+      categoryId: pick(rnd, live),
+      repeatsYearly: date === '2024-02-29' ? true : chance(rnd, 0.25),
+    });
+  }
+
+  const nBars = 1 + int(rnd, 5);
+  const bars = [];
+  for (let i = 0; i < nBars; i++) {
+    const start = pick(rnd, ['2026-02-10', '2026-01-31', '2026-03-31', '2026-06-01']);
+    bars.push({
+      id: `b-${20 - i}`,
+      startDate: start,
+      endDate: pick(rnd, ['2026-02-28', '2026-04-20', '2026-06-14', '2027-01-01']),
+      label: `${pick(rnd, LABELS)} ${i}`,
+      categoryId: pick(rnd, live),
+    });
+  }
+
+  const scratchpads = {};
+  for (const m of ['2026-01', '2026-03', '2026-12']) {
+    if (chance(rnd, 0.6)) scratchpads[m] = `Zettel ${m}\n${pick(rnd, TEXTS)}`;
+  }
+
+  return {
+    schemaVersion: 1,
+    notes,
+    bars,
+    categories: cats,
+    scratchpads,
+    settings: {
+      ...d.settings,
+      mode: 'pinned',
+      startMonth: '2026-01',
+      pageYears: int(rnd, 3),
+      lastCategoryId: live[0],
+      layers: { ...d.settings.layers, feiertage: chance(rnd, 0.5) },
+    },
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 8. Adversarial ops — the input P9 (structural ownership, risk R10) has to survive
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/** A fourth member who is NOT in the Kreis and is not attested. */
+export const EVE = `mem_${pad22('EVE')}`;
+const EVE_DEV = Object.freeze({
+  name: 'eve-mac', member: EVE, id: `dev_${pad22('DEVEVE')}`, short: short16('DEVEVE'), skew: 0,
+});
+
+/**
+ * Every ownership attack the register layer must be structurally immune to, as real ops.
+ *
+ * ADR 001 §0.4: "Ownership is structural, not a register. A family entity's key literally
+ * contains its owner." So there is no `owner` field to overwrite — and the attacks below are
+ * therefore not attempts to *change* a field but attempts to make the SYSTEM report a different
+ * owner: by writing to my entity from another member, by backdating to `ms = 0` so the write
+ * sorts below everything, by inventing an `owner` field, and by minting a key that names me as
+ * owner from someone else's device.
+ *
+ * `ms = 0` matters specifically: a stamp of zero is the smallest possible, so if ownership were
+ * ever decided by "the earliest write wins" rather than by the key, this is the op that would
+ * take it. It is generated on purpose and P9 asserts it changes nothing.
+ *
+ * @param {number} seed @param {GeneratedWorld} world
+ * @returns {{ ops: Object[], refused: Object[] }} `ops` are well-formed enough to reach the fold;
+ *          `refused` are the ones `makeOp` itself rejects — recorded so P9 can assert the
+ *          validator, not just the fold, is doing its share.
+ */
+export function ownershipAttacks(seed, world) {
+  const rnd = pcg32(seed ^ 0x0eeeee);
+  const ctx = { gid: 9000, opn: 900000 };
+  const eve = author(EVE_DEV, ctx);
+  const mamaDev = DEVICES.find((d) => d.member === MAMA);
+  const mama = author(mamaDev, ctx);
+  const ops = [];
+  const refused = [];
+
+  const victims = world.contentOps
+    .filter((o) => o.k === 'note.set' || o.k === 'bar.set')
+    .map((o) => o.e);
+  const victim = victims.length ? pick(rnd, victims) : 'note:' + UUIDS[0];
+  const uuid = victim.slice(victim.indexOf(':') + 1);
+
+  // 1. EVE writes directly to MY personal entity, backdated to the beginning of time.
+  eve.at(0);
+  ops.push(eve.op('note.set', noteKey(uuid), { text: 'von Eve' }, { space: PSP }));
+
+  // 2. …and at ms = 0 into the family space, on MY family key.
+  eve.at(0);
+  ops.push(eve.op('pub.set', familyKey('fnote', ME, uuid),
+    { 'pub.text': 'von Eve', 'pub.level': 'geteilt' }, { space: FSP }));
+
+  // 3. MAMA — a real, attested member — does the same. Attested is not the same as authorized.
+  mama.at(0);
+  ops.push(mama.op('pub.set', familyKey('fnote', ME, uuid),
+    { 'pub.level': 'geteilt', 'pub.coEdit': true }, { space: FSP }));
+
+  // 4. EVE self-attests and self-declares membership, then forges a genesis naming herself admin
+  //    at ms = 0 — the full assembled attack, not a single probe.
+  eve.at(0);
+  ops.push(eve.op('member.set', memberKey(EVE),
+    { [`dev.${EVE_DEV.short}`]: attestationBlob(EVE, EVE_DEV) }, { space: FSP }));
+  ops.push(eve.op('member.set', memberKey(EVE), { displayName: 'Eve', _alive: true }, { space: FSP }));
+  ops.push(eve.op('space.set', spaceKey(FSP), { admin: EVE, adminPrev: null }, { space: FSP }));
+
+  // 5. EVE mints a family key that reuses one of MY uuids under HER OWN member id. Legal to
+  //    build — the key names her, so it is her entity — and it must not collide with mine.
+  eve.at(0);
+  ops.push(eve.op('pub.set', familyKey('fnote', EVE, uuid),
+    { 'pub.level': 'geteilt', 'pub.alive': true, 'pub.date': '2026-12-24', 'pub.text': 'Evas Eintrag' },
+    { space: FSP, born: true }));
+
+  // 6. The ops that must not even be constructible. `owner` and `seriesId` do not exist in
+  //    `FIELDS` (ADR 001 §12.6), so `makeOp` refuses them — and P9 asserts that it does, because
+  //    "the field does not exist" is only a defence while nobody adds it.
+  for (const bad of [{ owner: EVE }, { ownerId: EVE }, { seriesId: uuid }]) {
+    try {
+      eve.at(0);
+      refused.push(eve.op('note.set', noteKey(uuid), bad, { space: PSP }));
+    } catch (e) {
+      refused.push({ patch: bad, error: e.message });
+    }
+  }
+  return { ops, refused };
+}

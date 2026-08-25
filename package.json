@@ -7,8 +7,9 @@
   "scripts": {
     "test": "node --test \"tests/tier1/*.test.js\"",
     "test:watch": "node --test --watch \"tests/tier1/*.test.js\"",
+    "test:property": "node --test \"tests/property/*.test.js\"",
     "test:dom": "./tests/run-dom-tests.sh",
-    "test:all": "npm test && npm run test:dom",
+    "test:all": "npm test && npm run test:property && npm run test:dom",
     "dev": "node dev-server.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

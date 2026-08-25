@@ -8,6 +8,15 @@
 // Downstream implementers: satisfy these signatures exactly. If a signature is
 // wrong, change it HERE first (with a note in the ADR), not silently at the
 // call site.
+//
+// ─── WP-1 RECONCILIATION (2026-08-25) ────────────────────────────────────────
+// The six machinery packages were built in parallel against this file and were
+// forbidden from editing each other's sources; each reported the changes it
+// needed instead. Those changes are now applied here, so this file describes
+// what src/js/core/ ACTUALLY implements. Every one is ADDITIVE — no existing
+// name, signature or meaning changed — and each is marked `[WP-1]` with the
+// reason it could not be avoided. Where a change reflects a genuine gap or
+// contradiction in ADR 001/004 rather than an oversight here, it says so.
 
 /* eslint-disable no-unused-vars */
 
@@ -110,7 +119,17 @@ export function deviceShortOf(rawSigPub) { throw new Error('not implemented'); }
  * @property {string[]} [values]     for t === 'enum'
  * @property {boolean}  [coEdit]     may a co-editor write it? (ADR 001 §4.3 stage 3b)
  * @property {boolean}  [gov]        governing field — owner/admin only (stage 3a)
- * @property {boolean}  [writeOnce]
+ * @property {boolean}  [writeOnce]  [WP-1] ADMISSIBILITY, not merge. Enforced on the way IN, by
+ *                                   `authz.js`, never by the join (which is unconditional
+ *                                   max-by-`≺`, ADR 001 §12.2). `member['dev.*']` IS enforced —
+ *                                   only the minimal write under `≺` is admissible, because a
+ *                                   second one is the ADR 002 §2.3 key-injection hole. `_born` is
+ *                                   deliberately NOT enforced: it rides inside ops that also carry
+ *                                   content, so rejecting the op would drop a legitimate write and
+ *                                   stripping the field would make ops non-atomic. Its exposure is
+ *                                   nil — `createdAt` is min over ALL an entity's stamps, so it
+ *                                   does not move when the `_born` register does. ADR 001 §3.1
+ *                                   should say the flag is an admissibility attribute.
  * @property {boolean}  [geteiltOnly]
  * @type {Object<EntityKind, Object<string, FieldSpec>>}
  */
@@ -137,7 +156,19 @@ export function validateOp(op) { throw new Error('not implemented'); }
 // 3. Registers and the merge  (ADR 001 §6)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** @typedef {{ value: any, stamp: Stamp, author: MemberId }} Register */
+/**
+ * @typedef {Object} Register
+ * @property {any}      value
+ * @property {Stamp}    stamp
+ * @property {MemberId} author  the acting MEMBER (`op.act`), never the device — so a retraction
+ *                              published from my laptop is not promoted on my desktop either.
+ * @property {OpId}     op      [WP-1] the winning write's opId, RETAINED. ADR 001 §6 step 1 makes
+ *                              the opId the final tiebreak, but once a checkpoint has collapsed
+ *                              ops into registers there is no op left to read it from, so
+ *                              `mergeMaps` could not break a stamp tie and two devices could
+ *                              disagree. `deserializeRegisters` accepts its absence (as '') so an
+ *                              older or hand-built checkpoint still orders totally.
+ */
 /** @typedef {Map<EntityKey, Map<string, Register>>} RegisterMap */
 
 /** @returns {RegisterMap} */
@@ -146,6 +177,16 @@ export function emptyRegisters() { throw new Error('not implemented'); }
 /**
  * Fold ONE op. Idempotent, commutative, associative. Assumes `op` was already admitted
  * by foldAuthorized — applyOp itself performs no authorization.
+ *
+ * [WP-1] The join is UNCONDITIONAL max-by-`≺` on every field, `_born` included (ADR 001 §12.2,
+ * "no exceptions, no per-kind special cases"). `FieldSpec.writeOnce` is therefore an
+ * ADMISSIBILITY attribute and NOT a merge attribute — "the register refuses a second write" is
+ * not commutative, so it cannot live here. See the note on `FieldSpec.writeOnce`.
+ *
+ * [WP-1] "changed" means the register was REPLACED, not that its value differs. A newer write
+ * carrying an identical value returns `true`, because `updatedAt`/`updatedBy` — story 17.6's
+ * „geändert So." line — move with it.
+ *
  * @param {RegisterMap} regs @param {Op} op
  * @returns {boolean} true iff any register actually changed (drives re-render and 17.5)
  */
@@ -156,6 +197,42 @@ export function foldAll(regs, ops) { throw new Error('not implemented'); }
 
 /** Field-wise max — used to fold a checkpoint with a tail. @returns {RegisterMap} */
 export function mergeMaps(a, b) { throw new Error('not implemented'); }
+
+/**
+ * [WP-1] THE PROMOTION, and the one place ADR 001 §5 step 2 / ADR 004 §4.1 needed a qualifier.
+ *
+ *     effective[f] = maxByStamp( truth[f], pub[f] where pub[f].author !== me )
+ *
+ * lives in `registers.js` and NOWHERE ELSE — `materialize.js` calls it rather than carrying a
+ * second copy, because ADR 004 §4.1 calls it "the correctness heart" and only one copy can be the
+ * one P7c is pointed at.
+ *
+ * @param {Register|undefined} truthReg @param {Register|undefined} pubReg @param {MemberId} me
+ * @returns {Register|undefined}
+ */
+export function promoteRegister(truthReg, pubReg, me) { throw new Error('not implemented'); }
+
+/**
+ * [WP-1] THE QUALIFIER §5 step 2 is missing, and it resolves a real contradiction between two
+ * normative passages.
+ *
+ * ADR 004 §5's transition table says an ADMIN UNSHARE (story 18.3) is
+ * `pub.set{'pub.level':'privat', …all content → null}` and that "the owner's truth is untouched".
+ * INV-R3 restates it: "a redaction can never make my own board lie to me". But that op carries
+ * `author === admin ≠ me` at a newer stamp, so the formula above promotes its `pub.text: null`
+ * onto my truth and materialization step 1 skips `null` — MY OWN NOTE GOES BLANK. Both passages
+ * cannot hold.
+ *
+ * Resolved WITHOUT a blanket "never promote null", which would break story 18.2 / risk R9 (a
+ * co-editor clearing my text with an explicit `null` must reach my truth). `pub.level` is
+ * `gov: true`, so stage 3a admits it from the owner or the admin alone and a co-editor physically
+ * cannot write it; an unshare is one op, so its level and its content nulls share a stamp and an
+ * author. Therefore a `pub.level` of `'privat'` (or `pub.alive: false`) under an author who is
+ * not me IS an admin unshare, and in that state promotion is skipped entirely.
+ *
+ * @param {Map<string, Register>|undefined} famCells @param {MemberId} me @returns {boolean}
+ */
+export function withdrawnByOther(famCells, me) { throw new Error('not implemented'); }
 
 /** @param {RegisterMap} regs @returns {Object} JSON-safe; retains value+stamp+author */
 export function serializeRegisters(regs) { throw new Error('not implemented'); }
@@ -174,6 +251,18 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * @property {Set<MemberId>} currentMembers
  * @property {Op[]} rejected                    dropped: failed admissibility
  * @property {Op[]} parked                      retained: future stamp / unknown epoch / unknown kind
+ *
+ * [WP-1] additive, all derived from the same immutable set so they stay functions of it:
+ * @property {Op[]} admitted
+ * @property {(id:OpId) => {stage:string, reason:string}|null} rejectionOf
+ * @property {(id:OpId) => string|null} parkReasonOf
+ * @property {(sid:SpaceId) => MemberId|null} adminOfSpace
+ * @property {(sid:SpaceId, at:Stamp) => MemberId|null} adminAtInSpace
+ * @property {(sid:SpaceId) => Op[]} adminChainOf
+ * @property {Set<DeviceShort>} attestedDevices
+ * @property {(devId:DeviceId) => MemberId|null} memberOfDevice
+ * @property {OpId[]} splicedIds                two different bodies under one opId; one is
+ *                                              admitted by canonical form so every device agrees
  */
 
 /**
@@ -186,11 +275,47 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * NOTE: it never consults a server role column. The admin is resolved from
  * `space.set{admin, adminPrev}` ops alone (ADR 001 §4.1).
  *
+ * [WP-1] `attestVerify` ALONE IS NOT SUFFICIENT and this is an ADR gap, not an oversight here.
+ * ADR 001 §1.2 defines `deviceShort` as a hash of the SIGNING KEY, while §4.0 and ADR 002 §5.2
+ * write `deviceShort(op.dev)` — and `op.dev` has no derivational relationship to that key. The
+ * only consistent reading is a LOOKUP: the `member:<M> → dev.<short>` attestation registers are
+ * the table, and resolving `op.dev` means DECODING the attestation blob to read `att.deviceId`.
+ * The fold therefore needs the payload, not just a boolean. §4.0 and ADR 002 §5.2 should say
+ * "lookup"; a cleaner contract would be `attestOpen(memberId, blob) => DeviceAttestation|null`.
+ * `attestVerify` FAILS CLOSED when absent: no family op is admitted.
+ *
+ * [WP-1] Stage 0 would otherwise regress infinitely — the ops that CREATE attestations are
+ * themselves ops. A `member.set` patch consisting SOLELY of `dev.*` registers is
+ * self-authorizing on `op.act === memberId` (§4.0's own second sentence) and gated only by
+ * `attestVerify`. A patch mixing `dev.*` with ordinary member fields has two predicates and no
+ * single answer, so it is refused whole. §4.0 needs one sentence saying this.
+ *
  * @param {Iterable<Op>} ops
- * @param {{ me: MemberId, nowMs: number, attestVerify: (memberId:MemberId, blob:string) => boolean }} ctx
+ * @param {{ me: MemberId, nowMs: number,
+ *           attestVerify: (memberId:MemberId, blob:string) => boolean,
+ *           myDevices?: Set<DeviceId>,   [WP-1] §4.0's "local device set"; absent, the check
+ *                                        degrades to `act === me`, all §4.4 claims for the
+ *                                        personal space
+ *           genesisOpId?: OpId,          [WP-1] OPTIONAL PIN closing a real hole §4.1 leaves
+ *                                        open: genesis is admissible from anyone with
+ *                                        `act === admin`, chains compare by length then greater
+ *                                        `ts`, and the common chain has length 1 — so any member
+ *                                        who knows the `fsp_` id can mint a rival genesis with a
+ *                                        greater ts and become admin, which grants the unshare
+ *                                        power over everyone's entries. Default behaviour is the
+ *                                        pure ADR rule. §4.1 NEEDS A BINDING between a space id
+ *                                        and its genesis link before family sharing ships.
+ *           haveEpochKey?: (op:Op) => boolean }} ctx
  * @returns {AuthzResult}
  */
 export function foldAuthorized(ops, ctx) { throw new Error('not implemented'); }
+
+/**
+ * [WP-1] A total, order-independent projection of an AuthzResult — the whole of property P5 as
+ * one `deepEqual` rather than a checklist.
+ * @param {AuthzResult} result @returns {Object}
+ */
+export function snapshot(result) { throw new Error('not implemented'); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. Materialization  (ADR 001 §5)
@@ -206,6 +331,20 @@ export function foldAuthorized(ops, ctx) { throw new Error('not implemented'); }
  * @property {Object} prefs                     the local `pref:app` registers
  * @property {Object<SpaceRef, string>} lastSeenSeq  device-local (17.5)
  * @property {(e:EntityKey) => Visibility|null} lastAckedPubLevel   16.6, see ADR 004 §6
+ *
+ * [WP-1] ALL OPTIONAL, and all defaulting to "no badge motion, no dot". ADR 004 §6's badge needs
+ * `outboxHasPendingPubOp(entity)` and §7.2's „neu" dot needs `maxSeq(entity)`; registers carry no
+ * seq (ADR 001 §7.2) and this ctx carried neither hook, so neither was computable as specified.
+ * The two SUPPRESSION clauses (a downgrade never dots, a deletion never dots) are enforced INSIDE
+ * materialize rather than delegated, so a caller with a sloppy seq source still cannot make a
+ * retraction blink.
+ * @property {(e:EntityKey) => boolean} [pendingPub]
+ * @property {(e:EntityKey) => string|null} [seqOf]
+ * @property {(e:EntityKey) => boolean} [isNew]
+ * @property {(e:EntityKey) => boolean} [levelDecreased]
+ * @property {Object} [defaultSettings]  [WP-1] §5 step 6 says settings merge over
+ *                    `defaultState().settings`, but `core/` may not import `store.js` (ADR 005
+ *                    §2). `store.js` passes its own, so the app keeps ONE source of truth.
  */
 
 /**
@@ -297,7 +436,24 @@ export function derivePublication(localOps, regs, ctx) { throw new Error('not im
  * @property {() => boolean} canRedo
  * @property {() => void} clear  import / snapshot restore (story 5.4)
  */
-/** @param {{ limitGroups:number, mint:() => Stamp }} cfg @returns {UndoStacks} */
+/**
+ * [WP-1] `undo()` is typed `() => Op[]`, and an Op needs `id`, `act`, `dev`, `space` and `gid` —
+ * none of which the declared cfg carried, so as written this could not build an op. The two
+ * original members keep their names and meanings exactly; the rest are additive.
+ *
+ * [WP-1] `push`/`undo`/`redo` take an OPTIONAL trailing `state` (the current materialized state),
+ * because the shadow assertion needs it at transfer time — v1's `undo()` clones the CURRENT
+ * content onto its redo stack (`store.js:177`). The zero-argument call still matches `() => Op[]`.
+ *
+ * [WP-1] `undo()` returns `[]`, never `false`; `store.undo()` maps empty → `false` for the v1
+ * surface in store.contract.js. Do not treat `[]` as truthy.
+ *
+ * @param {{ limitGroups:number, mint:() => Stamp,
+ *           act:MemberId, dev:DeviceId,
+ *           newOpId?:() => OpId, newGid?:() => GroupId,
+ *           space?:SpaceRef, familySpaceId?:SpaceId|null, shadow?:boolean }} cfg
+ * @returns {UndoStacks}
+ */
 export function createUndoStacks(cfg) { throw new Error('not implemented'); }
 
 /**
@@ -322,15 +478,36 @@ export function createUndoStacks(cfg) { throw new Error('not implemented'); }
  * @typedef {Object} OpLog
  * @property {(op:Op) => void} append
  * @property {(q:{space?:SpaceRef, sinceStamp?:Stamp}) => Iterable<Op>} ops
- * @property {() => {horizon:Stamp, regs:Object, cursors:Object, at:number}} checkpoint
+ * @property {() => {horizon:Stamp, regs:Object, cursors:Object, seqs:Object, at:number}} checkpoint
+ *           [WP-1] `seqs` is additive and REQUIRED: condition 3 of §7.3 needs stamp→seq for a
+ *           stamp that may live only in the checkpoint. Without persisting it, tombstone GC
+ *           silently stops working after the first relaunch — it never throws, it just never
+ *           collects. Pruned on compaction to the stamps surviving registers hold, so the bound
+ *           stays O(entities × fields).
  * @property {() => number} compact          fold ops <= horizon into the checkpoint; → dropped count
  * @property {(o:{checkpoint:Object, tail:Op[]}) => RegisterMap} load
- * @property {(op:Op, reason:'future'|'epoch'|'unknownKind'|'unknownField') => void} park
+ * @property {(op:Op, reason:'future'|'epoch'|'unknownKind'|'unknownField'|'version'|'unknownSpace') => void} park
+ *           [WP-1] `version` and `unknownSpace` were missing from this enum; ADR 001 §10 mandates
+ *           both and `ops.js:PARK_REASONS` carries all six.
  * @property {(pred:(op:Op)=>boolean) => Op[]} unpark
- * @property {(e:EntityKey, space:SpaceRef) => number} forget
- *           the ADR 004 §5.3 forget pass: purge this entity's lines for that space
+ * @property {(e:EntityKey, space:SpaceRef, opts?:{fields?:string[], values?:'all'}) => number} forget
+ *           the ADR 004 §5.3 forget pass: purge this entity's lines for that space.
+ *           [WP-1] `opts` is additive because §5.3 has TWO triggers and one default cannot serve
+ *           both. A full retraction must blank the content registers the retraction did not
+ *           itself null; a Geteilt→BELEGT downgrade must NOT, or it erases a Belegt entry the
+ *           family is meant to keep seeing. Default = all non-governing; `{fields}` narrows;
+ *           `{values:'all'}` is the hard purge. Governing registers keep their values by default
+ *           because `pub.alive:false` / `pub.level` ARE the retraction.
  */
-/** @param {{ storage: any }} ports @returns {OpLog} */
+/**
+ * [WP-1] `now` is REQUIRED, not optional: `core/` may not read a clock (ADR 005 §2) and the 24 h
+ * future-park must not be silently unarmed by an omitted argument. `createOpLog({storage})` alone
+ * throws. `storage` is accepted and retained but NEVER CALLED — using it would make the log
+ * async, and an `await` between `txn()` and `emit()` breaks bar-label editing (ADR 001 §0.9). It
+ * is exposed as `log.ports.storage` so `platform/oplogfile.js` can wire in without a signature
+ * change, and there is a test that the port is never touched.
+ * @param {{ storage?: any, now: () => number, registers?: any }} ports @returns {OpLog}
+ */
 export function createOpLog(ports) { throw new Error('not implemented'); }
 
 /**
@@ -356,9 +533,24 @@ export function tombstoneCollectable(regs, e, ctx) { throw new Error('not implem
  *   materialize(foldAuthorized(migrateV1(b).ops)) deep-equals stripV2Fields(v1migrate(b))
  * including array order after the deterministic sort.
  *
+ * [WP-1] `opId` is CSPRNG by §1.2, and byte-identical double migration is impossible with random
+ * ids, so migration DERIVES it:
+ *   b64u(SHA-256("lzp.migrate.op" ‖ label ‖ act ‖ index ‖ kind ‖ entityKey)[0..16])
+ * Deliberately excluding `op.dev` (or two Macs diverge) and deliberately excluding `f` — the opId
+ * is SERVER-VISIBLE, and hashing the payload into it would hand the relay a confirmation oracle
+ * for guessed note text, defeating the point of encrypting the body.
+ *
+ * [WP-1] §8.2 says "one `gid` labelled 'migrate:v1'", but `gid` is a 22-char GroupId and
+ * `validateOp` rejects anything else. 'migrate:v1' is the LABEL; the gid is derived from it and
+ * constant. §8.2 should say "labelled".
+ *
  * @param {Object} v1board  parsed board.json (already through v1's own migrate())
  * @param {{ memberId: MemberId, deviceId: DeviceId, deviceShort: DeviceShort }} ctx
- * @returns {{ ops: Op[], warnings: string[] }}
+ * @returns {{ ops: Op[], warnings: string[], lossy: boolean }}
+ *          [WP-1] `lossy` is additive: `f` is scalars-only, so a >80-char note text (v1's limits
+ *          are DOM `maxLength` attributes and do not apply to an imported or hand-edited file) has
+ *          no register and is DROPPED with a warning. The store must be able to refuse and tell
+ *          the user rather than migrating quietly — the original file is about to be replaced.
  */
 export function migrateV1(v1board, ctx) { throw new Error('not implemented'); }
 

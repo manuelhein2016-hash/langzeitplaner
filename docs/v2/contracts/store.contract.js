@@ -63,6 +63,12 @@
  *  1. `fn` returning `false` declines: no ops, no undo entry, no emit, no persist
  *     (store.js:150, verbatim — it already prevents 16 no-op mutations).
  *  2. Emitting zero ops is the same as declining.
+ *     [WP-1] ⚠ THIS CONTRADICTS A V1 CHARACTERIZATION TEST AND SOMEONE MUST DECIDE IT IN WRITING
+ *     BEFORE WP-3. `tests/tier1/store-persistence.test.js:501` ("only a strict `false` declines —
+ *     other falsy returns still record a step") pins the OPPOSITE for v1: `store.mutate('x', () => 0)`
+ *     records an undo step for a mutation that changed nothing. `undo.js` implements THIS rule and
+ *     pins the divergence with its own test. WP-2's regression suite will hit it at that exact
+ *     line; it is a deliberate change, not a regression.
  *  3. txn → apply → materialize → emit() is STRICTLY SYNCHRONOUS. interact.js:317 queries the
  *     DOM for the freshly created bar's label element immediately after this returns; an `await`
  *     anywhere before emit() silently breaks bar-label editing. Sealing, the outbox and all

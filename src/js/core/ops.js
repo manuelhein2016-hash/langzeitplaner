@@ -1,0 +1,931 @@
+// src/js/core/ops.js — the op vocabulary: FIELDS, the op kinds, the constructors, validation.
+// ADR 001 §2, §3, §7.4, §10 · ADR 004 §2.1, §3, §5 · ops.contract.js §2.
+//
+// DOM-free, I/O-free, dependency-free (ADR 005 §2).
+//
+// ONE OP PRIMITIVE: A STAMPED FIELD ASSIGNMENT (ADR 001 §0.1).
+// Every mutation in the product — note create, bar resize, category delete-with-reassign,
+// scratchpad typing, visibility change, member rename, admin transfer — compiles to a set of
+// `(entityKey, field, value, stamp, author)` writes. There is no move op, no create op and no
+// delete op at the merge layer. `MUTATIONS` below is therefore not a second vocabulary: it is a
+// lookup table from "the thing the user did" to "the field assignments that are". Every one of
+// its entries names the v1 `store.mutate()` call site it replaces, so the retrofit (WP-3) is a
+// mechanical rewrite and a missed site is a test failure rather than a silent data-loss bug.
+//
+// EVERY OP CARRIES AN ABSOLUTE VALUE. NOT ONE RELATIVE OP EXISTS IN THIS SYSTEM (ADR 001 §3.2,
+// §6). `move-bar` emits the new start and end dates, never a delta: a delta applied twice moves
+// twice, and duplicate delivery is not an error condition here, it is Tuesday. This is one of the
+// exactly two ways a design like this normally breaks.
+//
+// UNKNOWN IS PARKED, NEVER DROPPED (ADR 001 §7.4, §10, §12.5).
+// An op whose KIND we do not know, whose FIELD NAME we do not know, or whose SPACE we do not
+// recognise is retained and re-evaluated after an app update. An op whose field VALUE fails its
+// declared type is a protocol violation and is rejected. The difference is load-bearing: parking
+// is what makes an old client in a family with a newer sibling degrade to "does not show the new
+// thing" instead of "loses the new thing". `classifyOp()` is the explicit API for that decision;
+// nothing downstream should be re-deriving it from `validateOp`'s booleans.
+
+import { isStamp, isTooFarFuture } from './stamp.js';
+import {
+  parseEntityKey, kindOfEntity, ownerOfEntity, familyKey, familyKeyFor,
+  localKey, noteKey, barKey, catKey, padKey, memberKey, spaceKey, PREF_KEY,
+  isMemberId, isDeviceId, isSpaceId, isOpId, isDateString, VISIBILITY_LEVELS,
+  reanchorRepeat, addDays,
+} from './entities.js';
+
+// Re-exported so a call site can take the whole op vocabulary from one module, which is how
+// ops.contract.js §2 groups them (it lists FIELDS, kindOfEntity, ownerOfEntity and familyKey
+// side by side). They are IMPLEMENTED in entities.js because that is where ADR 005 §1.1 puts
+// "entityKey helpers"; these are aliases, not copies.
+export {
+  parseEntityKey, kindOfEntity, ownerOfEntity, familyKey, familyKeyFor,
+  localKey, noteKey, barKey, catKey, padKey, memberKey, spaceKey, PREF_KEY,
+  reanchorRepeat, addDays,
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. FIELDS — the one field table (ADR 001 §3.1)
+//
+// "Every downstream agent reads it; nobody invents a field."
+//
+//   t            the declared type; `validateOp` enforces it
+//   coEdit       may a co-editor write it? (ADR 001 §4.3 stage 3b)
+//   gov          a GOVERNING field — owner or admin only (stage 3a). A co-editor can never grant
+//                themselves co-edit, because `pub.coEdit` is folded in the earlier stage.
+//   writeOnce    an ADMISSIBILITY attribute, NOT a merge attribute. The join in
+//                `registers.js` is unconditional max-by-`≺` on every field with no
+//                exceptions (ADR 001 §12.2), because "the register refuses a second write"
+//                is not commutative: with writes W₁ ≺ W₂ to one cell, apply-then-refuse
+//                yields W₁ in one delivery order and W₂ in the other. Enforcement therefore
+//                lives on the way IN. `authz.js` enforces it for `member['dev.*']`, where a
+//                second write is the ADR 002 §2.3 key-injection hole: only the minimal write
+//                under `≺` is admissible and later claims are rejected `WRITE_ONCE`.
+//                `_born` is deliberately NOT enforced — it rides inside ops that also carry
+//                content (`bar.set{_born, startDate, …}`), so rejecting the op would drop a
+//                legitimate write and stripping the field would make ops non-atomic. The
+//                exposure is nil: `createdAt` is min over ALL of an entity's register stamps
+//                (ADR 001 §1.4), so it does not move when the `_born` register does, and only
+//                the owner can write it at all. Reported as an ADR §3.1 wording gap.
+//   geteiltOnly  content that exists at Geteilt and at no lower level (ADR 004 §2.1)
+//   local        `local` space only: persisted, never undoable, NEVER SYNCED (ADR 001 §3.3)
+//
+// TWO ENTRIES ARE NOT IN ADR 001 §3.1'S CODE BLOCK AND ARE HERE ANYWAY — see the notes at
+// `fnote._born` / `fbar._born`. They are required by ADR 001 §4.3 stage 3a and ADR 004 §5, which
+// both name `_born` as a family register. The omission from §3.1 is reported as an ADR gap.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const V = VISIBILITY_LEVELS;
+
+/** @type {Object<string, Object<string, Object>>} */
+export const FIELDS = deepFreeze({
+  note: {                                       // personal space — THE TRUTH
+    date: { t: 'date', coEdit: true },
+    text: { t: 'str80', coEdit: true },
+    categoryId: { t: 'id', coEdit: false },     // A3: never published, at any level
+    repeatsYearly: { t: 'bool', coEdit: true },
+    visibility: { t: 'enum', values: V, gov: true },
+    coEdit: { t: 'bool', gov: true },
+    _alive: { t: 'bool', gov: true },
+    _born: { t: 'stamp', writeOnce: true },
+  },
+  bar: {
+    startDate: { t: 'date', coEdit: true },
+    endDate: { t: 'date', coEdit: true },
+    label: { t: 'str40', coEdit: true },
+    categoryId: { t: 'id', coEdit: false },
+    visibility: { t: 'enum', values: V, gov: true },
+    coEdit: { t: 'bool', gov: true },
+    _alive: { t: 'bool', gov: true },
+    _born: { t: 'stamp', writeOnce: true },
+  },
+  cat: {                                        // personal only — A3
+    name: { t: 'str' },
+    nameEn: { t: 'str' },
+    paletteRef: { t: 'str' },
+    visible: { t: 'bool' },
+    defaultVisibility: { t: 'enum', values: V }, // 16.4; read ONCE at create, never a live rule
+    _alive: { t: 'bool' },
+    _born: { t: 'stamp', writeOnce: true },
+  },
+  pad: {
+    text: { t: 'str' },
+    _alive: { t: 'bool' },
+    _born: { t: 'stamp', writeOnce: true },
+  },
+  // Free-form, local, never undoable, never synced. Nested v1 settings (`layers.*`) and the v2
+  // additions (`lastSeenSeq.*`, `hiddenMembers.*`) are carried as DOTTED KEYS with scalar values,
+  // because `f` is scalars-only by contract (ADR 001 §2) and `pref` may not be the one exception.
+  pref: { '*': { t: 'any', local: true } },
+
+  fnote: {                                      // family space — THE PUBLICATION
+    'pub.level': { t: 'enum', values: V, gov: true },
+    'pub.coEdit': { t: 'bool', gov: true },
+    'pub.alive': { t: 'bool', gov: true },
+    'pub.date': { t: 'date', coEdit: true },
+    'pub.text': { t: 'str80', coEdit: true, geteiltOnly: true },
+    'pub.repeatsYearly': { t: 'bool', coEdit: true },
+    // NOT in ADR 001 §3.1's block, but required by ADR 001 §4.3 stage 3a ("governing fields
+    // pub.level, pub.coEdit, pub.alive, _born") and by ADR 004 §5's transition table, which
+    // writes `'_born': …` in the Privat→Belegt and Privat→Geteilt rows. Without it the first
+    // publication of an entry could not carry its create stamp and `createdAt` (ADR 001 §1.4)
+    // would be undefined for every foreign entry.
+    _born: { t: 'stamp', writeOnce: true, gov: true },
+  },
+  fbar: {
+    'pub.level': { t: 'enum', values: V, gov: true },
+    'pub.coEdit': { t: 'bool', gov: true },
+    'pub.alive': { t: 'bool', gov: true },
+    'pub.startDate': { t: 'date', coEdit: true },
+    'pub.endDate': { t: 'date', coEdit: true },
+    'pub.label': { t: 'str40', coEdit: true, geteiltOnly: true },
+    _born: { t: 'stamp', writeOnce: true, gov: true },   // see fnote._born
+  },
+  member: {
+    displayName: { t: 'str' },
+    colorRef: { t: 'str' },
+    _alive: { t: 'bool' },
+    _born: { t: 'stamp', writeOnce: true },
+    // One register per device: key `dev.<deviceShort>`, value = b64url device attestation.
+    // Write-once and admissible only from `op.act === memberId` — a member adds devices to their
+    // own record and to nobody else's (ADR 001 §4.0).
+    'dev.*': { t: 'str', writeOnce: true },
+  },
+  space: {
+    name: { t: 'str' },
+    admin: { t: 'id' },        // memberId — the admin chain, ADR 001 §4.1
+    adminPrev: { t: 'opId' },  // the opId this transfer supersedes; null at genesis
+    epoch: { t: 'int' },       // informational mirror of the key epoch (ADR 002 §4)
+  },
+});
+
+/**
+ * THERE IS NO `owner` FIELD, NO `seriesId` FIELD AND NO `board.reset` OP (ADR 001 §12.6).
+ * `seriesId` is defined as an ALIAS OF THE ENTITY UUID: a repeating note IS its series (9.3), so
+ * there is exactly one `visibility` register per series and A4 ("series-level visibility, no
+ * per-year exceptions") is free. Downstream agents must not invent occurrence entities.
+ * @param {string} entityKey @returns {string|null}
+ */
+export const seriesIdOf = (entityKey) => {
+  const p = parseEntityKey(entityKey);
+  return p && (p.kind === 'note' || p.kind === 'fnote') ? p.id : null;
+};
+
+/** `dev.<deviceShort16>` — the only wildcard register name on `member`. */
+const DEV_REGISTER_RE = /^dev\.[0123456789ABCDEFGHJKMNPQRSTVWXYZ]{16}$/;
+
+/**
+ * The field spec for `(entityKind, fieldName)`, honouring the two wildcard rows (`pref['*']` and
+ * `member['dev.*']`). Returns null when the field is UNKNOWN — which is a PARK, not a reject.
+ * @param {string} entityKind @param {string} fieldName @returns {Object|null}
+ */
+export function fieldSpec(entityKind, fieldName) {
+  const table = FIELDS[entityKind];
+  if (!table || typeof fieldName !== 'string') return null;
+  if (Object.prototype.hasOwnProperty.call(table, fieldName)) return table[fieldName];
+  if (Object.prototype.hasOwnProperty.call(table, '*')) return table['*'];
+  if (entityKind === 'member' && DEV_REGISTER_RE.test(fieldName)) return table['dev.*'];
+  return null;
+}
+
+/** Field names declared for a kind, wildcards excluded. @param {string} kind @returns {string[]} */
+export const fieldsOf = (kind) =>
+  Object.keys(FIELDS[kind] || {}).filter((f) => f !== '*' && f !== 'dev.*');
+
+/** Fields a co-editor may write (ADR 001 §4.3 stage 3b). @param {string} kind @returns {string[]} */
+export const coEditableFields = (kind) => fieldsOf(kind).filter((f) => FIELDS[kind][f].coEdit === true);
+
+/** Governing fields — owner or admin only (stage 3a). @param {string} kind @returns {string[]} */
+export const governingFields = (kind) => fieldsOf(kind).filter((f) => FIELDS[kind][f].gov === true);
+
+/**
+ * Truth registers vs `pub.*` registers — the split ADR 004 is built on.
+ * A truth field lives in the personal space and never leaves the device; a `pub.*` field lives in
+ * the family space and is what the projection built. `categoryId` has NO `pub.` counterpart at
+ * any level, and that absence — not a filter someone can forget to apply — is how A3 is enforced.
+ * @param {string} field @returns {boolean}
+ */
+export const isPubField = (field) => typeof field === 'string' && field.startsWith('pub.');
+/** @param {string} field @returns {boolean} */
+export const isReservedField = (field) => typeof field === 'string' && field.startsWith('_');
+/** A v1 product field, carried verbatim (ADR 001 §2.1). @param {string} field @returns {boolean} */
+export const isTruthField = (field) => !isPubField(field) && !isReservedField(field);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. Op kinds (ADR 001 §3) — eight, and that is the whole vocabulary
+//
+// ADR 004 §7: "There is no op kind for a read receipt, a presence signal, or a visibility-change
+// notification. The eight kinds in ADR 001 §3 are the whole vocabulary" — Principle 9 is enforced
+// by the ABSENCE of a mechanism, not by a policy. Adding a ninth kind needs a new ADR.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** @type {Object<string, {entities: string[], space: 'local'|'personal'|'family'}>} */
+export const OP_KINDS = deepFreeze({
+  'note.set': { entities: ['note'], space: 'personal' },
+  'bar.set': { entities: ['bar'], space: 'personal' },
+  'cat.set': { entities: ['cat'], space: 'personal' },
+  'pad.set': { entities: ['pad'], space: 'personal' },
+  'pref.set': { entities: ['pref'], space: 'local' },
+  'pub.set': { entities: ['fnote', 'fbar'], space: 'family' },
+  'member.set': { entities: ['member'], space: 'family' },
+  'space.set': { entities: ['space'], space: 'family' },
+});
+
+/** @type {string[]} */
+export const OP_KIND_NAMES = Object.freeze(Object.keys(OP_KINDS));
+
+/** The op kind that writes a given entity kind. @param {string} entityKind @returns {string|null} */
+export function opKindForEntity(entityKind) {
+  for (const k of OP_KIND_NAMES) if (OP_KINDS[k].entities.includes(entityKind)) return k;
+  return null;
+}
+
+/** The current op format version. Changes only when the op format changes, and it is SEPARATE
+ *  from the HTTP protocol version (ADR 003 §4). An op with another `v` is PARKED. */
+export const OP_VERSION = 1;
+
+/** The solo-mode placeholder personal space (ADR 001 §8.2): in solo mode there is no personal
+ *  space and no key, so migration ops are written with this and rewritten to the real `psp_…`
+ *  the first time a personal space is created. */
+export const PERSONAL_PLACEHOLDER = 'personal';
+/** The device-local space. Never synced, never encrypted, never undoable. */
+export const LOCAL_SPACE = 'local';
+
+/**
+ * 'local' | 'personal' | 'psp_…' | 'fsp_…', or null when the string is not a space reference we
+ * recognise. An unrecognised space is PARKED (ADR 001 §10), never rejected.
+ * @param {unknown} space @returns {'local'|'personal'|'family'|null}
+ */
+export function spaceClassOf(space) {
+  if (space === LOCAL_SPACE) return 'local';
+  if (space === PERSONAL_PLACEHOLDER) return 'personal';
+  if (typeof space !== 'string') return null;
+  if (isSpaceId(space)) return space.startsWith('fsp_') ? 'family' : 'personal';
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. Validation and the PARK / REJECT triage (ADR 001 §7.4, §10)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Why an op was parked. Parked ops are RETAINED and re-evaluated; they are never dropped. */
+export const PARK_REASONS = Object.freeze({
+  /** `Op.v` is not a version this build understands. Re-evaluated after an app update. */
+  VERSION: 'version',
+  /** `op.k` is not one of the eight kinds. Re-evaluated after an app update. */
+  UNKNOWN_KIND: 'unknownKind',
+  /** A name in `f` is not in `FIELDS[kind]`. Parked WITH ITS OP — not dropped, not applied. */
+  UNKNOWN_FIELD: 'unknownField',
+  /** `op.space` is a form this build does not recognise. */
+  UNKNOWN_SPACE: 'unknownSpace',
+  /** Stamp more than MAX_FUTURE_DRIFT_MS ahead. Re-evaluated when local wall time passes it. */
+  FUTURE: 'future',
+  /** Sealed under an epoch key we do not hold yet. Re-evaluated on the next key fetch. */
+  EPOCH: 'epoch',
+});
+
+const PARKABLE = new Set(Object.values(PARK_REASONS));
+/** @param {string} reason @returns {boolean} */
+export const isParkReason = (reason) => PARKABLE.has(reason);
+
+/**
+ * A JSON scalar or null — the ONLY thing an `f` value may be (ADR 001 §2), and therefore the
+ * only thing a register may hold. Exported so `registers.js` shares this definition rather
+ * than carrying a copy: two answers to "is this storable?" is one answer too many.
+ */
+export function isScalar(v) {
+  if (v === null) return true;
+  const t = typeof v;
+  if (t === 'string' || t === 'boolean') return true;
+  return t === 'number' && Number.isFinite(v);
+}
+
+/**
+ * `YYYY-MM-DD`, checked for FORMAT and not for calendar validity — deliberately.
+ * ADR 001 §12.8 says dates are `YYYY-MM-DD` everywhere and says nothing about a real day, and
+ * `interact.js:330-334` (a repeat dragged onto 29 February from a non-leap anchor year) legally
+ * produces `"2025-02-29"` in v1 today. See `entities.js:reanchorRepeat` for the full note. A
+ * stricter check here would make an existing, working v1 gesture emit an invalid op.
+ */
+const checkDate = (v) => (isDateString(v) ? null : 'not a YYYY-MM-DD date');
+
+/** @returns {string|null} an error message, or null when the value satisfies the spec */
+function checkType(spec, value) {
+  if (value === null) return null;             // `null` clears a register; always legal
+  switch (spec.t) {
+    case 'date': return checkDate(value);
+    case 'str': return typeof value === 'string' ? null : 'not a string';
+    case 'str40':
+      if (typeof value !== 'string') return 'not a string';
+      return value.length <= 40 ? null : `longer than 40 characters (${value.length})`;
+    case 'str80':
+      if (typeof value !== 'string') return 'not a string';
+      return value.length <= 80 ? null : `longer than 80 characters (${value.length})`;
+    case 'id': return typeof value === 'string' && value.length > 0 ? null : 'not an id';
+    case 'bool': return typeof value === 'boolean' ? null : 'not a boolean';
+    case 'int': return Number.isSafeInteger(value) ? null : 'not a safe integer';
+    case 'enum':
+      return spec.values.includes(value) ? null : `not one of ${spec.values.join('|')}`;
+    case 'stamp': return isStamp(value) ? null : 'not a 37-char stamp';
+    case 'opId': return isOpId(value) ? null : 'not a 22-char opId';
+    case 'any': return isScalar(value) ? null : 'not a JSON scalar';
+    default: return `unknown declared type ${spec.t}`;
+  }
+}
+
+const reject = (reason) => ({ ok: false, reason, park: false });
+const park = (reason, parkReason, extra = {}) => ({ ok: false, reason, park: true, parkReason, ...extra });
+
+/**
+ * Validate an op's shape: kind/entity agreement, scalar-only `f`, known field names, declared
+ * types, reserved-name rules, `YYYY-MM-DD` on every date field.
+ *
+ * @param {Object} op
+ * @returns {{ok:true}|{ok:false, reason:string, park:boolean, parkReason?:string, fields?:string[]}}
+ *   `park: true` for an unknown version, kind, field name or space — forward compatibility, and
+ *   the op MUST be retained (ADR 001 §7.4). `park: false` for a type violation or a structural
+ *   defect, which is a protocol violation and not a version skew.
+ */
+export function validateOp(op) {
+  if (op === null || typeof op !== 'object' || Array.isArray(op)) return reject('op is not an object');
+
+  if (op.v !== OP_VERSION) {
+    if (Number.isSafeInteger(op.v) && op.v > 0) return park(`op version ${op.v} is not ${OP_VERSION}`, PARK_REASONS.VERSION);
+    return reject(`op.v must be ${OP_VERSION}, got ${JSON.stringify(op.v)}`);
+  }
+  if (!isOpId(op.id)) return reject('op.id must be 22 base64url characters');
+  if (!isStamp(op.ts)) return reject('op.ts must be a 37-char stamp');
+  if (!isMemberId(op.act)) return reject('op.act must be a MemberId');
+  if (!isDeviceId(op.dev)) return reject('op.dev must be a DeviceId');
+
+  const spaceClass = spaceClassOf(op.space);
+  if (spaceClass === null) {
+    if (typeof op.space === 'string' && op.space.length > 0) {
+      return park(`unrecognised space ${JSON.stringify(op.space)}`, PARK_REASONS.UNKNOWN_SPACE);
+    }
+    return reject('op.space must be a string');
+  }
+
+  const kindSpec = OP_KINDS[op.k];
+  if (!kindSpec) {
+    if (typeof op.k === 'string' && op.k.length > 0) {
+      return park(`unknown op kind ${JSON.stringify(op.k)}`, PARK_REASONS.UNKNOWN_KIND);
+    }
+    return reject('op.k must be a string');
+  }
+
+  // `gid` has NO effect on merge (ADR 001 §2); it is the unit of undo. `pref.set` carries none
+  // and is never undone — v1 parity for `settings.lastCategoryId` (recon B5, rule U6).
+  if (op.k === 'pref.set') {
+    if (op.gid !== null && op.gid !== undefined && !isOpId(op.gid)) {
+      return reject('pref.set carries no gid (rule U6); null, undefined or a GroupId only');
+    }
+  } else if (!isOpId(op.gid)) {
+    return reject('op.gid must be a 22-char GroupId');
+  }
+
+  const entity = parseEntityKey(op.e);
+  if (!entity) return reject(`op.e is not a well-formed entity key: ${JSON.stringify(op.e)}`);
+  if (!kindSpec.entities.includes(entity.kind)) {
+    return reject(`op kind ${op.k} may not address a ${entity.kind} entity`);
+  }
+  if (kindSpec.space !== spaceClass) {
+    return reject(`op kind ${op.k} belongs in the ${kindSpec.space} space, not ${spaceClass}`);
+  }
+
+  if (op.f === null || typeof op.f !== 'object' || Array.isArray(op.f)) return reject('op.f must be an object');
+  const names = Object.keys(op.f);
+  if (names.length === 0) return reject('op.f is empty — an op that writes nothing is malformed');
+
+  const unknown = [];
+  for (const name of names) {
+    if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+      return reject(`op.f carries the forbidden key ${JSON.stringify(name)}`);
+    }
+    // A malformed `dev.*` register name is a bad shape, not version skew: the device short is a
+    // fixed 16-character Crockford string by construction (ADR 001 §1.2).
+    if (entity.kind === 'member' && name.startsWith('dev.') && !DEV_REGISTER_RE.test(name)) {
+      return reject(`${name} is not dev.<deviceShort16>`);
+    }
+    const spec = fieldSpec(entity.kind, name);
+    if (!spec) { unknown.push(name); continue; }
+    const value = op.f[name];
+    if (!isScalar(value)) {
+      return reject(`op.f["${name}"] must be a JSON scalar or null — no nested objects, no arrays`);
+    }
+    const bad = checkType(spec, value);
+    if (bad) return reject(`op.f["${name}"] ${bad}`);
+  }
+
+  if (unknown.length) {
+    // Parked WITH ITS OP. Not dropped and not partially applied: applying the known half of an
+    // op we do not fully understand is how "does not show the new thing" becomes "loses the new
+    // thing" (ADR 001 §7.4).
+    return park(
+      `unknown field${unknown.length > 1 ? 's' : ''} on ${entity.kind}: ${unknown.join(', ')}`,
+      PARK_REASONS.UNKNOWN_FIELD,
+      { fields: unknown },
+    );
+  }
+
+  return { ok: true };
+}
+
+/**
+ * The explicit triage. ONE place decides admit / park / reject, so nothing downstream has to
+ * re-derive parking from a pair of booleans.
+ *
+ * The future-stamp park (ADR 001 §1.3, §7.4) is applied here rather than in `validateOp` because
+ * it is the only check that depends on the local wall clock, which core/ may not read: pass
+ * `nowMs` to arm it, omit it to run the pure shape checks alone.
+ *
+ * @param {Object} op
+ * @param {{nowMs?:number, haveEpochKey?:boolean}} [ctx]
+ * @returns {{status:'admit'}|{status:'park', reason:string, parkReason:string, fields?:string[]}
+ *          |{status:'reject', reason:string}}
+ */
+export function classifyOp(op, ctx = {}) {
+  const shape = validateOp(op);
+  if (!shape.ok) {
+    if (shape.park) {
+      const out = { status: 'park', reason: shape.reason, parkReason: shape.parkReason };
+      if (shape.fields) out.fields = shape.fields;
+      return out;
+    }
+    return { status: 'reject', reason: shape.reason };
+  }
+  if (ctx.haveEpochKey === false) {
+    return { status: 'park', reason: 'sealed under an epoch key we do not hold yet', parkReason: PARK_REASONS.EPOCH };
+  }
+  // The 24 h clamp (ADR 001 §1.3, §7.4). `stamp.js` owns the constant; a peer with a broken clock
+  // must not be able to poison every register, and must not silently lose work either.
+  if (typeof ctx.nowMs === 'number' && isTooFarFuture(op.ts, ctx.nowMs)) {
+    return {
+      status: 'park',
+      reason: 'stamp is more than 24 h in the future',
+      parkReason: PARK_REASONS.FUTURE,
+    };
+  }
+  return { status: 'admit' };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. The op constructor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Thrown when a constructor is handed something it cannot build a legal op from. */
+export class OpError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'OpError';
+  }
+}
+
+/**
+ * @typedef {Object} OpCtx
+ * @property {string} act              the acting MemberId
+ * @property {string} dev              the authoring DeviceId
+ * @property {string} gid              the transaction group — one user action, one gid (rule U1)
+ * @property {() => string} mint       `clock.tick()`; ONE STAMP PER OP (ADR 001 §2)
+ * @property {() => string} newOpId    `ids.opId()`
+ * @property {string} [space]          the personal space id; defaults to the 'personal'
+ *                                     placeholder solo mode uses (ADR 001 §8.2)
+ * @property {string|null} [familySpaceId]  null in solo mode; required for family kinds
+ */
+
+function requireCtx(ctx) {
+  if (!ctx || typeof ctx !== 'object') throw new OpError('an OpCtx is required');
+  if (!isMemberId(ctx.act)) throw new OpError(`OpCtx.act must be a MemberId, got ${JSON.stringify(ctx.act)}`);
+  if (!isDeviceId(ctx.dev)) throw new OpError(`OpCtx.dev must be a DeviceId, got ${JSON.stringify(ctx.dev)}`);
+  if (typeof ctx.mint !== 'function') throw new OpError('OpCtx.mint is required — core/ may not read a clock (ADR 005 §2)');
+  if (typeof ctx.newOpId !== 'function') throw new OpError('OpCtx.newOpId is required — core/ may not read a CSPRNG directly');
+  return ctx;
+}
+
+function spaceFor(kind, ctx) {
+  const cls = OP_KINDS[kind].space;
+  if (cls === 'local') return LOCAL_SPACE;
+  if (cls === 'family') {
+    if (!isSpaceId(ctx.familySpaceId) || !String(ctx.familySpaceId).startsWith('fsp_')) {
+      throw new OpError(`${kind} needs OpCtx.familySpaceId (an fsp_… id); solo mode emits no family ops`);
+    }
+    return ctx.familySpaceId;
+  }
+  const s = ctx.space ?? PERSONAL_PLACEHOLDER;
+  if (spaceClassOf(s) !== 'personal') {
+    throw new OpError(`OpCtx.space must be a psp_… id or the '${PERSONAL_PLACEHOLDER}' placeholder, got ${JSON.stringify(s)}`);
+  }
+  return s;
+}
+
+/**
+ * Build ONE op. The op is validated and frozen before it is returned: ops are immutable and
+ * append-only (ADR 001 §2), and an op that fails its own contract must not reach the log.
+ *
+ * @param {OpCtx} ctx
+ * @param {string} k       op kind
+ * @param {string} e       entity key
+ * @param {Object} f       the field patch — JSON scalars or null only
+ * @param {{born?:boolean}} [opts] `born: true` writes `_born` = this op's own stamp
+ * @returns {Object} a frozen Op
+ */
+export function makeOp(ctx, k, e, f, opts = {}) {
+  requireCtx(ctx);
+  if (!OP_KINDS[k]) throw new OpError(`makeOp: unknown op kind ${JSON.stringify(k)}`);
+  const ts = ctx.mint();
+  const patch = opts.born ? { ...f, _born: ts } : { ...f };
+  const op = {
+    v: OP_VERSION,
+    id: ctx.newOpId(),
+    ts,
+    space: spaceFor(k, ctx),
+    act: ctx.act,
+    dev: ctx.dev,
+    // rule U6: `pref.set` carries no gid and is never undone.
+    gid: k === 'pref.set' ? null : ctx.gid,
+    k,
+    e,
+    f: patch,
+  };
+  const v = validateOp(op);
+  if (!v.ok) throw new OpError(`makeOp built an invalid ${k}: ${v.reason}`);
+  Object.freeze(op.f);
+  return Object.freeze(op);
+}
+
+// ── the eight kind-level constructors ────────────────────────────────────────
+
+/** @param {OpCtx} ctx @param {string} id @param {Object} f @param {{born?:boolean}} [o] */
+export const noteSet = (ctx, id, f, o) => makeOp(ctx, 'note.set', noteKey(id), f, o);
+/** @param {OpCtx} ctx @param {string} id @param {Object} f @param {{born?:boolean}} [o] */
+export const barSet = (ctx, id, f, o) => makeOp(ctx, 'bar.set', barKey(id), f, o);
+/** @param {OpCtx} ctx @param {string} id @param {Object} f @param {{born?:boolean}} [o] */
+export const catSet = (ctx, id, f, o) => makeOp(ctx, 'cat.set', catKey(id), f, o);
+/** @param {OpCtx} ctx @param {string} month `YYYY-MM` @param {Object} f @param {{born?:boolean}} [o] */
+export const padSet = (ctx, month, f, o) => makeOp(ctx, 'pad.set', padKey(month), f, o);
+/** LOCAL space, no gid, never undone, NEVER SYNCED (ADR 001 §3.3). @param {OpCtx} ctx @param {Object} f */
+export const prefSet = (ctx, f) => makeOp(ctx, 'pref.set', PREF_KEY, f);
+/** @param {OpCtx} ctx @param {'fnote'|'fbar'} kind @param {string} owner @param {string} uuid @param {Object} f */
+export const pubSet = (ctx, kind, owner, uuid, f, o) =>
+  makeOp(ctx, 'pub.set', familyKey(kind, owner, uuid), f, o);
+/** @param {OpCtx} ctx @param {string} memberId @param {Object} f */
+export const memberSet = (ctx, memberId, f, o) => makeOp(ctx, 'member.set', memberKey(memberId), f, o);
+/** @param {OpCtx} ctx @param {string} spaceId @param {Object} f */
+export const spaceSet = (ctx, spaceId, f) => makeOp(ctx, 'space.set', spaceKey(spaceId), f);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. Settings → `pref.set` (ADR 001 §3.3)
+//
+// "All 15 setSettings and 7 setLayer call sites keep v1 semantics exactly." (The real count in
+// the v1 tree is 14 `setSettings` + 7 `setLayer` — see the report accompanying this work package;
+// the mapping is the same either way.) Every settings field is device-local presentation state,
+// 17.7 establishes per-device density as correct, and `settings.js:143,147` fire on every `input`
+// event of a range slider — a synced settings op would be a per-pixel op storm.
+//
+// CONSEQUENCE FOR 19.4, stated here so nobody re-litigates it in a ticket: "my entire board syncs
+// between my devices" means BOARD = CONTENT — notes, bars, categories, scratchpads. Settings are
+// presentation and stay per device.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Flatten one level of nesting into dotted register names, because `f` is scalars-only.
+ * `setLayer({feiertage:true})` → `{'layers.feiertage': true}`.
+ * @param {Object} patch @param {string} [prefix] @returns {Object}
+ */
+export function flattenPref(patch, prefix = '') {
+  const out = {};
+  for (const [k, v] of Object.entries(patch || {})) {
+    const name = prefix ? `${prefix}.${k}` : k;
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) Object.assign(out, flattenPref(v, name));
+    else if (Array.isArray(v)) throw new OpError(`pref "${name}" is an array; carry set membership as ${name}.<id>: true`);
+    else out[name] = v;
+  }
+  return out;
+}
+
+/** `store.setSettings(patch)` → one `pref.set`. @param {OpCtx} ctx @param {Object} patch */
+export const settingsSet = (ctx, patch) => prefSet(ctx, flattenPref(patch));
+/** `store.setLayer(patch)` → one `pref.set` under `layers.*`. @param {OpCtx} ctx @param {Object} patch */
+export const layerSet = (ctx, patch) => prefSet(ctx, flattenPref(patch, 'layers'));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. MUTATIONS — every v1 `store.mutate()` site, mapped (ADR 001 §3.2)
+//
+// All 22 sites. `[L]` in the ADR marks a site that ALSO writes `settings.lastCategoryId`, which
+// becomes a `pref.set` in the `local` space, outside the transaction and therefore NOT undone —
+// deliberately reproducing v1's behaviour that `lastCategoryId` survives ⌘Z (recon B5, rule U6).
+//
+// Each entry names its `sites` (file:line in the v1 tree) and its `label` (the string v1 passes
+// to `store.mutate`, verbatim, so `undoStack` labels are unchanged). `tests/tier1/core-ops.test.js`
+// enumerates all 22 sites independently and fails if one loses its constructor.
+//
+// Every constructor returns an Op[]. Building the ops does NOT decide whether to emit them: v1's
+// `return false` decline protocol (`store.js:150`) survives verbatim in `store.txn()`, and it
+// already prevents 16 no-op mutations from reaching the log. A constructor is called only after
+// the caller has decided there is a change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Helper: the optional `[L]` pref op. Returns [] when the site did not touch lastCategoryId. */
+const lastCat = (ctx, catId) => (catId == null ? [] : [prefSet(ctx, { lastCategoryId: catId })]);
+
+/** Helper: the optional `cat.set{visible:true}` that `store.ensureVisible()` fired (story 4.6). */
+const unhide = (ctx, catId) => (catId == null ? [] : [catSet(ctx, catId, { visible: true })]);
+
+/** @type {Object<string, {sites:string[], label:string, kinds:string[], build:Function}>} */
+export const MUTATIONS = deepFreeze({
+  // 1 ────────────────────────────────────────────────────────────────────────
+  /**
+   * The v1 label says `delete`, and it lied: the same site deletes a note OR a bar depending on
+   * `selection.type`. The op does not lie.
+   * @param {OpCtx} ctx @param {{type:'note'|'bar', id:string}} a
+   */
+  deleteSelected: {
+    sites: ['interact.js:72'], label: 'delete', kinds: ['note.set', 'bar.set'],
+    build: (ctx, { type, id }) => {
+      if (type === 'note') return [noteSet(ctx, id, { _alive: false })];
+      if (type === 'bar') return [barSet(ctx, id, { _alive: false })];
+      throw new OpError(`deleteSelected: type must be 'note' or 'bar', got ${JSON.stringify(type)}`);
+    },
+  },
+
+  // 2 ────────────────────────────────────────────────────────────────────────
+  /** Vertical press-and-drag from an empty day lays down a bar (3.1). `label:''` is v1's value,
+   *  and `interact.js:317` goes straight into naming it — which is why `store.txn()` must stay
+   *  synchronous through `emit()` (ADR 001 §0.9, §12.1). */
+  createBar: {
+    sites: ['interact.js:307'], label: 'create-bar', kinds: ['bar.set', 'cat.set'],
+    build: (ctx, { id, startDate, endDate, categoryId, visibility = 'privat', unhideCategoryId = null }) => [
+      barSet(ctx, id, {
+        startDate, endDate, label: '', categoryId, visibility, coEdit: false, _alive: true,
+      }, { born: true }),
+      ...unhide(ctx, unhideCategoryId),
+    ],
+  },
+
+  // 3 ────────────────────────────────────────────────────────────────────────
+  /** `date` is ABSOLUTE. For a repeat the caller reanchors with `entities.reanchorRepeat()`,
+   *  which is `interact.js:330-334` verbatim (9.3: keep the series' first year). */
+  moveNote: {
+    sites: ['interact.js:324'], label: 'move-note', kinds: ['note.set'],
+    build: (ctx, { id, date }) => [noteSet(ctx, id, { date })],
+  },
+
+  // 4 ────────────────────────────────────────────────────────────────────────
+  /** ABSOLUTE VALUES, NEVER A DELTA (ADR 001 §3.2, §6). The caller computes the new dates with
+   *  `entities.addDays()`; a delta op applied twice would move the bar twice. */
+  moveBar: {
+    sites: ['interact.js:341'], label: 'move-bar', kinds: ['bar.set'],
+    build: (ctx, { id, startDate, endDate }) => [barSet(ctx, id, { startDate, endDate })],
+  },
+
+  // 5 ────────────────────────────────────────────────────────────────────────
+  resizeBar: {
+    sites: ['interact.js:352'], label: 'resize-bar', kinds: ['bar.set'],
+    build: (ctx, { id, startDate, endDate }) => {
+      const f = {};
+      if (startDate !== undefined) f.startDate = startDate;
+      if (endDate !== undefined) f.endDate = endDate;
+      if (!Object.keys(f).length) throw new OpError('resizeBar: give startDate, endDate or both');
+      return [barSet(ctx, id, f)];
+    },
+  },
+
+  // 6 ────────────────────────────────────────────────────────────────────────
+  /** The inline editor on the board. `[L]` — `interact.js:546` writes `lastCategoryId`.
+   *  `visibility` comes from the category's `defaultVisibility`, read ONCE at creation and never
+   *  again (ADR 004 §3); the global default is `'privat'` (16.1). */
+  createNoteInline: {
+    sites: ['interact.js:543'], label: 'create-note', kinds: ['note.set', 'cat.set', 'pref.set'],
+    build: (ctx, { id, date, text, categoryId, visibility = 'privat', unhideCategoryId = null, lastCategoryId = null }) => [
+      noteSet(ctx, id, {
+        date, text, categoryId, repeatsYearly: false, visibility, coEdit: false, _alive: true,
+      }, { born: true }),
+      ...unhide(ctx, unhideCategoryId),
+      ...lastCat(ctx, lastCategoryId),
+    ],
+  },
+
+  // 7 ────────────────────────────────────────────────────────────────────────
+  /** 2.2 — clearing the text is how you delete without a dialog. `[L]` only when the category
+   *  actually changed (`interact.js:573-575`). */
+  editNoteInline: {
+    sites: ['interact.js:565'], label: 'edit-note', kinds: ['note.set', 'pref.set'],
+    build: (ctx, { id, text, categoryId = null, lastCategoryId = null }) => {
+      if (text === '') return [noteSet(ctx, id, { _alive: false })];
+      const f = { text };
+      if (categoryId != null) f.categoryId = categoryId;
+      return [noteSet(ctx, id, f), ...lastCat(ctx, lastCategoryId)];
+    },
+  },
+
+  // 8 ────────────────────────────────────────────────────────────────────────
+  /** A bar label may legally be empty (`create-bar` writes `''`), so unlike a note there is no
+   *  empty-means-delete branch here — v1 has none either. */
+  editBarLabel: {
+    sites: ['interact.js:592'], label: 'edit-bar', kinds: ['bar.set', 'pref.set'],
+    build: (ctx, { id, label, categoryId = null, lastCategoryId = null }) => {
+      const f = { label };
+      if (categoryId != null) f.categoryId = categoryId;
+      return [barSet(ctx, id, f), ...lastCat(ctx, lastCategoryId)];
+    },
+  },
+
+  // 9 ────────────────────────────────────────────────────────────────────────
+  /** THE 600 ms DEBOUNCE IS THE OP BOUNDARY (recon B9, rule U9) so ⌘Z is not per keystroke.
+   *  v1 stores the UNTRIMMED value when `.trim()` is non-empty (`interact.js:621`). */
+  padTyping: {
+    sites: ['interact.js:618'], label: 'pad', kinds: ['pad.set'],
+    build: (ctx, args) => padOps(ctx, args),
+  },
+
+  // 10 ───────────────────────────────────────────────────────────────────────
+  /** The blur path bypasses the debounce and commits immediately (`interact.js:625-636`). Same
+   *  op shape; a separate site because a missed one is a lost paragraph. */
+  padBlur: {
+    sites: ['interact.js:631'], label: 'pad', kinds: ['pad.set'],
+    build: (ctx, args) => padOps(ctx, args),
+  },
+
+  // 11 ───────────────────────────────────────────────────────────────────────
+  /** The popover's "+ Notiz". NOTE: unlike site #6 this does NOT write `lastCategoryId` — it
+   *  only READS it (`popover.js:158`). ADR 001 §3.2 marks this row `[L]`; the v1 source does not
+   *  support that and it is reported as an ADR error. `lastCategoryId` is still accepted here so
+   *  a future story can turn it on deliberately rather than by drift. */
+  createNotePopover: {
+    sites: ['popover.js:159'], label: 'create-note', kinds: ['note.set', 'cat.set', 'pref.set'],
+    build: (ctx, { id, date, text, categoryId, visibility = 'privat', unhideCategoryId = null, lastCategoryId = null }) => [
+      noteSet(ctx, id, {
+        date, text, categoryId, repeatsYearly: false, visibility, coEdit: false, _alive: true,
+      }, { born: true }),
+      ...unhide(ctx, unhideCategoryId),
+      ...lastCat(ctx, lastCategoryId),
+    ],
+  },
+
+  // 12 ───────────────────────────────────────────────────────────────────────
+  recategoriseNote: {
+    sites: ['popover.js:183'], label: 'recategorise', kinds: ['note.set', 'pref.set'],
+    build: (ctx, { id, categoryId, lastCategoryId = categoryId }) => [
+      noteSet(ctx, id, { categoryId }),
+      ...lastCat(ctx, lastCategoryId),
+    ],
+  },
+
+  // 13 ───────────────────────────────────────────────────────────────────────
+  /** ONE OP, TWO FIELDS, ONE STAMP (ADR 001 §3.2 row 13).
+   *  9.5 — the series starts in the year it was switched on, so turning the repeat ON reanchors
+   *  the note to the occurrence the user was looking at (`popover.js:208`). Turning it OFF leaves
+   *  the date alone in v1, so `date` is optional here: writing an unchanged value at a fresh
+   *  stamp would let a toggle beat a concurrent remote move for no reason. */
+  toggleRepeat: {
+    sites: ['popover.js:202'], label: 'toggle-repeat', kinds: ['note.set'],
+    build: (ctx, { id, repeatsYearly, date }) => {
+      if (repeatsYearly === true && date === undefined) {
+        throw new OpError('toggleRepeat: switching a repeat ON must carry the anchor date (story 9.5)');
+      }
+      const f = { repeatsYearly };
+      if (date !== undefined) f.date = date;
+      return [noteSet(ctx, id, f)];
+    },
+  },
+
+  // 14 ───────────────────────────────────────────────────────────────────────
+  deleteNotePopover: {
+    sites: ['popover.js:217'], label: 'delete-note', kinds: ['note.set'],
+    build: (ctx, { id }) => [noteSet(ctx, id, { _alive: false })],
+  },
+
+  // 15 ───────────────────────────────────────────────────────────────────────
+  recategoriseBar: {
+    sites: ['popover.js:236'], label: 'recategorise-bar', kinds: ['bar.set', 'pref.set'],
+    build: (ctx, { id, categoryId, lastCategoryId = categoryId }) => [
+      barSet(ctx, id, { categoryId }),
+      ...lastCat(ctx, lastCategoryId),
+    ],
+  },
+
+  // 16 ───────────────────────────────────────────────────────────────────────
+  /** The popover's inline text edit. Like #7 an empty text deletes, but unlike #7 there is no
+   *  category picker in this row, so no `categoryId` and no `lastCategoryId` — ADR 001 §3.2's
+   *  "as #7 `[L]`" over-reaches and it is reported as an ADR error. */
+  editNotePopover: {
+    sites: ['popover.js:266'], label: 'edit-note', kinds: ['note.set'],
+    build: (ctx, { id, text }) =>
+      (text === '' ? [noteSet(ctx, id, { _alive: false })] : [noteSet(ctx, id, { text })]),
+  },
+
+  // 17 ───────────────────────────────────────────────────────────────────────
+  /** 4.3 — isolate a category by clicking it in the legend. ABSOLUTE, not a toggle: the caller
+   *  reads the current value and emits the new one, so two devices toggling concurrently
+   *  converge instead of cancelling. */
+  toggleCategory: {
+    sites: ['legend.js:35'], label: 'toggle-category', kinds: ['cat.set'],
+    build: (ctx, { id, visible }) => {
+      if (typeof visible !== 'boolean') throw new OpError('toggleCategory: `visible` must be the NEW absolute value');
+      return [catSet(ctx, id, { visible })];
+    },
+  },
+
+  // 18 ───────────────────────────────────────────────────────────────────────
+  /** Both language slots explicitly (`legend.js:81-82`): creating a category while the UI is
+   *  English must not store the English label as the German name. */
+  addCategory: {
+    sites: ['legend.js:76'], label: 'add-category', kinds: ['cat.set'],
+    build: (ctx, { id, name, nameEn, paletteRef, defaultVisibility = 'privat' }) => [
+      catSet(ctx, id, {
+        name, nameEn, paletteRef, visible: true, defaultVisibility, _alive: true,
+      }, { born: true }),
+    ],
+  },
+
+  // 19 ───────────────────────────────────────────────────────────────────────
+  /** `legend.js:116` — the DE-rename path does `delete x.nameEn`. In a register log there is no
+   *  delete: it emits `{nameEn: null}` EXPLICITLY. `null` is a value; `undefined` is not
+   *  representable (ADR 001 §2). Omitting it would leave the old English name in a register with
+   *  its old stamp and every other device would keep rendering it — the same shape of defect as
+   *  ADR 004 §5.1's, one level down. */
+  renameCategory: {
+    sites: ['legend.js:114'], label: 'rename-category', kinds: ['cat.set'],
+    build: (ctx, { id, lang, name }) => {
+      if (lang === 'en') return [catSet(ctx, id, { nameEn: name })];
+      if (lang === 'de') return [catSet(ctx, id, { name, nameEn: null })];
+      throw new OpError(`renameCategory: lang must be 'de' or 'en', got ${JSON.stringify(lang)}`);
+    },
+  },
+
+  // 20 ───────────────────────────────────────────────────────────────────────
+  recolorCategory: {
+    sites: ['legend.js:129'], label: 'recolor-category', kinds: ['cat.set'],
+    build: (ctx, { id, paletteRef }) => [catSet(ctx, id, { paletteRef })],
+  },
+
+  // 21 ───────────────────────────────────────────────────────────────────────
+  /** The empty-category path (`legend.js:152`). `[L]` only when the deleted category WAS the
+   *  last-used one (`legend.js:154`). */
+  deleteCategory: {
+    sites: ['legend.js:152'], label: 'delete-category', kinds: ['cat.set', 'pref.set'],
+    build: (ctx, { id, lastCategoryId = null }) => [
+      catSet(ctx, id, { _alive: false }),
+      ...lastCat(ctx, lastCategoryId),
+    ],
+  },
+
+  // 22 ───────────────────────────────────────────────────────────────────────
+  /**
+   * Delete-with-reassign (4.4 — deleting a category with entries never silently drops them).
+   *
+   * FAN-OUT, ONE `gid`, so ⌘Z stays one step (recon B1/B6). N + M + 1 INDEPENDENT register
+   * writes, each naming its target by id and carrying an absolute value. A single
+   * "reassign everything pointing at X" op would be non-commutative — its effect would depend on
+   * which entities the folding device had already seen — and would break ADR 001 §6. Partial
+   * delivery of the group leaves a consistent half-reassigned board that converges when the rest
+   * arrives; the group has no cross-device atomicity requirement.
+   */
+  deleteCategoryReassign: {
+    sites: ['legend.js:197'], label: 'delete-category', kinds: ['note.set', 'bar.set', 'cat.set', 'pref.set'],
+    build: (ctx, { id, targetId, noteIds = [], barIds = [], lastCategoryId = null }) => {
+      if (targetId === id) throw new OpError('deleteCategoryReassign: cannot reassign a category to itself');
+      return [
+        ...noteIds.map((n) => noteSet(ctx, n, { categoryId: targetId })),
+        ...barIds.map((b) => barSet(ctx, b, { categoryId: targetId })),
+        catSet(ctx, id, { _alive: false }),
+        ...lastCat(ctx, lastCategoryId),
+      ];
+    },
+  },
+});
+
+/** Sites 9 and 10 share their op shape. @param {OpCtx} ctx @param {{month:string,text:string,born?:boolean}} a */
+function padOps(ctx, { month, text, born = false }) {
+  if (typeof text !== 'string') throw new OpError('pad: `text` must be a string');
+  // v1: `if (val.trim()) s.scratchpads[key] = val; else delete s.scratchpads[key];`
+  if (!text.trim()) return [padSet(ctx, month, { _alive: false })];
+  return [padSet(ctx, month, { text, _alive: true }, { born })];
+}
+
+/** Every v1 mutate site this module covers, as `file:line`. The test enumerates them
+ *  independently from the v1 source and fails if the two lists ever disagree. */
+export const V1_MUTATE_SITES = Object.freeze(
+  Object.values(MUTATIONS).flatMap((m) => m.sites).sort(),
+);
+
+/** @param {string} name @returns {{sites:string[], label:string, build:Function}} */
+export function mutation(name) {
+  const m = MUTATIONS[name];
+  if (!m) throw new OpError(`unknown mutation ${JSON.stringify(name)}`);
+  return m;
+}
+
+/**
+ * Build the ops for one v1 mutation by name.
+ * @param {string} name @param {OpCtx} ctx @param {Object} args @returns {Object[]} frozen Ops
+ */
+export function buildMutation(name, ctx, args) {
+  return Object.freeze(mutation(name).build(ctx, args || {}));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+function deepFreeze(o) {
+  for (const v of Object.values(o)) if (v && typeof v === 'object') deepFreeze(v);
+  return Object.freeze(o);
+}
