@@ -1,6 +1,6 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-25 · **Stopped at:** WP-1 round-2 hardening, judge phase cut short
+**Last session:** 2026-08-26 · **Stopped at:** WP-3 retrofit landed; two WP-1 judges still owed
 **Resume by reading:** this file, then `docs/v2/PLAN.md`, then the ADRs.
 
 ---
@@ -9,18 +9,24 @@
 
 The v2 **design** is complete and decided (5 ADRs, 5 contracts, 9 PO decisions). The **v1
 regression gate** exists and is green. **WP-1 — the DOM-free op-log core — is built, attacked
-three times, and hardened twice.** No v1 file has been modified yet: the app still runs exactly
-as it did at the baseline commit. The next work package is **WP-3, the retrofit**, which is the
-first one that touches shipping v1 code.
+three times and hardened twice. WP-3 — the retrofit — has landed: the shipping v1 app now derives
+its state from an append-only op log**, all 22 mutate sites converted, and it behaves identically.
+`board.json` is still `schemaVersion: 1` with v1's exact field set and zero v2 leakage. The next
+package is **WP-6, the crypto core** — but resolve the `deviceShort` contradiction in §6 first,
+and re-run the two owed judges in §4.
 
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
 npm test              # tier 1, pure logic          → 1308 pass / 0 fail
-npm run test:attack   # adversarial corpus          →  218 pass / 0 fail
+npm run test:attack   # adversarial corpus          →  282 pass / 0 fail
 npm run test:property # property harness, 500 seeds →   51 pass / 0 fail
-npm run test:dom      # real headless WKWebView     →   16 pass, tier 2 PASS
+npm run test:dom      # real headless WKWebView     →  217 pass / 12 files, tier 2 PASS
 ```
+
+The shadow-undo assertion (risk R5's mechanical guard) is **armed** in all three `node --test`
+scripts via `tests/helpers/dev-flag.mjs`, pinned by `suite-integrity.test.js` so an `--import` of
+a no-op cannot satisfy it.
 
 `test:dom` compiles the Swift shell with `swiftc` and drives the real board in WKWebView. It is
 macOS-only, which is why `npm test` is tier 1 alone.
@@ -144,3 +150,85 @@ with WP-3–WP-5 whenever you want distribution dogfooded early, as the sprint p
 - **D1 = unsigned**, so **LZP-106 (the guided Systemeinstellungen unlock screen) is mandatory**
   and is the first thing Mom meets. Deliverables 27 and 28 are release-blocking. Reversible: a
   cert plus two CI secrets, no code change.
+
+---
+
+# Session 2 addendum — 2026-08-26
+
+## WP-3 landed (LZP-402 / 403 / 404 / 405)
+
+The v1 app is on the op log. Commits `125ba17` (retrofit) and the adversarial suites after it.
+
+**What changed in v1 code** — 7 files, everything else byte-identical to the baseline:
+
+| file | change |
+|---|---|
+| `store.js` | 284 → 888 lines. `mutate()` → `txn()`/`apply()` over the log; `applyRemote()` seam for WP-8; register-backed state materialised into the exact v1 shape |
+| `storage.js` | +159. `ops.jsonl` + `checkpoint.json` beside `board.json`, same atomic-write and localStorage-fallback shape |
+| `interact.js` | 10 sites converted; `__lzpContextMenu` moved out of top level |
+| `popover.js` | 6 sites; local day-selector replaced by `core/entities.js`'s shared one (**net −4 lines**) |
+| `legend.js` | 6 sites |
+| `main.js` | boot IIFE → `export function boot()` |
+| `boot.js` / `entry.js` | **new** — see the CSP note below |
+
+`layout.js`, `board.js`, `dates.js`, `find.js`, `print.js`, `settings.js`, `backup.js`, `ui.js`,
+`holidays.js`, `ferien.js`, `palette.js`, `i18n.js` are **untouched**. Rendering never learned about
+the op log.
+
+**Independently verified** (not just by the agents): the live app renders 12 columns / 372 rows /
+12 pads with zero console errors; create → undo → redo → undo round-trips on the log; the persisted
+note carries exactly v1's five keys at `schemaVersion: 1`.
+
+## New findings from the WP-3 adversaries — all open, none blocking
+
+- **F-1 · LOW · a decision, not a repair.** `board.json` stops being a fixed point across a restart
+  once two scratchpads exist: `store.js:reconcileMap` does `Object.assign` and never *reorders* an
+  existing live object, so `sortScratchpads` only takes effect on a freshly projected board. Content
+  is identical and nothing on screen moves — but the file is atomically rewritten with different
+  bytes on the first save of each session, and v1 *was* a fixed point. The fix is a one-liner
+  (rebuild the map in projection key order, as `reconcileList` already does for arrays) **but it
+  changes `board.json` bytes for existing users on their next save**, so decide it deliberately.
+  Pinned green in `retrofit-probe5/6.dom.js`.
+- **F-2 · not reachable by a human today, wrong failure mode.** An over-length value through the
+  `apply()` door throws an **uncaught** `OpError` — the note is lost, no undo step, no warning —
+  while the same value through the diff door truncates-and-warns. Measured in both WKWebView and
+  Blink: `maxLength` holds for every human input route (typing, paste, `execCommand`, drop); only
+  scripted `setRangeText` / direct `.value` bypass it, and no shipping site does. **It becomes live
+  the moment WP-8's remote path puts an over-length string in front of `apply()`** — fix it before
+  sync lands, as a truncate-and-warn or a visible decline.
+- **F-3 · cosmetic.** `store.undoStack.length = 0` also clears redo, and `.push()` is a silent
+  no-op. No shipping caller; belongs in `store.contract.js` §2.2 as an explicit divergence.
+- **F-4 · already decided, now measured through the real keyboard.** ATT-5: deleting an already-
+  deleted entry records 1 undo step where v1 recorded 2. Strictly better.
+
+**Everything else held.** The real-app adversary ran 92 gesture-level rows in WKWebView — undo
+grouping across month boundaries, the 50-step limit, autosave timing and `pagehide`, ⌘Z near a
+focused field, delete-with-reassign over 80 entries as one undo step, pinned-mode paging, find,
+print, the first-run coach, and a 200-gesture soak across a restart — with zero uncaught errors and
+no divergence from v1 beyond F-1.
+
+## New ADR amendment owed (adds to §6)
+
+**ADR 005 §1.1 / §2.1 owe `src/js/entry.js`.** §2.1 says `boot()` is called from `index.html`. It
+cannot be: `index.html` ships `default-src 'self'` with no `script-src` override (story 13.4), so an
+inline `<script type="module">` is refused by the page's own CSP and the app would silently never
+start. A CSP hash is brittle and `'unsafe-inline'` would destroy the zero-network property tier 2
+asserts — so the call lives in a two-statement same-origin module loaded by `src`, and the purity
+gate pins it to exactly those two statements.
+
+Also: the seams work found a **second, unlisted top-level blocker** the ADR does not name —
+`main.js`'s top-level `window.addEventListener('blur', …)`, which was the *synchronous* throw on
+import (the boot IIFE only produced a rejected promise).
+
+## Still owed from session 1 — unchanged and still first
+
+The two WP-1 judges (§4) have **not** run. A resume attempt re-executed the Repair phase instead of
+replaying it from cache, and it was writing to core files whose fixes were already committed while
+WP-3 was building against them — so it was stopped and its uncommitted work reverted to the
+proven-green commit. **Run the two judges as a standalone read-only workflow**, not via resume.
+
+Its one genuinely new artifact — a shared `src/js/core/v1import.js` extracting the duplicated
+v1→ops logic out of `migrate1to2.js` and `replace.js` — is saved as a patch at
+`<scratchpad>/round2-rerun/rerun.patch`. It is an internal refactor, not a correctness fix: the
+two-doors parity it would tidy is already proven by property **P13** over 500 seeds. Redo it cleanly
+when convenient, or drop it.
