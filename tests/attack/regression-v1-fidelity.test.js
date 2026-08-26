@@ -21,7 +21,8 @@ import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { oracle, v1board, note, bar, boardDiff, boardDiffBytes, freshV1, ME, MIG_CTX } from './_regression-harness.js';
-import { store, defaultState } from '../../src/js/store.js';
+// v1 = the FROZEN baseline store, not the retrofitted one — see `_regression-harness.js`.
+import { store, defaultState } from '../fixtures/v1-store-frozen.js';
 import { buildBoard, visibleStart } from '../../src/js/layout.js';
 import { migrateV1, MigrationLossyError } from '../../src/js/core/migrate1to2.js';
 import { materialize, stripV2Fields, exportV1JSON, MaterializeError } from '../../src/js/core/materialize.js';

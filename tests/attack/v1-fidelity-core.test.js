@@ -19,7 +19,9 @@ import test, { describe, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { localStorage as LS, resetStorage, seedBoard } from '../helpers/env.js';
-import { store, defaultState } from '../../src/js/store.js';
+// v1 = the FROZEN baseline store (`66126e9`), which is what this file's header means by
+// "the ACTUAL v1 store … unmodified". WP-3 modified `src/js/store.js`; it did not modify v1.
+import { store, defaultState } from '../fixtures/v1-store-frozen.js';
 import { buildBoard, visibleStart } from '../../src/js/layout.js';
 import { PALETTE } from '../../src/js/palette.js';
 

@@ -16,6 +16,9 @@ use tauri_plugin_dialog::DialogExt;
 
 const BOARD_FILE: &str = "board.json";
 const SNAPSHOT_FILE: &str = "snapshots.json";
+// LZP-402 — ADR 001 §9. Neither exists until a family space is created.
+const OPS_FILE: &str = "ops.jsonl";
+const CHECKPOINT_FILE: &str = "checkpoint.json";
 
 fn data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     let dir = app
@@ -26,9 +29,19 @@ fn data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// `<file>.tmp` beside the target — mirrors Swift's `appendingPathExtension`.
+/// `with_extension("json.tmp")` would have turned `ops.jsonl` into
+/// `ops.json.tmp`; for `board.json` / `snapshots.json` this is the same name it
+/// always produced.
+fn tmp_path(path: &PathBuf) -> PathBuf {
+    let mut s = path.clone().into_os_string();
+    s.push(".tmp");
+    PathBuf::from(s)
+}
+
 /// 11.4 — temp file + rename, so a crash mid-save cannot corrupt the board.
 fn write_atomic(path: &PathBuf, contents: &str) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
+    let tmp = tmp_path(path);
     {
         let mut f = fs::File::create(&tmp).map_err(|e| e.to_string())?;
         f.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
@@ -59,6 +72,88 @@ fn load_snapshots(app: AppHandle) -> Result<Option<String>, String> {
 #[tauri::command]
 fn save_snapshots(app: AppHandle, contents: String) -> Result<(), String> {
     write_atomic(&data_dir(&app)?.join(SNAPSHOT_FILE), &contents)
+}
+
+// ── LZP-402 · the op log ─────────────────────────────────────────────────────
+//
+// UNVERIFIED (risk R8): there is no Rust toolchain on the machine this was
+// written on, so nothing below has been compiled or smoke-tested. It is a
+// line-for-line mirror of shell-macos/main.swift, which IS built and covered by
+// tests/tier2/shell-oplog.dom.js. Build and run that same round-trip against
+// this shell on a machine with cargo before any Tauri build ships.
+//
+// Tauri v2 maps camelCase invoke args onto snake_case command parameters, so
+// `invoke('truncate_ops', { keepFromLine })` binds to `keep_from_line`.
+
+/// ADR 001 §9 — the log is APPENDED, never rewritten. `write_atomic` would make
+/// every append O(file) and the whole log O(n²) to write. `sync_all` puts the
+/// bytes on the platter before the reply goes back. A torn trailing line is the
+/// reader's problem, and `storage.js`'s `parseJSONL` already drops one.
+fn append_file(path: &PathBuf, contents: &str) -> Result<(), String> {
+    if contents.is_empty() {
+        return Ok(());
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| e.to_string())?;
+    f.write_all(contents.as_bytes()).map_err(|e| e.to_string())?;
+    f.sync_all().map_err(|e| e.to_string())
+}
+
+/// Split a JSONL blob the way `storage.js`'s `parseJSONL` does — blank and
+/// unparseable lines skipped — so a line index computed from what `load_ops`
+/// returned means the same thing here. That equivalence is the whole contract of
+/// `truncate_ops(keepFromLine)`.
+fn jsonl_lines(txt: &str) -> Vec<&str> {
+    txt.split('\n')
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+        .collect()
+}
+
+/// `""` — not null — when the log does not exist yet, so an absent file and an
+/// empty one are indistinguishable to the caller.
+#[tauri::command]
+fn load_ops(app: AppHandle) -> Result<String, String> {
+    Ok(read_opt(&data_dir(&app)?.join(OPS_FILE)).unwrap_or_default())
+}
+
+#[tauri::command]
+fn append_ops(app: AppHandle, contents: String) -> Result<(), String> {
+    append_file(&data_dir(&app)?.join(OPS_FILE), &contents)
+}
+
+/// The one whole-file rewrite the log gets, after a compaction has folded its
+/// head into the checkpoint (ADR 001 §7.2). Rare by construction, and atomic:
+/// a half-written log after a compaction loses ops the checkpoint had not
+/// absorbed yet.
+#[tauri::command]
+fn truncate_ops(app: AppHandle, keep_from_line: usize) -> Result<(), String> {
+    let path = data_dir(&app)?.join(OPS_FILE);
+    let txt = read_opt(&path).unwrap_or_default();
+    let kept: Vec<&str> = jsonl_lines(&txt).into_iter().skip(keep_from_line).collect();
+    if kept.is_empty() {
+        let _ = fs::remove_file(&path);
+        Ok(())
+    } else {
+        write_atomic(&path, &(kept.join("\n") + "\n"))
+    }
+}
+
+#[tauri::command]
+fn load_checkpoint(app: AppHandle) -> Result<String, String> {
+    Ok(read_opt(&data_dir(&app)?.join(CHECKPOINT_FILE)).unwrap_or_default())
+}
+
+/// Atomic, like `save_board` — and for a stronger reason. A torn `board.json`
+/// can be rebuilt by replaying the log; a torn checkpoint is the one file
+/// nothing else can re-derive.
+#[tauri::command]
+fn save_checkpoint(app: AppHandle, contents: String) -> Result<(), String> {
+    write_atomic(&data_dir(&app)?.join(CHECKPOINT_FILE), &contents)
 }
 
 /// 11.2 / 11.7 — native save dialog, dated default name.
@@ -211,6 +306,11 @@ pub fn run() {
             save_board,
             load_snapshots,
             save_snapshots,
+            load_ops,
+            append_ops,
+            truncate_ops,
+            load_checkpoint,
+            save_checkpoint,
             export_board,
             import_board,
             set_shell_pref

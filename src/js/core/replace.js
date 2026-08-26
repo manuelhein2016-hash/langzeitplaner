@@ -812,6 +812,30 @@ function buildPatch(kind, entry, regs, key, where, warn, asked) {
       }
       warn(`${where}: field ${q(name)} = ${q(value)} is not representable in v2 and was DROPPED`, true);
     }
+    // ATT-53, ON THIS DOOR TOO. `coerceToV1Text` deliberately answers `null` for an ABSENT value
+    // ("absence is ATT-53's business"), and until now this door had no answer for it: a note that
+    // arrives with no `text` key at all got no `text` register, which `materialize` reads as
+    // unrenderable (ADR 001 §5 step 3), which takes the note off the board. v1 imports that note
+    // and DRAWS it — `popover.js:193` is `n.text || '…'` — so the import lost an entry the user
+    // could see before it and cannot see after it, on the one door (11.5 snapshot restore) where
+    // the board being replaced is gone the moment the transaction lands.
+    //
+    // The migration door has done this since ATT-53, in exactly these words, and the two doors
+    // disagreeing about the same bytes is RECHECK-82-6's defect class — the same file producing
+    // two different boards depending on which way in it came. `''` is not an invention: it renders
+    // as „…" in v1 just as the absence does, and it is the value v1's own inline create writes.
+    //
+    // `value === undefined` rather than `!supplied`, so an explicit `text: undefined` is treated
+    // as the absence it is, matching `migrate1to2.js` line for line.
+    if (value === undefined && kind === 'note' && name === 'text') {
+      warn(
+        `${where}: no ${q(name)}; imported as "" so the entry stays on the board, which is what `
+        + 'v1 draws for it (ATT-53)',
+        false,
+      );
+      patch[name] = '';
+      continue;
+    }
     // The clear. Only where there is something to clear — see the docblock.
     if (carries(regs, key, name)) patch[name] = null;
   }

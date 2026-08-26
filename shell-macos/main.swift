@@ -21,13 +21,16 @@ let APP_HOST = "localhost"
 //   --smoke                 load the board, print one line of what it rendered
 //   --test <file.js>        load the board, run <file.js> against the live DOM,
 //                           print TAP, exit non-zero on any failure
-//   --scratch <dir>         where the bridge's board.json/snapshots.json go in
-//                           a headless run (default: a per-mode temp dir)
+//   --scratch <dir>         where the bridge's files — board.json, snapshots.json,
+//                           ops.jsonl, checkpoint.json — go in a headless run
+//                           (default: a per-mode temp dir)
 //
 // Both headless modes are HERMETIC: every bridge write is redirected into a
 // scratch directory, so a test run can never reach the user's real board. That
 // is enforced by `resolveScratchDir()` below, which aborts rather than fall
-// back to Application Support.
+// back to Application Support, and by `dataFile()`, which re-checks the
+// resolved FILE — so the guard covers board.json, snapshots.json and the two
+// LZP-402 op-log files alike, and covers any file added later by construction.
 
 private func argValue(_ flag: String) -> String? {
     let a = CommandLine.arguments
@@ -79,6 +82,42 @@ func appSupportDir() -> URL {
     return dir
 }
 
+// ── the four files the bridge owns ───────────────────────────────────────────
+//
+//   board.json       v1's materialized board — in solo mode it IS the checkpoint
+//   snapshots.json   the daily snapshot ring (11.5)
+//   ops.jsonl        LZP-402's op log, one op per line, APPEND-ONLY (ADR 001 §9)
+//   checkpoint.json  the serialized RegisterMap + cursors + seqs + parked lines
+//
+// ADR 001 §9/§11: the bottom two do not exist until a family space is created.
+// The read commands are pure — they create nothing — so `opsLogExists()` stays
+// an honest predicate.
+
+let BOARD_FILE = "board.json"
+let SNAPSHOT_FILE = "snapshots.json"
+let OPS_FILE = "ops.jsonl"
+let CHECKPOINT_FILE = "checkpoint.json"
+
+/// Every path the bridge touches is built here, and nowhere else.
+///
+/// This is the second half of the headless scratch guard. `resolveScratchDir()`
+/// proves the *directory* is outside the user's board dir; this proves the
+/// *file* that was resolved inside it is too. One is redundant given the other
+/// today — deliberately: the redundancy is what makes adding a fifth file safe
+/// without anyone having to remember the guard exists.
+func dataFile(_ name: String) -> URL {
+    let url = appSupportDir().appendingPathComponent(name).standardizedFileURL
+    guard isHeadless else { return url }
+    let real = realAppSupportDir().standardizedFileURL.path
+    if url.path == real || url.path.hasPrefix(real + "/") {
+        FileHandle.standardError.write(Data(
+            "FATAL: headless run resolved \(name) inside the real board directory (\(url.path)). Refusing to write.\n"
+                .utf8))
+        exit(70)
+    }
+    return url
+}
+
 /// 11.4 — temp file + rename, so a crash mid-save cannot corrupt the board.
 func writeAtomic(_ url: URL, _ contents: String) throws {
     let tmp = url.appendingPathExtension("tmp")
@@ -86,8 +125,48 @@ func writeAtomic(_ url: URL, _ contents: String) throws {
     _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
 }
 
+/// ADR 001 §9 — the log is APPENDED, never rewritten. `writeAtomic` would make
+/// every append O(file), and therefore the whole log O(n²) to write. Seek to the
+/// end and write the new bytes; `synchronize()` puts them on the platter before
+/// the reply goes back, which is what makes an append durable enough to be the
+/// source of truth. Partial-write risk is bounded by the reader: `parseJSONL`
+/// drops a torn trailing line and keeps the rest.
+func appendToFile(_ url: URL, _ contents: String) throws {
+    guard !contents.isEmpty else { return }
+    let data = Data(contents.utf8)
+    let fm = FileManager.default
+    if !fm.fileExists(atPath: url.path) {
+        guard fm.createFile(atPath: url.path, contents: nil) else {
+            throw NSError(domain: "LZP", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "cannot create \(url.lastPathComponent)"])
+        }
+    }
+    let fh = try FileHandle(forWritingTo: url)
+    defer { try? fh.close() }
+    try fh.seekToEnd()
+    try fh.write(contentsOf: data)
+    try fh.synchronize()
+}
+
 func readIfExists(_ url: URL) -> String? {
     try? String(contentsOf: url, encoding: .utf8)
+}
+
+/// Split a JSONL blob the way `storage.js`'s `parseJSONL` does — blank lines and
+/// unparseable lines skipped — so a line index computed from what `load_ops`
+/// returned means the same thing on this side. That equivalence is the whole
+/// contract of `truncate_ops(keepFromLine:)`.
+func jsonlLines(_ txt: String) -> [String] {
+    var out: [String] = []
+    for raw in txt.split(separator: "\n", omittingEmptySubsequences: false) {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        if s.isEmpty { continue }
+        guard let d = s.data(using: .utf8),
+              (try? JSONSerialization.jsonObject(with: d, options: [.fragmentsAllowed])) != nil
+        else { continue }
+        out.append(s)
+    }
+    return out
 }
 
 // ── serving the web bundle over a custom scheme ──────────────────────────────
@@ -180,24 +259,67 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
             replyHandler(nil, "malformed invoke"); return
         }
         let args = body["args"] as? [String: Any] ?? [:]
-        let dir = appSupportDir()
 
         do {
             switch cmd {
             case "load_board":
-                replyHandler(readIfExists(dir.appendingPathComponent("board.json")) ?? NSNull(), nil)
+                replyHandler(readIfExists(dataFile(BOARD_FILE)) ?? NSNull(), nil)
 
             case "save_board":
-                try writeAtomic(dir.appendingPathComponent("board.json"),
-                                args["contents"] as? String ?? "")
+                try writeAtomic(dataFile(BOARD_FILE), args["contents"] as? String ?? "")
                 replyHandler(NSNull(), nil)
 
             case "load_snapshots":
-                replyHandler(readIfExists(dir.appendingPathComponent("snapshots.json")) ?? NSNull(), nil)
+                replyHandler(readIfExists(dataFile(SNAPSHOT_FILE)) ?? NSNull(), nil)
 
             case "save_snapshots":
-                try writeAtomic(dir.appendingPathComponent("snapshots.json"),
-                                args["contents"] as? String ?? "")
+                try writeAtomic(dataFile(SNAPSHOT_FILE), args["contents"] as? String ?? "")
+                replyHandler(NSNull(), nil)
+
+            // ── LZP-402 · the op log (ADR 001 §9, ADR 005 §2.3) ──────────────
+            //
+            // `storage.js` calls these five. They are dormant in solo mode:
+            // ADR 001 §9/§11 keep both files out of existence until a family
+            // space exists, and `store-persistence.test.js` pins that a persist
+            // touches exactly the two v1 slots. The two READS create nothing,
+            // so they stay safe to call at any time.
+
+            case "load_ops":
+                // "" — not null — when the log does not exist yet. `parseJSONL`
+                // turns both into [], but "" is what the published contract says
+                // and what an existing-but-empty file returns, so the two cases
+                // are indistinguishable to the caller, as they should be.
+                replyHandler(readIfExists(dataFile(OPS_FILE)) ?? "", nil)
+
+            case "append_ops":
+                // APPEND. See appendToFile: not writeAtomic, on purpose.
+                try appendToFile(dataFile(OPS_FILE), args["contents"] as? String ?? "")
+                replyHandler(NSNull(), nil)
+
+            case "truncate_ops":
+                // The one whole-file rewrite the log gets, after a compaction
+                // has folded its head into the checkpoint (ADR 001 §7.2). Rare
+                // by construction, and atomic because a half-written log after a
+                // compaction would lose ops the checkpoint had not absorbed yet.
+                let keep = max(0, (args["keepFromLine"] as? Int)
+                    ?? ((args["keepFromLine"] as? NSNumber)?.intValue ?? 0))
+                let url = dataFile(OPS_FILE)
+                let kept = jsonlLines(readIfExists(url) ?? "").dropFirst(keep)
+                if kept.isEmpty {
+                    try? FileManager.default.removeItem(at: url)
+                } else {
+                    try writeAtomic(url, kept.joined(separator: "\n") + "\n")
+                }
+                replyHandler(NSNull(), nil)
+
+            case "load_checkpoint":
+                replyHandler(readIfExists(dataFile(CHECKPOINT_FILE)) ?? "", nil)
+
+            case "save_checkpoint":
+                // Atomic, like save_board — and for a stronger reason. A torn
+                // board.json can be rebuilt by replaying the log; a torn
+                // checkpoint is the one file nothing else can re-derive.
+                try writeAtomic(dataFile(CHECKPOINT_FILE), args["contents"] as? String ?? "")
                 replyHandler(NSNull(), nil)
 
             case "export_board":
@@ -326,8 +448,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         window.addEventListener('error', e => window.__lzpErrors.push(String(e.message)));
         window.addEventListener('unhandledrejection', e => window.__lzpErrors.push('rejection: ' + e.reason));
         """
+
+        // WP-3: arm the R5 shadow-undo assertion for headless runs, and ONLY for those.
+        //
+        // `src/js/core/dev.js` reads `globalThis.__LZP_DEV` exactly ONCE, at import time — a flag
+        // that can flip mid-run gives you a store whose txn() captured no shadow pre-image and an
+        // undo() that then demands one. `atDocumentStart` is the only place in this host that runs
+        // before the first module, which makes it the tier-2 equivalent of
+        // `node --test --import tests/helpers/dev-flag.mjs`.
+        //
+        // WHY IT MATTERS HERE. WP-3's exit criterion is "the v1 suite stays green WITH THE
+        // SHADOW-UNDO ASSERTION ON". Tier 1, the attack suite and the property suite all arm it
+        // through the npm scripts; tier 2 did not, so the ONE suite that drives the retrofitted
+        // store through real gestures — the mutation paths the assertion exists to guard — was
+        // running with the guard off. That is attack ATT-96's finding, one tier further down.
+        //
+        // It is gated on `testFilePath` so the shipping app never carries it: `DEV` stays false
+        // for every user, and the assertion cannot throw in anyone's face.
+        let devArm = testFilePath != nil ? "window.__LZP_DEV = true;\n" : ""
+
         cfg.userContentController.addUserScript(
-            WKUserScript(source: shim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            WKUserScript(source: devArm + shim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         webView = BoardWebView(frame: .zero, configuration: cfg)
         webView.navigationDelegate = self

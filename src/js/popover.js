@@ -9,7 +9,8 @@ import { store, uid } from './store.js';
 import { t, getLang } from './i18n.js';
 import { colorOf } from './palette.js';
 import { flashCategory } from './legend.js';
-import { parseISO, dowISO, WD_DE, WD_EN, MONTH_DE, MONTH_EN, projectYearly } from './dates.js';
+import { parseISO, dowISO, WD_DE, WD_EN, MONTH_DE, MONTH_EN } from './dates.js';
+import { notesOnDate, barsOnDate } from './core/entities.js';
 
 let node = null;
 let ctx = null;
@@ -43,22 +44,31 @@ function longDate(date) {
   return `${WD[dowISO(date)]} ${d}. ${MN[m - 1].slice(0, 3)} ${y}`;
 }
 
-/** Notes that render on `date`, including yearly-repeat projections. */
-function notesOn(date) {
-  const y = Number(date.slice(0, 4));
-  return store.state.notes.filter((n) => {
-    if (!store.categoryVisible(n.categoryId)) return false;
-    if (!n.repeatsYearly) return n.date === date;
-    if (Number(n.date.slice(0, 4)) > y) return false;
-    return projectYearly(n.date, y) === date;
-  });
-}
+// Notes and bars that render on `date`, yearly-repeat projections included.
+//
+// ADR 005 §3: ONE implementation of "is this entry on this day". What used to stand here was a
+// second one, hand-written beside `layout.js`'s — and the yearly-repeat rules (9.4's Feb-29 fold,
+// 9.5's "never before its first year") are exactly the kind of thing two copies drift apart on.
+// `notesOnDate` is the degenerate one-day case of the very range query the grid runs for a whole
+// board, so the popover and the grid can no longer disagree about what a day holds; that is what
+// makes the "+n" chip's count and the stack it opens the same list (2.4).
+//
+// The visibility gate is unchanged: `categoryVisibilityOf` is v1's tri-state rule (`visible`
+// missing or true → visible, only an explicit `false` hides), i.e. `store.categoryVisible`.
+const notesOn = (date) => notesOnDate(store.state, date).map((o) => o.note);
+const barsOn = (date) => barsOnDate(store.state, date);
 
-function barsOn(date) {
-  return store.state.bars.filter(
-    (b) => store.categoryVisible(b.categoryId) && b.startDate <= date && b.endDate >= date
-  );
-}
+/**
+ * 4.2 — v1 wrote `s.settings.lastCategoryId` inside the mutation, so picking a colour here also
+ * set the default for the next entry.
+ *
+ * The op is emitted INSIDE the transaction but in the LOCAL space with no `gid`, which is what
+ * keeps ⌘Z from dragging 4.2 backwards (rule U6 — v1's behaviour, not a change). `store.js`'s
+ * `_commit()` reflects it onto `store.state.settings` before `emit()`, so the register and the
+ * live board move together and every reader below sees the new default immediately, exactly as
+ * they did when v1 assigned it inside the callback.
+ */
+const rememberCategory = (tx, catId) => tx.pref({ lastCategoryId: catId });
 
 export function openDayPopover(anchor, date, opts = {}) {
   closePopover();
@@ -156,9 +166,15 @@ function startAdd(addBtn, date) {
     if (!v) { row.remove(); return; }
     const catId = store.state.settings.lastCategoryId;
     let unhid = false;
-    store.mutate('create-note', (s) => {
-      unhid = store.ensureVisible(catId);
-      s.notes.push({ id: uid(), date, text: v, categoryId: catId, repeatsYearly: false });
+    // This site only READS lastCategoryId — it never writes it. ADR 001 §3.2 marks the row `[L]`;
+    // the v1 source does not, and the source wins (reported).
+    store.txn('create-note', (tx) => {
+      // 4.6, inside the same group, so the unhide is part of the one ⌘Z.
+      unhid = tx.ensureVisible(catId);
+      tx.note(uid()).create({
+        date, text: v, categoryId: catId, repeatsYearly: false,
+        visibility: 'privat', coEdit: false,
+      });
     });
     // Flash after refresh — refresh triggers a board redraw that rebuilds the
     // legend, which would wipe a flash started before it (4.6).
@@ -180,11 +196,11 @@ function noteRow(n, date) {
   dot.title = store.category(n.categoryId).name;
   dot.addEventListener('click', () =>
     toggleSwatches(row, n.categoryId, (catId) => {
-      store.mutate('recategorise', (s) => {
-        const x = s.notes.find((y) => y.id === n.id);
-        if (!x || x.categoryId === catId) return false;
-        x.categoryId = catId;
-        s.settings.lastCategoryId = catId;
+      store.txn('recategorise', (tx) => {
+        const x = tx.get('note', n.id);
+        if (!x || x.categoryId === catId) return false;   // the v1 decline protocol, verbatim
+        tx.note(n.id).set({ categoryId: catId });
+        rememberCategory(tx, catId);
       });
     })
   );
@@ -199,13 +215,18 @@ function noteRow(n, date) {
   const rep = el('button', 'act' + (n.repeatsYearly ? ' on' : ''), '↻');
   rep.title = t('repeatsYearly');
   rep.addEventListener('click', () => {
-    store.mutate('toggle-repeat', (s) => {
-      const x = s.notes.find((y) => y.id === n.id);
+    // ONE op, two fields, ONE stamp — a repeat that was switched on has always been anchored,
+    // and two ops could be split by a merge into a repeat with the wrong anchor year.
+    store.txn('toggle-repeat', (tx) => {
+      const x = tx.get('note', n.id);
       if (!x) return false;
-      x.repeatsYearly = !x.repeatsYearly;
-      // 9.5 — the series starts in the year it was switched on, so anchor it
-      // to the occurrence the user was actually looking at.
-      if (x.repeatsYearly) x.date = date;
+      const on = !x.repeatsYearly;
+      // 9.5 — the series starts in the year it was switched on, so anchor it to the occurrence
+      // the user was actually looking at. Switching it OFF leaves `date` alone: v1 assigns the
+      // date only on the ON branch, and writing an unchanged value at a fresh stamp would let a
+      // toggle beat a concurrent remote move for no reason. (ADR 001 §3.2 row 13 reads as though
+      // both directions carry the date; the code is right and the row is wrong — reported.)
+      tx.note(n.id).set(on ? { repeatsYearly: true, date } : { repeatsYearly: false });
     });
     refresh();
   });
@@ -214,7 +235,10 @@ function noteRow(n, date) {
   const del = el('button', 'act', '✕');
   del.title = t('delete');
   del.addEventListener('click', () => {
-    store.mutate('delete-note', (s) => { s.notes = s.notes.filter((y) => y.id !== n.id); });
+    // v1's `notes.filter()` is a harmless no-op on an id that is already gone; a log has no
+    // no-ops, so the tombstone goes through the vetted constructor and its ATT-88 existence
+    // gate, which declines rather than minting a register for a note that never existed.
+    store.apply('deleteNotePopover', { id: n.id });
     refresh();
   });
   row.appendChild(del);
@@ -233,11 +257,11 @@ function barRow(b) {
   // and without this the only fix was delete-and-redraw.
   dot.addEventListener('click', () =>
     toggleSwatches(row, b.categoryId, (catId) => {
-      store.mutate('recategorise-bar', (s) => {
-        const x = s.bars.find((y) => y.id === b.id);
+      store.txn('recategorise-bar', (tx) => {
+        const x = tx.get('bar', b.id);
         if (!x || x.categoryId === catId) return false;
-        x.categoryId = catId;
-        s.settings.lastCategoryId = catId;
+        tx.bar(b.id).set({ categoryId: catId });
+        rememberCategory(tx, catId);
       });
     })
   );
@@ -263,12 +287,15 @@ function startEdit(row, txt, n) {
   inp.select();
   const commit = () => {
     const v = inp.value.trim();
-    store.mutate('edit-note', (s) => {
-      const x = s.notes.find((y) => y.id === n.id);
+    store.txn('edit-note', (tx) => {
+      const x = tx.get('note', n.id);
       if (!x) return false;
-      if (!v) s.notes = s.notes.filter((y) => y.id !== n.id);
+      // Clearing the text IS the delete, and it is tested first — a note that was already empty
+      // is deleted rather than declined as "unchanged". v1, verbatim. The `!x` guard above is
+      // also the existence gate the tombstone needs (ATT-88).
+      if (!v) tx.note(n.id).del();
       else if (x.text === v) return false;
-      else x.text = v;
+      else tx.note(n.id).set({ text: v });
     });
     refresh();
   };

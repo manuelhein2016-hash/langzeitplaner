@@ -26,8 +26,14 @@ let lastMonth = monthKeyOf(lastToday);
 let pendingRollAnim = false;
 
 // ── boot ─────────────────────────────────────────────────────────────────────
+//
+// WP-3 (ADR 005 §1.5): the boot IIFE is now an EXPORTED function, called from `index.html`
+// rather than by the act of importing this module. Importing `main.js` no longer starts the
+// app, which is what lets a test — or, in WP-8, a lazily `import()`ed `sync/` module — reach
+// anything in here without a store, a board element and a first-run sheet appearing as a side
+// effect. Nothing about the boot sequence itself changed; only who calls it.
 
-(async function boot() {
+export async function boot() {
   boardEl = $('board');
   wrapEl = $('board-wrap');
 
@@ -69,7 +75,7 @@ let pendingRollAnim = false;
   redraw();
   scrollToToday(false);
   maybeFirstRun();
-})();
+}
 
 // ── rendering ────────────────────────────────────────────────────────────────
 

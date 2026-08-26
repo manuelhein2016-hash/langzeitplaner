@@ -14,7 +14,11 @@ import '../helpers/env.js';
 import { after } from 'node:test';
 
 import { resetStorage, seedBoard } from '../helpers/env.js';
-import { store, defaultState } from '../../src/js/store.js';
+// THE ORACLE IS v1, AND v1 IS FROZEN (WP-3). This harness compares the v2 core against the v1
+// store; after LZP-402 `src/js/store.js` IS v2, so importing it here would compare v2 against
+// itself. `tests/fixtures/v1-store-frozen.js` is the baseline commit's bytes, guarded against
+// drift by `tests/tier1/v1-frozen-store.test.js`.
+import { store, defaultState } from '../fixtures/v1-store-frozen.js';
 
 import { migrateV1 } from '../../src/js/core/migrate1to2.js';
 import { materialize, stripV2Fields } from '../../src/js/core/materialize.js';

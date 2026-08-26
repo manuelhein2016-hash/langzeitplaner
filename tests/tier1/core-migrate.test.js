@@ -64,7 +64,7 @@ import { ZERO_DEVICE_SHORT } from '../../src/js/core/ids.js';
 import { canonicalJSON } from '../../src/js/core/canon.js';
 import { fold as realFold } from '../../src/js/core/registers.js';
 import { materialize as realMaterialize, stripV2Fields as realStrip } from '../../src/js/core/materialize.js';
-import { store, defaultState } from '../../src/js/store.js';
+import { store, defaultState, migrate as v1MigrateFn } from '../../src/js/store.js';
 import { boardState, CAT, note, bar } from '../helpers/fixtures.js';
 import { generateBoard } from '../helpers/gen.js';
 
@@ -169,10 +169,18 @@ function richBoard() {
   };
 }
 
-/** v1's OWN migrate(), reached through the only exported door (`store.js:194`). */
+/**
+ * v1's OWN migrate() — the function itself, now that `store.js` exports it.
+ *
+ * This used to reach it through `store.replaceAll()`, which was v1's only door onto it
+ * (`store.js:194` did `this.state = migrate(next)`). After LZP-402 `replaceAll()` is a diff
+ * transaction over the op log, so that door leads somewhere else and going through it would make
+ * these assertions measure the RETROFIT rather than v1 — which is the opposite of what a
+ * characterization test is for. `migrate()` itself is unchanged from the v1 baseline commit, so
+ * calling it directly is the same measurement this helper always made, minus the detour.
+ */
 function v1Migrate(raw) {
-  store.replaceAll(clone(raw));            // replaceAll mutates its argument; never hand it ours
-  return clone(store.state);
+  return clone(v1MigrateFn(clone(raw)));   // migrate() mutates its argument; never hand it ours
 }
 
 // ── the reference fold (ADR 001 §6) ──────────────────────────────────────────
