@@ -259,8 +259,20 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * @property {(sid:SpaceId) => MemberId|null} adminOfSpace
  * @property {(sid:SpaceId, at:Stamp) => MemberId|null} adminAtInSpace
  * @property {(sid:SpaceId) => Op[]} adminChainOf
- * @property {Set<DeviceShort>} attestedDevices
+ * @property {Map<MemberId, Set<DeviceId>>} attestedDevices   memberId -> attested deviceIds
  * @property {(devId:DeviceId) => MemberId|null} memberOfDevice
+ *
+ * [AMENDED 2026-08-27] `attestedDevices` was typed `Set<DeviceShort>` here and has always been
+ * `Map<MemberId, Set<DeviceId>>` in `authz.js:853` — two different things. Corrected above.
+ *
+ * [OWED — WP-6, finding F-10] `envelope.js` cannot be written against either of the two entries
+ * above. ADR 002 §5.2 (rewritten 2026-08-27, the resolution of the `deviceShort` contradiction)
+ * requires the attestation PAYLOAD, keyed by deviceShort:
+ * @property {(dv:DeviceShort) => DeviceAttestation|null} attestationOf
+ * from which memberId, deviceId and sigPubRaw all fall out, superseding both entries above on the
+ * public surface. `authz.js` already decodes exactly this object (`parseAttestationBlob`, :181)
+ * and already walks the folded registers to build the table (:650-663); the payload is DISCARDED
+ * at :661, where only `deviceId -> memberId` is kept. ~10 lines.
  * @property {OpId[]} splicedIds                two different bodies under one opId; one is
  *                                              admitted by canonical form so every device agrees
  */
@@ -275,13 +287,16 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * NOTE: it never consults a server role column. The admin is resolved from
  * `space.set{admin, adminPrev}` ops alone (ADR 001 §4.1).
  *
- * [WP-1] `attestVerify` ALONE IS NOT SUFFICIENT and this is an ADR gap, not an oversight here.
+ * [RESOLVED 2026-08-27 — this note reported the contradiction; ADR 002 §5.2 now settles it.]
  * ADR 001 §1.2 defines `deviceShort` as a hash of the SIGNING KEY, while §4.0 and ADR 002 §5.2
- * write `deviceShort(op.dev)` — and `op.dev` has no derivational relationship to that key. The
- * only consistent reading is a LOOKUP: the `member:<M> → dev.<short>` attestation registers are
- * the table, and resolving `op.dev` means DECODING the attestation blob to read `att.deviceId`.
- * The fold therefore needs the payload, not just a boolean. §4.0 and ADR 002 §5.2 should say
- * "lookup"; a cleaner contract would be `attestOpen(memberId, blob) => DeviceAttestation|null`.
+ * used to write `deviceShort(op.dev)` — and `op.dev` has no derivational relationship to that key.
+ * BOTH DOCUMENTS ARE NOW AMENDED to say LOOKUP: the `member:<M> → dev.<short>` attestation
+ * registers are the table, and resolving `op.dev` means DECODING the attestation blob to read
+ * `att.deviceId`. ADR 002 §2.3 adds the four acceptance conditions that make
+ * `deviceShort -> DeviceAttestation` a FUNCTION across the space, which is what lets `openOp`
+ * resolve a device from `env.dv` alone, BEFORE decrypt and therefore before it knows `op.act`.
+ * The fold therefore needs the payload, not a boolean: `attestVerify` should become
+ * `attestOpen(memberId, blob) => DeviceAttestation|null`. That change is OWED (WP-6, F-10).
  * `attestVerify` FAILS CLOSED when absent: no family op is admitted.
  *
  * [WP-1] Stage 0 would otherwise regress infinitely — the ops that CREATE attestations are

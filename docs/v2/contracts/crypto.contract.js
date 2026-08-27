@@ -199,17 +199,31 @@ export function aadOf(hdr) { throw new Error('not implemented'); }
 export async function sealOp(op, keyring, sigPriv, hdr) { throw new Error('not implemented'); }
 
 /**
- * VERIFY BEFORE DECRYPT — a failed signature never reaches the AES path.
- * After decrypting, MUST check (ADR 002 §5.2):
- *   op.id === env.oid · op.space === env.sp · deviceShort(op.dev) === env.dv
- *   · op.act === memberOf(env.dv)
- * Any mismatch → throw. Without these, `op.act` — which 17.6 renders as "von Mama" — is forgeable.
- * @param {Envelope} env @param {KeyRing} keyring @param {CryptoKey} authorSigPub
- * @param {(dv:string) => string|null} memberOf
+ * [AMENDED 2026-08-27 — ADR 002 §5.2 was rewritten; this signature changed with it.]
+ *
+ * PRE-DECRYPT GATE, in this order (§5.2.2):
+ *   P1  att = attestationOf(env.dv); att === null  → the caller PARKS THE SEALED ENVELOPE,
+ *       unopened (ADR 001 §7.4). It is not a rejection: there is no causal delivery, so an op
+ *       overtaking its own attestation is ordinary. `att` is ALSO the only source of the
+ *       verification key, which is why this cannot be a post-decrypt check.
+ *   P2  deviceShortOf(att.sigPubRaw) === env.dv        // the short is self-certifying, §1.2
+ *   P3  verify(sig, aad ‖ iv ‖ ct, att.sigPubRaw)      // VERIFY BEFORE DECRYPT
+ *   P4  keyring holds epoch env.ep                     // else the caller PARKS (§4)
+ *
+ * POST-DECRYPT, all five, throw on any mismatch:
+ *   1 op.id === env.oid · 2 op.space === env.sp · 3 att.deviceId === op.dev
+ *   4 devOf(op.ts) === env.dv · 5 att.memberId === op.act
+ * 3 replaces the impossible `deviceShort(op.dev) === env.dv`; 5 replaces `memberOf(env.dv)`;
+ * 4 is new and not optional (it is what keeps ADR 001 §6.2's total order attributable).
+ * Without these, `op.act` — which 17.6 renders as "von Mama" — is forgeable.
+ *
+ * @param {Envelope} env @param {KeyRing} keyring
+ * @param {(dv:string) => DeviceAttestation|null} attestationOf  from AuthzResult (OWED — F-10)
  * @returns {Promise<Object>} the Op
- * @throws on bad signature, wrong key, missing epoch (caller PARKS), or any identity mismatch
+ * @throws on bad signature, wrong key, or any identity mismatch. Missing epoch and a null
+ *         attestation are NOT throws — they are parks, signalled to the caller.
  */
-export async function openOp(env, keyring, authorSigPub, memberOf) { throw new Error('not implemented'); }
+export async function openOp(env, keyring, attestationOf) { throw new Error('not implemented'); }
 
 /** varint(len) ‖ utf8(canonicalJSON(op)) ‖ zeros, to a multiple of PAD_BUCKET. */
 export function pad(plaintextBytes) { throw new Error('not implemented'); }

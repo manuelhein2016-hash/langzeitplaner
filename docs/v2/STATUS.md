@@ -1,7 +1,7 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-26 · **Stopped at:** WP-3 retrofit landed; two WP-1 judges still owed
-**Resume by reading:** this file, then `docs/v2/PLAN.md`, then the ADRs.
+**Last session:** 2026-08-27 · **Stopped at:** both owed judges ran; their documentation half is landed
+**Resume by reading:** this file, then `docs/v2/FINDINGS.md`, then `docs/v2/PLAN.md`, then the ADRs.
 
 ---
 
@@ -11,18 +11,28 @@ The v2 **design** is complete and decided (5 ADRs, 5 contracts, 9 PO decisions).
 regression gate** exists and is green. **WP-1 — the DOM-free op-log core — is built, attacked
 three times and hardened twice. WP-3 — the retrofit — has landed: the shipping v1 app now derives
 its state from an append-only op log**, all 22 mutate sites converted, and it behaves identically.
-`board.json` is still `schemaVersion: 1` with v1's exact field set and zero v2 leakage. The next
-package is **WP-6, the crypto core** — but resolve the `deviceShort` contradiction in §6 first,
-and re-run the two owed judges in §4.
+`board.json` is still `schemaVersion: 1` with v1's exact field set and zero v2 leakage.
+**Both owed judges have now run** (§4), the twelve ADR amendments they produced are **applied to
+the ADR text** (§6), and the **`deviceShort` contradiction is resolved** — ADR 002 §5.2 is
+rewritten and is the single normative answer. Every finding from every audit now lives in one
+register, `docs/v2/FINDINGS.md`. The next package is **WP-6, the crypto core**; its one concrete
+blocker is finding **F-10** (`attestationOf` on `AuthzResult`, ~10 lines in `authz.js`).
 
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-npm test              # tier 1, pure logic          → 1308 pass / 0 fail
-npm run test:attack   # adversarial corpus          →  282 pass / 0 fail
+npm test              # tier 1, pure logic          → 1341 pass / 0 fail   (100 suites)
+npm run test:attack   # adversarial corpus          →  325 pass / 0 fail   (28 suites)
 npm run test:property # property harness, 500 seeds →   51 pass / 0 fail
-npm run test:dom      # real headless WKWebView     →  217 pass / 12 files, tier 2 PASS
+npm run test:dom      # real headless WKWebView     →  271 pass / 14 files, tier 2 PASS
 ```
+
+Re-measured 2026-08-27, all four green. The counts moved for two independent reasons and neither
+is a code change: `judge:adversary3` added **43 rows in three files** under `tests/attack/`, and the
+**E1 pipeline agent** added `tests/tier1/platform-updater.test.js` and `tests/tier2/shell-updater.dom.js`
+in parallel — which is why tier 1 reads 1341 rather than 1308 and tier 2 reads 14 files rather
+than 12. Rows in `tests/attack/round3-*.test.js` tagged `SUCCEEDED (defect)` are green **because the
+defect is there**; if one goes red, invert it, do not repair it.
 
 The shadow-undo assertion (risk R5's mechanical guard) is **armed** in all three `node --test`
 scripts via `tests/helpers/dev-flag.mjs`, pinned by `suite-integrity.test.js` so an `--import` of
@@ -54,69 +64,113 @@ b230847  Propagate PO decisions D1/D7/D8/D9 through the ADRs and contracts
 66126e9  v1 baseline — LangzeitPlaner 1.0 as handed over
 ```
 
-## 4. The one unfinished thing from last session
+## 4. The two owed judges — **DONE**, 2026-08-27
 
-Round-2 hardening ran **Repair → Prove** to completion and committed as `3ab00c3`. Its final
-**Judge** phase was stopped mid-flight. Two reviews were never run:
+Both ran as a standalone read-only pass (not via workflow resume), against `c0306ac`. Neither
+touched `src/`.
 
-1. **`judge:adversary3`** — a third adversary against round 2's own fixes. Rounds 1 and 2 both
-   introduced regressions while fixing things, so assume round 2 did too. Highest value: attack
-   the unified door, the A1 splice-across-compaction fix, the A7 seq-by-opId fix, the
-   park-reason persistence, and hunt for a round-2 equivalent of "the guard now refuses boards
-   v1 opens".
-2. **`judge:conformance`** — a story-by-story audit of `src/js/core/` against the v1 and v2
-   specs, plus the list of **ADR amendments now required**. Several ADR statements were corrected
-   in code comments but never in the ADR text (see §6).
+1. **`judge:adversary3` — DONE.** 43 new adversarial rows in three files under `tests/attack/`
+   (`round3-seam`, `round3-doors`, `round3-persistence`). Produced **1 CRITICAL, 4 HIGH, 5 MEDIUM
+   and 3 LOW** findings, and a list of 19 attacks that **failed** — the code held — which is
+   recorded in `FINDINGS.md` §5 so the next round does not re-run them.
+2. **`judge:conformance` — DONE.** A story-by-story audit of all 79 v1 stories and the v2 addendum
+   against `src/js/core/` and the seven retrofitted v1 files, plus **the full ADR amendment list**
+   and **the `deviceShort` resolution**. Produced 6 further findings (F-5…F-10) and confirmed
+   11.6 lossless on the PO's real `board.json`.
 
-Re-run both first thing. The workflow script is preserved and can be resumed from cache:
+**Everything both judges found is triaged in `docs/v2/FINDINGS.md`** — one register, with owner and
+status per row, and a clearly marked "needs a decision" section for the three items that are a PO
+call rather than an engineering fix. **The documentation half is landed (this session); the code
+half is a separate later pass** — no `src/` file was changed.
 
-```
-Workflow({scriptPath: "<session>/workflows/scripts/lzp-wp1-harden-2-wf_9f9b7354-435.js", resumeFromRunId: "wf_9f9b7354-435"})
-```
+## 5. Open findings → **`docs/v2/FINDINGS.md`**
 
-Repair and Prove replay from cache; only the two judges actually run.
+**That file is now the single register.** 24 rows: 1 CRITICAL, 4 HIGH, 8 MEDIUM, 7 LOW, 4
+INFO/gap — 18 open, 2 accepted, 3 needing a PO decision, 1 fixed. It carries the three items that
+used to live in this section, plus F-1…F-4 from the WP-3 adversaries, plus everything both judges
+found. **Do not add findings here; add them there.**
 
-## 5. Open findings, deliberately deferred (do not lose these)
+Read `FINDINGS.md` §3 before starting WP-8: **eight of the eighteen open rows go from latent to
+live the moment a second device exists.** The three PO decisions are §4 of that file: F-1
+(`board.json`'s byte stability), A3-H2 (coerce / quarantine / refuse when v2's type table is
+stricter than v1's), and A3-M1a (a permissive door vs a throwing one).
 
-Both are annotated in the tests themselves, pinned to current behaviour so the row is green
-while the gap exists. **If either test goes red, the gap was closed — invert the row, do not
-"repair" it.**
+The three items that were listed here, with what changed:
 
-- **KNOWN GAP → WP-9 · security-relevant.** A bare `dev.*` attestation makes its author a
+- **KNOWN GAP → WP-9 · security-relevant · still open (`G-1`).** A bare `dev.*` attestation makes its author a
   `currentMember`: an outsider can appear in the Kreis unassisted, and `currentMembers` is what
   gates foreign-entry visibility (story 20.2). Cannot be closed in WP-1 — membership has to be
   *conferred* by the invite/redeem flow before `authz.js` can refuse to infer it.
   → `tests/attack/convergence-authz.test.js:201`, `tests/attack/ownership-authz-admin.test.js`
 
-- **STILL OPEN → WP-3.** `replaceAllOps()` returns ops alone by contract, so the retraction
-  carrier exists only on the *plan*. **The retrofitted store must call `planReplaceAll` — never
-  the short entry point — for every import and snapshot restore, and hand `plan.retractions` to
-  the publisher.** Core cannot enforce this; nothing in `core/` runs after the transaction lands.
-  Without it, an imported/restored board leaves entries live on the family's boards (story 16.5).
-  → `tests/attack/recheck-att40-replace.test.js:220`
+- **~~STILL OPEN → WP-3~~ → FIXED, and verified (`G-2`).** The obligation was that the retrofitted
+  store must call `planReplaceAll` — never the short entry point — for every import and snapshot
+  restore, and hand `plan.retractions` to the publisher. `judge:conformance` A.3 (story 16.5) read
+  `store.js:805` and confirmed it does exactly that; the publisher is still `nullPublisher`, which
+  is correct until WP-10. `tests/attack/recheck-att40-replace.test.js:220` stays as the pin.
 
-- **ACCEPTED, not a defect.** An import resurrects a tombstone at a fresh stamp. That is what
+- **ACCEPTED, not a defect (`A-1`).** An import resurrects a tombstone at a fresh stamp. That is what
   restore *means* (story 11.5), and the fresh stamp is load-bearing for paired-device
   convergence (ADR 001 §8.5). Documented so nobody "fixes" it later.
 
-## 6. ADR amendments owed
+## 6. ADR amendments — **applied 2026-08-27**
 
-Corrected in code and comments, never in the ADR text. `judge:conformance` was going to produce
-the exact list; these are the ones already known:
+`judge:conformance` produced the exact list; **all sixteen are now in the ADR text.** Every
+correction carries a marginal **Amended 2026-08-27** note naming the test, probe or finding id that
+caught it, so the next reader can tell a *verified* sentence from a *reasoned* one.
 
-- **ADR 001 §7.3 condition 3** states only the `lastSeenSeq` half. It must also require write
-  progress — `min(lastPushedSeq)` — or an unpushed write of any age resurrects a deleted entry.
-- **ADR 001 §8.3's acceptance criterion** was false as written (bar array order). Bars now sort
-  by `(_born, id)`; the AC text needs to match.
-- **ADR 001 §3.2 row 13** ("toggle-repeat → one op, two fields") is wrong for the OFF direction;
-  v1 only assigns `date` when the repeat is switched ON. The code is right, the ADR is not.
-- **ADR 001 §1.2 vs §4.0 / ADR 002 §5.2 — `deviceShort(op.dev)` is a genuine contradiction.**
-  `op.dev` has no derivational relationship to the signing key, so `deviceShort()` cannot be a
-  function of it. Implemented per §1.2 (the numbered definition); the §4.0/§5.2 step must
-  therefore be a **lookup** over the member's `dev.*` registers, not a hash. **Resolve this
-  before `envelope.js` is written** (WP-6).
-- **ADR 005 §1.1** has no home for `src/js/core/replace.js`, which now exists.
-- **ADR 002 §7.1** was already rewritten for decision D9 — no further action.
+### Applied
+
+| # | where | what was wrong | evidence that corrected it |
+|---|---|---|---|
+| B-1 | **ADR 001 §7.3 cond. 3** | read progress alone was unsafe; write progress (`min(lastPushedSeq)`) is required or an unpushed write of any age resurrects a deleted entry | `src/js/core/oplog.js:150-199`, which implements both halves and fails closed |
+| B-2 | **ADR 001 §5 step 5** | the **bar comparator** — `(startDate, endDate desc, id)` throws away the v1 array index. Corrected to `(_born, id)`. **§8.3's AC was correct as written; this section is where the error lived** — the old §6 mis-located it | `src/js/core/entities.js:694-704 cmpBars`, property P8 |
+| B-3 | **ADR 001 §3.2 row 13** | `toggle-repeat` OFF must not re-write the anchor date | `git show 66126e9:src/js/popover.js:205-208`; `core-ops.test.js:1087`, `layout.test.js:1048` |
+| B-4 | **ADR 001 §3.2 rows 11, 16** | two `[L]` marks the v1 source does not support, and a `{categoryId}` on a row with no category picker | `src/js/core/ops.js:845-848, 903-905` |
+| B-5 | **ADR 001 §3.1** | `_born` was missing from the `fnote`/`fbar` field tables while §4.3 and ADR 004 §5 both already treat it as governing | `src/js/core/ops.js:154-160, 168` |
+| B-6 | **ADR 001 §8.1 property 2** | "two migrations are **byte-identical**" overstates what holds *and* what is needed — the **registers** are identical; opIds and `dev` are not, and must not be | conformance probe `p2` test 2 against the PO's real `board.json` |
+| B-7 | **ADR 001 §4.0** | attestation is a **LOOKUP**, not `deviceShort(op.dev)`; plus the self-authorizing bootstrap, write-once as *admissibility*, and park-don't-reject | `src/js/core/authz.js:159-173, 591-663`; findings F-6, H-4 |
+| B-8 | **ADR 001 §7.4** | two parked classes missing: unarrived attestation, and an unreadable admin unshare | `src/js/core/ops.js:310-325`, `authz.js:782-793` |
+| B-9 | **ADR 001 §5 step 2** | the promotion formula and 18.3 could not both hold — an admin unshare's `pub.text: null` blanked **my own note on my own board** | `src/js/core/registers.js:493-542 withdrawnByOther` |
+| B-10 | **ADR 001 §7.2** | nothing wrong; re-read and marked **reviewed, no change**, with the `checkpoint().bodies` cross-reference, so it is not re-opened | `src/js/core/oplog.js:323, 492` |
+| B-11 | **ADR 005 §1.1** | no home for `src/js/core/replace.js` (now added, with why it is its own level-1 module); `project.js` marked **NOT YET BUILT** — it is the only entry with no file on disk, and all of ADR 004 §2 depends on it | `src/js/core/replace.js:67-77`; `ls src/js/core/` |
+| B-12 | **ADR 005 §2.1** | `boot()` **cannot** be called from `index.html` — the page's own CSP refuses an inline module. The call lives in `src/js/boot.js`; and `main.js`'s top-level `blur` listener was an unlisted **third** import blocker | `index.html:17, 82`; `src/js/boot.js` |
+| B-13 | **ADR 005 §2.2** | `mutate()` was **not** removed; it survives re-implemented as a diff transaction, and is a supported door — which is why findings A3-M3/M4 against it are contract defects, not dead branches | `src/js/store.js:19-31, 642-653` |
+| B-14 | **ADR 003 §7 gate 1** + **ADR 005 §5 rule 4** | the gate **does not exist**: no `platform/net.js`, no `tests/tier1/network-scope.test.js`, and `PURE_DIRS` never scans `src/js/` as a whole. Marked **OWED (WP-8 / LZP-1002)** rather than left implying it holds | `tests/helpers/purity.js:28`; finding F-9 |
+| B-16 | **ADR 002 §2.3 + §5.2** | the `deviceShort` resolution — see below | `src/js/core/ids.js:138`, `authz.js:591-663` |
+| — | **contracts** | `ops.contract.js` (`attestedDevices` mistyped; `attestationOf` owed), `crypto.contract.js` (`openOp`'s signature and check list), `server.contract.js` (`setLastPushedSeq`/`minLastPushedSeq`) | all three still `node --check` clean |
+
+**B-15 · ADR 002 §7.1** was already rewritten for decision D9 — confirmed, no action.
+
+### The `deviceShort` contradiction — **RESOLVED**
+
+**ADR 002 §5.2 is rewritten and is the single normative answer; ADR 001 §1.2 is the single
+definition and every other document defers to it.** `deviceShort = crock32(SHA-256(rawSigPubKey)[0..10])`,
+a function of the **signing key**; `op.dev` is an unrelated random id; the two are joined by a
+**lookup** over the member's `dev.*` attestation registers. ADR 001 §4.0 and ADR 002 §5.2 both now
+say lookup. `envelope.js` can be written against §5.2 without a further decision.
+
+**Two corrections were made to the resolution as the reviewer filed it**, stated in ADR 002 §5.2.1
+rather than papered over:
+
+1. **`att === null` cannot be a post-decrypt check.** The attestation is the only source of
+   `authorSigPub`, so resolving it is a **pre-decrypt gate**, and what gets parked is a **sealed
+   envelope, unopened**.
+2. **`attestationOf` is keyed by `deviceShort` alone** — `op.act` is not knowable before decrypt, so
+   a two-key lookup could not run where it is needed. That is sound **only** because ADR 002 §2.3's
+   four acceptance conditions make `deviceShort → DeviceAttestation` a function across the space;
+   those conditions are now written down, with a warning that relaxing them breaks §5.2.
+
+**One thing is still owed in code:** `foldAuthorized` discards the decoded payload
+(`authz.js:661`), so `openOp` has nothing to check against. That is finding **F-10**, ~10 lines,
+and it is **the** WP-6 blocker.
+
+### Owed, and not amendments
+
+- `ops.contract.js` now names `attestOpen(memberId, blob) => DeviceAttestation|null` as the
+  replacement for `attestVerify`. **Owner: WP-6.**
+- `server.contract.js` now names `setLastPushedSeq` / `minLastPushedSeq`. **Owner: WP-7.**
+- ADR 003 §7 gate 1 and ADR 005 §5 rule 4 are marked **owed**. **Owner: WP-8 / LZP-1002.**
 
 ## 7. What to build next, in order
 
@@ -207,9 +261,12 @@ focused field, delete-with-reassign over 80 entries as one undo step, pinned-mod
 print, the first-run coach, and a 200-gesture soak across a restart — with zero uncaught errors and
 no divergence from v1 beyond F-1.
 
-## New ADR amendment owed (adds to §6)
+## New ADR amendment owed (adds to §6) — **APPLIED, see §6 row B-12**
 
-**ADR 005 §1.1 / §2.1 owe `src/js/entry.js`.** §2.1 says `boot()` is called from `index.html`. It
+> **Correction, 2026-08-27:** this section named the file `src/js/entry.js`. **The file on disk is
+> `src/js/boot.js`** and no `entry.js` exists; ADR 005 §1.1 and §2.1 were amended to say `boot.js`.
+
+**ADR 005 §1.1 / §2.1 owe `src/js/boot.js`.** §2.1 says `boot()` is called from `index.html`. It
 cannot be: `index.html` ships `default-src 'self'` with no `script-src` override (story 13.4), so an
 inline `<script type="module">` is refused by the page's own CSP and the app would silently never
 start. A CSP hash is brittle and `'unsafe-inline'` would destroy the zero-network property tier 2
@@ -220,9 +277,13 @@ Also: the seams work found a **second, unlisted top-level blocker** the ADR does
 `main.js`'s top-level `window.addEventListener('blur', …)`, which was the *synchronous* throw on
 import (the boot IIFE only produced a rejected promise).
 
-## Still owed from session 1 — unchanged and still first
+## Still owed from session 1 — **CLEARED 2026-08-27**
 
-The two WP-1 judges (§4) have **not** run. A resume attempt re-executed the Repair phase instead of
+> **Both judges ran** as a standalone read-only pass, exactly as this section asked. See §4 and
+> `docs/v2/FINDINGS.md`. The paragraph below is kept for the history of *why* the resume attempt
+> was abandoned.
+
+The two WP-1 judges (§4) had **not** run. A resume attempt re-executed the Repair phase instead of
 replaying it from cache, and it was writing to core files whose fixes were already committed while
 WP-3 was building against them — so it was stopped and its uncommitted work reverted to the
 proven-green commit. **Run the two judges as a standalone read-only workflow**, not via resume.
@@ -232,3 +293,33 @@ v1→ops logic out of `migrate1to2.js` and `replace.js` — is saved as a patch 
 `<scratchpad>/round2-rerun/rerun.patch`. It is an internal refactor, not a correctness fix: the
 two-doors parity it would tidy is already proven by property **P13** over 500 seeds. Redo it cleanly
 when convenient, or drop it.
+
+---
+
+# Session 3 addendum — 2026-08-27 · the documentation half
+
+Read-only session. **No file under `src/` was changed**, and no code fix was applied — the code half
+of both audits is a separate, later pass, and three of the findings are PO decisions rather than
+repairs.
+
+**What landed**
+
+- **`docs/v2/FINDINGS.md` — new, and the single register.** 24 rows with id, severity, one-line
+  description, `file:line`, owning work package and status; a "fix before WP-8, in order" list; a
+  clearly marked "needs a decision" section with the trade-off in two sentences each; a record of
+  the 19 attacks that **failed**, so the next round does not re-run them; and a record of the six
+  things neither audit could execute.
+- **Sixteen ADR amendments applied** to ADR 001, 002, 003 and 005 plus three contracts — §6 above
+  has the table. Each carries a marginal note naming its evidence.
+- **The `deviceShort` contradiction is resolved** in ADR 002 §5.2, with two corrections to the
+  filed resolution stated loudly in §5.2.1 rather than smoothed over.
+
+**Suites re-measured, all four green** (§2). Unchanged code, so this was a check that nothing rotted
+under the E1 agent's parallel work, not a claim about this session.
+
+**Watch out for:** the E1 pipeline agent was editing the working tree throughout this session
+(`shell-macos/`, `src-tauri/`, `.github/`, `scripts/`, `server/`, `src/js/platform/`, `src/js/i18n.js`).
+Those changes are **not** part of this session's commit. One tier-2 run failed mid-session with a
+shell syntax error because `shell-macos/build.sh` was being written at that moment; the re-run was
+clean. **Finding F-9 is about that work and belongs to E1: `src/js/platform/` is scanned by
+nothing.**

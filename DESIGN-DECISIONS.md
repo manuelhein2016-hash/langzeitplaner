@@ -333,3 +333,32 @@ both halves are stated honestly:
 > Requested: either a carve-out ("D7 does not cover stamp uniqueness, or membership and admin
 > authority, which are WP-9's") or a re-wording of the last bullet. No code depends on the answer;
 > triage does.
+
+---
+
+# v2 — decisions open after the WP-1/WP-3 audits (2026-08-27)
+
+Both owed judges (`judge:adversary3`, `judge:conformance`) ran read-only against `c0306ac`. Their
+full register — 24 findings, with owner and status per row — is **`docs/v2/FINDINGS.md`**. Three
+rows there are a **PO decision, not an engineering fix**, and they are repeated here because this
+is the file the PO reads. The trade-off is stated in full in `FINDINGS.md` §4.
+
+| | decision | the trade |
+|---|---|---|
+| **F-1** | does `board.json` go back to being a byte-stable fixed point across a restart? | fixing it restores ADR 001 §5 step 5 and v1's fixed-point property; it also **rewrites `board.json` for every existing user on their next save** — identical content, different bytes |
+| **A3-H2** | when v2's type table is stricter than v1's, do we **coerce**, **quarantine**, or **refuse to migrate**? | five entry shapes v1 keeps are dropped and the loss is committed to disk on the first autosave — most visibly, `repeatsYearly: 'yes'` makes **a birthday silently stop repeating**. Only "refuse" never loses data; only "coerce" is invisible to the user |
+| **A3-M1a** | is a permissive door better than a throwing one? | the op door throws on 27 hostile values and silently accepts 3 others (a `null` note text that can never render, a `null` `categoryId` quietly repaired, a number written into a pref register). Either behaviour is defensible; **the mix is not**, and the answer decides what WP-8 does with a hostile peer |
+
+## The `deviceShort` contradiction — decided, no PO input needed
+
+Recorded here only so it is visibly closed: `deviceShort` is `crock32(SHA-256(rawSigPubKey)[0..10])`,
+a function of the device's **signing key**, defined once in ADR 001 §1.2. `op.dev` is an unrelated
+random identifier, and the two are joined by a **lookup** over the member's `dev.*` attestation
+registers — never a hash. **ADR 002 §5.2 is rewritten and is the normative answer**; ADR 001 §4.0
+now says lookup. This was the item blocking WP-6; its remaining blocker is a ~10-line code change
+(finding F-10), not a decision.
+
+## D7's open wording question is unchanged
+
+The `⚠ OPEN FOR THE PO` block above D7 is still open and neither judge closed it. `FINDINGS.md`
+does **not** duplicate it, because it is a wording question about this file rather than a defect.

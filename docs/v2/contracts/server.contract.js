@@ -194,6 +194,16 @@ export async function route(ctx, req) { throw new Error('not implemented'); }
  * @property {(deviceShort:string, seq:bigint) => Promise<void>} setLastSeenSeq
  * @property {(spaceId:string) => Promise<bigint>} minLastSeenSeq            // gates tombstone GC
  *
+ * [AMENDED 2026-08-27 — ADR 001 §7.3 condition 3 now requires WRITE progress too. Read progress
+ * alone is unsafe: a device can be fully caught up on reads and still hold a three-week-old
+ * UNPUSHED edit, and §12.5 guarantees that edit is never discarded for being old — so collecting
+ * the tombstone around it RESURRECTS the entry. `src/js/core/oplog.js:150-199` already demands
+ * both and fails closed without them. Owner: WP-7.]
+ * @property {(deviceShort:string, seq:bigint) => Promise<void>} setLastPushedSeq
+ * @property {(spaceId:string) => Promise<bigint>} minLastPushedSeq          // also gates GC
+ * `lastPushedSeq` = the space's global seq high-water at the moment that device last confirmed a
+ * DRAINED outbox. An UNKNOWN seq must make the entity NOT collectable; unknown never means yes.
+ *
  * // key wraps
  * @property {(rows:KeyWrapRow[]) => Promise<void>} putKeyWraps
  * @property {(spaceId:string, deviceId:string) => Promise<KeyWrapRow[]>} getKeyWraps

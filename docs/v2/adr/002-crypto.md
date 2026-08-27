@@ -192,6 +192,22 @@ hold, so **a malicious relay cannot fabricate a device row for an existing membe
 Every client verifies the attestation before accepting an op from that device (ADR 001 §4.0), and
 **every client verifies it before wrapping a space key to that device** (§4.2).
 
+**The four conditions under which a `dev.*` register is accepted at all** (ADR 001 §4.0), stated
+here because §5.2's lookup depends on every one of them:
+
+1. the op writing it is admissible — `op.act === memberId`, the record's own member and nobody else;
+2. the **register name equals `att.deviceShort`**;
+3. `att.memberId` equals the housing member; and
+4. the signature verifies under **that housing member's** recovery key.
+
+**Consequence, and it is load-bearing for §5.2: `deviceShort → DeviceAttestation` is a FUNCTION
+across the whole space.** A member who copies a peer's attestation blob verbatim into their own
+record — the blob is inside the E2EE stream, so every member can read it — fails (3) and (4) and
+the register never enters the table. Two members legitimately holding the same short would need the
+same signing **private** key, which is outside the model. This is what lets `openOp` resolve a
+device from `env.dv` alone, **before** it has decrypted anything and therefore before it knows
+`op.act`.
+
 Residual: a malicious relay could still fabricate a whole *member* row on the coordination API.
 The rotating client would then wrap the family key to an unattested stranger unless someone
 notices an unknown name in the member list. **The member list is therefore a security surface,
@@ -381,24 +397,174 @@ a train. This is a metadata reduction below the addendum §3 schema sketch and i
 | `dv` | the relay re-attributes an op to another device |
 | `wit` | the relay rewrites what a device claimed to have seen (§5.4) |
 
-### 5.2 Mandatory post-decrypt checks
+### 5.2 Identity resolution, and the mandatory checks
 
-After a successful decrypt, `openOp` **must** verify and throw on any mismatch:
+> **This section is the resolution of the `deviceShort` contradiction that was blocking WP-6.**
+> It was written 2026-08-27 from `judge:conformance` Part C, with two corrections to that
+> resolution stated in full below rather than papered over. Nothing here needs a further decision;
+> `envelope.js` can be written against it.
+
+#### 5.2.0 One definition, and what it is not
+
+`deviceShort` is defined **once**, in **ADR 001 §1.2**, as
+`crock32(SHA-256(rawSigPublicKey)[0..10])` → 16 Crockford base32 characters, 80 bits — a function
+of the device's **signing key** and of nothing else. `op.dev` is `'dev_' + 128 random bits` with
+**no derivational relationship to that key**, so `deviceShort(op.dev)` **is not a computation that
+exists**. Earlier drafts of this section and of ADR 001 §4.0 wrote it as though it were; that was
+an error, and this section is the correction.
+
+**§1.2 wins over the lookup reading because four consumers cannot be served by anything else**, and
+exactly one consumer needs a lookup:
+
+| consumer | needs | why the alternative fails |
+|---|---|---|
+| **HTTP request auth** — `LZP1 device=<deviceShort>` (`sync.contract.js:112`), `getDeviceByShort` (`server.contract.js:191`) | key-derived | the server is the verifier and holds **no** attestation registers — they are inside E2EE ciphertext it cannot read. A key-derived short is **self-certifying**: the relay recomputes it at registration and refuses a device claiming a short it cannot derive. A random id would be an unverifiable claim the relay must simply trust, widening §2.3's residual from "fabricate a member row" to "fabricate a device row" |
+| **the relay's device principal** — `Op.deviceShort`, `deleteOpsByDevices` for 20.2's purge, `setLastSeenSeq` for ADR 001 §7.3's GC | key-derived | `op.dev` is **inside the ciphertext**; the relay never sees it, and could not attribute, purge or track a device at all |
+| **the HLC tiebreak** — the 16-char stamp tail (ADR 001 §1.3) | key-derived | ADR 001 §6.2's proof that `≺` is a strict total order rests on "80-bit hashes of **distinct public keys**", and §8.1's `ZERO_DEVICE_SHORT` minimum depends on the Crockford alphabet. Neither statement is true of a random id |
+| **`envelope.js`'s key selector** — `env.dv` | key-derived | `openOp` must find `authorSigPub` **before** it can verify anything; a self-certifying handle means a wrong key cannot silently be substituted |
+| **ADR 001 §4.0 stage 0b** — "is `op.dev` an attested device of `op.act`?" | **lookup** | `op.dev` appears only inside the plaintext, and the attestation is the only table that maps it |
+
+Note that this section was already **half** consistent with that decision: its fourth line,
+`op.act === memberOf(env.dv)`, is a *lookup* keyed by `dv`. Only the third line applied
+`deviceShort()` as a function. The contradiction was one line deep.
+
+#### 5.2.1 ⚠ Two corrections to the resolution as it was handed over
+
+Both are stated loudly because getting either wrong makes `envelope.js` unimplementable or unsafe.
+
+1. **`att === null` is NOT a post-decrypt check. It cannot be.** The resolution as filed listed
+   "`att !== null`" among the *post-decrypt* checks and said a null attestation parks the op. The
+   attestation is the **only** source of `authorSigPub`: with `att === null` there is no key to
+   verify the signature with and no reason to reach the AES path at all. Resolving `att` is
+   therefore a **pre-decrypt gate**, and what gets parked is a **sealed envelope, unopened** —
+   re-opened when the attesting `member.set{dev.*}` arrives. The outbox/inbox must be able to hold
+   an envelope it has never decrypted, which is the same shape ADR 002 §4's unknown-epoch park
+   already requires.
+2. **`attestationOf` is keyed by `deviceShort` ALONE, and that is only sound because of an
+   invariant that must be enforced at fold time.** The resolution wrote the signature as
+   `attestationOf(env.dv)` while *describing* it as "the register `member:<op.act> → dev.<env.dv>`"
+   — a two-key description of a one-key function, and `op.act` is **not knowable before decrypt**,
+   so a two-key lookup could not run where it is needed. The one-key form is correct **provided**
+   §2.3's four acceptance conditions hold, which make `deviceShort → DeviceAttestation` a function
+   across the space. Binding back to the decrypted body is then check **5** below
+   (`att.memberId === op.act`), not a second lookup. **If a future change relaxes §2.3 condition (3)
+   or (4), this section breaks and must be revisited.**
+
+#### 5.2.2 The gate, in order
+
+Let
 
 ```
-op.id    === env.oid
-op.space === env.sp
-deviceShort(op.dev) === env.dv
-op.act   === memberOf(env.dv)          // from the attested device registers, §2.3
+att = attestationOf(env.dv)     // the DeviceAttestation whose deviceShort is env.dv, decoded from
+                                // the folded dev.* registers and signature-verified under its
+                                // housing member's RK_sig (ADR 001 §4.0 stage 0a, §2.3 above)
 ```
 
-Without these, a valid signer could bind an authenticated header to an unrelated op body, and
-`op.act` — which 17.6 renders directly as "von Mama" — would be forgeable by any member.
-**Attribution is a trust surface; treat it as one.**
+**Pre-decrypt** — in this order, no exceptions:
+
+```
+P1  att !== null                              // else PARK THE ENVELOPE, unopened (ADR 001 §7.4)
+P2  deviceShortOf(att.sigPubRaw) === env.dv   // the short is self-certifying (ADR 001 §1.2)
+P3  verify(sig, aad ‖ iv ‖ ct, att.sigPubRaw) // VERIFY BEFORE DECRYPT — hard failure
+P4  keyring has epoch env.ep                  // else PARK (§4) — a failed key never reaches AES
+```
+
+**Post-decrypt** — `openOp` **must** verify all five and **throw** on any mismatch:
+
+```
+1  op.id        === env.oid
+2  op.space     === env.sp
+3  att.deviceId === op.dev                    // ← replaces "deviceShort(op.dev) === env.dv"
+4  devOf(op.ts) === env.dv                    // the HLC tiebreak is this device's own short
+5  att.memberId === op.act                    // replaces "op.act === memberOf(env.dv)"
+```
+
+**What each check buys.**
+
+- **3** is the one this section used to get wrong. `env.dv` is the *outer* device handle the relay
+  sees and routes on; `op.dev` is the *inner* one the plaintext carries. Without 3 a valid signer
+  could seal an authenticated header over a body naming a different device — the same class of
+  splice the `oid` binding blocks for op identity.
+- **4 is new and it is not optional.** The stamp's last 16 characters are the LWW final tiebreak,
+  and ADR 001 §6.2's claim that `≺` is a *strict total order* rests on "two writes from different
+  devices differ in `deviceShort`". A device that stamped its ops with a peer's short would break
+  that premise. Convergence itself survives — the register join falls through to `opId` and then to
+  the canonical value (`src/js/core/registers.js cmpWrites`) — but merge outcomes would silently
+  stop being **attributable**, and the honest fix is one string comparison here rather than an
+  argument later. It also closes the only T5 gap the lookup reading otherwise leaves open: forging
+  a peer's short inside one's own stamps.
+- **5, with P2** is attribution. 17.6 renders `op.act` directly as „von Mama";
+  **attribution is a trust surface, treat it as one.** P2 is what makes `dv` self-certifying and is
+  the same computation the relay performs at device registration — which is why the relay needs no
+  attestation registers to bind a `deviceShort` to a public key (§2.3, ADR 003 §2).
+
+#### 5.2.3 Where the table comes from
+
+`att` is supplied by ADR 001 §4.0's stage-0a fold, which must therefore expose the attestation
+**payload**, not merely a verification boolean:
+
+```js
+/** @property {(dv: DeviceShort) => DeviceAttestation|null} attestationOf */
+```
+
+on `AuthzResult`, replacing the `Set<DeviceShort> attestedDevices` and
+`(devId) => MemberId|null memberOfDevice` entries in `ops.contract.js` §4 and matching `openOp`'s
+fourth parameter in `crypto.contract.js` §4. The injected verifier `foldAuthorized` takes changes
+from `attestVerify(memberId, blob) => boolean` to
+**`attestOpen(memberId, blob) => DeviceAttestation|null`**. `openOp` is otherwise given no way to
+perform P1–P3 or checks 3–5.
+
+`src/js/core/authz.js` already decodes exactly this object (`parseAttestationBlob`, `:181`) and
+already walks the folded registers to build the table (`:650-663`); the payload is **discarded** at
+`:661`, where only `deviceId → memberId` is kept. **That is a ~10-line change in `authz.js` plus
+two contract lines, and it is the concrete unblocker for WP-6** (LZP-304). It is finding **F-10** in
+`docs/v2/FINDINGS.md`.
+
+#### 5.2.4 The chain this buys, and what it costs each adversary
+
+```
+op.f  ──(AES-256-GCM under FSK_e, AAD binds v‖sp‖ep‖dv‖oid‖wit)──►  ct
+ct    ──(ECDSA over aad‖iv‖ct, key = att.sigPubRaw named by dv)──►  sig
+dv    ──(self-certifying: crock32(SHA-256(sigPubRaw)[0..10]))────►  sigPubRaw
+sigPubRaw ──(inside DeviceAttestation, signed by RK_sig)─────────►  {memberId, deviceId, deviceShort}
+att   ──(register member:<M> → dev.<dv>, write-once, §2.3 (1)-(4))►  M attested it
+op.dev === att.deviceId  ∧  op.act === att.memberId === M
+```
+
+- **T1 (relay).** `dv` is in the AAD, so re-attributing an op to another device breaks the GCM tag
+  *and* the signature. The relay cannot fabricate a `dev.*` register — it is authored under
+  `RK_sig` inside the E2EE stream (§2.3). Check 3 additionally stops the relay pairing an
+  authenticated header with an unrelated body's `dev`. **Strictly stronger than the old text.**
+- **T4 (MITM at pairing).** Unchanged — the SAS is the defence, and the new device self-attests
+  with the restored `RK_sig` (§6.3 step 8), which is what mints the `dev.<short>` register.
+- **T5 (member as adversary, admin included).** A member can add devices **only to their own
+  record** (ADR 001 §4.0, enforced as admissibility at `authz.js:612` and write-once at
+  `:626-644`). Forging another member's short inside one's own stamps is closed by check 4.
+
+#### 5.2.5 Bootstrapping, and the one thing that is NOT a rejection
+
+An envelope may legitimately arrive before the attestation that would resolve it: there is **no
+causal delivery** in this system (ADR 001 §2), so a member's first content op overtaking their
+`member.set{dev.*}` op is ordinary, not hostile. `att === null` therefore **parks the sealed
+envelope** (P1) and never rejects it — a rejection is final, and a final rejection here is silent
+data loss on first contact and on every partial pull. This is finding **F-6**, and today the shipping
+fold does the wrong thing: `authz.js:671` **rejects** `unattestedDevice`, and `store.js:699-703`
+drops the rejected op without appending it to the log, so it is never re-evaluated. A park reason
+(`ATTESTATION`) must exist in `ops.js`'s `PARK_REASONS` before WP-8 pulls from a real peer.
+
+Checks P2, P3, 1, 2, 3, 4 and 5 remain **hard failures**: those are protocol violations, not version
+or delivery skew.
 
 `openOp` also rejects a field whose *value* fails its declared type check in `FIELDS`
 (a protocol violation → drop and log locally), while an unknown *kind* or an unknown *field name*
 is **parked** (ADR 001 §7.4).
+
+>  **Amended 2026-08-27.** Corrected by `judge:conformance` Part C, resolving the contradiction
+>  recorded in `docs/v2/contracts/ops.contract.js:279-290` and STATUS §6. The implementation
+>  (`src/js/core/ids.js:138`, `src/js/core/authz.js:159-173, 591-663`) already follows the lookup
+>  reading; only the documents were wrong. §5.2.1's two corrections are **this pass's**, not the
+>  reviewer's, and they change the shape of `openOp`: the attestation gate moved *ahead* of the
+>  decrypt, and the lookup is single-keyed with an invariant (§2.3) carrying the weight.
 
 ### 5.3 Padding — the measure that makes Belegt honest
 

@@ -28,12 +28,27 @@ src/js/core/                      ── DOM-FREE, I/O-FREE, dependency-free
                             sort comparators
   registers.js      [new]   the LWW join: applyOp / foldAll / mergeMaps / serialize
   authz.js          [new]   the staged fold: attestation → admin chain → membership → content
-  project.js        [new]   projectForFamily / assertFamilyPatch / retractPatch  (ADR 004 §2)
+  project.js        [NOT YET BUILT — WP-10]  projectForFamily / assertFamilyPatch / retractPatch  (ADR 004 §2)
   materialize.js    [new]   RegisterMap + ctx → the exact v1 state shape
   undo.js           [new]   txn groups, pre/post images, inverse-op emission
   oplog.js          [new]   in-memory log, dedupe, checkpoint, compaction, parking
   migrate1to2.js    [new]   board.json (v1) → v2 ops, with GENESIS(i) stamps
+  replace.js        [new]   the ADR 001 §8.5 diff transaction: import (11.3), snapshot restore (11.5)
 ```
+
+**`src/js/boot.js`** `[new]` also belongs to §1.5's client tree — two statements, loaded by `src`
+from `index.html`; see §2.1 for why it cannot be inline.
+
+>  **Amended 2026-08-27 — two files this section had no home for.**
+>  · **`replace.js` is its own level-1 module**, not a corner of `migrate1to2.js` and not part of
+>  `ops.js`. It is not migration (that runs once, is deterministic, and stamps `GENESIS`; this runs
+>  on demand, stamps the present, and is non-deterministic by design) and it is not `ops.js` (it
+>  reads the current `RegisterMap`, which `ops.js` never does). Evidence:
+>  `src/js/core/replace.js:67-77`.
+>  · **`project.js` is the only entry in this tree with no file on disk.** `ls src/js/core/` returns
+>  14 files and none of them is `project.js` — so **all of ADR 004 §2's single choke point is
+>  unbuilt**. Owner: **WP-10**. Recorded by `judge:conformance` B-11 / A.3.
+
 
 ### 1.2 Client — crypto and sync (DOM-free, ports injected)
 
@@ -215,8 +230,23 @@ Both were verified: 16 of 18 v1 modules import cleanly under bare Node 22; exact
 - **`interact.js:199`** — `window.__lzpContextMenu = (x, y) => { … }` at top level. **Move it
   inside `initInteractions()` (`:27-40`).** One line. This also unlocks unit-testing the
   drag-commit handlers at `:296-360`.
-- **`main.js:30`** — `(async function boot() { … })()`. **Wrap it as `export function boot()`**,
-  called from `index.html`. `main.js` then imports cleanly and the boot order becomes testable.
+- **`main.js:30`** — `(async function boot() { … })()`. **Wrap it as `export function boot()`.**
+  It **cannot** be called from `index.html` directly: the page ships
+  `Content-Security-Policy: default-src 'self'` with no `script-src` override (story 13.4, asserted
+  at `tests/tier2/shell-bridge.dom.js:68`), so an inline `<script type="module">` is refused by the
+  page's own CSP and the app silently never starts. A CSP hash is brittle and `'unsafe-inline'`
+  would destroy the zero-network property tier 2 asserts. The call therefore lives in
+  **`src/js/boot.js`** — a two-statement, same-origin module — and `index.html:82` ships
+  `<script type="module" src="./src/js/boot.js">`.
+- **`main.js`'s top-level `window.addEventListener('blur', …)`** — a **third** import blocker the
+  recon did not list, and the one that actually threw *synchronously* on import (the boot IIFE only
+  produced a rejected promise). Move it inside `boot()`.
+
+>  **Amended 2026-08-27 — this section said `index.html` calls `boot()`; it cannot.** Corrected
+>  against the shipped `index.html:17, 82` and the 11-line `src/js/boot.js` that WP-3 landed.
+>  `judge:conformance` B-12 also records that **STATUS §"New ADR amendment owed" named the file
+>  `src/js/entry.js`; the file on disk is `src/js/boot.js`** and no `entry.js` exists — the STATUS
+>  line is corrected in the same pass.
 
 `tests/tier1/core-purity.test.js` additionally imports **all 18 v1 modules** and asserts none
 throws, so this cannot rot.
@@ -239,9 +269,27 @@ store.init()         store.flushSync()        store.schedulePersist()  store.per
 store.ready
 ```
 
-**`mutate(label, fn)` is removed and replaced by `txn(label, fn)`** (ADR 001 §7.1) — the one
+**`txn(label, fn)` replaces `mutate(label, fn)` at all 22 call sites** (ADR 001 §7.1) — the one
 deliberate break, and the reason all 22 call sites are rewritten. New members:
 `store.txn()`, `store.applyRemote(ops)`, `store.registers()`, `store.publisher`.
+
+**`mutate()` itself survives, re-implemented as a diff transaction.** `fn` edits `state` in place
+exactly as it always did; the store then diffs the four content keys plus `settings` against a
+pre-image and emits the describing ops. It is kept for two reasons: WP-2's characterization suite —
+which is the retrofit's *oracle* — calls `store.mutate` 44 times in
+`tests/tier1/store-persistence.test.js` and 16 more times in `tests/tier2/`; and it made the
+22-site conversion incremental, because a converted site and an unconverted one produce the same
+ops into the same log. Same declines, same return value, same "a declining callback's edits are not
+rolled back" quirk.
+
+>  **Amended 2026-08-27 — this section said `mutate()` was removed. It was not.** Corrected against
+>  `src/js/store.js:19-31, 642-653` by `judge:conformance` B-13. Because `mutate()` is a **supported
+>  door**, two `judge:adversary3` findings against it are API-contract defects rather than dead
+>  branches: **M-3** (a *nested* `mutate()` spends one ⌘Z on two actions, and the R5 shadow guard
+>  then throws *after* the ops are appended and *before* `schedulePersist()`/`emit()` — leaving the
+>  board changed, unsaved and un-redrawn) and **M-4** (a throwing callback's half-edit is adopted
+>  into the log by the *next* action, permanently, with no undo step). Both are in
+>  `docs/v2/FINDINGS.md`, owner **WP-4**.
 
 The `return false` decline protocol at `store.js:150` survives verbatim; it already prevents 16
 no-op mutations from reaching the log and it maps exactly onto "emit no op".
@@ -439,7 +487,9 @@ equivalence property test** — it does not enter the foundation on speculation 
    explicit `DESIGN-DECISIONS.md` entry; a runtime one needs PO sign-off.
 3. `server/core/` never imports Prisma, `@vercel/*` or `node:fs`, and never reads
    `process.env`/`Date.now()`/`Math.random()`.
-4. `platform/net.js` is the only `fetch` call site, and it is dynamically imported.
+4. `platform/net.js` is the only `fetch` call site, and it is dynamically imported. **(Rule stands;
+   its mechanical gate is OWED — see ADR 003 §7 gate 1, amended 2026-08-27. `src/js/platform/` is
+   not in `PURE_DIRS` and nothing scans it.)**
 5. No test reads the wall clock or the network.
 6. The v1 store surface in §2.2 is preserved; only `mutate` → `txn` breaks.
 7. `appendOps` appends; it never rewrites the log.

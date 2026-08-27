@@ -9,6 +9,16 @@
 | **Supersedes** | LZP-401's "ULIDs" premise (§1.2), the standalone `board.reset` primitive (§7.3) |
 | **Path** | A (v1 exists as working code; LZP-402/403 in scope) |
 
+> **Amended 2026-08-27**, after `judge:conformance` and `judge:adversary3` ran against the
+> WP-1 core and the WP-3 retrofit. Ten statements in this document were **wrong**, not merely
+> imprecise, and are corrected in place: §1.2 (cross-reference), §3.1 (`_born` on `fnote`/`fbar`),
+> §3.2 rows 11/13/16, §4.0 (attestation is a **lookup**, not a hash), §5 step 2 (the withdrawal
+> qualifier), §5 step 5 (the bar comparator), §7.2 (`bodies` cross-reference), §7.3 condition 3
+> (write progress), §7.4 (two more parked classes), §8.1 property 2 ("byte-identical" overstated).
+> Every correction carries a marginal **Amended** note naming the test or the finding id that
+> caught it, so the next reader knows which sentences were *verified* and which are still merely
+> *reasoned*. The register of findings behind them is `docs/v2/FINDINGS.md`.
+>
 > **How to read this.** §0 is the whole design in nine sentences. Everything after it is
 > the detail an implementer needs so that no further design decision is required.
 > Where this document and a ticket summary disagree, the **spec story wins**; where this
@@ -103,6 +113,22 @@ Three properties this buys, all load-bearing:
   probability around `10⁻²⁰`). Two of the reviewed proposals needed a server round trip here.
 - **Crockford alphabet** (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`) ⇒ every character sorts at or
   above `'0'`, so the all-zeros device short is a true minimum. Migration depends on this (§8).
+
+> **This paragraph is the ONLY definition of `deviceShort` in the system, and every other document
+> defers to it.** `deviceShort` is a function of the device's **signing key** and of nothing else.
+> `op.dev` (`'dev_' + 22 b64url`, above) is an independent random identifier with **no derivational
+> relationship** to that key: `deviceShort(op.dev)` is not a computation that exists. The two are
+> joined by exactly one artifact — the `DeviceAttestation` (ADR 002 §2.3), which names `memberId`,
+> `deviceId` **and** `deviceShort` together and is signed by the member's recovery key — so
+> resolving one from the other is a **lookup**, never a hash. Earlier drafts of §4.0 and of ADR 002
+> §5.2 wrote it as a hash; both are corrected, and ADR 002 §5.2 now carries the full resolution.
+>
+> **Amended 2026-08-27** — the contradiction was raised from the implementation
+> (`docs/v2/contracts/ops.contract.js:279-290`, written while `authz.js` was built) and resolved by
+> `judge:conformance` Part C. `src/js/core/ids.js:138 deviceShortOf` implements this paragraph
+> verbatim and needs no change; its one non-conforming caller, `src/js/store.js:415-425`, mints an
+> **ephemeral solo identity** from `getRandomValues` and is documented as such — it becomes the real
+> thing when the keystore lands in WP-6.
 
 **Entity uuids are never re-keyed.** Migration keeps v1's `crypto.randomUUID()` values verbatim.
 Re-keying gains no ordering (the stamp provides it), destroys any external reference, and would
@@ -288,6 +314,7 @@ export const FIELDS = {
     'pub.date':          { t: 'date', coEdit: true },
     'pub.text':          { t: 'str80', coEdit: true, geteiltOnly: true },
     'pub.repeatsYearly': { t: 'bool', coEdit: true },
+    _born:               { t: 'stamp', writeOnce: true, gov: true },
   },
   fbar: {
     'pub.level':     { t: 'enum', values: ['privat','belegt','geteilt'], gov: true },
@@ -296,6 +323,7 @@ export const FIELDS = {
     'pub.startDate': { t: 'date', coEdit: true },
     'pub.endDate':   { t: 'date', coEdit: true },
     'pub.label':     { t: 'str40', coEdit: true, geteiltOnly: true },
+    _born:           { t: 'stamp', writeOnce: true, gov: true },
   },
   member: {
     displayName: { t: 'str' }, colorRef: { t: 'str' },
@@ -311,6 +339,14 @@ export const FIELDS = {
   },
 };
 ```
+
+>  **Amended 2026-08-27 — `_born` was missing from `fnote` and `fbar`.** §4.3 stage 3a already
+>  names it a governing family field ("`pub.level`, `pub.coEdit`, `pub.alive`, **`_born`**"), and
+>  ADR 004 §5's transition table writes `'_born'` in the Privat→Belegt and Privat→Geteilt rows —
+>  so the register was normative everywhere except in the table that declares it. Without it the
+>  first publication cannot carry its create stamp and `createdAt` (§1.4) is undefined for every
+>  foreign entry, which 17.6 renders. Corrected by `judge:conformance` B-5 against
+>  `src/js/core/ops.js:154-160, 168`, which has carried the field since WP-1.
 
 **There is no `owner` field anywhere.** Owner is the `<memberId>` segment of the family entity
 key, and in the personal space it is trivially me (single-writer space). See §4.
@@ -340,18 +376,29 @@ transaction and therefore not undone — deliberately reproducing v1's behaviour
 | 7 | `interact.js:565` | `edit-note` | `note.set{text}` (+`{categoryId}`) **or** `note.set{_alive:false}` when the text empties `[L]` |
 | 8 | `interact.js:592` | `edit-bar` | `bar.set{label}` (+`{categoryId}`) `[L]` |
 | 9,10 | `interact.js:618, 631` | `pad` | `pad.set{text}` on `pad:YYYY-MM`, or `{_alive:false}` when empty. **The 600 ms debounce is the op boundary** (recon B9) so ⌘Z is not per keystroke. |
-| 11 | `popover.js:159` | `create-note` | as #6 `[L]` |
+| 11 | `popover.js:159` | `create-note` | as #6, **but NOT `[L]`** — this site only *reads* `lastCategoryId` (`popover.js:158`); it never writes it |
 | 12 | `popover.js:183` | `recategorise` | `note.set{categoryId}` `[L]` |
-| 13 | `popover.js:202` | `toggle-repeat` | `note.set{repeatsYearly,date}` — one op, two fields, one stamp |
+| 13 | `popover.js:202` | `toggle-repeat` | **ON:** `note.set{repeatsYearly:true, date}` — one op, two fields, one stamp (9.5: the series is anchored to the occurrence the user was looking at). **OFF:** `note.set{repeatsYearly:false}` **only** |
 | 14 | `popover.js:217` | `delete-note` | `note.set{_alive:false}` |
 | 15 | `popover.js:236` | `recategorise-bar` | `bar.set{categoryId}` `[L]` |
-| 16 | `popover.js:266` | `edit-note` | as #7 `[L]` |
+| 16 | `popover.js:266` | `edit-note` | `note.set{text}` **or** `note.set{_alive:false}` when the text empties. **NOT `[L]`, and no `{categoryId}`** — there is no category picker in this row, so #7's `(+{categoryId})` and its `[L]` do not carry over |
 | 17 | `legend.js:35` | `toggle-category` | `cat.set{visible}` |
 | 18 | `legend.js:76` | `add-category` | `cat.set{_born,name,nameEn,paletteRef,visible:true,defaultVisibility:'privat',_alive:true}` |
 | 19 | `legend.js:114` | `rename-category` | `cat.set{name}` or `{nameEn}`; the DE-rename path emits `{nameEn: null}` explicitly, reproducing `legend.js:116` — **`null` is a value, `undefined` is not representable** |
 | 20 | `legend.js:129` | `recolor-category` | `cat.set{paletteRef}` |
 | 21 | `legend.js:152` | `delete-category` | `cat.set{_alive:false}` `[L]` |
 | 22 | `legend.js:197` | `delete-category` (reassign) | **fan-out:** N×`note.set{categoryId}` + M×`bar.set{categoryId}` + `cat.set{_alive:false}`, **one `gid`** so ⌘Z stays one step (recon B1/B6) `[L]` |
+
+>  **Amended 2026-08-27 — three rows of this table were wrong about the v1 source.**
+>  · **Row 13:** v1 assigns `date` on the ON branch **alone**
+>  (`git show 66126e9:src/js/popover.js:205-208` — `if (x.repeatsYearly) x.date = date`).
+>  Re-writing an unchanged date at a fresh stamp would let a toggle beat a concurrent remote move
+>  for no reason. `src/js/core/ops.js:875-884` implements the corrected reading and **throws** if
+>  ON carries no anchor date (9.5); pinned by `tests/tier1/core-ops.test.js:1087` and
+>  `tests/tier1/layout.test.js:1048`.
+>  · **Rows 11 and 16:** neither site writes `lastCategoryId`, so neither is `[L]`, and row 16 has
+>  no category picker at all. `src/js/core/ops.js:845-848, 903-905` both carry the correction as a
+>  source comment. Caught by `judge:conformance` B-3/B-4.
 
 Every entry op addresses its target **by id and by an absolute target value**. A single
 "reassign everything pointing at X" op would be non-commutative — its effect would depend on
@@ -382,6 +429,17 @@ v2 adds three device-local prefs: `settings.deviceId`, `settings.lastSeenSeq` (a
 `spaceId → seq`, for 17.5's "neu" markers), `settings.hiddenMembers` (an array of memberIds, for
 17.3), and `settings.density` (17.7).
 
+>  **Not yet enforced at the seam — finding F-7, owner WP-8.** "Never synced" is true of every
+>  *local* door and false of the *remote* one: `store.applyRemote()` has **no space filter**, and
+>  `authz.js:672-675` takes the `else` branch for `spaceClassOf('local')`, which only checks
+>  `op.act === me`. A `pref.set` arriving over the wire under my own member id is folded, moving the
+>  `rowHeight` and `layers.feiertage` registers while `state.settings` — which `_project()`
+>  deliberately does not re-derive — keeps the old values. In solo mode `board.json` wins at the
+>  next launch and the change is silently **discarded**; once a checkpoint exists the checkpoint
+>  wins and **the drawn Feiertage layer changes under the user with no gesture behind it**. The fix
+>  is one line at the `applyRemote` seam: drop `space === 'local'` ops. Measured by
+>  `judge:conformance` probe p6 test 1 and `tests/attack/round3-seam.test.js` R3-3/R3-4.
+
 ---
 
 ## 4. Authorization — a pure function of the op set
@@ -395,13 +453,56 @@ values of earlier stages.
 
 ### 4.0 Stage 0 — device attestation
 
-An op is admitted at all only if `op.dev` is an attested device of `op.act`:
-`member:<act>` holds a register `dev.<deviceShort(op.dev)>` whose value is a
-`DeviceAttestation` signed by that member's recovery key (ADR 002 §2.3), and the signature
-verifies. Personal-space ops are checked against the local device set.
+An op is admitted at all only if `op.dev` is an attested device of `op.act`. **`deviceShort` is a
+function of the signing key (§1.2) and cannot be computed from `op.dev`, so this is a LOOKUP, not a
+hash** (the full resolution is ADR 002 §5.2): the registers `member:<act>` → `dev.<short>` are
+decoded to their `DeviceAttestation` payloads, and `op.dev` is admitted iff some decoded attestation
+on `member:<act>` satisfies **all four** of
+
+- `attestation.deviceId === op.dev`,
+- `attestation.memberId === act`,
+- the register name equals `attestation.deviceShort`, and
+- the signature verifies under **that member's** recovery key.
+
+The fold therefore needs the **payload**, not a boolean: the injected verifier is
+`attestOpen(memberId, blob) => DeviceAttestation|null`, not `attestVerify(memberId, blob) => bool`.
+Personal- and local-space ops are checked against the local device set instead; where the caller
+does not supply it, the check degrades to `op.act === me`, which is all §4.4 claims for the personal
+space — **and see the amendment note below, because that degradation is a WP-8 blocker.**
 
 `dev.*` registers are **write-once** and admissible only from `op.act === memberId` — a member
-can add devices to their own record and to nobody else's.
+can add devices to their own record and to nobody else's. **Write-once here is an ADMISSIBILITY
+rule, not the LWW join:** only the minimal claim under `≺` is admitted and every later claim is
+rejected outright, because an attestation that could be *replaced* at a greater stamp is exactly the
+key-injection hole ADR 002 §2.3 exists to close.
+
+**Stage 0 does not regress infinitely.** The ops that *create* attestations are themselves ops. A
+`member.set` patch consisting **solely** of `dev.*` registers is therefore **self-authorizing** on
+`op.act === memberId` — requiring an already-attested device to author an attestation has no base
+case. A patch that **mixes** `dev.*` with ordinary member fields has two predicates and no single
+answer and is **refused whole**.
+
+**An op whose attestation has not yet arrived is PARKED, not rejected** (§7.4). There is no causal
+delivery in this system (§2), so a member's first content op arriving before their attestation op is
+ordinary, not hostile — and a rejection is *final*, which makes it silent data loss on first contact
+and on every partial pull.
+
+>  **Amended 2026-08-27, four ways, and one of them is a live defect.**
+>  · **The lookup.** `dev.<deviceShort(op.dev)>` was unimplementable — see §1.2. Corrected by
+>  `judge:conformance` Part C against `src/js/core/authz.js:159-173, 591-663`, which has
+>  implemented the lookup since WP-1. **This is the item that was blocking WP-6; it is now closed.**
+>  · **Self-authorizing bootstrap** and **write-once as admissibility** were both discovered while
+>  building `authz.js` (`:612`, `:626-644`) and recorded in `docs/v2/contracts/ops.contract.js`;
+>  §4.0 never said either.
+>  · **Park, don't reject.** Finding **F-6**: `authz.js:671` rejects an unattested-device op and
+>  `store.js:699-703` then drops it without appending it to the log, so it is never re-evaluated.
+>  Reproduced by probe `p4` — the *same op set* admits the op once the attestation is present.
+>  Owner: **WP-8**.
+>  · **The `act === me` degradation is not benign.** Finding **H-4** (`tests/attack/round3-seam.test.js`
+>  R3-40/41) measured two store instances over one board: stamps and opIds agree exactly as §8.1
+>  promises, but `_me` is ephemeral per process, so each refuses the other's ops with `notMyAct` and
+>  **nothing merges**. Any fleet test that mints its ops with the receiving store's own `_me` is a
+>  false green. ADR 002 §2.2's durable identity must land before `applyRemote` can admit a real peer.
 
 ### 4.1 Stage 1 — the admin chain (governance)
 
@@ -503,11 +604,25 @@ export function materialize(regs, ctx) { … }
 2. **Choose the scope.**
    - **Own entity** (`note:`/`bar:` in the personal space) → read *truth* fields, then apply
      **promotion**: for each co-editable field,
-     `effective[f] = maxByStamp( truth[f], pub[f] where pub[f].author !== me )`.
+     `effective[f] = maxByStamp( truth[f], pub[f] where pub[f].author !== me )`,
+     **and never any `pub[f]` at all while my publication stands withdrawn by a third party.**
      **Never promote my own `pub.*` writes.** They are projections *of* the truth, not edits
      *to* it — which is exactly why publishing `pub.text: null` for a Belegt downgrade does not
      blank my own note. *This single asymmetry is the correctness heart of ADR 004; it carries a
      comment in the source and property test P7.*
+
+     > **Amended 2026-08-27 — the formula as written contradicted 18.3.** An admin unshare is one
+     > op, so its `pub.text: null` carries `author === admin ≠ me` at a stamp newer than my truth;
+     > the unqualified formula promotes it, step 1 skips `null`, and **my own note goes blank on my
+     > own board from a register I did not write** — while 18.3 says the entry "reverts to
+     > owner-private and is **never deleted**". The discriminator is local and exact:
+     > `pub.level === 'privat'` (or `pub.alive === false`) authored by someone other than me can
+     > only be an admin unshare, because `pub.level` is `gov: true` and §4.3 stage 3a admits it
+     > from the owner or the admin alone. The tempting alternative — *never promote a `null`* — is
+     > **wrong**: 18.2/R9 needs a co-editor's explicit `pub.text: null` to reach my truth, `null`
+     > being a first-class value (ADR 004 §5.1) and not a synonym for absent. Corrected by
+     > `judge:conformance` B-9 against `src/js/core/registers.js:493-542` (`withdrawnByOther`),
+     > which implements the qualifier and flags the contradiction in place.
    - **Foreign entity** (`fnote:<M>/…`, `M ≠ me`) → read `pub.*` only. Truth fields for foreign
      entities cannot exist, because they were never transmitted.
 3. **Filter.** Drop if `_alive === false` / `pub.alive === false`; if foreign and
@@ -531,13 +646,29 @@ export function materialize(regs, ctx) { … }
    and per-column lane rescue (`layout.js:162-177`) are order-sensitive, so array order is
    user-visible (stories 2.4, 2.5, 3.8).
    - `notes` — `(_born asc, id asc)`
-   - `bars` — `(startDate asc, endDate desc, id asc)`, deliberately the comparator
-     `assignLanes` already uses at `layout.js:43`, which makes the rescue pass
-     order-independent too
+   - `bars` — `(_born asc, id asc)`, the **same** comparator as notes and categories, and for the
+     same reason: `_born` carries the v1 array index (§8.1), and only a `_born` sort satisfies
+     §8.3's "deep-equals … including array order" for bars. A date sort throws that index away. It
+     costs nothing at render time — `assignLanes` re-sorts its own input by
+     `(startDate, endDate desc, id)` internally (`layout.js:38-44`), so lane assignment is
+     order-independent either way; what array order still decides is `seg.labelRow`, and on upgrade
+     day the user's own file order is the answer that moves nothing.
    - `categories` — `(_born asc, id asc)`, so `categories[0]` (the dangling-reference fallback)
      is deterministic
    - `scratchpads` — object built with **sorted keys**, so `JSON.stringify` comparisons in tests
-     are stable
+     are stable. **This property is true at this layer and is discarded one layer up** — see
+     finding **F-1**: `store.js:368 reconcileMap` `Object.assign`s into the live state object and
+     never reorders it, so the shipped `board.json` carries insertion order in the session that
+     created the pads and sorted order after a relaunch. The sort is unit-tested where it holds
+     (`tests/tier1/core-ops.test.js:1302`) and violated where it ships. Open, and a **PO decision**
+     rather than a repair, because the one-line fix rewrites `board.json`'s bytes for existing
+     users on their next save.
+
+   > **Amended 2026-08-27 — the bar comparator above was the wrong sort.** STATUS §6 mis-located
+   > this amendment in §8.3; §8.3's acceptance criterion is **correct as written** and it is this
+   > bullet that was false. Corrected by `judge:conformance` B-2 against
+   > `src/js/core/entities.js:694-704 cmpBars`, which carries the same correction as a source
+   > comment and is pinned by the §8.3 deep-equal AC (property P8).
 
    For a single device `_born` order **is** v1 insertion order, and migration (§8) preserves the
    v1 array index inside the stamp — so a migrated solo board renders byte-identically to v1.
@@ -740,6 +871,10 @@ for debuggability.
 > pruned only for entities collected by the §7.3 tombstone GC. Stated here rather than left to be
 > rediscovered: it is the price of "a compaction may not decide state", and it is the right price,
 > but the bound in this section was wrong without it.
+>
+> **Reviewed 2026-08-27 — no change owed.** `judge:conformance` B-10 re-read this block against the
+> implementation and found it current; recorded so it is not re-opened. `checkpoint().bodies` is
+> `src/js/core/oplog.js:323, 492`.
 
 **Sizing, so nobody has to guess.** A heavy family — 8 members × 300 entries/year × ~4 ops each
 ≈ 10 000 ops/year. Plaintext ≈180 B, padded to 256 B (ADR 002 §5.3), envelope ≈380 B on the wire
@@ -755,9 +890,23 @@ An entity may be dropped from the checkpoint **entirely** only when **all three*
 
 1. `_alive === false` (or `pub.alive === false`), **and**
 2. `max(all its stamps)` is more than **400 days** old, **and**
-3. **every registered, non-revoked device in that space reports `lastSeenSeq` past the seq of
-   that stamp's op** (the server exposes `Device.lastSeenSeq`, reported opportunistically on
-   push).
+3. **every registered, non-revoked device in that space has both READ and WRITTEN past that
+   stamp's op** — `min(lastSeenSeq) >= seq` **and** `min(lastPushedSeq) >= seq`, where
+   `lastPushedSeq` is the space's global seq high-water at the moment that device last confirmed a
+   drained outbox (the relay knows both and reports them opportunistically on push). A device may
+   be fully caught up on **reads** and still hold a three-week-old *unpushed* local edit to that
+   entity; §12.5 guarantees that edit will never be discarded for being old, so collecting the
+   tombstone around it **resurrects the entry**. An **unknown** seq — a device that has never
+   reported, or an op whose seq was compacted away — makes the entity NOT collectable.
+   **Unknown never permits a collection.**
+
+> **Amended 2026-08-27 — read progress alone was unsafe, and this is the one rule whose violation
+> is incorrect.** Corrected by `judge:conformance` B-1 against `src/js/core/oplog.js:150-199`,
+> which implements both halves, fails closed on a missing `minPushedSeq`/`seqOf`, and says in as
+> many words that the ADR stated only the `lastSeenSeq` half. **This amendment implies a second
+> edit outside this ADR:** `docs/v2/contracts/server.contract.js:194` exposes only
+> `setLastSeenSeq(deviceShort, seq)` and needs `setLastPushedSeq` / `minLastPushedSeq` beside it
+> (owner: **WP-7**).
 
 A device that never returns blocks GC forever — which is safe. **This is the single rule in the
 system whose violation causes incorrect behaviour** (a very-long-offline Mac resurrecting deleted
@@ -780,6 +929,17 @@ dropped:
 | an op whose stamp is more than 24 h in the future | a peer with a broken clock must not poison every register, and must not silently lose work either | local wall time advances past it |
 | an op sealed under an epoch key we do not hold yet | catching up across rotations | the next key fetch succeeds |
 | an op whose **kind** or whose **fields** this client does not know | forward compatibility (§10) | after an app update |
+| an op from a **device whose attestation has not yet arrived** | there is no causal delivery (§2); first contact and partial pulls are ordinary, not hostile | the attesting `member.set{dev.*}` arrives |
+| an admin's stage-3a patch that sets `pub.level: 'privat'` but carries something **this build cannot read as a withdrawal** | version skew must never leave previously-hidden content visible on the newer client | after an app update |
+
+> **Amended 2026-08-27 — two parked classes were missing.** The second row already exists in code
+> as the `UNSHARE_SHAPE` park reason (`src/js/core/ops.js:310-325`, `src/js/core/authz.js:782-793`)
+> and was simply never written down; `classifyUnsharePatch` (`authz.js:386`) is version-independent
+> and parks a near-miss rather than rejecting it, which is **better than this ADR asked for**. The
+> first row is finding **F-6** and is **not yet implemented** — `authz.js:671` still *rejects*, and
+> `store.js:699-703` drops the rejected op without appending it, so it is never re-evaluated.
+> Owner: **WP-8**. Until it lands, §7.4's promise ("an old client degrades to *does not show*
+> instead of *loses*") is false for exactly this case.
 
 Parking is what makes an old client in a family with a newer sibling degrade to *"does not show
 the new thing"* instead of *"loses the new thing"*. Because merge is set-based, unparking late is
@@ -817,10 +977,19 @@ with `i` drawn from **one global counter** running in the order
 Two properties, both required:
 
 1. **Everything pre-existing loses to every future edit on every device.** `ms = 0`.
-2. **Two independent migrations of the same `board.json` are byte-identical.** A migrated board
-   on my laptop and a migrated board on my desktop (same exported file) produce identical stamps
-   for identical fields, so pairing two already-migrated Macs converges immediately with **no
-   spurious conflicts and no silent overwrite**. Stamping with local wall time — which two of the
+2. **Two independent migrations of the same `board.json` produce identical REGISTERS.** For every
+   `(entityKey, field)` the value and the **stamp** are identical, because `GENESIS(i)` is a pure
+   function of the file — so pairing two already-migrated Macs converges immediately with **no
+   spurious conflicts and no silent overwrite**. The **ops are not** byte-identical and must not
+   be: `id` is 128 CSPRNG bits per op (§1.2) and `dev` names the migrating device. Identical
+   *stamps* are what the convergence argument needs; identical *opIds* would additionally make the
+   two migrations mutually **deduplicable**, which is neither required nor true.
+
+   > **Amended 2026-08-27 — "byte-identical" overstated what holds and what is needed.** Measured
+   > by `judge:conformance` probe `p2` test 2 against the PO's real `board.json`: identical after
+   > stripping `{id, dev, gid}`, different with them. `src/js/core/migrate1to2.js`'s `MigrateCtx`
+   > documents `deviceId` as "the ONLY part of the output that legitimately differs between two
+   > Macs", which is itself incomplete — the opIds and the gid differ too. Stamping with local wall time — which two of the
    three reviewed designs did — creates a real data-loss path: Mac A migrates at `T0` and edits a
    note at `T1`; Mac B migrates the same export at `T2 > T1`; B's migration op writes the *old*
    text at a greater stamp and LWW silently discards A's edit.
@@ -943,7 +1112,7 @@ This is the N+1 half of the compatibility story; ADR 003 §4 owns the N−1 half
 
 | claim | mechanism |
 |---|---|
-| No network | `src/js/platform/net.js` is the only `fetch` call site, dynamically imported and gated on a configured space; plus the shell/CSP gate (ADR 003 §7) |
+| No network | `src/js/platform/net.js` is the only `fetch` call site, dynamically imported and gated on a configured space; plus the shell/CSP gate (ADR 003 §7). **Neither `net.js` nor its grep gate exists yet — see ADR 003 §7 gate 1, amended 2026-08-27.** The property is true at HEAD only because nothing in `src/` calls `fetch` at all |
 | No crypto | key generation and `probeCrypto()` run at the moment the user first touches "Familienkreis erstellen / beitreten" or "Gerät koppeln" — never on first run |
 | No extra file | `ops.jsonl` / `checkpoint.json` are created when a space is created |
 | No render change | `materialize()` with `ctx.familySpaceId === null` produces exactly the v1 arrays; `layout.js`'s foreign branches collapse to the v1 expressions |

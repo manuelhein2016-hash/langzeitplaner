@@ -420,6 +420,17 @@ A promise this central does not rest on one `if`.
    `fetch`. `tests/tier1/network-scope.test.js` greps all of `src/js/` for `fetch(`,
    `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator.sendBeacon` and fails on any hit
    outside that file.
+
+   > **Amended 2026-08-27 — gate 1 is OWED, not held. Owner: WP-8 / LZP-1002.** Neither
+   > `src/js/platform/net.js` nor `tests/tier1/network-scope.test.js` exists, and
+   > `tests/helpers/purity.js:28`'s `PURE_DIRS` is `['src/js/core','src/js/crypto','src/js/sync',
+   > 'server/core']` — it never scans `src/js/` as a whole. At HEAD the property is **vacuously**
+   > true: `grep -rn "fetch\|XMLHttpRequest\|WebSocket\|EventSource\|sendBeacon" src/` returns
+   > three comment hits and nothing else, and the op log added nothing networked. Gates 2, 3 and 4
+   > are real and asserted (`tests/tier2/shell-bridge.dom.js:68` proves a real off-origin `fetch`
+   > is **blocked**, not merely unused). This gate is ~20 lines and it is the one that would have
+   > caught `src/js/platform/updater.js` arriving unscanned — see finding **F-9**. Recorded by
+   > `judge:conformance` B-14.
 2. **Never loaded.** `net.js` and the whole of `src/js/sync/` are reached only through a dynamic
    `await import()` gated on `store.state._v2.spaces.personal || store.state._v2.spaces.family`.
    In solo mode the modules are never evaluated, so there is no code path to a request even under
