@@ -972,6 +972,40 @@ test('P10 — a late op OLDER than the horizon merges by the identical rule', ()
   assert.equal(snap(compacted), snap(never), 'compacted and never-compacted logs diverged');
 });
 
+test('compact() again with EVERY live line below the horizon does not recede, and does not throw (R5-4)', () => {
+  // `resolveHorizon(opts, 'advance')` answers "everything currently held", and everything
+  // currently held is the CHECKPOINT plus the lines above it — so a live line BELOW the horizon
+  // may not drag it backwards. It used to: the fallback was `maxLiveStamp() ?? horizon`, the
+  // receding-horizon guard then threw, and `compact()` threw for the rest of that log's life.
+  //
+  // Two ordinary events reach this. A late op older than the horizon (§7.2, the row above) is
+  // one. The other is the store's own persist: a crash between `saveCheckpoint` and
+  // `truncateOps` leaves a tail whose every line the checkpoint beside it already folds, and the
+  // next launch loads exactly that — after which the one call that bounds `ops.jsonl` could
+  // never run again.
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'a', short: SHORT_A, wall });
+  const b = makeAuthor({ tag: 'b', short: SHORT_B, act: MEM_B, dev: DEV_B, wall });
+
+  const late = (b.txn(), b.note(U1, { text: 'alt', date: '2026-09-01' }));
+  wall.advance(10);
+  const kept = (a.txn(), a.note(U1, { text: 'neu' }));
+
+  const l = log(makeWall(wall.ms));
+  l.append(kept);
+  l.compact();
+  const h = l.horizon();
+  assert.equal(l.size, 0);
+
+  assert.equal(l.append(late).status, APPEND.APPENDED);
+  const before = snap(l);
+  const dropped = l.compact();                    // ← used to throw OpLogError
+  assert.equal(l.horizon(), h, 'the horizon stayed where it was rather than receding to the late op');
+  assert.equal(dropped, 1, 'and the late line was still absorbed, so the tail can be trimmed');
+  assert.equal(l.size, 0);
+  assert.equal(snap(l), before, 'losslessly — P10 still holds over the second compaction');
+});
+
 test('P10 — a late op NEWER than a checkpointed stamp still wins', () => {
   const wall = makeWall();
   const a = makeAuthor({ tag: 'a', short: SHORT_A, wall });

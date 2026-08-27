@@ -49,7 +49,18 @@
 // solo mode does before any genesis exists) rather than a core algorithm change.
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// OPEN in this file (7 rows):
+// CLOSED since the round-4 fix pass (2026-08-27):
+//   B5c                — round-4 finding 4. A `deviceId` is a self-asserted LABEL and the four
+//                        §2.3 acceptance conditions bind none of it, so I could file another
+//                        member's deviceId inside my own attestation and win `memberOfDevice` by
+//                        backdating. Closed STRUCTURALLY, the ADR 001 §4.4 way: the fold no
+//                        longer publishes a map from a label to an owner. `memberOfDevice` is
+//                        the sole-claimant function, `deviceIdCollisions` reports every contest,
+//                        and the row now proves the copied label confers nothing an invented one
+//                        would not. The op is still ADMITTED on purpose — refusing it would hand
+//                        anybody a way to un-attest an honest peer's device.
+//
+// OPEN in this file (6 rows):
 //   B3, B3b, B3c       — WP-6/ADR 002. An opId is not bound to its author, so re-using another
 //                        member's opId makes the two bodies a SPLICE, and the content-addressable
 //                        max can be the attacker's — deleting the victim's op before admissibility
@@ -61,8 +72,6 @@
 //                        year-9999 stamp wins every join forever. `B4b` proves the clamp works
 //                        when it is supplied — this is the "optional guard defaults to permissive"
 //                        pattern named in the disposition above.
-//   B5c                — WP-6. A device SHORT is 16 characters chosen by its owner and nothing
-//                        binds it to a member, so I can claim another member's short.
 //   B6                 — WP-3 wiring. `ctx.myDevices` closes it (`B6b`); omitted, a forged
 //                        personal-space op is admitted.
 
@@ -376,30 +385,48 @@ test('B5b FAILED (defence holds): a second, backdated claim on my own dev.<short
   assert.equal(r.attestedDevices.get(ZORRO).has(D.zorro.id), false);
 });
 
-test('B5c SUCCEEDED: I can claim ANOTHER member\'s deviceId inside my own attestation', () => {
+test('B5c CLOSED: another member\'s deviceId is a LABEL I can copy and nothing more', () => {
+  // CLOSED 2026-08-27 (round-4 finding 4). The blob's `deviceId` is still not bound to anything
+  // — it cannot be, it is 128 random bits its own author asserts, and any rule that picked a
+  // winner between two claims would pick it on a stamp the attacker chooses. So the fix is the
+  // ADR 001 §4.4 move: the fold stopped publishing `deviceId → memberId`. The identity of a
+  // device is the PAIR (housing member, register name), the register name is the key-derived
+  // `deviceShort`, and a bare label with two claimants has NO owner.
+  //
+  // The blob carries MY OWN device keys — only the label is Papa's. A forgery using Papa's keys
+  // would not be a forgery, it would be Papa's device.
   const w = preamble();
-  // The blob's `deviceId` is not bound to anything. `parseAttestationBlob` checks only that
-  // `memberId === subject` and `deviceShort === the register name`. So I sign, with my own key,
-  // a payload that says "dev_PAPAMAC belongs to me", and file it in MY OWN record.
   const shortOfLie = short16('LIE');
-  const blob = attestationBlob(ZORRO, { id: D.papa.id, short: shortOfLie });
+  const MY_KEYS = { sigPubRaw: 'zorro-sigpub', kexPubRaw: 'zorro-kexpub' };
+  const FRESH = `dev_${'FRESH'.padEnd(22, '-')}`;
+  const blob = attestationBlob(ZORRO, { id: D.papa.id, short: shortOfLie }, MY_KEYS);
   const claim = w.A.zorro.op('member.set', memberKey(ZORRO), { [`dev.${shortOfLie}`]: blob },
-    { space: FSP, ms: 0 });   // ms = 0: first in (ts,id) order ⇒ first into `memberOfDevice`
+    { space: FSP, ms: 0 });   // ms = 0 used to be "first in, therefore the winner". Nothing wins now.
 
   const r = foldAuthorized([...w.ops, claim], authzCtx());
-  assert.equal(wasAdmitted(r, claim), true);
+  assert.equal(wasAdmitted(r, claim), true,
+    'still admitted: rejecting it would hand anybody a way to un-attest an honest peer\'s device');
   assert.equal(r.attestedDevices.get(ZORRO).has(D.papa.id), true,
-    'EXPECTED FAILURE: PAPA\'s device is now an attested device of MINE');
-  assert.equal(r.memberOfDevice(D.papa.id), ZORRO,
-    'EXPECTED FAILURE: memberOfDevice() — the map ADR 002 §5.2 uses to check `op.act` — now names ME');
+    'the pair (ZORRO, label) exists — which says I have a device wearing that name, not that it is Papa\'s');
+  assert.equal(r.memberOfDevice(D.papa.id), null,
+    'FIXED: two claimants ⇒ no owner. Not ME, and not "whoever backdated"');
+  assert.deepEqual(r.deviceIdCollisions, [D.papa.id],
+    'FIXED: and the contest is reported, which is the signal that did not exist before');
+  assert.equal(r.attestedDevices.get(PAPA).has(D.papa.id), true, 'Papa is not un-attested by my claim');
 
-  // And the stage-0b device gate lets me author ops from "Papas Mac".
-  const spoof = w.A.zorro.op('pub.set', familyKey('fnote', ZORRO, U2),
+  // Stage 0b still admits MY op carrying that label — and that is the point, not a residual:
+  // it admits my op carrying ANY label I have attested in my own record, so the copied one
+  // confers nothing an invented one would not. What it never admits is an op authored AS PAPA.
+  const spoof = (devId) => w.A.zorro.op('pub.set', familyKey('fnote', ZORRO, U2),
     { 'pub.level': 'geteilt', 'pub.alive': true, 'pub.date': '2026-12-24', 'pub.text': 'x' },
-    { space: FSP, ms: T.now, dev: D.papa.id });
-  const r2 = foldAuthorized([...w.ops, claim, spoof], authzCtx());
-  assert.equal(wasAdmitted(r2, spoof), true,
-    'EXPECTED FAILURE: stage 0b admits my op authored from a device that is not mine');
+    { space: FSP, ms: T.now, dev: devId });
+  const invented = attestationBlob(ZORRO, { id: FRESH, short: shortOfLie }, MY_KEYS);
+  const claim2 = w.A.zorro.op('member.set', memberKey(ZORRO), { [`dev.${shortOfLie}`]: invented },
+    { space: FSP, ms: 0 });
+  const withCopied = foldAuthorized([...w.ops, claim, spoof(D.papa.id)], authzCtx());
+  const withOwn = foldAuthorized([...w.ops, claim2, spoof(FRESH)], authzCtx());
+  assert.equal(wasAdmitted(withCopied, spoof(D.papa.id)), wasAdmitted(withOwn, spoof(FRESH)),
+    'identical outcomes ⇒ copying Papa\'s label is a name collision, not a capability');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════

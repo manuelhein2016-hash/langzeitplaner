@@ -21,25 +21,108 @@ async function tauriInvoke(cmd, args) {
   return invoke(cmd, args);
 }
 
-export async function loadBoard() {
+/**
+ * The four things `board.json` can be. R5-3a/b/c: THREE OF THEM USED TO LOOK LIKE THE FOURTH.
+ *
+ *   'ok'           bytes were read and they parsed
+ *   'absent'       the backing store was consulted and holds nothing — a fresh install
+ *   'unparseable'  bytes exist and `JSON.parse` threw — a truncated write, a bad sector, a
+ *                  sync client's conflicted copy. THE USER'S DATA IS ON DISK AND UNREADABLE.
+ *   'read-failed'  the READ ITSELF failed — a locked file, a permission prompt the user
+ *                  dismissed, an EIO. Nothing is known about the file, including whether it
+ *                  exists. This is emphatically NOT 'absent'.
+ *
+ * ADR 006 makes `board.json` the sole authority over content, so the ONE precondition of the
+ * whole rule is that it can be read. Collapsing these four into "is `raw` null?" is what let a
+ * corrupted byte hand the board to any log lying beside it (`store._recoverFromLog`).
+ */
+export const BOARD_FILE_STATUS = Object.freeze(['ok', 'absent', 'unparseable', 'read-failed']);
+
+const readError = (e) => `${e && e.name ? e.name : 'Error'}: ${e && e.message ? e.message : String(e)}`;
+
+/**
+ * The board file, its BYTES, what they parse to, and WHICH OF THE FOUR THINGS IT IS.
+ *
+ * ADR 006 §4.2 hashes "the exact bytes written to `board.json` in the same persist", and the
+ * check on the way back in has to hash the exact bytes as READ. `loadBoard()` throws the bytes
+ * away, so a hash taken over a re-serialization of the parsed object is a hash of something the
+ * file never contained (key order, whitespace, a number that round-tripped). Hence `text`.
+ *
+ * THE FALLBACK IS A PAIR, NOT A GUESS. `saveBoardText` writes to `localStorage` when the native
+ * write throws, so a native READ that throws must still look there — otherwise the one board a
+ * failed save left behind becomes unreachable. What it may never do is report the result as
+ * "there is no board file": if the fallback is empty too, the status is `read-failed` and the
+ * store goes read-only rather than treating an EIO as a fresh install (R5-3c).
+ *
+ * @returns {Promise<{text: string|null, raw: Object|null, status: string, error: string|null,
+ *                    where: string, fallback: boolean}>}
+ */
+export async function loadBoardFile() {
+  const where = storagePath();
+  let txt = null;
+  let failure = null;
+  let fallback = false;
+
   if (isTauri()) {
     try {
-      const txt = await tauriInvoke('load_board', {});
-      return txt ? JSON.parse(txt) : null;
+      txt = await tauriInvoke('load_board', {});
     } catch (e) {
+      // NOT `txt = null`. A throw here is a fact about the read, and it survives to the caller.
       console.warn('[storage] Tauri load failed, falling back', e);
+      failure = readError(e);
+      txt = null;
     }
   }
+  if (txt === null || txt === undefined) {
+    const nativeMiss = isTauri();
+    try {
+      txt = localStorage.getItem(LS_BOARD);
+      fallback = nativeMiss && typeof txt === 'string' && txt !== '';
+    } catch (e) {
+      txt = null;
+      failure = failure ?? readError(e);
+    }
+  }
+
+  if (typeof txt !== 'string' || txt === '') {
+    // A read that FAILED is not a board that is absent. The distinction is the whole point.
+    return failure
+      ? { text: null, raw: null, status: 'read-failed', error: failure, where, fallback: false }
+      : { text: null, raw: null, status: 'absent', error: null, where, fallback: false };
+  }
   try {
-    const raw = localStorage.getItem(LS_BOARD);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+    return { text: txt, raw: JSON.parse(txt), status: 'ok', error: null, where, fallback };
+  } catch (e) {
+    return { text: txt, raw: null, status: 'unparseable', error: readError(e), where, fallback };
   }
 }
 
-export async function saveBoard(state) {
-  const txt = JSON.stringify(state, null, 2);
+/**
+ * `loadBoardFile` reduced to the two keys its v1-era callers destructure.
+ *
+ * Kept at EXACTLY two keys — `tests/tier1/storage.test.js` deep-equals the whole object — and
+ * kept as a thin wrapper so there is one read path and not two. A caller that has to tell
+ * "absent" from "unreadable" from "the read failed" calls `loadBoardFile` instead; this one
+ * cannot express the difference and never could.
+ * @returns {Promise<{text: string|null, raw: Object|null}>}
+ */
+export async function loadBoardText() {
+  const { text, raw } = await loadBoardFile();
+  return { text, raw };
+}
+
+export async function loadBoard() {
+  const { raw } = await loadBoardText();
+  return raw;
+}
+
+/**
+ * Write the EXACT bytes given. `saveBoard(state)` is the thin wrapper its v1 callers use;
+ * everything that needs the bytes it wrote (ADR 006 §6: serialize once, hash those bytes) calls
+ * this one so that no second `JSON.stringify` can quietly produce a different string.
+ * @param {string} txt
+ */
+export async function saveBoardText(txt) {
   if (isTauri()) {
     try {
       await tauriInvoke('save_board', { contents: txt });
@@ -51,6 +134,10 @@ export async function saveBoard(state) {
   localStorage.setItem(LS_BOARD, txt);
 }
 
+export async function saveBoard(state) {
+  return saveBoardText(JSON.stringify(state, null, 2));
+}
+
 /**
  * Best-effort write during pagehide/beforeunload. Async work is not guaranteed
  * to finish while the window is going away, so this stays synchronous: in the
@@ -58,8 +145,13 @@ export async function saveBoard(state) {
  * the window-close hook already cover the same ground.
  */
 export function saveBoardSync(state) {
+  saveBoardSyncText(JSON.stringify(state, null, 2));
+}
+
+/** The same, for a caller that has already serialized (ADR 006 §6 — serialize exactly once). */
+export function saveBoardSyncText(txt) {
   try {
-    localStorage.setItem(LS_BOARD, JSON.stringify(state, null, 2));
+    localStorage.setItem(LS_BOARD, txt);
   } catch (e) {
     console.warn('[storage] sync flush failed', e);
   }
@@ -242,9 +334,114 @@ export async function saveCheckpoint(blob) {
   localStorage.setItem(LS_CHECKPOINT, txt);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// I-6 — MOVING A QUARANTINED LOG ASIDE
+//
+// A quarantine makes three promises (ADR 006 §7): the log is not applied, not deleted, not
+// overwritten. Leaving the two files exactly where they are keeps all three — and re-derives the
+// refusal, and re-reports it, on every single launch, with no way for the user to make it stop.
+// That is I-6.
+//
+// The sanctioned form is a MOVE, never a delete: `ops.quarantined-<ts>.jsonl` /
+// `checkpoint.quarantined-<ts>.json` beside the originals. "Not deleted" is one of the three
+// promises and it survives the move — the bytes are still on disk, under a name that says why.
+//
+// PLATFORM SPLIT, STATED HONESTLY. The browser/localStorage fallback can do this with the
+// primitives it already has (a key is a file). The NATIVE path cannot: `src-tauri/src/lib.rs` and
+// `shell-macos/main.swift` expose exactly nine file commands (`load_board`, `save_board`,
+// `load_snapshots`, `save_snapshots`, `load_ops`, `append_ops`, `truncate_ops`, `load_checkpoint`,
+// `save_checkpoint`) and none of them can create a THIRD file in the data directory. Truncating
+// `ops.jsonl` without first writing the copy would break promise 2 outright, so on the native path
+// this function does nothing and says so: `{moved: false, reason: …}`. The store must therefore
+// treat a successful move as a bonus and never as a precondition.
+//
+// OWED (a file no one owned this round): `quarantine_logs(suffix)` on both shells — rename
+// `ops.jsonl` → `ops.quarantined-<ts>.jsonl` and `checkpoint.json` →
+// `checkpoint.quarantined-<ts>.json`, atomically, creating neither if the source is absent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `2026-08-27T10-31-04-512Z` — an ISO instant that is legal in a filename and sorts correctly. */
+function quarantineStamp(at = Date.now()) {
+  return new Date(at).toISOString().replace(/[:.]/g, '-');
+}
+
+/**
+ * Move a refused op log aside so it is refused ONCE (I-6). Never deletes; never throws.
+ *
+ * @param {{at?: number}} [opts]
+ * @returns {Promise<{moved: boolean, reason: string, ops: string|null, checkpoint: string|null}>}
+ *   `ops` / `checkpoint` name the slots the bytes now live in, or null when that slot was empty.
+ */
+export async function quarantineLogAside({ at = Date.now() } = {}) {
+  const suffix = quarantineStamp(at);
+  if (isTauri()) {
+    return {
+      moved: false,
+      reason: 'the native shell has no move-aside command yet (owed: quarantine_logs in '
+        + 'src-tauri/src/lib.rs and shell-macos/main.swift); the refused files are LEFT WHERE THEY '
+        + 'ARE, which keeps every quarantine promise and costs one repeated warning per launch',
+      ops: null,
+      checkpoint: null,
+    };
+  }
+  let ops = null;
+  let checkpoint = null;
+  try {
+    const opsBytes = localStorage.getItem(LS_OPS);
+    if (typeof opsBytes === 'string' && opsBytes !== '') {
+      ops = `${LS_OPS}.quarantined-${suffix}`;
+      // Write the copy FIRST. If the write throws (quota), the original is still the only copy
+      // and nothing has been lost — which is the whole reason the order is this way round.
+      localStorage.setItem(ops, opsBytes);
+      localStorage.removeItem(LS_OPS);
+    }
+    const cpBytes = localStorage.getItem(LS_CHECKPOINT);
+    if (typeof cpBytes === 'string' && cpBytes !== '') {
+      checkpoint = `${LS_CHECKPOINT}.quarantined-${suffix}`;
+      localStorage.setItem(checkpoint, cpBytes);
+      localStorage.removeItem(LS_CHECKPOINT);
+    }
+  } catch (e) {
+    console.warn('[storage] could not move the quarantined log aside', e);
+    return {
+      moved: false,
+      reason: `the move failed (${e && e.name ? e.name : 'Error'}); the refused files are left where they are`,
+      ops: null,
+      checkpoint: null,
+    };
+  }
+  if (!ops && !checkpoint) {
+    return { moved: false, reason: 'there was nothing on disk to move', ops: null, checkpoint: null };
+  }
+  return {
+    moved: true,
+    reason: 'the refused files were moved aside; they are still on disk, under a name that says why',
+    ops,
+    checkpoint,
+  };
+}
+
+/** Every quarantined slot currently on disk, newest last. Read-only; a rescue pass reads these. */
+export function quarantinedSlots() {
+  const out = [];
+  try {
+    const n = localStorage.length;
+    for (let i = 0; i < n; i++) {
+      const k = localStorage.key(i);
+      if (typeof k === 'string' && (k.startsWith(`${LS_OPS}.quarantined-`) || k.startsWith(`${LS_CHECKPOINT}.quarantined-`))) out.push(k);
+    }
+  } catch { /* a storage that cannot be enumerated simply reports nothing */ }
+  return out.sort();
+}
+
 /**
  * Does an op log exist? The other half of ADR 001 §8.4's idempotence predicate
  * (`shouldMigrate(board, {opsLogExists})`) — a READ, so it creates nothing.
+ *
+ * DEPRECATED by ADR 006 R1: the store no longer branches on whether a log exists, so this has no
+ * caller in `src/`. It is kept because `tests/tier2/shell-oplog.dom.js` uses it as the honest
+ * "reading created no file" probe against the real shells. Remove it with `shouldMigrate`'s
+ * `opsLogExists` parameter, not before.
  * @returns {Promise<boolean>}
  */
 export async function opsLogExists() {

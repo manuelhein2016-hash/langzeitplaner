@@ -288,6 +288,30 @@ export const DATE_RE = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/;
 /** @param {unknown} s @returns {boolean} */
 export const isDateString = (s) => typeof s === 'string' && DATE_RE.test(s);
 
+/**
+ * The two ends of `DATE_RE`'s alphabet — R5-11.
+ *
+ * Every accepted date is exactly ten characters of the fixed shape `dddd-dd-dd`, so the STRING
+ * order of two accepted dates is their calendar order, and the extremes of that order are the
+ * smallest and largest strings the regex can produce: month and day are both floored at `01` and
+ * the year is four unconstrained digits.
+ *
+ *     '0000-01-01' ≤ every accepted date ≤ '9999-12-31'
+ *
+ * That is not a nicety. `layout.js:133` decides whether a bar is painted at all by COMPARING its
+ * edge against `iso(y, m, 1)` and `iso(y, m, len)` — never by parsing it — so a bar edge the file
+ * holds as `''` or `'zzz'` has a well-defined rendering in v1 even though it is not a date, and
+ * the only way v2 can reproduce that rendering with a `date` register is to write the end of the
+ * alphabet that sorts on the same side. `migrate1to2.js:coerceToV1BarEdge` is the one caller and
+ * carries the argument in full; these two constants are here, next to `DATE_RE`, because the
+ * claim they make is a claim about `DATE_RE` and about nothing else.
+ *
+ * Pinned by `core-ops.test.js` §F — a widened `DATE_RE` (a five-digit year, a `+` sign) has to
+ * move these with it or the pin goes red.
+ */
+export const EARLIEST_DATE = '0000-01-01';
+export const LATEST_DATE = '9999-12-31';
+
 /** @param {number} n @returns {string} */
 export const p2 = (n) => String(n).padStart(2, '0');
 
@@ -647,20 +671,25 @@ export function renderableNote(note) {
  * A FOREIGN bar needs both ends, for `renderableNote`'s reason: absence on the redaction path is
  * absence, never a value inferred from it.
  *
- * An OWN bar is v1's array again (A3-H2). v1 draws a bar with no `endDate` from its start to the
- * END OF THE VISIBLE WINDOW — `layout.js:133-135`: `undefined < mFirst` is false, so the bar is
- * not skipped, and `segEnd = b.endDate < mLast ? b.endDate : mLast` resolves to `mLast` in every
- * column from its start onwards. "To the horizon" is a function of TODAY, and a migration that
- * read the clock would produce a different file on each of my two Macs (R12), so the missing edge
- * is filled at the DOOR instead, from the edge the file does carry
- * (`migrate1to2.js:missingBarEdge`) — and almost every bar therefore reaches here with both.
+ * An OWN bar is v1's array again (A3-H2), and — since R4-10 — an own bar with a missing edge is
+ * v1's array too, WITH THE EDGE STILL MISSING. v1 draws a bar with no `endDate` from its start to
+ * the END OF THE VISIBLE WINDOW: `layout.js:133-135`, where `undefined < mFirst` is false so the
+ * bar is not skipped, and `segEnd = b.endDate < mLast ? b.endDate : mLast` resolves to `mLast` in
+ * every column from its start onwards. Nine column-segments for an April start, four for an April
+ * end, twelve for a bar with neither — the last of which additionally clashes with every other
+ * bar in `assignLanes` (`layout.js:50`) and takes a lane off it.
  *
- * The one that does not is a bar with NO usable date at all, which no door can anchor and which
- * this predicate used to drop off the board and, one autosave later, out of `board.json`. v1
- * keeps it and paints it as a full-height stripe in every column — including the lane it takes
- * from every other bar (`layout.js:50`, where `undefined` clashes with everything). That is v1's
- * rendering, ugly and all, and reproducing it is the point: `layout.js` is the same file in both
- * builds, so an entry that is in the array is drawn the same way it always was.
+ * THE HORIZON IS NOT DATA, SO IT IS NOT MIGRATED. Both doors used to fill the missing edge from
+ * the edge the file did carry, reasoning that "to the horizon" is a function of TODAY and a
+ * migration that read the clock would produce a different file on each of my two Macs (R12). The
+ * premise was right and the conclusion did not follow: the third option is to write NOTHING and
+ * let the renderer do what it has always done. Anchoring turned nine painted segments into one
+ * painted day and wrote an `endDate` into the user's `board.json` that the file never held —
+ * which in solo mode, where `board.json` IS the checkpoint, is permanent at the first autosave.
+ *
+ * So every own bar reaches here, with whatever edges the file had, and `layout.js` — the same
+ * file in both builds — draws it the way it always did. Ugly and all: reproducing v1's rendering
+ * is the point, and it is what makes `board.json` a fixed point for these shapes.
  *
  * @param {Object} bar @returns {boolean}
  */

@@ -1088,3 +1088,69 @@ describe('module invariants', () => {
     assert.equal(getValue(A.regs, 'note:n1', 'repeatsYearly'), null, 'and it holds null — cleared, not absent');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R4-10 / R4-11a — THE IMPORT DOOR'S HALF OF THE TWO ROUND-4 COERCION FIXES
+//
+// Both fixes had to land on BOTH doors, because that is what `CARRIED_FIELDS`' docblock and
+// REG-20…23 are about: the same file must migrate at launch into the board it restores into from
+// a snapshot. `round4-coercion-oracle.test.js` measures the MIGRATION door against the v1
+// renderer; these rows are the mirror, on the door the oracle cannot reach.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('the import door agrees with the migration door about a missing bar edge and an empty pad', () => {
+  test('R4-10 — an import does not anchor a one-ended bar, and does not invent the other end', () => {
+    const A = device('a', MAC_A, SHORT_A);
+    seed(A, board());
+    A.advance(60_000);
+    const incoming = board({
+      bars: [
+        { id: 'b1', startDate: '2026-04-10', label: 'kein Ende', categoryId: 'cat-1' },
+        { id: 'b2', endDate: '2026-04-10', label: 'kein Anfang', categoryId: 'cat-1' },
+        { id: 'b3', label: 'weder noch', categoryId: 'cat-1' },
+      ],
+    });
+    const plan = planReplaceAll(A.regs, incoming, { ...A.ctx(), acceptLossy: true });
+    foldAll(A.regs, plan.ops);
+    const bars = A.state().bars;
+    assert.equal(bars.length, 3, 'all three are on the board');
+    assert.deepEqual(
+      bars.map((x) => [x.id, x.startDate, x.endDate]).sort((x, y) => (x[0] < y[0] ? -1 : 1)),
+      [['b1', '2026-04-10', undefined], ['b2', undefined, '2026-04-10'], ['b3', undefined, undefined]],
+      'the edge the file carried is carried; the edge it did not is still not there',
+    );
+    assert.equal(plan.warnings.filter((w) => /anchored to its/.test(w)).length, 0, 'nothing anchors');
+    assert.equal(plan.warnings.filter((w) => /will not be DRAWN/.test(w)).length, 0,
+      'and no bar is told it is invisible — R4-10d, on this door too');
+    assert.equal(plan.warnings.filter((w) => /IS DRAWN/.test(w)).length, 3, 'each is told what it will look like');
+  });
+
+  test('R4-10 — an import CLEARS an end the local board has and the file does not', () => {
+    // The one thing this door does that migration cannot: the local register already holds an
+    // `endDate`, so "absent in the file" has to be written as a `null` CLEAR rather than simply
+    // not written. Absent and cleared are the same bar to `layout.js`; both run to the horizon.
+    const A = device('a', MAC_A, SHORT_A);
+    seed(A, board({ bars: [bar('b1', '2026-04-10', '2026-05-20', 'beide Enden')] }));
+    A.advance(60_000);
+    foldAll(A.regs, replaceAllOps(
+      A.regs,
+      board({ bars: [{ id: 'b1', startDate: '2026-04-10', label: 'beide Enden', categoryId: 'cat-1' }] }),
+      { ...A.ctx(), acceptLossy: true },
+    ));
+    assert.equal(getValue(A.regs, 'bar:b1', 'endDate'), null, 'the register is CLEARED …');
+    assert.equal(A.state().bars[0].endDate, undefined, '… so the bar has no end, like the file');
+  });
+
+  test('R4-11a — an empty-string scratchpad is dropped on this door too, and is SAID on this door too', () => {
+    const A = device('a', MAC_A, SHORT_A);
+    seed(A, board());
+    A.advance(60_000);
+    const plan = planReplaceAll(A.regs, board({ scratchpads: { '2026-05': '', '2026-06': 'Text' } }), A.ctx());
+    foldAll(A.regs, plan.ops);
+    assert.deepEqual(Object.keys(A.state().scratchpads), ['2026-06'], 'REG-23: the key is dropped …');
+    assert.equal(plan.lossy, false, '… it is not a loss …');
+    const said = plan.warnings.filter((w) => w.includes('2026-05'));
+    assert.equal(said.length, 1, '… and it is not silent either');
+    assert.match(said[0], /empty string in the file/);
+    assert.equal(plan.warnings.filter((w) => w.includes('2026-06')).length, 0, 'a real pad is not warned about');
+  });
+});

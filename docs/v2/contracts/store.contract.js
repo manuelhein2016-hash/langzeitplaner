@@ -37,8 +37,12 @@
  * @property {(patch:Object) => void} setSettings            [v1] → a `pref.set` op, LOCAL space,
  *                                                            never undoable, NEVER SYNCED (17.7)
  * @property {(patch:Object) => void} setLayer               [v1] same
- * @property {(next:Object) => void} replaceAll              [v1] now a DIFF TXN (ADR 001 §8.5);
- *                                                            clears both stacks (story 5.4)
+ * @property {(next:Object) => boolean} replaceAll           [v1 shape, DIVERGENT] now a DIFF TXN
+ *                                                            (ADR 001 §8.5); clears both stacks
+ *                                                            (5.4). RETURNS FALSE when the board
+ *                                                            in the file cannot be drawn — see I-1
+ *                                                            below; v1 returned undefined and
+ *                                                            could not refuse.
  * @property {(id:string) => Object} category                [v1]
  * @property {(id:string) => boolean} categoryVisible        [v1]
  * @property {(catId:string) => number} countEntriesIn       [v1]
@@ -57,12 +61,33 @@
  * @property {() => RegisterMap} registers
  * @property {Object} publisher                              derivePublication + outbox enqueue
  *
- * // ── the warnings channel (F-8) ─────────────────────────────────────────────
- * @property {string[]} warnings                             STABLE IDENTITY for the store's life
+ * // ── §2.2 ADDITIVE SURFACE — the reporting channel ──────────────────────────
+ * //
+ * // NORMATIVE, and additive: nothing below replaces a v1 name. Every one of these is READ-ONLY
+ * // to callers except `clearWarnings()`. They are the only supported way to find out how the
+ * // board on screen came to be there, and `diagnostics()` is the one a settings pane should use.
+ * //
+ * @property {string[]} warnings                             F-8. ONE array for the store's life —
+ *                                                            callers may hold it; `init()` and
+ *                                                            `replaceAll()` empty/append IN PLACE
+ *                                                            and never reassign. Capped at 1000.
  * @property {() => void} clearWarnings                      empties IN PLACE; never reassigns
- * @property {(fn:(w:string)=>void) => (()=>void)} subscribeWarnings   per warning, not per batch
- * @property {() => StoreDiagnostics} diagnostics
+ * @property {(fn:(w:string, all:string[])=>void) => (()=>void)} subscribeWarnings
+ *                                                            fires once per warning, synchronously;
+ *                                                            the return value unsubscribes; a
+ *                                                            listener that throws is caught and
+ *                                                            cannot take the store down
+ * @property {() => StoreDiagnostics} diagnostics            a fresh object every call; the
+ *                                                            `warnings` inside it is a COPY
  * @property {?StoreQuarantine} quarantine                   null unless init() refused an op log
+ * @property {?StoreBootFailure} bootFailure                 null unless the board could not be
+ *                                                            drawn, or could not be READ at all
+ *                                                            — see I-2 below. While it is set the
+ *                                                            session is READ-ONLY: `persistNow()`
+ *                                                            and `flushSync()` return without
+ *                                                            writing any file, and `init()` does
+ *                                                            not sequester a quarantined log
+ *                                                            either, so no file is even renamed.
  */
 
 /**
@@ -92,22 +117,138 @@
 /**
  * @typedef {Object} StoreDiagnostics
  * @property {boolean} ready
- * @property {'board.json'|'op-log'} source   which of the two the board on screen came from
+ * @property {'board.json'|'op-log'|'recovery'} source
+ *   WHERE THE HISTORY CAME FROM, not the content. Under ADR 006 `board.json` is ALWAYS the content
+ *   authority, so this says what happened to the log beside it: `'op-log'` — a log bound to this
+ *   board was adopted and its stamps survived; `'recovery'` — there was no readable `board.json`,
+ *   so the log had to be the truth (R7) and the user is told; `'board.json'` — solo mode, or the
+ *   log was quarantined.
+ * @property {StoreLineage} lineage
+ * @property {?StoreBootFailure} bootFailure
+ * @property {?StoreRecoveredFrom} recoveredFrom
+ *   null on an ordinary launch. Tells R7's genuine recovery apart from the read-only disaster
+ *   boot that used to hide inside the same `source: 'recovery'` — see below.
  * @property {string[]} warnings              a copy — mutating it does not touch the channel
  * @property {?StoreQuarantine} quarantine
  */
 
 /**
- * What `init()` refused, kept for a rescue pass and for the UI. The files themselves are LEFT ON
- * DISK, unmodified — see `store.js:_quarantineLog`'s three promises.
+ * ADR 006 §4 — the binding that decides whether a log's history may be adopted.
+ * @typedef {Object} StoreLineage
+ * @property {?string} id          `lin_` + 128 bits, or null in solo mode, where no log is durable
+ *                                 and `board.json` therefore carries no `_v2` at all
+ * @property {number} gen          diagnostics ONLY; nothing branches on it, ever
+ * @property {boolean} adopted     whether this launch adopted a log's history
+ * @property {?boolean} exact      whether `lzp.boardHash` matched the bytes read (reporting only)
+ * @property {?number} reconciled  how many changes `board.json` carried that the log did not.
+ *                                 0 on an exact match — that is INV-4, and a non-zero number on
+ *                                 a quiet launch means the reconciler has started churning.
+ */
+
+/**
+ * What `init()` refused, kept for a rescue pass and for the UI.
+ *
+ * A QUARANTINE IS FIVE PROMISES (ADR 006 §7):
+ *  1. NOT APPLIED   — the log's registers never reach `state`.
+ *  2. NOT DELETED   — the bytes stay on disk. `movedAside` names where; a MOVE is the sanctioned
+ *                     form of "refused once rather than once per launch" (I-6), never a delete.
+ *  3. NOT OVERWRITTEN — `_opsPersisted` stays false for the session. WP-8 turning it on when a
+ *                     space is created MUST consult `store.quarantine` first (ADR 006 §9.5).
+ *  4. IT CANNOT COST CONTENT — not "does not", CANNOT: `state` is derived from `board.json`
+ *                     before the log is read at all. Provable by construction (INV-15).
+ *  5. THE REASON IS TRUE — the enum below names a fact, never a guess. `lzp.v` is never a reason.
+ *
  * @typedef {Object} StoreQuarantine
  * @property {string} at
- * @property {'no-provenance'|'unrelated-log'|'unreadable-log'} reason
+ * @property {'no-checkpoint'|'board-carries-no-lineage'|'log-carries-no-lineage'
+ *           |'foreign-lineage'|'unreadable-log'|'board-unreadable'|'clock-skew'
+ *           |'reconcile-failed'} reason
+ *   `clock-skew` (ADR 006 §7.1, R5-2e): both files are this board's own and well formed, and this
+ *   MACHINE's date is what makes the log unusable today — §12.6 cannot be satisfied above a stamp
+ *   ADR 001 §1.3 refuses. It is the one DEFERRED reason: it is expected to stop being true, so the
+ *   files keep their own names and the next launch reconsiders them.
+ *   `board-unreadable` (ADR 006 §5.5, R5-3a/b/c): `board.json` EXISTS and could not be read, so it
+ *   has no `_v2.lineageId` and there is nothing to compare the log against. A log is refused on
+ *   the ABSENCE of a tie, never adopted on it — inferring the opposite from the same absence is
+ *   what let a stranger's log be handed a board whose own file was one truncated byte short.
+ *   This reason always travels with a `bootFailure`, so the session is read-only and — because
+ *   `_sequesterQuarantine` is gated on `!bootFailure` — the refused bytes are NOT moved aside
+ *   either: on a failed boot, every file keeps its own name.
  * @property {string} detail                  prose, already user-facing
+ * @property {boolean} [deferred]             true only on a DEFERRED reason; the log was not moved
+ * @property {?{ops:?string, checkpoint:?string}} movedAside
+ *   where the refused bytes now live, or null when they were left in place (the native shell has
+ *   no move-aside command yet; leaving them keeps every promise and costs one repeated warning)
  * @property {?number} checkpointHorizon
  * @property {number} tailLines
  * @property {?Object} checkpoint
  * @property {string[]} tailSample
+ */
+
+/**
+ * I-2 / Finding 2 — THE APP ALWAYS BOOTS, AND ALWAYS SAYS WHAT IT REFUSED.
+ *
+ * `materialize` legitimately refuses a `settings` that would make `layout.js:25` produce a NaN
+ * year and hang `holidays.js:51`. A refusal out of `init()` used to mean `ready === false` and a
+ * white screen with an intact `board.json` sitting right there. `init()` now escalates: project
+ * as-is → reset `mode`/`startMonth`/`pageYears` → reset every setting → open on an empty board and
+ * REFUSE TO WRITE. Every step is reported on `warnings`; steps 2 and 3 touch SETTINGS ONLY, and no
+ * note, bar, category or scratchpad is ever discarded to make a board drawable.
+ *
+ * `bootFailure` is set only at the last step, and while it is set no file is written at all — so
+ * the board that could not be drawn is still the board on disk, for a rescue pass and for the next
+ * build. `replaceAll()` runs the same escalation as a REHEARSAL on a throwaway log (I-1) and
+ * returns `false` rather than blanking `state` when even that fails.
+ *
+ * ROUND 5 WIDENED `reason` FROM ONE VALUE TO FOUR (R5-3a/b/c). `unprojectable` means board.json
+ * was READ and then refused to DRAW. The three `board-*` reasons mean the opposite: board.json
+ * exists and was never read at all, so whether it draws is unknown and unknowable this launch.
+ * They are a different event with different honest copy — see `readOnlyBecause()` in `store.js`
+ * and the DE/EN strings in `_bootUnreadableBoard`'s docblock — and they must not be collapsed:
+ * telling a user their file is broken when the app merely could not open it is the difference
+ * between relaunching and giving up.
+ *
+ * FIRST REASON WINS. `_bootUnreadableBoard` runs before `_projectSafe`, so if the snapshot shown
+ * in place of the unreadable board ALSO refuses to project, `reason` stays `board-*` and the
+ * projection error is recorded beside it as `projectionFailure`. Read-only-ness does not depend
+ * on the reason: it is `bootFailure` being non-null that gates `persistNow()` and `flushSync()`.
+ *
+ * @typedef {Object} StoreBootFailure
+ * @property {string} at
+ * @property {'unprojectable'|'board-unparseable'|'board-not-a-board'|'board-read-failed'} reason
+ * @property {string} detail
+ * @property {string} [projectionFailure]  set only when a `board-*` boot ALSO failed to project
+ * @property {?{from:'snapshot'|'none', day:?string, at:?string}} [shownInstead]
+ *   `board-*` only: what the app put on screen instead. The settings pane keys the „Angezeigt wird
+ *   der letzte Schnappschuss vom <Tag>" half of the copy off this.
+ * @property {boolean} [logPresent]
+ *   `board-*` only: whether a log was lying beside the unreadable board. When true it was
+ *   quarantined `board-unreadable` and the copy gains the sentence saying so.
+ */
+
+/**
+ * WHAT THE BOARD ON SCREEN WAS BUILT FROM, when it was not built from `board.json`.
+ *
+ * `diagnostics().source` keeps its three documented values and cannot answer this: R7's genuine
+ * recovery (no board file, a log adopted as the truth) and the read-only disaster boot (a board
+ * file that exists and cannot be read, a snapshot standing in) both used to report `'recovery'`
+ * and were indistinguishable. `recoveredFrom` is the field that tells them apart.
+ *
+ *   {from:'op-log'}   R7 — no `board.json`; the log was the truth and the boot is a recovery.
+ *   {from:'snapshot'} the disaster boot — `board.json` exists, could not be read, and a
+ *                     `snapshots.json` entry from `day` is standing in. Always with a
+ *                     `bootFailure`, therefore always read-only.
+ *   {from:'none'}     the disaster boot with no usable snapshot: an empty stand-in board.
+ *
+ * Null on an ordinary launch. `lineageId` is non-null only on `'op-log'`, where the recovered
+ * board is written back carrying the checkpoint's lineage so the NEXT launch does not quarantine
+ * and rename the only copy of the board it just rebuilt.
+ *
+ * @typedef {Object} StoreRecoveredFrom
+ * @property {'op-log'|'snapshot'|'none'} from
+ * @property {?string} day
+ * @property {?string} at
+ * @property {?string} lineageId
  */
 
 /**
@@ -122,7 +263,11 @@
  *   · every A3-H2 coercion, with the old value and the new one,
  *   · every field or entry either door dropped,
  *   · every op `applyRemote` refused, with the reason,
- *   · the op-log quarantine (A3-C1), also readable structurally via `diagnostics().quarantine`.
+ *   · the op-log quarantine (A3-C1 / ADR 006), also readable structurally via
+ *     `diagnostics().quarantine`,
+ *   · every settings repair `init()` or `replaceAll()` had to make to draw the board (I-2 / I-1),
+ *   · a recovery boot — `board.json` was missing and the board came out of the log (ADR 006 R7),
+ *   · where a refused log was moved aside to, or why it could not be (I-6).
  *
  * F-8 IS NOT CLOSED BY THIS. The carrier exists and is durable; **no UI reads it** (WP-10). The
  * seam to wire is `subscribeWarnings(fn)` for live events and `diagnostics()` for the settings

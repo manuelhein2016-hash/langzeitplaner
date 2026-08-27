@@ -49,19 +49,38 @@
 //    would quietly repair that quirk into a merge. The registers ARE the authority on the load
 //    and import paths, where v1 also re-normalises through `migrate()`.
 //
-// 5. A LOG MAY NOT OUTRANK `board.json` UNTIL IT IS SHOWN TO BE THAT BOARD'S LOG (A3-C1).
-//    `shouldMigrate(board, {opsLogExists})` answers "has migration already run?" and nothing
-//    else. `_useLog()` answers the two questions that actually license discarding the user's
-//    file: can the log be READ, and does it BELONG to this board (`logBelongsToBoard`)? Either
-//    answer being no is a QUARANTINE — the log is not applied, not deleted and not written to,
-//    the board loads from `board.json` untouched, and `store.warnings` / `store.quarantine` say
-//    so. Never add a branch here that prefers a log on the strength of its existence alone.
+// 5. `board.json` IS THE TRUTH. THE OP LOG IS HISTORY. (ADR 006 — normative, read it.)
 //
-// SOLO MODE WRITES NO SECOND FILE (ADR 001 §9, §11). `ops.jsonl` and `checkpoint.json` are
-// created when a space is created. Until then `board.json` IS the checkpoint: on every launch
-// the persisted v1 board is re-migrated through `migrateV1`, whose GENESIS(i) stamps are a pure
-// function of the file (ADR 001 §8.1), so two Macs opening the same board agree byte for byte
-// and every future edit beats every migrated field on every device.
+//    Every launch loads `board.json` and migrates it into an op set — the SPINE — with no
+//    predicate and no branch. The log is then reconciled ONTO that spine; it may contribute
+//    stamps, tombstones, parked ops, cursors and splice evidence, and it may never contribute,
+//    remove or alter one entity or one field value `board.json` asserts.
+//
+//    Two attempts at a smarter rule were broken by adversaries (`shouldMigrate(board,
+//    {opsLogExists})` → R3-31; a provenance envelope plus an entity census → R4-1a/R4-2a). ADR
+//    006 §2 proves no third one can work: "the log is one persist behind" and "the log is a
+//    stranger's" produce the SAME observation — the board has keys the log lacks — so no
+//    function of set overlap can tell them apart. The missing information had to be put on disk
+//    deliberately, BY BOTH FILES: `board.json._v2.lineageId` and `checkpoint.json.lzp.lineageId`.
+//
+//    The gate is therefore ONE equality (`adoptable`), and it is affordable precisely because
+//    adoption cannot change content: adoption is load → project → DIFF against `board.json` →
+//    mint the difference at fresh stamps above the log's horizon. A log adopted by mistake costs
+//    the user nothing. Do not add a second condition to `adoptable()`; if one seems necessary,
+//    the reconciler is wrong, not the gate (ADR 006 §12.4).
+//
+// SOLO MODE WRITES NO SECOND FILE AND NO SECOND KEY (ADR 001 §9/§11, ADR 006 §4.1). `_v2` is
+// attached to `board.json` only once a lineage exists — i.e. once the log is durable — so in
+// solo mode as it ships today `board.json` does not change at all, `ops.jsonl` and
+// `checkpoint.json` do not exist, and the spine's GENESIS(i) stamps stay a pure function of the
+// file (ADR 001 §8.1), so two Macs opening the same board agree byte for byte.
+//
+// 6. `init()` ALWAYS BOOTS TO SOMETHING, AND ALWAYS SAYS WHAT IT REFUSED (Finding 2 / I-2).
+//    `_project()` can throw — `materialize` refuses a `settings` that would make `layout.js:25`
+//    produce a NaN year and hang `holidays.js:51` — and a throw out of `init()` is a WHITE
+//    SCREEN with the user's intact `board.json` sitting right there. Every projection at a boot
+//    or replace boundary goes through `_projectSafe()` / a CANDIDATE, which repairs the settings
+//    it can and, in the last resort, opens read-only rather than writing a board nobody made.
 
 import { todayISO, monthKeyOf } from './dates.js';
 import { nextFreeRef } from './palette.js';
@@ -74,11 +93,11 @@ import {
 import { isMonthKey } from './core/entities.js';
 import { opId as newOpId, groupId as newGid, memberId as mintMemberId, deviceId as mintDeviceId } from './core/ids.js';
 import { crock32 } from './core/b64.js';
-import { createClock } from './core/stamp.js';
+import { createClock, isStamp, cmp, msOf, MAX_FUTURE_DRIFT_MS } from './core/stamp.js';
 import { createOpLog } from './core/oplog.js';
 import { materialize, stripV2Fields, exportV1JSON } from './core/materialize.js';
 import { createUndoStacks, makeTx, captureImages, shadowContent } from './core/undo.js';
-import { migrateV1, shouldMigrate, migrateSnapshots, toV1Snapshot } from './core/migrate1to2.js';
+import { migrateV1, migrateSnapshots, toV1Snapshot } from './core/migrate1to2.js';
 import { planReplaceAll } from './core/replace.js';
 import { foldAuthorized } from './core/authz.js';
 
@@ -413,38 +432,53 @@ function nullPublisher() {
   };
 }
 
-// ── is this log a log of THIS board? (A3-C1) ─────────────────────────────────
+// ── who wins, `board.json` or the log? (ADR 006) ──────────────────────────────
 //
-// ADR 001 §8.4's idempotence predicate asks one question about the log — `opsLogExists` — and it
-// is the RIGHT question for the predicate it belongs to: "has migration already run?". It is not,
-// on its own, a licence to throw `board.json` away, because it never asks whether the log it
-// found has anything to do with the board sitting beside it. One stray line in `ops.jsonl` used
-// to be enough to replace a full board with the empty fold of that line, write the empty board
-// back over `board.json`, and roll it into `snapshots.json` — silently (A3-C1, CRITICAL).
+// THE DECISION, IN ONE LINE: `board.json` is the truth; the op log is history; every launch
+// loads `board.json` and the log is reconciled ONTO it, never the reverse.
 //
-// So the store adds a CONSISTENCY CHECK on top of the predicate. It is deliberately two layers,
-// because the two files on disk carry different amounts of evidence:
+// Two rules that looked reasonable are dead, and the corpses are kept here so a third is not
+// written:
 //
-//  1. PROVENANCE — `checkpoint.json` written by this store carries an `lzp` envelope naming the
-//     board it was folded from (`boardFp`) and the horizon it was folded at. A checkpoint with no
-//     envelope was not written by this app, and a checkpoint whose fingerprint does not match the
-//     board on disk has, at best, drifted from it. `ops.jsonl` is a line format with no header,
-//     so a tail-only log carries no provenance at all and only layer 2 applies to it.
-//  2. CENSUS — every entity `board.json` asserts the existence of must be an entity the log has
-//     heard of. Once a log exists it is authoritative and `board.json` is its projection, so a
-//     log that knows NONE of the board's entities cannot be that board's log. (Knowing SOME but
-//     not all is drift — a hand-edited file, a crash between the two writes — which is a warning,
-//     not a quarantine: the log still wins, and it says so.)
+//  1. `shouldMigrate(board, {opsLogExists})` — "is there a log?" One well-formed line in
+//     `ops.jsonl` replaced a whole board with the fold of that line (A3-C1 / R3-31).
+//  2. A provenance envelope on `checkpoint.json` PLUS an entity census with a zero-overlap
+//     threshold. `pad:<YYYY-MM>` is a MONTH, shared by every board that ever existed, so
+//     recognising ONE key was enough to hand the board over (R4-1a), and two boards sharing one
+//     month key swapped wholesale (R4-2a).
 //
-// A log that fails either layer is QUARANTINED: not applied, not deleted, not overwritten, and
-// reported on `store.warnings` + `store.quarantine`. `board.json` then loads untouched, exactly
-// as it does on a machine with no log at all. Never silently prefer a log over a board it cannot
-// be shown to belong to.
+// ADR 006 §2 ends the tuning: "the log is this board's own log, one persist behind" (R4-4a) and
+// "the log is a stranger's" (R4-2a) BOTH present as "the board has keys the log lacks". Set
+// overlap is a function of the two key sets alone, so no threshold over it can separate them —
+// raising 1-of-N to k-of-N moves the failure from one case to the other. The information is not
+// in the key sets. It has to be put on disk deliberately, BY BOTH FILES, because the one file
+// that knows the board moved is the board.
+//
+//   board.json     `_v2: { lineageId, gen }`     — additive, ADR 001 §8.4's sanctioned key
+//   checkpoint.json`lzp: { v, lineageId, gen, boardHash, horizon, at }`
+//
+// THE VERDICT IS ONE EQUALITY: `cp.lzp.lineageId === board._v2.lineageId`. No census, no
+// threshold, no counter, no version comparison. `lzp.v` is NEVER consulted — that is what kills
+// R4-3a's false refusal of a log written by a newer build. `gen` and `boardHash` are diagnostics
+// and a fast path; neither gates.
+//
+// A blunt equality is affordable ONLY because adoption cannot change content (`_adoptHistory` →
+// `_reconcileOntoBoard`): the log is loaded, projected, DIFFED against the board's own spine, and
+// the difference is minted at fresh stamps above the log's horizon. A log adopted by mistake — a
+// forged lineage, a copied file — therefore costs the user nothing. Do not add a second condition
+// here (ADR 006 §12.4); if one seems necessary, the reconciler is wrong, not the gate.
 
-/** The envelope version. Bump only when the fields below change meaning. */
-const LZP_CHECKPOINT_ENVELOPE = 1;
+/** The envelope version. NOT consulted by the verdict (ADR 006 §4.2) — humans and migrations only. */
+const LZP_CHECKPOINT_ENVELOPE = 2;
 
-/** FNV-1a, 32 bit, hex. Not a hash for security — a cheap stable fingerprint of a key list. */
+/**
+ * Quarantine reasons that are expected to STOP BEING TRUE without anyone touching the files, and
+ * whose log must therefore keep its own name so the next launch can reconsider it (R5-2e).
+ * One member, and adding a second needs the same argument: what changes, and who changes it?
+ */
+const DEFERRED_QUARANTINE = new Set(['clock-skew']);
+
+/** FNV-1a, 32 bit, hex. Not a hash for security — a cheap stable fingerprint of a byte string. */
 function fnv1a(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
@@ -454,87 +488,329 @@ function fnv1a(str) {
   return h.toString(16).padStart(8, '0');
 }
 
-/** Every entity key a v1 board asserts the existence of, in the register map's own key format. */
-function boardCensus(board) {
-  const keys = new Set();
-  const add = (kind, list) => {
-    for (const e of Array.isArray(list) ? list : []) {
-      if (e && e.id !== undefined && e.id !== null) keys.add(`${kind}:${String(e.id)}`);
-    }
-  };
-  add('note', board?.notes);
-  add('bar', board?.bars);
-  add('cat', board?.categories);
-  const pads = board?.scratchpads;
-  if (pads && typeof pads === 'object') for (const m of Object.keys(pads)) keys.add(`pad:${m}`);
-  return keys;
-}
-
-/** Every entity key a loaded log has heard of — folded, tombstoned or merely parked. */
-function logCensus(log) {
-  const keys = new Set();
-  for (const k of log.registers().keys()) if (typeof k === 'string' && !k.startsWith('pref:')) keys.add(k);
-  for (const op of log.ops({ includeParked: true })) {
-    if (op && typeof op.e === 'string' && !op.e.startsWith('pref:')) keys.add(op.e);
-  }
-  return keys;
-}
-
-/** `{fp, n}` — the fingerprint of a board's entity census, stable under key order. */
-function censusFingerprint(board) {
-  const keys = [...boardCensus(board)].sort();
-  return { fp: fnv1a(keys.join('|')), n: keys.length };
+/**
+ * `<fnv1a>:<length>` over the EXACT bytes of a `board.json`.
+ *
+ * ADR 006 §4.2: this is an optimisation and a diagnostic and NEVER a gate, which is exactly why
+ * 32 bits plus a length is enough and why no async WebCrypto call may appear on the `flushSync`
+ * path. Nothing branches on it.
+ */
+function boardHash(text) {
+  const s = typeof text === 'string' ? text : '';
+  return `${fnv1a(s)}:${s.length}`;
 }
 
 /**
- * Does `log` belong to `board`? Never throws; returns a verdict the caller can act on.
- * @returns {{ok:boolean, reason:string, detail:string, warn?:string}}
+ * How many lines `ops.jsonl` may hold before a persist compacts (ADR 001 §7.2 · R5-4).
+ *
+ * §7.2's policy is "compact when the tail exceeds 5 000 ops". `storage.appendOps`' browser
+ * fallback has no append primitive and caps the file at `LS_OPS_CAP` lines by dropping the OLDEST
+ * — which, for a line the checkpoint does not fold, is the one loss this whole file exists to
+ * prevent. So the threshold is the smaller of the two, with headroom, and it is ONE number rather
+ * than a per-backend branch: a branch only one backend ever exercises is a branch that is never
+ * tested, and this one may not be wrong.
+ *
+ * Two things §7.2 asks for that this does NOT do, recorded so they are not mistaken for done:
+ * the compaction is total rather than "keeping a 30-day tail for debuggability" (`truncateOps`
+ * can only drop a PREFIX of the file, and the store does not track which line of the file each op
+ * is on, so a partial compaction could not trim anything at all), and nothing compacts on the
+ * 2 MB-at-launch trigger.
  */
-function logBelongsToBoard(board, checkpoint, log) {
-  // 1. provenance — only a checkpoint can carry it
-  if (checkpoint) {
-    const env = checkpoint.lzp;
-    if (!env || typeof env !== 'object' || env.v !== LZP_CHECKPOINT_ENVELOPE) {
+const TAIL_COMPACT_AT = Math.min(5000, Math.floor(storage.LS_OPS_CAP * 0.75));
+
+/**
+ * The identity of ONE LINE of `ops.jsonl`: its opId and its body. Used only to answer "have I
+ * already written this line?" — see `_uncommittedTailLines`. The body is in the key because an
+ * opId is not unique across bodies once envelope splicing is possible (ADR 002 §5.1), and a
+ * 32-bit fingerprint is enough because the cost of a collision is one line that is not appended
+ * twice, never a line that is not appended at all.
+ */
+function tailLineKey(op) {
+  const s = canonJSON(op ?? null);
+  return `${op && typeof op.id === 'string' ? op.id : '?'}:${fnv1a(s)}:${s.length}`;
+}
+
+const LINEAGE_PREFIX = 'lin_';
+
+/** `lin_` + 128 random bits in Crockford base32. Minted once per lineage, opaque forever. */
+function mintLineageId() {
+  return LINEAGE_PREFIX + crock32(crypto.getRandomValues(new Uint8Array(16)));
+}
+
+/** Frozen FOREVER (ADR 006 §12.2): a future envelope version must still be legible for this. */
+function isLineageId(v) {
+  return typeof v === 'string' && v.startsWith(LINEAGE_PREFIX) && v.length > LINEAGE_PREFIX.length
+    && v.length <= 64 && /^[0-9A-Za-z_-]+$/.test(v);
+}
+
+/**
+ * Split `board.json`'s parsed bytes into the v1 board and the ADR 006 binding.
+ *
+ * `_v2` NEVER ENTERS `store.state` (ADR 006 §4.1). It is attached at serialization and removed
+ * here, before `migrate()`, so `exportJSON`, `snapshots.json` and `replaceAll` never see it and
+ * 11.4's "`board.json` IS `store.state`" stays true modulo one documented additive key.
+ * @returns {{board0: Object|null, binding: {lineageId:string, gen:number}|null}}
+ */
+function splitBoardEnvelope(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { board0: null, binding: null };
+  const v2 = raw._v2;
+  const binding = v2 && typeof v2 === 'object' && !Array.isArray(v2) && isLineageId(v2.lineageId)
+    ? { lineageId: v2.lineageId, gen: Number.isInteger(v2.gen) && v2.gen >= 0 ? v2.gen : 0 }
+    : null;
+  if (!('_v2' in raw)) return { board0: raw, binding: null };
+  const board0 = { ...raw };
+  delete board0._v2;
+  return { board0, binding };
+}
+
+/**
+ * `store.state` → the exact bytes of `board.json`, with `_v2` attached when a lineage exists.
+ *
+ * Serialized ONCE per persist so that the hash in the checkpoint names the bytes that were
+ * actually written (ADR 006 §6). `_v2` holds `{lineageId, gen}` and nothing else, ever — it is
+ * not a scratch area (§12.3).
+ */
+function serializeBoard(state, binding) {
+  if (!binding) return JSON.stringify(state, null, 2);
+  return JSON.stringify({ ...state, _v2: { lineageId: binding.lineageId, gen: binding.gen } }, null, 2);
+}
+
+/**
+ * WHICH OF THE FIVE THINGS IS `board.json`? (R5-3a/b/c — the precondition nothing defended.)
+ *
+ * ADR 006's rule has exactly one precondition: `board.json` must be READABLE. Before this
+ * function the code asked one question — did `splitBoardEnvelope` hand back a board? — and five
+ * different situations answered it identically:
+ *
+ *   'ok'           a board object was read.
+ *   'absent'       there is no board file. A fresh install, or R7's recovery when a log is
+ *                  beside it. The ONLY one of these that may ever adopt a log (ADR 006 §5.5).
+ *   'unparseable'  the bytes are there and `JSON.parse` threw. §5.5's defence — "reaching it
+ *                  requires deleting board.json" — is not this precondition. One truncated
+ *                  write reaches it, and the user's data is still on disk.
+ *   'not-a-board'  the bytes parsed to `[]`, `"a string"`, `null`, `7`. Someone or something
+ *                  wrote over the file with valid JSON that is not a board.
+ *   'read-failed'  the read threw: a locked file, a dismissed permission prompt, an EIO.
+ *                  NOTHING is known — least of all that the file is gone.
+ *
+ * The last three mean THE BOARD EXISTS AND THIS APP CANNOT SEE IT. They are not recoveries and
+ * they are not fresh installs; they are the one situation in which the app has genuinely lost
+ * the user's data and has to say so (`_bootUnreadableBoard`).
+ *
+ * @returns {{kind: 'ok'|'absent'|'unparseable'|'not-a-board'|'read-failed', detail: string}}
+ */
+function classifyBoardFile(file, board0) {
+  const f = file && typeof file === 'object'
+    ? file
+    : { status: 'read-failed', error: 'storage returned nothing at all' };
+  const bytes = typeof f.text === 'string' ? f.text.length : 0;
+  switch (f.status) {
+    case 'read-failed':
       return {
-        ok: false,
-        reason: 'no-provenance',
-        detail: 'checkpoint.json carries no `lzp` provenance envelope, so it was not written by this '
-          + 'app over this board; a checkpoint may not outrank board.json on the strength of merely existing',
+        kind: 'read-failed',
+        detail: `${f.where ?? 'the board file'} could not be read (${f.error || 'no reason given'})`,
       };
-    }
+    case 'unparseable':
+      return {
+        kind: 'unparseable',
+        detail: `${f.where ?? 'board.json'} is not valid JSON (${f.error || 'JSON.parse failed'}); `
+          + `its ${bytes} byte${bytes === 1 ? '' : 's'} are still on disk, untouched`,
+      };
+    case 'absent':
+      return { kind: 'absent', detail: 'there is no board file' };
+    default:
+      if (board0 !== null) return { kind: 'ok', detail: '' };
+      return {
+        kind: 'not-a-board',
+        detail: `${f.where ?? 'board.json'} is valid JSON but not a board `
+          + `(${Array.isArray(f.raw) ? 'an array' : f.raw === null ? 'null' : typeof f.raw}); `
+          + `its ${bytes} byte${bytes === 1 ? '' : 's'} are still on disk, untouched`,
+      };
   }
-  // 2. census — the log must have heard of what the board says exists
-  const mine = boardCensus(board);
-  if (mine.size === 0) {
-    return { ok: true, reason: 'empty-board', detail: 'board.json asserts no entities; there is nothing for the log to contradict', warn: [] };
+}
+
+/**
+ * WHY IS THIS SESSION READ-ONLY? One sentence, keyed off `bootFailure.reason`.
+ *
+ * There are now two ways to reach a read-only session and they are not the same event:
+ *   - `unprojectable` — board.json was READ fine and then refused to DRAW (`_projectSafe` step 4);
+ *   - `board-unparseable` / `board-not-a-board` / `board-read-failed` — board.json was never read
+ *     at all, so nothing is known about whether it draws (`_bootUnreadableBoard`).
+ *
+ * Before round 5's integration `persistNow` told every one of them "the board on disk could not
+ * be drawn", which is false on three of the four and is the *worst* thing to say on them: it
+ * asserts the file is broken when the honest claim is that this app could not open it — often
+ * transient, and often the difference between a user relaunching and a user giving up. The copy
+ * `_bootUnreadableBoard` documents is keyed off the same enum, so the two never drift apart.
+ */
+function readOnlyBecause(bootFailure) {
+  const tail = ' Every file on disk is exactly as it was.';
+  switch (bootFailure && bootFailure.reason) {
+    case 'board-read-failed':
+      return 'board.json could not be accessed this launch, so nothing may be written over it — '
+        + 'this is often temporary; quit and reopen.' + tail;
+    case 'board-unparseable':
+    case 'board-not-a-board':
+      return 'board.json could not be read, so the board on screen is a stand-in and may not be '
+        + 'saved over the real file.' + tail;
+    default:
+      return 'the board on disk could not be drawn.' + tail;
   }
-  const known = logCensus(log);
-  const unknown = [...mine].filter((k) => !known.has(k));
-  if (unknown.length === mine.size) {
-    return {
-      ok: false,
-      reason: 'unrelated-log',
-      detail: `the log knows ${known.size} entit${known.size === 1 ? 'y' : 'ies'} and NONE of the `
-        + `${mine.size} board.json asserts (${[...mine].slice(0, 3).join(', ')}${mine.size > 3 ? ', …' : ''})`,
-    };
+}
+
+/** The newest snapshot that is actually restorable. 11.5's safety net, read defensively. */
+function newestUsableSnapshot(list) {
+  for (const s of Array.isArray(list) ? list : []) {
+    if (s && typeof s === 'object' && typeof s.day === 'string'
+      && s.state && typeof s.state === 'object' && !Array.isArray(s.state)) return s;
   }
-  const drift = unknown.length
-    ? `op log accepted, but board.json carries ${unknown.length} entr${unknown.length === 1 ? 'y' : 'ies'} `
-      + `the log has never heard of (${unknown.slice(0, 3).join(', ')}${unknown.length > 3 ? ', …' : ''}); `
-      + 'the log is authoritative once it exists, so those are not on the board'
-    : undefined;
-  const env = checkpoint?.lzp;
-  const fp = censusFingerprint(board).fp;
-  const stale = env && env.boardFp !== fp
-    ? `checkpoint.json was folded from a different generation of board.json (${env.boardFp} vs ${fp}) — `
-      + 'expected after a crash between the two writes, and the log wins'
-    : undefined;
+  return null;
+}
+
+const no = (reason, detail) => ({ ok: false, reason, detail });
+
+/**
+ * MAY THE LOG'S HISTORY BE ADOPTED? One comparison. Never throws. (ADR 006 §5.2)
+ *
+ * Five refusals, each naming a fact rather than a guess. `gen` is not read, `v` is not read,
+ * `boardHash` does not gate, and no key sets are compared.
+ *
+ * A bare `ops.jsonl` with no `checkpoint.json` is NEVER adopted: a line format has no header and
+ * therefore no lineage. That is what makes A3-C1's original attack — one stray line — structurally
+ * unreachable rather than merely unlikely. The cost is that one crash shape (append written,
+ * checkpoint write lost) costs a session's HISTORY; under ADR 006 R5 it can never cost content.
+ *
+ * @returns {{ok:boolean, reason:string, detail:string, exact?:boolean}}
+ */
+function adoptable(binding, checkpoint, boardText) {
+  if (!checkpoint || typeof checkpoint !== 'object' || Array.isArray(checkpoint)) {
+    return no('no-checkpoint',
+      'there is no readable checkpoint.json; a bare ops.jsonl carries no header and therefore no '
+      + 'lineage, and a log with no lineage is never adopted');
+  }
+  if (!binding) {
+    return no('board-carries-no-lineage',
+      'board.json carries no _v2.lineageId, so no op log has ever been bound to this board');
+  }
+  const lzp = checkpoint.lzp;
+  if (!lzp || typeof lzp !== 'object' || Array.isArray(lzp) || !isLineageId(lzp.lineageId)) {
+    return no('log-carries-no-lineage',
+      'checkpoint.json carries no lzp.lineageId; it was not written by this app over any board');
+  }
+  if (lzp.lineageId !== binding.lineageId) {
+    return no('foreign-lineage',
+      `checkpoint.json belongs to lineage ${lzp.lineageId}; this board is ${binding.lineageId}`);
+  }
   return {
     ok: true,
-    reason: 'related',
-    detail: `${mine.size - unknown.length}/${mine.size} of the board's entities are in the log`,
-    warn: [stale, drift].filter(Boolean),
+    reason: 'same-lineage',
+    detail: `lineage ${lzp.lineageId}`,
+    // Reporting and a fast path only — see `boardHash`. Never a gate.
+    exact: typeof lzp.boardHash === 'string' && lzp.boardHash === boardHash(boardText),
   };
+}
+
+/**
+ * The v1 content of a projected board, reduced to EXACTLY what the register model can express:
+ * the four collections keyed by id with their v1 fields, the month-keyed pads, the flattened
+ * prefs — AND THE ORDER OF EACH COLLECTION. Used only by the post-condition (ADR 006 R4), and
+ * deliberately NOT built out of `_diff`, so that a sabotaged reconciler cannot make the check
+ * that guards it vacuous (INV-13).
+ *
+ * ARRAY ORDER IS CONTENT (R5-5a). This used to compare id→fields maps only, with the reasoning
+ * that "entry ORDER is not content". It is: ADR 001 §5 step 5 is explicit that the comparators
+ * are MANDATORY, NOT COSMETIC, because v1's capacity slice (`layout.js:209`) and its per-column
+ * lane rescue (`layout.js:162-177`) are order-sensitive, so two devices that folded the same ops
+ * into different array orders draw different boards from identical data.
+ *
+ * And order is contributed ENTIRELY BY THE LOG: the comparators sort by `_born`, which is a
+ * register, is written once at creation and can never be re-minted (`ops.js` `writeOnce`), and is
+ * not in any `COLLECTION[].fields` — so `diffCollection` cannot mint it and, until this change,
+ * `v1ContentOf` could not see it either. The reconciler's field list was also its guard's blind
+ * spot: swapping two `_born` VALUES inside an adopted checkpoint reordered the board on screen
+ * with `quarantine === null` and `reconciled === 0`.
+ *
+ * Because `_born` cannot be re-minted, R3 cannot be satisfied by minting the difference here the
+ * way it is for every other field. What is left is R4, and R4 is enough: the order the LOG
+ * asserts must equal the order `board.json` asserts, or the log is refused and `board.json` — in
+ * whose array order the truth lives — is used alone. History lost, content kept, order kept.
+ *
+ * The two orders agree on every path the app itself produces, which is what makes this safe:
+ * `board.json` is always written from `store.state`, `store.state` is always the output of
+ * `materialize`, and `materialize` sorts by the very `_born` the log holds. They can only differ
+ * when one of the two files was written by something that is not this app.
+ */
+function v1ContentOf(board) {
+  const out = { notes: {}, bars: {}, categories: {}, scratchpads: {}, settings: null, order: {} };
+  for (const spec of COLLECTION) {
+    const bag = out[spec.key];
+    const seq = [];
+    for (const e of Array.isArray(board?.[spec.key]) ? board[spec.key] : []) {
+      if (!e || e.id === undefined || e.id === null) continue;
+      const id = String(e.id);
+      if (id in bag) continue;                  // a duplicate id: the first one wins, as `_diff` does
+      const f = {};
+      for (const name of spec.fields) if (e[name] !== undefined) f[name] = e[name];
+      bag[id] = f;
+      seq.push(id);
+    }
+    out.order[spec.key] = seq;
+  }
+  const pads = board?.scratchpads;
+  if (pads && typeof pads === 'object') {
+    for (const k of Object.keys(pads)) if (isMonthKey(k)) out.scratchpads[k] = pads[k];
+  }
+  try { out.settings = flattenPref(board?.settings || {}); } catch { out.settings = null; }
+  return out;
+}
+
+/** Key-order-independent JSON, so the comparison reports VALUES and not insertion order. */
+function canonJSON(v) {
+  if (Array.isArray(v)) return `[${v.map(canonJSON).join(',')}]`;
+  if (v && typeof v === 'object') {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonJSON(v[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
+/**
+ * ADR 006 R4's post-condition, as a predicate: do these two projections assert the same content?
+ *
+ * Both sides come out of the SAME `materialize` call path — one over the adopted log, one over
+ * the spine that `board.json` was migrated into — so defaults, repairs and normalisations are
+ * identical on both sides and only a genuine disagreement can show up.
+ *
+ * Entry ORDER IS compared, and the argument that it was not is in `v1ContentOf` (R5-5a). The
+ * fields are compared as a map keyed by id so that the report is about VALUES; the order is
+ * compared as the id sequence, separately, so that a disagreement about order says so and a
+ * disagreement about a value is not disguised as one.
+ */
+function sameV1Content(a, b) {
+  return canonJSON(v1ContentOf(a)) === canonJSON(v1ContentOf(b));
+}
+
+/**
+ * WHICH HALF of the post-condition failed, said in one clause. `reconcile-failed` is true and
+ * useless on its own; the two halves have different causes and only one of them is repairable in
+ * principle, so the detail names which one it was (R5-5a).
+ * @param {?Object} theirs the adopted log's projection, or null when it would not project
+ * @param {Object} mine `board.json`'s own projection @returns {string}
+ */
+function postConditionDetail(theirs, mine) {
+  if (theirs === null) return 'the log could not be projected at all after reconciliation';
+  const A = v1ContentOf(theirs);
+  const B = v1ContentOf(mine);
+  const orderDiffers = canonJSON(A.order) !== canonJSON(B.order);
+  A.order = null;
+  B.order = null;
+  const valuesDiffer = canonJSON(A) !== canonJSON(B);
+  if (orderDiffers && !valuesDiffer) {
+    return 'the log projects exactly the entries board.json carries but in a DIFFERENT ORDER. Array '
+      + 'order is user-visible (ADR 001 §5 step 5) and it is decided by `_born`, which is write-once '
+      + 'and therefore the one thing the reconciler cannot mint the difference for';
+  }
+  if (orderDiffers) return 'the log disagrees with board.json about both entry values and entry order';
+  return 'the log still did not assert what board.json asserts';
 }
 
 /**
@@ -604,6 +880,34 @@ class Store {
     /** Set by `init()` when an op log was refused. Inspectable, never written back to disk. */
     this.quarantine = null;
 
+    // ── ADR 006 — the board/log binding ────────────────────────────────────────
+    /** The lineage this board's log belongs to, or null in solo mode (where no log is durable). */
+    this._lineageId = null;
+    /** Diagnostics only. Frozen in the format forever; NOTHING branches on it (ADR 006 §4.2). */
+    this._gen = 0;
+    /** `{lineageId, exact, reconciled}` when a log's history was adopted; null otherwise. */
+    this._adopted = null;
+    /** True when `board.json` was not the source of the board on screen (R7, or R5-3's read-only boot). */
+    this._recovered = false;
+    /** `{from: 'op-log'|'snapshot'|'none', day, at, lineageId}` — WHICH recovery, or null. */
+    this._recoveredFrom = null;
+
+    // ── the tail file, `ops.jsonl` (R5-4 · ADR 006 §9.2) ──────────────────────
+    /** How many lines `ops.jsonl` holds. `truncateOps(keepFromLine)` wants a line count, and the
+     *  store is the only thing that knows one without re-reading the file it just appended to. */
+    this._tailLines = 0;
+    /** `tailLineKey(op)` for every line already committed — to the tail file, or to a checkpoint
+     *  that folds it. Never appended twice. Reset by `init()` from the tail it just read. */
+    this._opsCommitted = new Set();
+    /**
+     * Set when even a repaired projection could not be rendered. The app opens on whatever it
+     * could build and REFUSES TO WRITE for the rest of the session — the one thing worse than a
+     * board that cannot be drawn is that board's replacement committed over the file (I-2).
+     */
+    this.bootFailure = null;
+    /** So the read-only session says so once, not once per debounce tick. */
+    this._toldAboutReadOnly = false;
+
     this.state = defaultState();
     this.snapshots = [];
     this.listeners = new Set();
@@ -614,119 +918,622 @@ class Store {
     this.redoStack = stackView(() => this._stacks.size().redo, () => this._stacks.clear());
   }
 
-  async init() {
-    const loaded = await storage.loadBoard();
-    const board = migrate(loaded ?? defaultState());
-    if (!loaded) board.settings.seenFirstRun = false;
+  /**
+   * THE SPINE (ADR 006 R1). `board.json` is migrated into an op set on EVERY launch, whether a
+   * log exists or not. There is no predicate here any more; the path that used to be rare is the
+   * only path, which is why it is the path every test exercises.
+   *
+   * `stampBase` (§9.4): a board that has NEVER had a log is migrated at `GENESIS(i)`, a pure
+   * function of the file, so two Macs migrating the same `board.json` agree byte for byte. A
+   * board that HAS a lineage but whose log was refused is a RE-DERIVATION, not a migration: its
+   * values are the newest thing this device knows, and stamping them at the bottom of the order
+   * would make them lose every contest they should win (R4-7b). Those get fresh stamps, minted in
+   * one sequence in the migration's own order, so the run is still deterministic.
+   *
+   * `migrateV1` does not take a `stampBase` (`core/migrate1to2.js` belongs to another owner this
+   * round), so the re-stamp is applied here, on the way into the log. Ops are frozen by
+   * construction, hence the copy.
+   */
+  _buildSpine(board, { restamp }) {
+    const spine = createOpLog({ now: () => Date.now() });
+    const r = migrateV1(board, { memberId: this._me, deviceId: this._device, acceptLossy: true });
+    this._warnAll(r.warnings);
+    for (const op of r.ops) spine.append(restamp ? { ...op, ts: this._clock.tick() } : op);
+    return spine;
+  }
 
-    // ADR 001 §8.4's idempotence predicate, both halves. In solo mode there is no op log, so
-    // the answer is "migrate" on every launch and `board.json` is the checkpoint (§9). Once a
-    // space exists the log is authoritative and re-migrating would re-stamp every field at
-    // GENESIS and discard every edit since — which is what `shouldMigrate` refuses.
+  async init() {
+    const file = await storage.loadBoardFile();
+    const { text, raw } = file;
+    const { board0, binding } = splitBoardEnvelope(raw);
+    const boardFile = classifyBoardFile(file, board0);
+    const board = migrate(board0 ?? defaultState());
+
     const checkpoint = await storage.loadCheckpoint();
     const tail = await storage.loadOps();
     const hasLog = !!checkpoint || tail.length > 0;
-    this._log = createOpLog({ now: () => Date.now() });
+
     this.clearWarnings();
     this.quarantine = null;
-    // A3-C1 / A3-H1: the predicate says whether migration has already run; `_useLog` says whether
-    // the log it found is READABLE and BELONGS TO THIS BOARD. Only both together may discard
-    // `board.json`. Either failure quarantines the log — reported, left on disk, not applied —
-    // and the board loads exactly as it would on a machine with no log at all.
-    const useLog = !shouldMigrate(board, { opsLogExists: hasLog }).migrate
-      && hasLog
-      && this._useLog(board, checkpoint, tail);
-    if (useLog) {
-      this._opsPersisted = true;
+    this.bootFailure = null;
+    this._toldAboutReadOnly = false;
+    this._adopted = null;
+    this._recovered = false;
+    this._recoveredFrom = null;
+    this._lineageId = binding ? binding.lineageId : null;
+    this._gen = binding ? binding.gen : 0;
+    // The tail on disk is committed BY DEFINITION — it is what was just read off it — so nothing
+    // below re-appends a line that is already there (R5-4). A tail entry is an op, a `{op, seq}`
+    // pair or a `lines()` record, exactly as `oplog.load()` accepts them.
+    this._tailLines = tail.length;
+    this._opsCommitted = new Set(tail.map((l) => tailLineKey(l && typeof l === 'object' && l.op ? l.op : l)));
+
+    // 11.5's safety net, loaded BEFORE the branch that needs it. `snaps` is re-used below rather
+    // than read twice, so `migrateSnapshots`' warnings are still reported exactly once.
+    const snaps = migrateSnapshots(await storage.loadSnapshots());
+
+    if (boardFile.kind === 'ok') {
+      // ── R1. THE SPINE. Unconditional, every launch, no predicate. ──────────────
+      const spine = this._buildSpine(board, { restamp: !!binding });
+      // ── R2. ONE EQUALITY. ─────────────────────────────────────────────────────
+      if (!hasLog) {
+        this._log = spine;                     // solo: nothing to adopt, nothing to refuse
+      } else {
+        const verdict = adoptable(binding, checkpoint, text);
+        if (!verdict.ok) {
+          this._log = spine;
+          this._quarantineLog(verdict.reason, verdict.detail, checkpoint, tail);
+        } else {
+          this._log = this._adoptHistory(spine, checkpoint, tail, verdict);
+        }
+      }
+    } else if (boardFile.kind === 'absent' && hasLog) {
+      // R7 — an absent board file is not a disagreement. §5.5. THE ONLY BRANCH THAT ADOPTS A LOG
+      // IT CANNOT TIE TO A BOARD, and it is reachable only when the file is genuinely gone.
+      this._log = this._recoverFromLog(checkpoint, tail, board);
+    } else if (boardFile.kind === 'absent') {
+      board.settings.seenFirstRun = false;      // a fresh install. Story 15.1, INV-12.
+      this._log = this._buildSpine(board, { restamp: false });
     } else {
-      const r = migrateV1(board, { memberId: this._me, deviceId: this._device, acceptLossy: true });
-      this._warnAll(r.warnings);
-      for (const op of r.ops) this._log.append(op);
-      this._opsPersisted = false;
+      // The board file EXISTS and this app could not read it (R5-3a/b/c).
+      this._log = this._bootUnreadableBoard(boardFile, checkpoint, tail, snaps.snapshots);
     }
+    // The log is durable only once a space exists (ADR 001 §9/§11, ADR 006 §9.5). WP-8 turns this
+    // on — and MUST consult `store.quarantine` first, or it overwrites the very bytes the
+    // quarantine exists to preserve.
+    this._opsPersisted = false;
+
     // The registers were replaced wholesale under stacks that survive `init()` by design (v1
     // fact, pinned at store-persistence.test.js:271). Retire their DEV shadow expectations,
     // which describe a board that is no longer on screen; the stacks themselves are untouched.
     this._stacks.remoteApplied();
 
-    this.state = this._blankState();
-    this._project({ settings: true });
+    // Finding 2 / I-2 — NEVER a white screen. `_project` can refuse, from a poisoned checkpoint
+    // and from a poisoned `board.json` alike; both land here and both boot.
+    this._projectSafe();
 
-    const snaps = migrateSnapshots(await storage.loadSnapshots());
     this.snapshots = snaps.snapshots;
     this._warnAll(snaps.warnings);
     this._lastSnapshotDay = this.snapshots[0]?.day ?? null;
     // What was on disk when the app opened. This — not the edited state — is
     // what the day's snapshot has to preserve.
     this._persisted = structuredClone(this.state);
+    // I-6 — refuse the log ONCE. Strictly after the board is on screen, and it can only fail
+    // safely: a move that does not happen costs one repeated warning per launch and nothing else.
+    //
+    // NEVER ON A FAILED BOOT. A read-only session's promise is that every file is exactly as it
+    // was, and a move-aside is a write. It is also precisely the wrong moment to rename the log:
+    // on the `board-unreadable` path it may be the freshest record of the board that exists, and
+    // the user has just been told to send it in for a rescue (R5-3b's "the evidence is renamed
+    // away one launch after the board is").
+    if (this.quarantine && !this.bootFailure) await this._sequesterQuarantine();
     this.ready = true;
     this.emit('init');
   }
 
   /**
-   * Load the op log — but only if it can be read AND can be shown to belong to `board`.
+   * ADOPT THE LOG'S HISTORY — and nothing else (ADR 006 §5.3).
    *
-   * A3-H1: `storage.loadCheckpoint()` catches a JSON parse error and returns `null`, so an
-   * UNPARSABLE checkpoint was always safe; one that PARSED and was wrong reached
-   * `deserializeRegisters` and threw `RegisterError` out of `init()`, leaving `ready === false`
-   * — a white screen with the user's intact `board.json` sitting right there. That asymmetry was
-   * the bug. Anything the log throws on the way in is now a quarantine, not a dead app.
+   * Three things happen here in an order that is load-bearing:
    *
-   * A3-C1: and a log that loads cleanly still has to be THIS board's log — see
-   * `logBelongsToBoard` above.
+   *  1. The log is loaded. A3-H1 stays closed: anything thrown on the way in is a quarantine,
+   *     never a dead app.
+   *  2. THE CLOCK IS ADVANCED PAST EVERY STAMP THE LOG CARRIES, BEFORE ANYTHING IS MINTED. This
+   *     is the one silent failure mode in the whole design (ADR 006 §12.6): mint below a
+   *     register's stamp and LWW quietly keeps the LOG's value, R4-4a is back, and nothing
+   *     anywhere says so. Deleting this loop reddens INV-3 and nothing else.
+   *  3. The board's own spine is diffed onto the history, so `board.json` wins every
+   *     disagreement — with a FRESH stamp, which is what makes it win against a peer too.
    *
-   * @returns {boolean} true when the log is authoritative; false when the caller must migrate
-   *          `board.json` instead.
+   * Then the post-condition (R4): if the reconciled log does not assert exactly what the board
+   * asserts, for any reason at all, the log is quarantined and the board is used alone. Every
+   * conceivable failure of the reconciler therefore degrades to "history lost, content kept".
+   * It may NOT be removed as redundant (§12.7).
+   *
+   * @returns {Object} the log to run on — the history when it was adopted, the spine when it was not
    */
-  _useLog(board, checkpoint, tail) {
-    const fresh = () => { this._log = createOpLog({ now: () => Date.now() }); };
+  _adoptHistory(spine, checkpoint, tail, verdict) {
+    const history = createOpLog({ now: () => Date.now() });
     try {
-      this._log.load({ checkpoint, tail });
+      history.load({ checkpoint, tail });
     } catch (e) {
-      fresh();
       this._quarantineLog('unreadable-log', `${e.name}: ${e.message}`, checkpoint, tail);
-      return false;
+      return spine;
     }
-    let verdict;
+    // ── THE PRECONDITION FOR STEP 2, CHECKED BEFORE STEP 2 IS ATTEMPTED (R5-2e) ─────────────
+    // §12.6 ("mint above every stamp the log carries") and ADR 001 §1.3/§7.4 ("a stamp more than
+    // 24 h ahead of local wall time is neither adopted by the clock nor applied by the log") are
+    // both normative and, for a log stamped beyond the drift window, they contradict each other.
+    // This is where that is decided, ONCE, by name — see `_clockSkew`.
+    const skew = this._clockSkew(history, checkpoint);
+    if (skew) {
+      this._quarantineLog('clock-skew', skew, checkpoint, tail);
+      return spine;
+    }
     try {
-      verdict = logBelongsToBoard(board, checkpoint, this._log);
+      this._observeEveryStamp(history, checkpoint);
     } catch (e) {
-      verdict = { ok: false, reason: 'unreadable-log', detail: `the consistency check itself failed: ${e.name}: ${e.message}` };
+      this._quarantineLog('unreadable-log', `the clock refused a stamp the log carries (${e.name}: ${e.message})`, checkpoint, tail);
+      return spine;
     }
-    if (!verdict.ok) {
-      fresh();
-      this._quarantineLog(verdict.reason, verdict.detail, checkpoint, tail);
-      return false;
+
+    let reconciled = 0;
+    let mine;
+    try {
+      mine = this._projectionOf(spine);
+      reconciled = this._reconcileOntoBoard(history, mine);
+    } catch (e) {
+      this._quarantineLog('reconcile-failed',
+        `the log could not be reconciled onto board.json (${e.name}: ${e.message}); board.json was kept whole`,
+        checkpoint, tail);
+      return spine;
     }
-    for (const w of verdict.warn ?? []) this._warn(`op log: ${w}`);
-    return true;
+
+    let theirs = null;
+    try { theirs = this._projectionOf(history); } catch { theirs = null; }
+    if (theirs === null || !sameV1Content(theirs, mine)) {
+      this._quarantineLog('reconcile-failed',
+        `after reconciliation ${postConditionDetail(theirs, mine)}; board.json was kept whole`,
+        checkpoint, tail);
+      return spine;
+    }
+
+    if (reconciled) {
+      this._warn(`op log: reconciled ${reconciled} change${reconciled === 1 ? '' : 's'} board.json carried that the `
+        + 'log did not (expected after a crash between the two writes; board.json is the truth and it won)');
+    }
+    this._adopted = { lineageId: verdict.detail, exact: verdict.exact === true, reconciled };
+    return history;
   }
 
   /**
-   * Refuse an op log without destroying it (A3-C1).
+   * IS THIS MACHINE'S CLOCK THE REASON THE LOG CANNOT BE ADOPTED? (R5-2e)
    *
-   * QUARANTINE IS THREE PROMISES: the log is not applied, the log is not deleted, and the log is
-   * not overwritten. The third is the one that used to fail — `init()` emptied `state`,
-   * `persistNow()` wrote the empty board over `board.json`, and `rollSnapshot()` rolled it into
-   * `snapshots.json`. Leaving `_opsPersisted` false is what keeps `_persistOps()` away from
-   * `checkpoint.json` and `ops.jsonl` for the rest of the session, so the refused bytes are still
-   * there for a rescue pass to read.
+   * TWO NORMATIVE RULES MEET HERE AND ONLY ONE OF THEM CAN BE OBEYED:
    *
-   * STILL OWED (needs `src/js/storage.js`, another agent's file this round): physically moving
-   * the files aside — `ops.quarantined-<ts>.jsonl` / `checkpoint.quarantined-<ts>.json` — so the
-   * check does not have to run again on every launch. Until that exists the refusal is re-derived
-   * (and re-reported) at each launch, which is the safe direction: nothing is lost either way.
+   *   ADR 006 §12.6  the clock is advanced past every stamp in the loaded log BEFORE any op is
+   *                  minted, or the reconciliation silently loses to LWW and R4-4a is back.
+   *   ADR 001 §1.3   `clock.observe` DECLINES a stamp more than `MAX_FUTURE_DRIFT_MS` (24 h)
+   *        + §7.4    ahead of local wall time, and `oplog.append` PARKS an op stamped that far
+   *                  ahead. A parked op changes no register, so a reconciliation minted up there
+   *                  would not be applied even if the clock had agreed to mint it.
+   *
+   * For a log whose stamps are inside the drift window there is no conflict and nothing happens
+   * here — that is the ordinary path, including a skew of many hours (the non-vacuity control).
+   * Beyond it the two rules are irreconcilable, and the resolution is NOT to mint below the log
+   * and hope: it is to say so. §12.6 is a PRECONDITION FOR ADOPTION, not an instruction to try.
+   * ADR 006 §7 gains the `clock-skew` reason and §12.6 is amended to say exactly this.
+   *
+   * WHY IT IS A SEPARATE REASON AND NOT `reconcile-failed`. `reconcile-failed` is true and
+   * useless: it names the post-condition, never the cause, and the cause here is a fact about
+   * the MACHINE that the user can act on (a dead CMOS battery, a VM resumed from a snapshot, a
+   * botched NTP step, a manual date change) and that the store cannot repair. It is also the one
+   * quarantine reason that is EXPECTED TO STOP BEING TRUE: the wall clock passes, or is fixed,
+   * and the same log becomes adoptable again. So `_sequesterQuarantine` does not move it aside —
+   * a refusal that is deferred must leave the files where the next launch will look for them.
+   *
+   * @returns {?string} the detail for the quarantine, or null when the log is inside the window
    */
-  _quarantineLog(reason, detail, checkpoint, tail) {
+  _clockSkew(log, checkpoint) {
+    let max = isStamp(checkpoint?.horizon) ? checkpoint.horizon : null;
+    const consider = (s) => { if (isStamp(s) && (max === null || cmp(s, max) > 0)) max = s; };
+    for (const cells of log.registers().values()) {
+      if (!cells || typeof cells.values !== 'function') continue;
+      for (const cell of cells.values()) consider(cell?.stamp);
+    }
+    for (const op of log.ops({ includeParked: true })) consider(op?.ts);
+    if (max === null) return null;
+    const now = Date.now();
+    const ahead = msOf(max) - now;
+    if (ahead <= MAX_FUTURE_DRIFT_MS) return null;
+    const hours = Math.round(ahead / 3600000);
+    return 'THIS MACHINE\'S CLOCK is the problem, not the log: the log\'s newest stamp is dated '
+      + `${new Date(msOf(max)).toISOString()}, which is ${hours} hours ahead of this Mac's clock `
+      + `(${new Date(now).toISOString()}) — more than the ${MAX_FUTURE_DRIFT_MS / 3600000} hours `
+      + 'ADR 001 §1.3 allows, so no op minted now could be applied above it. The log is this '
+      + 'board\'s own and it is NOT being discarded: set this Mac\'s date and time correctly (or '
+      + 'wait until the date passes) and the history is adopted again on the next launch.';
+  }
+
+  /**
+   * Every stamp in a loaded log, into the clock. See `_adoptHistory` step 2 — this is the whole
+   * of ADR 006 §12 rule 6 and it is the reason `_reconcileOntoBoard` can be a plain diff.
+   * Its precondition is `_clockSkew`, which has already answered null when this runs.
+   */
+  _observeEveryStamp(log, checkpoint) {
+    if (isStamp(checkpoint?.horizon)) this._clock.observe(checkpoint.horizon);
+    for (const cells of log.registers().values()) {
+      if (!cells || typeof cells.values !== 'function') continue;
+      for (const cell of cells.values()) if (isStamp(cell?.stamp)) this._clock.observe(cell.stamp);
+    }
+    for (const op of log.ops({ includeParked: true })) if (isStamp(op?.ts)) this._clock.observe(op.ts);
+  }
+
+  /** The v1-shaped projection of an arbitrary log. `_project`'s materialize, without the install. */
+  _projectionOf(log) {
+    const full = materialize(log.registers(), {
+      me: this._me,
+      familySpaceId: this._familySpaceId,
+      members: new Map(),
+      currentMembers: new Set([this._me]),
+      hiddenMembers: new Set(),
+      defaultSettings: defaultState().settings,
+    });
+    return this._familySpaceId ? full : stripV2Fields(full);
+  }
+
+  /**
+   * MINT THE DIFFERENCE, AT FRESH STAMPS (ADR 006 R3 / §5.4).
+   *
+   * THE PRIMITIVE MATTERS AND IT IS EASY TO GET WRONG. `planReplaceAll` emits a `set` for EVERY
+   * entry unconditionally (`replace.js:560`), so using it here would re-stamp every field and
+   * reset every `_born` ON EVERY LAUNCH — R4-7b, permanently, on the happy path. The right
+   * primitive is the one `_adopt()` is already made of: "the board object was edited outside a
+   * transaction; mint ops for the difference." Swapping `_diff` for `planReplaceAll` here reddens
+   * INV-4, and INV-4 is the most important row in the table.
+   *
+   * What falls out of a diff, none of it a special case:
+   *   · exact match ⇒ ZERO ops; every stamp, `_born`, tombstone, parked op and cursor survives;
+   *   · the board has an entry the log lacks ⇒ one `set` above the log's horizon (R4-4a's note);
+   *   · the log has a live entry the board lacks ⇒ one `{_alive:false}` — an honoured deletion,
+   *     which is also what makes a Time-Machine restore of an older `board.json` mean what the
+   *     user meant by restoring it;
+   *   · a FOREIGN TOMBSTONE CAN NEVER DELETE MY ENTRY: if the board carries the entity, the diff
+   *     mints a live `set` above the tombstone. No rule about tombstones is needed.
+   *
+   * OWED AT WP-8 (recorded so it is not rediscovered): `_diff` produces no `retractions`. A
+   * deletion discovered at init inside a family space owes the publisher one, the way
+   * `planReplaceAll` does (`plan.retractions`, G-2). Unreachable until a family space can exist.
+   *
+   * @returns {number} how many ops the board contributed
+   */
+  _reconcileOntoBoard(history, mine) {
+    const theirs = this._projectionOf(history);
+    const ops = this._diffBetween(theirs, theirs.settings, mine, mine.settings, history);
+    for (const op of ops) history.append(op);
+    return ops.length;
+  }
+
+  /**
+   * R7 — `board.json` is ABSENT, so there is no truth for a log to overrule and therefore no
+   * disagreement to resolve (ADR 006 §5.5). The log is loaded as the truth and the boot is
+   * REPORTED as a recovery. This is the one asymmetric branch in the design.
+   *
+   * ITS PRECONDITION IS NOW THE ONE §5.5 ARGUES FOR. "Reaching it requires deleting board.json,
+   * and anyone who can delete it can equally write it" was never the precondition the code had:
+   * the precondition was that `JSON.parse` threw, and `[]`, `"a string"`, `null`, a truncated
+   * object and a read that failed all took this branch (R5-3a/b/c). They now take
+   * `_bootUnreadableBoard`. This one is entered only when the file is genuinely not there.
+   *
+   *   no board + no log  = a fresh install. Unchanged, story 15.1 untouched — not this path.
+   *   no board + a log   = a recovery, said out loud.
+   *
+   * THE RECOVERED BOARD IS RE-BOUND TO THE LOG IT CAME OUT OF. Without this the board written by
+   * the next persist carries no `_v2`, so the very next launch quarantines that same log as
+   * `board-carries-no-lineage` and moves it aside — the log is destroyed one launch after it
+   * became the only copy of the board. Adopting its lineage is not a new trust decision: its
+   * content is already on screen, which is a strictly larger concession than its name.
+   */
+  _recoverFromLog(checkpoint, tail, fallbackBoard) {
+    const log = createOpLog({ now: () => Date.now() });
+    try {
+      log.load({ checkpoint, tail });
+    } catch (e) {
+      this._quarantineLog('unreadable-log', `${e.name}: ${e.message}`, checkpoint, tail);
+      return this._buildSpine(fallbackBoard, { restamp: false });
+    }
+    try { this._observeEveryStamp(log, checkpoint); } catch { /* a stamp the clock refuses is not fatal here */ }
+    const lzp = checkpoint && typeof checkpoint === 'object' ? checkpoint.lzp : null;
+    if (lzp && typeof lzp === 'object' && isLineageId(lzp.lineageId)) {
+      this._lineageId = lzp.lineageId;
+      this._gen = Number.isInteger(lzp.gen) && lzp.gen >= 0 ? lzp.gen : 0;
+    }
+    this._recovered = true;
+    this._recoveredFrom = { from: 'op-log', lineageId: this._lineageId, day: null, at: null };
+    this._warn('board.json was MISSING and an op log was found beside it; the board was RECOVERED from '
+      + 'the log. Nothing verified that this log belongs to this board — a log has no way to prove it '
+      + '— so check the board is yours and complete BEFORE making a change. If it is not, quit without '
+      + 'editing: the log is still on disk and so is snapshots.json.');
+    return log;
+  }
+
+  /**
+   * `board.json` EXISTS AND THIS APP COULD NOT READ IT (R5-3a/b/c) — the one path where the app
+   * has genuinely lost the user's data, and therefore the one path where it must say so instead
+   * of quietly presenting something else.
+   *
+   * Three facts decide everything here:
+   *
+   *  1. **The log is never the content.** ADR 006's gate is `cp.lzp.lineageId ===
+   *     board._v2.lineageId`, and an unreadable board has no `_v2` to compare — so there is NO
+   *     evidence that the log beside it is this board's. The old code inferred the opposite from
+   *     the absence of evidence and handed the board to whatever log was lying there: R5-3b
+   *     needed a legitimate pair for the attacker's OWN board plus one truncated byte. Salvaging
+   *     a lineage out of the corrupt bytes would be a fourth heuristic on a question that has
+   *     killed three (ADR 006 §2); the honest answer is that the tie cannot be made.
+   *  2. **`snapshots.json` is §8.2's own stated answer**, and it was never even mentioned. It is
+   *     this app's own file, in this app's own shape, and 11.5 exists for exactly this morning.
+   *     It is at most a day old; the log might be fresher, but "fresher" is worth nothing when
+   *     nothing ties it to this board.
+   *  3. **Nothing is committed.** `bootFailure` puts the session read-only (`persistNow` and
+   *     `flushSync` both return early), so `board.json` keeps its bytes for a rescue pass, the
+   *     log keeps its bytes and is NOT moved aside, and the user gets to decide. The previous
+   *     behaviour made a recoverable morning permanent on the first autosave.
+   *
+   * The board on screen is therefore a snapshot or nothing, it is labelled, and it cannot be
+   * written back over the file it is standing in for.
+   *
+   * HUMAN-FACING COPY (DE is the shipping language; the settings pane owes this a real surface —
+   * `bootFailure.reason` and `.detail` are the seam, see `subscribeWarnings`/`diagnostics`):
+   *
+   *   board-unparseable / board-not-a-board
+   *     DE  „Die Datei board.json konnte nicht gelesen werden. Ihre Daten sind NICHT gelöscht —
+   *         die Datei liegt unverändert an ihrem Platz. Angezeigt wird der letzte Schnappschuss
+   *         vom <Tag>. Diese Sitzung speichert nichts, damit nichts überschrieben wird."
+   *     EN  "board.json could not be read. Your data has NOT been deleted — the file is still
+   *         where it was, untouched. What you see is the snapshot from <day>. Nothing will be
+   *         saved this session, so nothing can be overwritten."
+   *   board-read-failed
+   *     DE  „Auf board.json konnte nicht zugegriffen werden (<Grund>). Das ist oft vorübergehend:
+   *         App beenden und neu öffnen. Angezeigt wird der letzte Schnappschuss vom <Tag>; diese
+   *         Sitzung speichert nichts."
+   *     EN  "board.json could not be accessed (<reason>). This is often temporary — quit and
+   *         reopen. What you see is the snapshot from <day>; nothing will be saved this session."
+   *   …with no snapshot, the second sentence becomes:
+   *     DE  „Es gibt keinen Schnappschuss. Der Kalender ist leer, bis die Datei gelesen werden
+   *         kann." / EN  "There is no snapshot. The calendar is empty until the file can be read."
+   *
+   * @returns {Object} the spine to run on — built from a snapshot, or from nothing
+   */
+  _bootUnreadableBoard(boardFile, checkpoint, tail, snapshots) {
+    // FIRST, before anything can be written. Read-only is the promise the rest of this rests on.
+    this.bootFailure = {
+      at: new Date().toISOString(),
+      reason: `board-${boardFile.kind}`,     // board-unparseable | board-not-a-board | board-read-failed
+      detail: boardFile.detail,
+      /** For the settings pane: what the app could show instead. Filled in below. */
+      shownInstead: null,
+      logPresent: !!checkpoint || (Array.isArray(tail) && tail.length > 0),
+    };
+
+    if (this.bootFailure.logPresent) {
+      this._quarantineLog(
+        'board-unreadable',
+        `${boardFile.detail}, so there is no _v2.lineageId to compare and nothing ties this log to `
+        + 'this board; a log is never adopted on evidence it cannot supply',
+        checkpoint, tail,
+        'board.json was NOT replaced and this session writes nothing;',
+      );
+    }
+
+    const snap = newestUsableSnapshot(snapshots);
+    let board;
+    if (snap) {
+      board = migrate(structuredClone(snap.state));
+      this._recoveredFrom = { from: 'snapshot', day: snap.day, at: snap.at ?? null, lineageId: null };
+      this.bootFailure.shownInstead = { from: 'snapshot', day: snap.day, at: snap.at ?? null };
+    } else {
+      board = migrate(defaultState());
+      // `seenFirstRun` is LEFT AT v1's VALUE (false ⇒ the first-run tour shows) deliberately.
+      // Showing the tour over a disaster is wrong, but it is what v1 did with a corrupt
+      // board.json and `tests/tier1/store-persistence.test.js:240` characterizes it by name
+      // ("treated as a first run"). Re-baselining a v1 observable is the tier-1 owner's call,
+      // not this pass's; the read-only guard and the warning are what actually protect the file.
+      this._recoveredFrom = { from: 'none', day: null, at: null, lineageId: null };
+      this.bootFailure.shownInstead = { from: 'none', day: null, at: null };
+    }
+    this._recovered = true;
+
+    this._warn(
+      `board.json COULD NOT BE READ: ${boardFile.detail}. Your board has NOT been deleted — every file `
+      + 'is exactly where it was and this session will NOT write to board.json, ops.jsonl or '
+      + `checkpoint.json, so nothing can be overwritten. ${snap
+        ? `What is on screen is the snapshot from ${snap.day} (Einstellungen › Schnappschüsse), which may be `
+          + 'up to a day older than the board you last saw.'
+        : 'There is no snapshot to fall back on, so the calendar is empty until board.json can be read.'}`
+      + (this.bootFailure.logPresent
+        ? ' An op log was found beside it and was NOT used: nothing ties a log to a board whose lineage '
+          + 'cannot be read, and believing one would be how a stranger\'s board ends up on your screen.'
+        : ''),
+    );
+
+    return this._buildSpine(board, { restamp: false });
+  }
+
+  /**
+   * PROJECT, AND ALWAYS BOOT TO SOMETHING (Finding 2 · I-2 · A3-H1's real closure).
+   *
+   * A3-H1 wrapped `_log.load` and the consistency check. It did not wrap `_project()`, two
+   * statements later — and `materialize` legitimately REFUSES a `settings` that would make
+   * `layout.js:25` produce a NaN year and hang `holidays.js:51` forever. Refusing is right; where
+   * the refusal landed was not: outside every door, `ready === false`, a white screen, with an
+   * intact `board.json` on disk. Rows R4-5a-e reached it through `checkpoint.json`; I-2 reaches
+   * the same throw site through `board.json` itself. One policy closes both.
+   *
+   * THE POLICY: the app always boots, and it always says what it refused.
+   *
+   *   1. project as it stands;
+   *   2. failing that, reset the three settings the projection can actually refuse — `mode`,
+   *      `startMonth`, `pageYears` — at a fresh stamp, and say so;
+   *   3. failing that, reset every setting to the v1 defaults, and say so;
+   *   4. failing that, open on an empty board AND REFUSE TO WRITE FOR THE REST OF THE SESSION.
+   *      Step 4 changes no file: `persistNow` and `flushSync` both return early while
+   *      `bootFailure` is set, so the board that could not be drawn is still the board on disk
+   *      for a rescue pass — and for the next build.
+   *
+   * Steps 2 and 3 touch SETTINGS ONLY. No note, bar, category or scratchpad is ever discarded to
+   * make a board renderable.
+   */
+  _projectSafe() {
+    const d = defaultState().settings;
+    const steps = [
+      null,
+      { what: 'the pinned start month (mode, startMonth, pageYears)', patch: { mode: d.mode, startMonth: d.startMonth, pageYears: d.pageYears } },
+      { what: 'every setting', patch: this._defaultPrefs() },
+    ];
+    let last = null;
+    for (const step of steps) {
+      if (step) {
+        this._warn(`the board could not be drawn with the settings it was loaded with `
+          + `(${last.name}: ${last.message}) — ${step.what} was reset to the default. `
+          + 'Nothing on the board itself was changed.');
+        try { this._log.append(prefSet(this._ctx(), step.patch)); }
+        catch (e) { this._warn(`settings repair refused by the log: ${e.name}: ${e.message}`); }
+      }
+      try {
+        this.state = this._blankState();
+        this._project({ settings: true });
+        return true;
+      } catch (e) {
+        last = e;
+      }
+    }
+    // Step 4. Nothing this store can build renders. Open, say so, and go read-only.
+    //
+    // FIRST REASON WINS (round 5 integration). `_bootUnreadableBoard` runs BEFORE this and may
+    // already have set `bootFailure` to a `board-*` reason with the `shownInstead` the settings
+    // pane keys its copy off. If the stand-in it chose — a `snapshots.json` entry — then also
+    // refuses to project, the session is still read-only for the ORIGINAL reason: board.json
+    // could not be READ. Overwriting `reason` with 'unprojectable' would tell the user their
+    // board cannot be DRAWN, which is a different (and here unknowable) claim about a file
+    // nothing has successfully parsed. The projection failure is recorded beside it instead, so
+    // no diagnostic is lost. Session read-only-ness is unaffected either way: it is
+    // `bootFailure` being truthy that gates `persistNow`/`flushSync`, not its reason.
+    const projectionFailure = `${last.name}: ${last.message}`;
+    this.bootFailure = this.bootFailure
+      ? { ...this.bootFailure, projectionFailure }
+      : {
+          at: new Date().toISOString(),
+          reason: 'unprojectable',
+          detail: projectionFailure,
+        };
+    this._warn((this.bootFailure.reason === 'unprojectable'
+      ? 'the board on disk could not be drawn at all '
+      : 'the stand-in shown in place of the unreadable board.json could not be drawn either ')
+      + `(${projectionFailure}). The app has opened on an EMPTY board and will NOT write to `
+      + 'board.json, ops.jsonl or checkpoint.json this session, so every file on disk is exactly as '
+      + 'it was. Restore a snapshot from Einstellungen, or send board.json in for a rescue.');
+    this._log = createOpLog({ now: () => Date.now() });
+    try {
+      this.state = this._blankState();
+      this._project({ settings: true });
+    } catch {
+      this.state = defaultState();
+    }
+    return false;
+  }
+
+  /**
+   * I-6 — move a refused log aside so it is refused ONCE, not once per launch.
+   *
+   * "Not deleted" is one of the quarantine's promises and it survives a move: the bytes stay on
+   * disk under a name that says why. `storage.quarantineLogAside()` writes the copy BEFORE
+   * removing the original and cannot do either on the native path, where no shell command can
+   * create a third file — so this is a best-effort tidy-up and never a precondition for anything.
+   *
+   * NEVER ON A REFUSAL THAT IS EXPECTED TO STOP BEING TRUE (R5-2e). `clock-skew` says "come back
+   * when this Mac's date is right"; renaming the files is how that promise is broken, because the
+   * next launch does not look under the new name. A refusal that is DEFERRED must leave the bytes
+   * where the deferral points. `DEFERRED_QUARANTINE` is that list and it has exactly one member —
+   * every other reason is a fact about the files themselves, which the next launch cannot change.
+   */
+  async _sequesterQuarantine() {
+    if (this.quarantine && DEFERRED_QUARANTINE.has(this.quarantine.reason)) {
+      this.quarantine.movedAside = null;
+      this.quarantine.deferred = true;
+      this._warn('the op log was left exactly where it is, under its own name: this refusal is expected to '
+        + 'stop being true, and the next launch has to be able to find the files to reconsider them.');
+      return;
+    }
+    let r;
+    try { r = await storage.quarantineLogAside(); }
+    catch (e) { r = { moved: false, reason: `${e.name}: ${e.message}` }; }
+    if (this.quarantine) this.quarantine.movedAside = r.moved ? { ops: r.ops, checkpoint: r.checkpoint } : null;
+    if (r.moved) {
+      this._warn(`the refused op log was moved aside to ${[r.ops, r.checkpoint].filter(Boolean).join(' and ')}; `
+        + 'it is still on disk and can be inspected or restored, and it will not be re-read on the next launch.');
+    } else {
+      this._warn(`the refused op log was left where it is (${r.reason}), so this refusal is reported again `
+        + 'on every launch until the files are moved or removed by hand.');
+    }
+  }
+
+  /**
+   * Refuse an op log without destroying it (A3-C1 · ADR 006 §7).
+   *
+   * QUARANTINE IS FIVE PROMISES. The first three are unchanged and structural:
+   *
+   *  1. NOT APPLIED. The log's registers never reach `state`.
+   *  2. NOT DELETED. The bytes stay on disk. I-6's move-aside (`_sequesterQuarantine`) is the
+   *     sanctioned form of "not re-read"; it is a MOVE and never a delete.
+   *  3. NOT OVERWRITTEN. `_opsPersisted = false` is set here, so `_persistOps` cannot touch
+   *     either slot for the rest of the session.
+   *
+   * ADR 006 adds two, and the first is the point of the whole ADR:
+   *
+   *  4. A QUARANTINE CAN NEVER COST CONTENT. Not "does not" — CANNOT. `state` is derived from the
+   *     spine, which was built from `board.json` before the log was read at all, so there is no
+   *     code path from a quarantine to a lost entry. Provable by construction; pinned by INV-15.
+   *  5. THE REASON IS TRUE. The enum is exact and every member names a fact, not a guess:
+   *     `no-checkpoint`, `board-carries-no-lineage`, `log-carries-no-lineage`, `foreign-lineage`,
+   *     `unreadable-log`, `clock-skew`, `reconcile-failed`, `board-unreadable`. `lzp.v` is NEVER
+   *     a reason (R4-3a).
+   *
+   *     `board-unreadable` (R5-3a/b/c) is the one member that is not about the log at all: the
+   *     BOARD could not be read, so there is no `_v2.lineageId` for the gate to compare and no
+   *     evidence either way. A log is refused on the absence of a tie, never adopted on it.
+   *
+   *     `clock-skew` (R5-2e) is the one member that is not about either FILE: both are this
+   *     board's own and both are well formed, and the machine's date is what makes the log
+   *     unusable today. It is therefore also the only DEFERRED reason — see
+   *     `_sequesterQuarantine` and `_clockSkew`.
+   *
+   * THE LINEAGE IS RE-MINTED ON `foreign-lineage` ONLY, because that is the only reason that says
+   * the old lineage was never ours. On every other reason it is kept, so a log a newer build
+   * wrote and this build could not read becomes readable again the moment the user re-upgrades.
+   *
+   * @param {string} [note] replaces "board.json was loaded unchanged" for a caller on which that
+   *        sentence would be false. The rest of the message is fixed: the files are still there.
+   */
+  _quarantineLog(reason, detail, checkpoint, tail, note) {
     // Structural, not incidental: whatever the caller does next, this session may not write to
     // the two log slots. (WP-8 setting `_opsPersisted` when a space is created must consult
-    // `store.quarantine` first — see the note in docs/v2/FINDINGS.md A3-C1.)
+    // `store.quarantine` first — see ADR 006 §9.5 and FINDINGS A3-C1.)
     this._opsPersisted = false;
+    if (reason === 'foreign-lineage') {
+      // W2 (ADR 006 §9.3): the log we were bound to belongs to someone else, so this device's
+      // history under that lineage is over. A new lineage makes the next persist a re-join rather
+      // than a silent convergence reset. Content is untouched — it came from `board.json`.
+      this._lineageId = mintLineageId();
+      this._gen = 0;
+    }
     const lines = Array.isArray(tail) ? tail : [];
     this.quarantine = {
       at: new Date().toISOString(),
       reason,
       detail,
+      /** Set by `_sequesterQuarantine()`: where the bytes went, or null when they did not move. */
+      movedAside: null,
       checkpointHorizon: (checkpoint && typeof checkpoint === 'object' ? checkpoint.horizon : null) ?? null,
       tailLines: lines.length,
       // A sample, not the log: the files themselves are untouched on disk, so a rescue pass reads
@@ -736,7 +1543,7 @@ class Store {
       tailSampled: Math.min(lines.length, 50),
     };
     this._warn(
-      `op log QUARANTINED (${reason}): ${detail}. board.json was loaded unchanged; `
+      `op log QUARANTINED (${reason}): ${detail}. ${note ?? 'board.json was loaded unchanged;'} `
       + 'ops.jsonl and checkpoint.json are still on disk and will not be written to this session.',
     );
   }
@@ -776,7 +1583,22 @@ class Store {
   diagnostics() {
     return {
       ready: this.ready,
-      source: this._opsPersisted ? 'op-log' : 'board.json',
+      // ADR 006: `board.json` is always the content authority, so `source` says where the HISTORY
+      // came from — 'op-log' when a log's history was adopted, 'recovery' when there was no board
+      // file to be authoritative and the log had to be, 'board.json' otherwise.
+      source: this._recovered ? 'recovery' : this._adopted ? 'op-log' : 'board.json',
+      // WHICH recovery — `source: 'recovery'` alone said "not board.json" and let R5-3a/b hide
+      // inside it. `'op-log'` is R7 (the file is genuinely gone); `'snapshot'` and `'none'` are
+      // the read-only boot over a board.json that exists and could not be read.
+      recoveredFrom: this._recoveredFrom ? { ...this._recoveredFrom } : null,
+      lineage: {
+        id: this._lineageId,
+        gen: this._gen,
+        adopted: !!this._adopted,
+        exact: this._adopted ? this._adopted.exact : null,
+        reconciled: this._adopted ? this._adopted.reconciled : null,
+      },
+      bootFailure: this.bootFailure ? { ...this.bootFailure } : null,
       warnings: [...this.warnings],
       quarantine: this.quarantine
         ? {
@@ -785,6 +1607,7 @@ class Store {
           detail: this.quarantine.detail,
           checkpointHorizon: this.quarantine.checkpointHorizon,
           tailLines: this.quarantine.tailLines,
+          movedAside: this.quarantine.movedAside ?? null,
         }
         : null,
     };
@@ -805,8 +1628,12 @@ class Store {
     return { schemaVersion: SCHEMA_VERSION, notes: [], bars: [], categories: [], scratchpads: {}, settings: null };
   }
 
-  /** An OpCtx for one transaction. `regs` arms `ops.js`'s existence gate (ATT-88). */
-  _ctx(gid) {
+  /**
+   * An OpCtx for one transaction. `regs` arms `ops.js`'s existence gate (ATT-88).
+   * @param {string} [gid] @param {Object} [log] the log the gate reads — the live one by default,
+   *        and the log being reconciled during `_reconcileOntoBoard` (ADR 006 §5.4)
+   */
+  _ctx(gid, log) {
     return {
       act: this._me,
       dev: this._device,
@@ -816,7 +1643,7 @@ class Store {
       newGid,
       space: this._personalSpaceId ?? PERSONAL_PLACEHOLDER,
       familySpaceId: this._familySpaceId,
-      regs: this._log.registers(),
+      regs: (log ?? this._log).registers(),
     };
   }
 
@@ -1058,12 +1885,24 @@ class Store {
 
   /** The op group describing what `fn` just did to `state`. */
   _diff(before, beforeSettings) {
-    const ctx = this._ctx();
+    return this._diffBetween(before, beforeSettings, this.state, this.state.settings, this._log);
+  }
+
+  /**
+   * The same diff, over two boards neither of which has to be `state`.
+   *
+   * `_diff` is the whole of `mutate()`; ADR 006 §5.4 needs exactly the same computation between
+   * the projection of an adopted log and the projection of `board.json`'s spine, against that
+   * log's registers rather than the live one's. The generalisation is the fix — the reconciler
+   * IS `_diff`, unchanged, called with a different `before`.
+   */
+  _diffBetween(before, beforeSettings, after, afterSettings, log) {
+    const ctx = this._ctx(undefined, log);
     const ops = [];
     const warn = (m) => this._warn(m);
-    for (const spec of COLLECTION) diffCollection(spec, before[spec.key], this.state[spec.key], ctx, ops, warn);
-    diffPads(before.scratchpads, this.state.scratchpads, ctx, ops, warn);
-    const patch = diffSettings(beforeSettings, this.state.settings, this._defaultPrefs());
+    for (const spec of COLLECTION) diffCollection(spec, before[spec.key], after[spec.key], ctx, ops, warn);
+    diffPads(before.scratchpads, after.scratchpads, ctx, ops, warn);
+    const patch = diffSettings(beforeSettings, afterSettings, this._defaultPrefs());
     if (patch) ops.push(prefSet(ctx, patch));
     return ops;
   }
@@ -1148,18 +1987,97 @@ class Store {
       newGid,
       defaultSettings: defaultState().settings,
     });
+
+    // ── I-1 · PROJECT INTO A CANDIDATE, SWAP ONLY ON SUCCESS ────────────────────
+    //
+    // This used to be `this.state = this._blankState(); this._project(...)`, in that order, with
+    // `persistNow()` two lines below and a 700 ms autosave behind it. A projection that refused
+    // — an imported board with `mode:'pinned'` and an unrenderable `startMonth`, which
+    // `materialize` is RIGHT to refuse — therefore threw with `state` already blanked, and the
+    // next autosave committed the blank to `board.json`. Story 11.5's safety net was itself a way
+    // to lose the board, and 11.3's import was the same shape.
+    //
+    // So the whole replacement is now rehearsed on a THROWAWAY log first. Nothing is appended to
+    // the live log, nothing is retracted, `state` is not touched and no file is written until a
+    // projection has been shown to succeed. A repair the rehearsal needed is carried across so
+    // the commit takes the path the rehearsal proved.
+    const rehearsal = this._rehearse(plan.ops);
+    if (!rehearsal.ok) {
+      this._warn('import refused: the board in this file cannot be drawn '
+        + `(${rehearsal.detail}). Nothing was changed — the board you had is still on screen and still on disk.`);
+      return false;
+    }
+
     // APPEND, never replace (F-8). `plan.warnings` of `[]` used to erase everything the session
     // had accumulated — including the migration report the user had not been shown yet.
     if (plan.lossy) this._warn('import: this file could not be represented in full — see the entries below');
     this._warnAll(plan.warnings);
     for (const op of plan.ops) this._log.append(op);
+    if (rehearsal.repair) {
+      this._warn(`import: ${rehearsal.repair.what} could not be drawn as given and was reset to the default; `
+        + 'every note, bar, category and scratchpad in the file was imported unchanged.');
+      this._log.append(prefSet(this._ctx(), rehearsal.repair.patch));
+    }
     this._stacks.clear();
     this.publisher.retract(plan.retractions);    // ← the WP-3 obligation, hand-off point
     this.publisher.askToReshare(plan.reshares);  // nothing is re-shared until the user confirms
+
+    const previous = this.state;
     this.state = this._blankState();             // v1 installs a NEW state object here
-    this._project({ settings: true });
+    try {
+      this._project({ settings: true });
+    } catch (e) {
+      // Unreachable: the rehearsal projected the same ops. Kept because "unreachable" is a claim
+      // about today's `materialize`, and the cost of being wrong is the board.
+      this.state = previous;
+      this._warn(`import refused after the rehearsal passed (${e.name}: ${e.message}); the board you had is unchanged.`);
+      return false;
+    }
     this.persistNow();
     this.emit('replace');
+    return true;
+  }
+
+  /**
+   * Rehearse a whole-board replacement on a THROWAWAY log (I-1).
+   *
+   * The trial log is `this._log`'s own checkpoint plus the plan's ops, so it folds to exactly the
+   * registers the real replacement would produce — without the real log ever holding an op that
+   * cannot be projected. Two settings repairs are tried, in the same order and for the same
+   * reason as `_projectSafe`; content is never touched.
+   *
+   * @returns {{ok:boolean, repair:?{what:string, patch:Object}, detail:string}}
+   */
+  _rehearse(ops) {
+    const d = defaultState().settings;
+    const steps = [
+      null,
+      { what: 'the pinned start month (mode, startMonth, pageYears)', patch: { mode: d.mode, startMonth: d.startMonth, pageYears: d.pageYears } },
+      { what: 'every setting', patch: this._defaultPrefs() },
+    ];
+    let base;
+    try {
+      base = this._log.checkpoint();
+    } catch (e) {
+      // The live log cannot even describe itself, so there is nothing to rehearse against. Say so
+      // and let the commit path's own candidate swap be the guard.
+      return { ok: true, repair: null, detail: `no rehearsal was possible (${e.name}: ${e.message})` };
+    }
+    let last = null;
+    for (const step of steps) {
+      let trial;
+      try {
+        trial = createOpLog({ now: () => Date.now() });
+        trial.load({ checkpoint: base, tail: [] });
+        for (const op of ops) trial.append(op);
+        if (step) trial.append(prefSet(this._ctx(undefined, trial), step.patch));
+        this._projectionOf(trial);
+        return { ok: true, repair: step, detail: 'ok' };
+      } catch (e) {
+        last = e;
+      }
+    }
+    return { ok: false, repair: null, detail: `${last.name}: ${last.message}` };
   }
 
   // ── persistence ────────────────────────────────────────────────────────────
@@ -1168,43 +2086,193 @@ class Store {
     this._saveTimer = setTimeout(() => this.persistNow(), SAVE_DEBOUNCE);
   }
 
+  /**
+   * `board.json` FIRST, AND THAT IS THE COMMIT POINT (ADR 006 R5 / §6).
+   *
+   * Stated once here so no future pass "fixes" the ordering: if `board.json` is the truth about
+   * content, the truth file must never be BEHIND. Anything written after it can only ever be
+   * behind it, and being behind is harmless for something that is only history. Invert the order
+   * and a crash leaves `board.json` behind a checkpoint that is now the only copy of a note — and
+   * under R3 the board would then delete it. The ordering and the authority rule are the same
+   * decision seen from two sides. Pinned by INV-8 / R4-7a.
+   *
+   * The bytes are serialized ONCE, so the hash in the checkpoint names what was actually written.
+   */
   async persistNow() {
     clearTimeout(this._saveTimer);
+    // Finding 2 / I-2 step 4: a board that could not be drawn may not be replaced by the empty
+    // board the app is showing instead. Read-only until the user relaunches.
+    if (this.bootFailure) {
+      if (!this._toldAboutReadOnly) {
+        this._toldAboutReadOnly = true;
+        this._warn(`a save was skipped: this session is read-only because ${readOnlyBecause(this.bootFailure)}`);
+      }
+      return;
+    }
     this._adopt();
     await this.rollSnapshot();
-    await storage.saveBoard(this.state);
+    // A lineage exists exactly as long as a durable log does (ADR 006 §4.1), so solo mode still
+    // writes `board.json` byte-for-byte as v1 did and creates no second key of any kind.
+    if (this._opsPersisted && !this._lineageId) this._lineageId = mintLineageId();
+    const text = serializeBoard(this.state, this._lineageId ? { lineageId: this._lineageId, gen: ++this._gen } : null);
+    await storage.saveBoardText(text);            // ◀── THE COMMIT POINT
     this._persisted = structuredClone(this.state);
-    // ADR 001 §9/§11: solo mode writes no second file. The log becomes durable when a space is
-    // created — `board.json` is the checkpoint until then.
-    if (this._opsPersisted) await this._persistOps();
-  }
-
-  /** WP-8's half: append the tail, then checkpoint. Never called while `_opsPersisted` is false. */
-  async _persistOps() {
-    await storage.saveCheckpoint(this._stampedCheckpoint());
-    await storage.truncateOps(0);
+    // Everything below this line is HISTORY and may be lost to a crash. ADR 001 §9/§11: solo mode
+    // writes no second file; the log becomes durable when a space is created.
+    if (this._opsPersisted) await this._persistOps(boardHash(text));
   }
 
   /**
-   * `oplog.checkpoint()` plus the provenance envelope `init()` checks on the way back in (A3-C1).
+   * THE LOG ACTUALLY RECORDS (R5-4 · A3-M5 · ADR 006 §6, §9.2). Never called while
+   * `_opsPersisted` is false, and everything it does is below the commit point (R5/INV-8).
    *
-   * `board.json` has just been written from the same `state` (see `persistNow`), so the
-   * fingerprint names exactly the generation of the file this fold belongs to. `core/oplog.js`
-   * neither writes nor reads `lzp` — the log has no business knowing what a v1 board file is —
-   * and `load()` ignores keys it does not recognise, so the envelope costs the format nothing.
+   * WHAT WAS WRONG, because it is the most consequential defect this project has had. The body
+   * was `saveCheckpoint(this._log.checkpoint())` + `truncateOps(0)`, and BOTH halves were inert:
+   *
+   *   · `checkpoint()` folds to `resolveHorizon(opts,'read')` = `horizon ?? maxLiveStamp()`, and
+   *     `horizon` is NON-NULL for any log that has been `load()`ed. So from the SECOND LAUNCH
+   *     onward the persisted checkpoint was frozen at the horizon it was read with, and every op
+   *     minted since was above it and simply not in the file.
+   *   · nothing ever called `appendOps`, so the ops that the checkpoint did not carry had nowhere
+   *     else to be. `truncateOps(0)` is `keepFromLine > 0`-guarded and means "keep everything",
+   *     which was harmless only because the file it kept was always empty.
+   *
+   * Consequences, all measured (R5-4a-d): no op after the first persist was ever written; every
+   * ordinary launch reconciled a growing number of "changes board.json carried that the log did
+   * not (expected after a crash)" so the happy path and the crash path were indistinguishable
+   * forever; and every entry created after the first persist was re-minted `born: true` at a
+   * fresh stamp on EVERY launch, making its array position a function of when the app was opened.
+   *
+   * THE SHAPE ADR 006 §6 ASKS FOR — "append the new tail, checkpoint, then `truncateOps(folded)`":
+   *
+   *   ① APPEND what the coming checkpoint will not carry. That is the outbox of §9.2 and it is
+   *      the only reason `ops.jsonl` exists. A line already committed is never written twice
+   *      (`_opsCommitted`), and a PARKED line is never written at all — it rides in
+   *      `checkpoint().parked` by construction, with the park reason `load()` cannot re-derive.
+   *   ② COMPACT when the tail has grown (ADR 001 §7.2), which is the only thing that advances the
+   *      horizon and therefore the only thing that lets ④ ever drop a line.
+   *   ③ CHECKPOINT — the fold of everything at or below that horizon, plus the envelope.
+   *   ④ TRUNCATE, and ONLY lines ③ already folds. The condition is checked, not assumed: if one
+   *      admitted op is above the checkpoint's horizon, the tail is the only copy of it and the
+   *      file is left alone. This is the half that makes a crash between ③ and ④ cost nothing.
    */
-  _stampedCheckpoint() {
-    const cp = this._log.checkpoint();
-    const { fp, n } = censusFingerprint(this.state);
-    return { ...cp, lzp: { v: LZP_CHECKPOINT_ENVELOPE, boardFp: fp, boardN: n, horizon: cp.horizon, at: Date.now() } };
+  async _persistOps(hash) {
+    // ① the outbox (ADR 006 §9.2)
+    const pending = this._uncommittedTailLines();
+    if (pending.length) {
+      await storage.appendOps(pending);
+      for (const line of pending) this._opsCommitted.add(tailLineKey(line.op));
+      this._tailLines += pending.length;
+    }
+
+    // ② the compaction policy (ADR 001 §7.2)
+    if (this._tailLines >= TAIL_COMPACT_AT) {
+      try {
+        this._log.compact();
+      } catch (e) {
+        // A compaction that cannot run costs a bigger file and nothing else, so it is a warning
+        // and never a refusal to persist — the checkpoint below is still written.
+        this._warn(`op log: the tail could not be compacted (${e.name}: ${e.message}); ops.jsonl keeps growing`);
+      }
+    }
+
+    // ③ the checkpoint
+    const cp = this._stampedCheckpoint(hash);
+    await storage.saveCheckpoint(cp);
+
+    // ④ drop only what ③ folds
+    if (this._tailLines > 0 && !this._log.ops().some((o) => cmp(o.ts, cp.horizon) > 0)) {
+      await storage.truncateOps(this._tailLines);
+      this._tailLines = 0;
+      // `_opsCommitted` is deliberately NOT cleared: those lines are committed to the CHECKPOINT
+      // now, which is a stronger statement than "they are in the tail file", and re-appending
+      // them would put back exactly what this call just dropped.
+    }
   }
 
-  /** Synchronous last-chance write for pagehide/beforeunload. */
+  /**
+   * The lines the log holds that are not yet on disk and that the coming checkpoint will not
+   * carry — i.e. the outbox, exactly (ADR 006 §9.2).
+   *
+   * Three exclusions, each load-bearing:
+   *   · PARKED lines ride in `checkpoint().parked` with their reasons (A2 round 2), so writing
+   *     them to the tail as well would duplicate them and, on the way back in, hand `load()` two
+   *     copies of one op.
+   *   · lines the coming checkpoint FOLDS (at or below the horizon it will use) are already
+   *     durable in the file written two statements later, so the tail would be scratch.
+   *   · lines already appended (`_opsCommitted`, keyed by opId AND body) are on disk. The body is
+   *     in the key so that an envelope splice — a second body under a re-used opId (ADR 002 §5.1)
+   *     — is appended rather than mistaken for the line already written; the fold is a function
+   *     of the op SET, so both bodies in the file is the correct outcome, not a hazard.
+   */
+  _uncommittedTailLines() {
+    const h = this._comingHorizon();
+    const out = [];
+    for (const line of this._log.lines()) {
+      if (line.park !== null && line.park !== undefined) continue;
+      if (h !== null && isStamp(line.op?.ts) && cmp(line.op.ts, h) <= 0) continue;
+      if (this._opsCommitted.has(tailLineKey(line.op))) continue;
+      out.push(line);
+    }
+    return out;
+  }
+
+  /**
+   * The horizon `checkpoint()` will resolve to, computed without serializing a checkpoint to find
+   * out: `horizon ?? maxLiveStamp()` — `resolveHorizon(opts, 'read')`, which is the one thing
+   * R5-4 proves must not be guessed at. Null means the log holds nothing live and the checkpoint
+   * will fall back to `ZERO_STAMP`, which folds nothing and keeps every line in the tail.
+   */
+  _comingHorizon() {
+    const h = this._log.horizon();
+    if (h !== null) return h;
+    let max = null;
+    for (const o of this._log.ops()) if (isStamp(o?.ts) && (max === null || cmp(o.ts, max) > 0)) max = o.ts;
+    return max;
+  }
+
+  /**
+   * `oplog.checkpoint()` plus the ADR 006 §4.2 envelope `init()` reads on the way back in.
+   *
+   * `lineageId` is the WHOLE verdict and is frozen forever. `gen` is frozen too and is consulted
+   * by nothing — it exists so a support bundle can say which generation of `board.json` a fold
+   * belongs to. `boardHash` is over the exact bytes `persistNow` just wrote and chooses a fast
+   * path; it never gates, which is why 32 bits is enough. `v` is a version for humans and for a
+   * future migration — a version this build does not know IS NOT A REFUSAL (R4-3a).
+   *
+   * `core/oplog.js` neither writes nor reads `lzp` — the log has no business knowing what a v1
+   * board file is — and `load()` ignores keys it does not recognise, so the envelope costs the
+   * format nothing.
+   */
+  _stampedCheckpoint(hash) {
+    const cp = this._log.checkpoint();
+    return {
+      ...cp,
+      lzp: {
+        v: LZP_CHECKPOINT_ENVELOPE,
+        lineageId: this._lineageId,
+        gen: this._gen,
+        boardHash: hash ?? null,
+        horizon: cp.horizon,
+        at: Date.now(),
+      },
+    };
+  }
+
+  /**
+   * Synchronous last-chance write for pagehide/beforeunload.
+   *
+   * It writes the board and no log files, so the board moves without the checkpoint — which is
+   * exactly the "ahead" state, and reconciliation handles it (ADR 006 §6). `gen` deliberately
+   * does NOT advance here; nothing reads `gen`, which is why nothing reads `gen`.
+   */
   flushSync() {
-    if (!this.ready) return;
+    if (!this.ready || this.bootFailure) return;
     clearTimeout(this._saveTimer);
     if (storage.isTauri()) { this.persistNow(); return; }
-    storage.saveBoardSync(this.state);
+    storage.saveBoardSyncText(
+      serializeBoard(this.state, this._lineageId ? { lineageId: this._lineageId, gen: this._gen } : null),
+    );
   }
 
   /**
@@ -1235,11 +2303,15 @@ class Store {
   listSnapshots() {
     return this.snapshots.map((s) => ({ day: s.day, at: s.at }));
   }
+  /**
+   * I-1 — the return value is now the truth. `replaceAll` refuses a board it cannot draw and
+   * leaves everything alone; a `restoreSnapshot` that returned `true` regardless would tell
+   * `settings.js:224-254` that the restore happened when nothing did.
+   */
   restoreSnapshot(day) {
     const s = this.snapshots.find((x) => x.day === day);
     if (!s) return false;
-    this.replaceAll(structuredClone(s.state));
-    return true;
+    return this.replaceAll(structuredClone(s.state)) !== false;
   }
 
   // ── export / import ────────────────────────────────────────────────────────

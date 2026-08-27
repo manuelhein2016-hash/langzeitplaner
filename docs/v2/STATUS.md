@@ -1,7 +1,9 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-27 · **Stopped at:** both owed judges ran; their documentation half is landed
-**Resume by reading:** this file, then `docs/v2/FINDINGS.md`, then `docs/v2/PLAN.md`, then the ADRs.
+**Last session:** 2026-08-27 · **Stopped at:** rounds 4 and 5 fixed, integrated and verified; the
+register is caught up with them
+**Resume by reading:** this file (start at the **session 4 addendum** at the bottom), then
+`docs/v2/FINDINGS.md` §1 and §4, then `docs/v2/adr/006-board-log-authority.md`, then `PLAN.md`.
 
 ---
 
@@ -24,11 +26,15 @@ identity (ADR 002 §2.2). Until that lands no fleet test means anything.
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-npm test              # tier 1, pure logic          → 1360 pass / 0 fail   (100 suites)
-npm run test:attack   # adversarial corpus          →  340 pass / 0 fail   (29 suites)
+npm test              # tier 1, pure logic          → 1374 pass / 0 fail   (101 suites)
+npm run test:attack   # adversarial corpus          →  512 pass / 0 fail   ( 63 suites)
 npm run test:property # property harness, 500 seeds →   51 pass / 0 fail
-npm run test:dom      # real headless WKWebView     →  278 pass / 15 files, tier 2 PASS
+npm run test:dom      # real headless WKWebView     → 15 files, tier 2 PASS
 ```
+
+**Re-measured 2026-08-27 after the round-5 integration pass** — these are the current numbers.
+(The 1360 / 340 / 51 / 278 figures below are the *first fix pass*'s and are kept because the
+paragraphs explaining the movement were written against them.)
 
 Re-measured **after the fix pass of 2026-08-27** (A3-C1 / A3-H1 / A3-H2 / A3-H3 / F-1 / F-10
 closed), all four green. The counts move for three independent reasons and none of them is a
@@ -350,3 +356,92 @@ Those changes are **not** part of this session's commit. One tier-2 run failed m
 shell syntax error because `shell-macos/build.sh` was being written at that moment; the re-run was
 clean. **Finding F-9 is about that work and belongs to E1: `src/js/platform/` is scanned by
 nothing.**
+
+
+---
+
+# Session 4 addendum — 2026-08-27 · rounds 4 and 5, fixed and integrated
+
+**Read this first.** Two more adversary rounds ran against the retrofit, three fixers worked in
+parallel, and one integration pass landed the cross-file work, verified it, and caught the register
+up. All four suites green: **`npm test` 1374 · `test:attack` 512 · `test:property` 51 ·
+`test:dom` 15 files, tier 2 PASS.**
+
+## The headline: the rule held, the implementation did not
+
+ADR 006 — *`board.json` is the truth, the op log is history* — **survived round 5 without
+amendment to §1**. Three attempts at this question have now been made and the third is the first
+one an adversary could not break at the level of the rule. Every round-5 finding was an
+implementation defect underneath it, which is the outcome you want from an ADR.
+
+**Four things were wrong under it, and two of them were serious:**
+
+| what | severity | why it mattered |
+|---|---|---|
+| **R5-3** — A3-C1 reachable again through R7 | CRITICAL | R7 (the absent-`board.json` recovery) was entered on `kind !== 'ok'`, so a board that merely failed to **parse** took the branch that performs **no lineage check at all**. One truncated byte + the attacker's own legitimate log pair = the stranger's board on screen and committed. **CLOSED.** |
+| **A3-M5 / R5-4** — the log stops recording on the second launch | HIGH (was filed MEDIUM/latent) | `_persistOps` never called `appendOps`, and `checkpoint()` folds only to the horizon it was loaded with — so from launch 2 onward **nothing the user did was ever written to the log again**, every ordinary launch reconciled a growing diff, and `_born` (which decides array order) was re-minted on every launch. **CLOSED.** |
+| **R5-11** — an unreadable bar edge | MEDIUM | The edge was dropped, a one-ended bar is anchored to the other end, and a bar v1 drew **nowhere** was drawn across every column with chevrons, taking a lane from real bars. `endDate: ""` is the commonest hand-edit there is. **CLOSED**, narrowed residual in FINDINGS §4.6. |
+| **R5-2e** — two ADRs that could not both be obeyed | MEDIUM | A wrong wall clock made ADR 006 §12.6 and ADR 001 §1.3 jointly unsatisfiable, and the loser was the user's whole history — quarantined *and renamed*. **CLOSED** as a deferral, in code and in both ADRs. |
+
+## What the integration pass itself found
+
+**Two of the three fixers' "left for another agent" items were unproven fixes.** `_projectSafe`
+clobbering `bootFailure`, and `persistNow`'s read-only sentence claiming a board "could not be
+**drawn**" on three reasons where nothing had even read it. Both were landed here — and reverting
+either killed **nothing** in any of the four suites, which is the same thing as not having a fix.
+Rows **R5-3e** and **R5-3f** were written to close them before they were recorded as fixed.
+
+**One attack row was still asserting a closed defect.** R3-39 claimed `_persistOps()` never
+appends. Inverted, and its file header's "`store.js` never writes `ops.jsonl`" corrected to the
+narrower claim R3-38 actually pins.
+
+**The headline check for R5-4 — boot · edit · restart · edit · restart — is now a permanent row**
+(R5-4f), because the defect was only ever visible as a *sequence*: each launch looked fine and the
+damage was that the number grew.
+
+## What you actually have to decide
+
+**`docs/v2/FINDINGS.md` §4 has two new open decisions, and one of them blocks WP-6:**
+
+- **§4.5 — I-3 / R5-7: a remote denial of service on any family member's device.** One op from
+  anybody permanently mutes a named Mac, and **WP-6's owed P2 check does not close it.** If the
+  plan of record for WP-6 is "we'll fix I-3 with the attestation binding", that plan is wrong. Read
+  §4.5 before any attestation code is written.
+- **§4.6 — R5-11g:** a bar edge with no faithful v2 value at all. Blocks nothing; it is a fidelity
+  ceiling and should be an explicit one.
+
+**§4.7 records that ADR 006 §12.6 vs ADR 001 §7.4 is NOT a decision** — R5-2e resolved it in code
+and in both ADRs. Nothing is owed to you there.
+
+## Register and ADRs
+
+**`docs/v2/FINDINGS.md` was three rounds behind and is now caught up.** 31 rows → **39**, counts
+recomputed from the rows rather than carried forward, with a table of what moved between severities
+and why. New: **§7c**, the accepted-defect list — all 23 `tests/attack/` rows that are green
+*because a defect exists*, each mapped to its register row. Nine of the twenty-three trace to just
+three rows (F-2/F-7, A3-H4, I-3), which is the useful reading of it. §6b's corpus table is
+regenerated, not hand-edited: round 5's new generator block consumes the rng stream, so several
+existing rows moved without anything about them changing.
+
+**ADR 006** gains a rewritten **§5.5** (R7's precondition is `absent`, and only `absent`), a new
+**§5.6** (the read-only boot over `snapshots.json`), and `board-unreadable` in §7's reason enum.
+**`store.contract.js`** documents `diagnostics().recoveredFrom`, the widened `bootFailure.reason`,
+and the two new quarantine reasons.
+
+## Two things to fix about the process, not the code
+
+1. **`src/js/store.js` and `tests/attack/round5-authority.test.js` were assigned to two fixers at
+   once.** Both used anchored edits and both survived, but that was luck. One owner per file.
+2. **A fixer reporting "left for another agent" is reporting an unproven fix.** Two of three did,
+   and neither item had a test. Treat that list as work, not as a note.
+
+## Still owed (full list in FINDINGS §8)
+
+- **ADR 001 §7.2's own text** still describes a 30-day debuggability tail and a 2 MB-at-launch
+  trigger. Neither is implemented — compaction is total. The deviation is recorded in ADR 006 §8.5
+  and at the `TAIL_COMPACT_AT` docblock; **§7.2's text itself is unamended.**
+- **The first-run tour still shows over a disaster boot with no snapshot** (`seenFirstRun` left at
+  v1's value; a tier-1 row characterizes it by name). Tier-1 owner's call.
+- **I-6** — `quarantineLogAside` on the native path still cannot move anything. Much less pressing:
+  a failed boot never sequesters at all now.
+- **F-5 / R5-5b** — folding an adopted checkpoint through `applyRemote`'s gate. WP-8.

@@ -125,14 +125,26 @@ import { ZERO_DEVICE_SHORT, opId as defaultOpId, groupId as defaultGroupId } fro
 // difference is that a drift in a field LIST is caught by `checkCoverage`, while a drift in a
 // BEHAVIOUR is caught by nothing.
 //
-// A3-H2 adds five more to that list — `coerceToV1Bool`, `coerceToV1Date`, `coerceToV1Id`,
-// `mintedId`, `missingBarEdge` — and `notDrawnReason`, the warning that replaced the old
-// "will not be renderable" one. Every one of them answers "what did v1 MEAN by this value", and
-// two answers to that question is the two-doors defect class in its purest form: the same file
-// would migrate into one board at launch and restore into a different one from a snapshot.
+// A3-H2 adds four more to that list — `coerceToV1Bool`, `coerceToV1Date`, `coerceToV1Id`,
+// `mintedId` — and `gridPlacementWarning`, the warning that replaced the old "will not be
+// renderable" one (and then, at R4-10, replaced its replacement: see its docblock). Every one of
+// them answers "what did v1 MEAN by this value", and two answers to that question is the
+// two-doors defect class in its purest form: the same file would migrate into one board at launch
+// and restore into a different one from a snapshot.
+//
+// `missingBarEdge` was the fifth and is GONE from both doors — R4-10 found it anchoring a bar v1
+// paints across nine columns onto a single day, and writing an `endDate` into the user's file
+// that the file never held. Deleting it is the fix; it had to be deleted on both doors at once,
+// for this list's reason.
+//
+// R5-11 adds the sixth, `coerceToV1BarEdge`, and it is the same argument one more time. A bar
+// edge the file holds as text that names no day is DROPPED by the type table, and `layout.js:133`
+// does not treat a dropped edge like an absent one: it compares the text. A door that dropped it
+// and a door that positioned it would build two different boards from the same bytes — and the
+// import door is the one where the file being replaced is gone the moment the transaction lands.
 import {
-  truncateToFit, coerceToV1Text, coerceToV1Bool, coerceToV1Date, coerceToV1Id,
-  mintedId, missingBarEdge, notDrawnReason,
+  truncateToFit, coerceToV1Text, coerceToV1Bool, coerceToV1Date, coerceToV1Id, coerceToV1BarEdge,
+  mintedId, gridPlacementWarning,
   defaultCategories, rekeyed, V1_BOARD_KEYS,
 } from './migrate1to2.js';
 
@@ -537,7 +549,8 @@ export function planReplaceAll(regs, incoming, ctx) {
       if (kind === 'cat') catIds.add(id);
       const key = `${kind}:${id}`;
       present.add(key);
-      const patch = buildPatch(kind, entry, regs, key, `${singular} ${q(id)}`, warn, asked);
+      const dropped = new Set();
+      const patch = buildPatch(kind, entry, regs, key, `${singular} ${q(id)}`, warn, asked, dropped);
 
       // Found by the widened property corpus (P16), and it is the same class as REG-20…23: the
       // migration door reported an entry the grid cannot place and this one did not check at all,
@@ -547,16 +560,14 @@ export function planReplaceAll(regs, incoming, ctx) {
       //
       // A3-H2 changed WHAT is reported, on both doors together. An entry the grid cannot place no
       // longer leaves the board: `entities.js:renderableNote` keeps an own entry in the ARRAY the
-      // way v1's `state.notes` did, and `missingBarEdge` anchors a one-ended bar. What is left is
-      // that no day row can hold it — which is what v1 did with it too — so it is reported and it
-      // is NOT lossy.
-      const undrawn = (kind === 'note' || kind === 'bar') ? notDrawnReason(kind, patch) : null;
-      if (undrawn) {
-        warn(
-          `${singular} ${q(id)} is on the board but will not be DRAWN on any day: ${undrawn}`,
-          false,
-        );
-      }
+      // way v1's `state.notes` did, and `renderableBar` keeps a bar with one edge or none. What
+      // is left is that the grid puts it somewhere the user did not ask for — which is what v1 did
+      // with it too — so it is reported and it is NOT lossy. R4-10d: the sentence this used to
+      // write was FALSE for three of the four bar shapes it was written about, so the wording is
+      // now worked out from the patch by `gridPlacementWarning` rather than assembled here.
+      const placement = (kind === 'note' || kind === 'bar')
+        ? gridPlacementWarning(kind, singular, id, patch, dropped) : null;
+      if (placement) warn(placement, false);
       emit(set(opCtx, id, patch, { born: true }));
       written.push(key);
     }
@@ -593,10 +604,11 @@ export function planReplaceAll(regs, incoming, ctx) {
   }
 
   // ── step 2b — scratchpads ─────────────────────────────────────────────────
-  // Keyed by month, not by uuid (F10). An EMPTY string is kept, unlike migration (§8.2 takes
-  // non-empty keys only): v1's `replaceAll` installs the payload's `scratchpads` object verbatim
-  // (`store.js:74`), so a `''` in the file is a `''` on the board, and this is a replacement of
-  // that object rather than a conversion of a legacy one.
+  // Keyed by month, not by uuid (F10). An EMPTY string is DROPPED, exactly as migration drops it
+  // (§8.2 takes non-empty keys only) and reported exactly as migration reports it — see REG-23
+  // and R4-11a at the bottom of this loop. (This comment used to say the opposite, which is the
+  // divergence REG-23 closed: v1's `replaceAll` does not install the payload's `scratchpads`
+  // object verbatim, it installs `migrate(payload)`'s.)
   const pads = incoming.scratchpads;
   if (pads !== undefined && !isPlainObject(pads)) {
     warn(`scratchpads is not an object (${q(typeof pads)}); treated as empty`, true);
@@ -634,9 +646,22 @@ export function planReplaceAll(regs, incoming, ctx) {
     // Nothing the user can see moves: v1 renders a pad as `state.scratchpads[key] || ''`
     // (`layout.js:259`), so `''` and absent paint the same empty textarea, and v1's own editor
     // DELETES the key when the text is blank (`interact.js:620,634`) — a `''` only ever reaches
-    // us from a hand-edited file. Not a loss, and not warned: reporting it would make `lossy`
-    // noisy on a difference with no rendered consequence.
-    if (padText === '') continue;
+    // us from a hand-edited file. Not a loss, so it does not touch `lossy`.
+    //
+    // R4-11a — but it IS said. „Not warned" was the other half of the old comment, on the ground
+    // that reporting it would make `lossy` noisy; those are two different channels, and the
+    // silence made this the one drop in the door that was reported when the value had to be
+    // COERCED to `''` and hidden when the file already held `''`. §4b rule 2 is „every coercion
+    // is reported so it is auditable". Same sentence as the migration door, for the same bytes.
+    if (padText === '') {
+      if (text === '') {
+        warn(`scratchpad ${q(month)} is an empty string in the file; §8.2 writes no register for `
+          + 'an empty month, so the KEY is not carried into v2 — v1 painted an empty textarea for '
+          + "it and so does v2, and v1's own editor deletes a blank key too (interact.js:620)",
+        false);
+      }
+      continue;
+    }
     const key = `pad:${month}`;
     present.add(key);
     emit(padSet(opCtx, month, buildPatch('pad', { text: padText }, regs, key, `scratchpad ${q(month)}`, warn, asked), { born: true }));
@@ -777,9 +802,13 @@ export function replaceAllOps(regs, incoming, ctx) {
  * @param {string} where @param {(m:string,l:boolean)=>void} warn
  * @param {(key:string, field:string, value:any) => void} asked records an exposure the FILE
  *        requested and this module refused to grant — see `ReplacePlan.reshares`.
+ * @param {Set<string>} [dropped] OUT — field names the file CARRIED and this door could not
+ *        store. `gridPlacementWarning` cannot tell those from a field the file never had, and on
+ *        the grid they are different bars (R5-11). The migration door threads the identical
+ *        out-parameter, for the identical reason.
  * @returns {Object} the field patch (`_born` is added by `makeOp`)
  */
-function buildPatch(kind, entry, regs, key, where, warn, asked) {
+function buildPatch(kind, entry, regs, key, where, warn, asked, dropped = new Set()) {
   const defaults = IMPORT_DEFAULTS[kind];
   const carried = CARRIED_FIELDS[kind];
   const patch = {};
@@ -860,6 +889,16 @@ function buildPatch(kind, entry, regs, key, where, warn, asked) {
       // same functions (`migrate1to2.js` §4b). `repeatsYearly: 'yes'` is the case the finding
       // named: truthy in v1, so the birthday repeats; not a boolean, so v2 dropped the key and
       // the birthday quietly became a one-off.
+      // R5-11, BEFORE the date reader on this door too — `coerceToV1Date` trims, and a leading
+      // space is exactly the class the edge rule exists for. Same function, same order, same
+      // sentence: the `why` is built by the shared coercer so the two doors cannot word it
+      // differently.
+      const asEdge = coerceToV1BarEdge(kind, name, value);
+      if (asEdge) {
+        warn(`${where}: ${asEdge.why}`, true);
+        patch[name] = asEdge.kept;
+        continue;
+      }
       const asV1 = coerceToV1Bool(kind, name, value)
         ?? coerceToV1Date(kind, name, value)
         ?? (fieldTypeOf(kind, name) === 'id' ? coerceToV1Id(value) : null);
@@ -872,6 +911,10 @@ function buildPatch(kind, entry, regs, key, where, warn, asked) {
         patch[name] = asV1.kept;
         continue;
       }
+      // R5-11. What is left here is the class with no faithful v2 value: a text that sorts
+      // BETWEEN two real dates. Recorded so `gridPlacementWarning` can tell it from an edge the
+      // file never carried — see the migration door's twin.
+      dropped.add(name);
       warn(
         `${where}: field ${q(name)} = ${q(value)} is not representable in v2 and the FIELD was `
         + 'DROPPED. The entry itself is kept',
@@ -906,29 +949,17 @@ function buildPatch(kind, entry, regs, key, where, warn, asked) {
     if (carries(regs, key, name)) patch[name] = null;
   }
 
-  // A3-H2 — the two coercions that need the WHOLE patch, after the field loop and identical to
-  // `migrate1to2.js`'s. A bar edge the import does not carry is anchored to the edge it does
-  // (v1 drew it to the horizon, which is a function of TODAY and cannot be written into a
-  // register); a repeat with no anchor date is turned off, because `layout.js:72` cannot expand
-  // it and takes the whole board down trying.
+  // A3-H2 — the coercion that needs the WHOLE patch, after the field loop and identical to
+  // `migrate1to2.js`'s: a repeat with no anchor date is turned off, because `layout.js:72` cannot
+  // expand it and takes the whole board down trying.
   //
-  // AFTER the loop rather than inside it, because on THIS door a missing field may already have
-  // been written as a `null` CLEAR, and the anchor has to overwrite that too — `patch.endDate ==
-  // null` covers absent and cleared alike, which is exactly the pair that means "no end".
-  if (kind === 'bar') {
-    for (const name of ['startDate', 'endDate']) {
-      if (patch[name] != null) continue;
-      const edge = missingBarEdge(name, entry, patch);
-      if (!edge) continue;
-      warn(
-        `${where}: no ${q(name)}; v1 drew this bar from its ${edge.from} to the far edge of the `
-        + `visible year, which depends on TODAY and cannot be imported (R12). It was anchored to `
-        + `its ${edge.from} (${q(edge.kept)}) so it stays on the board`,
-        true,
-      );
-      patch[name] = edge.kept;
-    }
-  }
+  // R4-10 REMOVED ITS TWIN. A bar edge the import does not carry used to be ANCHORED here to the
+  // edge it does — one day instead of the nine column-segments v1 paints — and the migration door
+  // did the same thing, so both doors agreed on the same wrong board. `entities.js:renderableBar`
+  // already keeps an OWN bar with no dates so `layout.js` can paint it the way it always did; a
+  // one-ended bar needs no rescue either, and an absent edge stays absent on this door too. What
+  // was written as a `null` CLEAR above is exactly right for it: absent and cleared both mean "no
+  // end", and `layout.js` runs such a bar to the horizon in v2 as it did in v1.
   if (kind === 'note' && patch.repeatsYearly === true && !isDateString(patch.date)) {
     warn(
       `${where}: it is marked as repeating yearly and has no usable date to repeat FROM; v1 `

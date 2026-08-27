@@ -20,6 +20,8 @@ import { localStorage as LS, resetStorage } from '../helpers/env.js';
 
 const BOARD_KEY = 'langzeitplaner.board';
 const SNAP_KEY = 'langzeitplaner.snapshots';
+const OPS_KEY = 'langzeitplaner.ops';
+const CP_KEY = 'langzeitplaner.checkpoint';
 
 test('storage takes its browser branch: no __TAURI__, localStorage keys', () => {
   // The env shim defines `window` WITHOUT __TAURI__ on purpose, so the branch
@@ -87,4 +89,85 @@ test('saveBoardSync writes the same bytes as saveBoard, without awaiting', () =>
   // the point of the sync path (window close) is that the bytes are on disk
   // the instant the call returns — no microtask, no debounce
   assert.equal(LS.getItem(BOARD_KEY), JSON.stringify(doc, null, 2));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADR 006 — the bytes, as written and as read
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('loadBoardText returns the bytes AS READ, so a hash names what the file contained', async () => {
+  resetStorage();
+  // Key order and whitespace that no re-serialization of the parsed object would reproduce.
+  const odd = '{ "settings": {"a":1},\n  "schemaVersion": 1 }';
+  LS.setItem(BOARD_KEY, odd);
+  const r = await storage.loadBoardText();
+  assert.equal(r.text, odd, 'the exact bytes');
+  assert.deepEqual(r.raw, { settings: { a: 1 }, schemaVersion: 1 });
+});
+
+// NB: keep the word "from" away from a following quoted string anywhere in this file —
+// `suite-integrity.test.js` scans it for imports with a regex that would read one as a module.
+test('loadBoardText separates an absent board file from an unparseable one', async () => {
+  resetStorage();
+  assert.deepEqual(await storage.loadBoardText(), { text: null, raw: null }, 'no file');
+  LS.setItem(BOARD_KEY, '{"notes":[');
+  const torn = await storage.loadBoardText();
+  assert.equal(torn.text, '{"notes":[', 'the bytes survive for a rescue pass …');
+  assert.equal(torn.raw, null, '… and `raw` says it did not parse');
+  // `loadBoard()` keeps its v1 contract on top of that: null either way.
+  assert.equal(await storage.loadBoard(), null);
+});
+
+test('saveBoardText writes exactly what it is given; saveBoard is the thin wrapper', async () => {
+  resetStorage();
+  await storage.saveBoardText('{"a":1}');
+  assert.equal(LS.getItem(BOARD_KEY), '{"a":1}', 'byte for byte — no re-serialization');
+  const doc = { notes: [], schemaVersion: 1 };
+  await storage.saveBoard(doc);
+  assert.equal(LS.getItem(BOARD_KEY), JSON.stringify(doc, null, 2));
+  storage.saveBoardSyncText('{"b":2}');
+  assert.equal(LS.getItem(BOARD_KEY), '{"b":2}');
+});
+
+// ── I-6 — a refused log is moved aside, never deleted ────────────────────────
+
+test('quarantineLogAside MOVES both slots and keeps every byte', async () => {
+  resetStorage();
+  LS.setItem(OPS_KEY, 'line one\nline two');
+  LS.setItem(CP_KEY, '{"horizon":null}');
+  const r = await storage.quarantineLogAside({ at: Date.parse('2026-08-27T10:31:04.512Z') });
+
+  assert.equal(r.moved, true);
+  assert.equal(r.ops, 'langzeitplaner.ops.quarantined-2026-08-27T10-31-04-512Z');
+  assert.equal(r.checkpoint, 'langzeitplaner.checkpoint.quarantined-2026-08-27T10-31-04-512Z');
+  assert.equal(LS.getItem(r.ops), 'line one\nline two', 'not deleted — that is the promise');
+  assert.equal(LS.getItem(r.checkpoint), '{"horizon":null}');
+  assert.equal(LS.getItem(OPS_KEY), null, 'and the live slots are clear, so the refusal is not re-derived');
+  assert.equal(LS.getItem(CP_KEY), null);
+  assert.deepEqual(storage.quarantinedSlots(), [r.checkpoint, r.ops].sort());
+});
+
+test('quarantineLogAside moves only what is there, and reports honestly when there is nothing', async () => {
+  resetStorage();
+  let r = await storage.quarantineLogAside();
+  assert.equal(r.moved, false);
+  assert.match(r.reason, /nothing on disk to move/);
+
+  LS.setItem(OPS_KEY, 'x');
+  r = await storage.quarantineLogAside();
+  assert.equal(r.moved, true);
+  assert.equal(r.checkpoint, null, 'no checkpoint existed, so none was invented');
+  assert.equal(LS.getItem(r.ops), 'x');
+});
+
+test('quarantineLogAside writes the copy BEFORE removing the original, and never throws', async () => {
+  resetStorage();
+  LS.setItem(OPS_KEY, 'precious');
+  const realSet = LS.setItem.bind(LS);
+  LS.setItem = () => { const e = new Error('QuotaExceededError'); e.name = 'QuotaExceededError'; throw e; };
+  const r = await storage.quarantineLogAside();
+  LS.setItem = realSet;
+  assert.equal(r.moved, false, 'it reports the failure …');
+  assert.equal(LS.getItem(OPS_KEY), 'precious',
+    '… and the only copy of the log is still the only copy of the log');
 });

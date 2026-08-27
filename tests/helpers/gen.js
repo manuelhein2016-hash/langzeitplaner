@@ -860,6 +860,32 @@ export function generateUglyBoard(seed, o) {
     if (chance(rnd, 0.06)) x.startDate = pick(rnd, ODD_DATES);
   }
 
+  // R5-11 — A BAR EDGE THAT SORTS OUTSIDE THE DATE ALPHABET, ON BOTH SIDES OF THE BOUNDARY.
+  //
+  // `layout.js:133` never parses a bar edge, it COMPARES it — `if (b.endDate < mFirst ||
+  // b.startDate > mLast) continue;` — so for a bar edge (and for nothing else) the STRING ORDER
+  // of an unreadable value is the whole of its rendering. Three values, three different bars:
+  //
+  //   · absent      `undefined < '2026-03-01'` is false (NaN) ⇒ runs to the horizon
+  //   · `''`        `'' < '2026-03-01'` is true              ⇒ skipped in EVERY column
+  //   · `'zzz'`     above the range                          ⇒ as an endDate, the horizon again;
+  //                                                            as a startDate, skipped everywhere
+  //
+  // The corpus was ONE-SIDED, and that is why the class survived four rounds: `ODD_DATES` puts
+  // `''` on a `startDate` (below, where below is the harmless half) and nothing anywhere above.
+  // Both sides of the boundary are generated here, on both edges, so P13 and P15 see the class
+  // and `uglyShapesIn` can report each side separately. The boundary character is `'2'` for a
+  // board in the 2000s; in general it is `entities.js`'s `EARLIEST_DATE` / `LATEST_DATE`, and the
+  // values below straddle those and not the digit.
+  const EDGE_BELOW = ['', ' ', '-', '(offen)', '0', ' 2026-03-04', '!', '1.3'];
+  const EDGE_ABOVE = ['zzz', 'unbekannt', 'irgendwann', 'ab wann?', '~', 'offen?'];
+  for (const x of b.bars) {
+    if (chance(rnd, 0.09)) x.endDate = pick(rnd, EDGE_BELOW);
+    else if (chance(rnd, 0.09)) x.endDate = pick(rnd, EDGE_ABOVE);
+    if (chance(rnd, 0.08)) x.startDate = pick(rnd, EDGE_ABOVE);
+    else if (chance(rnd, 0.06)) x.startDate = pick(rnd, EDGE_BELOW);
+  }
+
   // The two carried BOOLEANS, which v1 does not read alike: `repeatsYearly` is plain truthiness
   // (`layout.js:71`) and `visible` is `!== false` (`layout.js:111`), so `0` is a category v1
   // SHOWS and a note v1 does not repeat. `Boolean(v)` gets one of them wrong, which is why the
@@ -974,6 +1000,22 @@ export function uglyShapesIn(b) {
       (x) => [x.startDate, x.endDate].filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).length === 1,
     ),
     'a bar with no dates at all': b.bars.some((x) => x.startDate === undefined && x.endDate === undefined),
+    // ── R5-11, ONE CLASS PER SIDE OF THE BOUNDARY ─────────────────────────────────────────────
+    // Reported separately on purpose: they are opposite bars in `layout.js:133`, a generator that
+    // reached only one side is exactly how the defect survived, and a single merged count would
+    // hide that happening again. The bounds are `entities.js`'s `EARLIEST_DATE`/`LATEST_DATE`,
+    // restated here rather than imported for the reason this whole function is: it is the gate on
+    // the corpus, so it must not agree with the code under test by construction.
+    'a bar edge sorting BELOW every date v2 can hold': b.bars.some(
+      (x) => [x.startDate, x.endDate].some(
+        (d) => typeof d === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(d) && d < '0000-01-01',
+      ),
+    ),
+    'a bar edge sorting ABOVE every date v2 can hold': b.bars.some(
+      (x) => [x.startDate, x.endDate].some(
+        (d) => typeof d === 'string' && !/^\d{4}-\d{2}-\d{2}$/.test(d) && d > '9999-12-31',
+      ),
+    ),
     'a non-string scratchpad': Object.values(b.scratchpads).some((v) => typeof v !== 'string'),
   };
 }

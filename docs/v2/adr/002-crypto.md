@@ -7,6 +7,7 @@
 | **Tickets** | LZP-301, 302, 303, 304, 305, 306 · supports 502, 601/602, 608, 701, 1003, 1004 |
 | **Stories** | 15.2, 15.3, 15.5, 19.4, 19.5, 20.2, 20.3, 20.5, 21.1, 21.2, 21.3, 21.4, A2 |
 | **Amends** | LZP-301's "libsodium-based design" premise → `LZP-CRYPTO-1` (§1); LZP-302's "macOS Keychain via Tauri" → non-extractable IndexedDB keys + a Keychain *backstop* (§2.2) |
+| **Amended** | 2026-08-27 (round 4) — §2.3's stated guarantee was untrue in two places and is corrected in place: the four acceptance conditions bind **nothing to `deviceId`** ("A `deviceId` is a label, not an identity"), and `deviceShort → DeviceAttestation` is *argued* rather than enforced, so a contested short now resolves to `null` instead of to a winner ("Two shorts, no winner"). §2.3 also gains "Revocation — the gap, and who owns it" (WP-9) and §8 gains **8.2a**. §5.2.1 and §5.2.5 amended to match; §5.2.4's T5 row extended. |
 
 > This ADR is written threat-model-first. §0 names the adversaries; every later section
 > justifies itself against one of them. §8 is the honest list of what those adversaries can
@@ -208,11 +209,115 @@ same signing **private** key, which is outside the model. This is what lets `ope
 device from `env.dv` alone, **before** it has decrypted anything and therefore before it knows
 `op.act`.
 
+> **AMENDED 2026-08-27 — round-4 finding 4 and finding I-3.** The paragraph above overstated the
+> guarantee in two places and the corrections are normative. **(a)** "a function" is what the four
+> conditions *argue*, not what they *enforce*: two members would need the same signing private key
+> to collide **honestly**, but a dishonest collision needs only a well-formed blob, because
+> nothing pure and synchronous can check §5.2.2's P2. The fold therefore does not resolve a
+> contested short at all — see "Two shorts, no winner" below. **(b)** the four conditions bind
+> `memberId` and `deviceShort` and bind **nothing to `deviceId`** — see "A `deviceId` is a label"
+> below. Neither correction changes the wire form or the four conditions.
+
+#### A `deviceId` is a label, not an identity
+
+Enumerate the payload's six fields against the four acceptance conditions. `memberId` is bound by
+(1), (3) and (4). `deviceShort` is bound by (2). `sigPubRaw` and `kexPubRaw` are covered by the
+signature. `createdAt` is decorative. **`deviceId` is bound by nothing** — it is 128 random bits
+with no derivational relationship to any key, asserted by its own author.
+
+So a member can mint an attestation that is honest in every checkable respect — her record, her
+short, her `memberId`, her signature, her keys — carrying **a peer's `deviceId`**. All four
+conditions pass. `src/js/core/authz.js` claimed the opposite in a comment ("a deviceId can only
+ever map to one member") and published a `deviceId → memberId` map resolved first-writer-wins,
+which made the outcome of a two-member dispute a function of who backdated harder.
+
+**There is no fifth condition to add.** No pure fold can know which member a random label
+"really" belongs to, and any rule that picked a winner would be picking it on a stamp the
+attacker chooses. So the fix is ADR 001 §4.4's, applied here: **remove the forgeable resolver
+rather than guard it.**
+
+> **The identity of a device is the pair — the housing member record and the register name — and
+> the register name is `deviceShort`, which ADR 001 §1.2 derives from the signing key and §5.2.2
+> P2 self-certifies. `deviceId` is a label carried inside one signed attestation and is
+> meaningful only relative to it. Nothing may key on a bare `deviceId`.**
+
+Everything that enforces anything already reads the pair: ADR 001 §4.0 stage 0b asks whether
+`op.dev` is attested **in `op.act`'s own record**, and §5.2.2's checks 3 and 5 read `deviceId` and
+`memberId` off the *same* attestation resolved by `env.dv`. `AuthzResult.memberOfDevice` now
+answers only when there is exactly one claimant and returns `null` otherwise, with every contested
+label published on `AuthzResult.deviceIdCollisions`.
+
+A contested claim is **admitted, not rejected**, and that is deliberate: refusing both claims
+would hand any member a way to un-attest an honest peer's device by naming its label — a denial
+of service strictly worse than an unresolved query. It costs the forger nothing either, and that
+is the property that makes this a fix rather than a mitigation: **any op she can author holding a
+copied label she can author holding an invented one**, so copying is a name collision and not a
+capability. She still cannot author as the victim (stage 0b reads `op.act`'s own record) and
+cannot sign as the victim's device (P2/P3 bind the signature to `att.sigPubRaw`).
+
+**Obligation on WP-9 and WP-6.** Story 20.2's device purge (`deleteOpsByDevices`) and any
+per-member device panel must key on **`deviceShort`** — which the relay derives and self-certifies
+at registration (§5.2.0) — or on the pair. A purge keyed on `op.dev` would let a removed member
+name an honest peer's label and have that peer's ops deleted with her own.
+
+#### Two shorts, no winner
+
+The mirror residual. Nothing pure and synchronous can check
+`crock32(SHA-256(sigPubRaw)[0..10]) === att.deviceShort` — that is §5.2.2's **P2**, it needs a
+SHA-256, and the authorization fold may not await — so a member **can** file a well-formed
+attestation under a peer's short (finding I-3). The fold used to resolve that contest
+minimal-under-`≺`, which handed a *backdated* squatter the lookup and therefore handed `openOp`
+the squatter's verification key.
+
+**The contest is no longer resolved. `attestationOf` returns `null` for a contested short.** That
+is a defined outcome at the seam: §5.2.2 P1 **parks the sealed envelope**, unopened, and a park is
+re-evaluable (§5.2.5). A squatter can therefore stall a peer's envelopes and can never be handed
+the key that opens one — liveness for confidentiality, in the direction this ADR takes everywhere
+else. Stage 0b is untouched, so the victim's own plaintext ops keep folding.
+
+Two things contest a short, both by equality alone, with no ordering and no stamp:
+
+1. one short claimed on two different member records; and
+2. one `sigPubRaw` under two different shorts — a **direct** contradiction of §1.2, visible
+   without hashing anything, and the case that catches a squat landing *before* its victim's own
+   attestation arrives.
+
+Both are reported on `AuthzResult.shortCollisions`, whose reader is now `attestationOf` itself.
+**`attestOpen` (WP-6) MUST enforce P2**, which closes this at the root and removes the stall; the
+contract line was raised from SHOULD to MUST.
+
+#### Revocation — the gap, and who owns it
+
+**There is no device revocation anywhere in the authorization fold, and `dev.*` write-once means
+an attestation cannot even be amended or withdrawn.** A `member.set{dev.<short>: null}` loses to
+the original claim; a replacement blob under the same short is rejected `writeOnce`. So the
+attestation of a stolen laptop (T3) or of an ex-partner's Mac (T2) stays valid forever, and stage
+0b keeps admitting its ops.
+
+What exists today is **key distribution, not admissibility**: the epoch bump (§4) stops wrapping
+new space keys to a revoked device, so it cannot read *future* content. It can still author ops
+the fold admits, and it can still read every epoch it already holds. That is the honest statement
+of the T2/T3 residual and it belongs next to §8.2's.
+
+**Owner: WP-9** (Familienkreis lifecycle — create → invite → join → member list → remove with
+rotation → leave → delete space), together with ADR 003 §2's device revocation on the relay. The
+design decision it must make, and which is deliberately *not* made here: a revocation is an
+admissibility fact about a device, so it needs a register that a later op can write — which is
+exactly what `dev.*` write-once forbids. Either a **separate** `rev.<deviceShort>` register on the
+owning member's record (write-once too, so it cannot be un-revoked, and admissible only from the
+housing member or the admin), or a revocation carried in the space record. Whichever is chosen,
+it must be a *fold* input, or two devices will disagree about whether an op is admissible.
+Characterized as row **R4-16a** in `tests/attack/round4-attestation.test.js`, which stays green
+because the gap is real.
+
 Residual: a malicious relay could still fabricate a whole *member* row on the coordination API.
 The rotating client would then wrap the family key to an unattested stranger unless someone
 notices an unknown name in the member list. **The member list is therefore a security surface,
 not just a roster** — deliverable 22 must treat it that way, and the panel shows a per-member
-**device count** so an extra device is at least visible. §8.5.
+**device count** so an extra device is at least visible. §8.5. The count is unaffected by the
+label forgery above (one register, one device, whatever the label says), and the panel SHOULD also
+render `shortCollisions` and `deviceIdCollisions`, which are the two contests the fold can see but
+cannot decide.
 
 ### 2.4 Solo mode generates nothing
 
@@ -450,6 +555,12 @@ Both are stated loudly because getting either wrong makes `envelope.js` unimplem
    (`att.memberId === op.act`), not a second lookup. **If a future change relaxes §2.3 condition (3)
    or (4), this section breaks and must be revisited.**
 
+   > **AMENDED 2026-08-27 (I-3).** "the four conditions make it a function" is an argument, not an
+   > enforcement — see §2.3 "Two shorts, no winner". Where the argument fails, the fold returns
+   > **`null`** rather than a winner, so the one-key lookup is a *partial* function and P1's park
+   > is what covers the hole. `openOp` therefore sees `att === null` for two reasons now — absent,
+   > and contested — and **both are parks, never rejections**.
+
 #### 5.2.2 The gate, in order
 
 Let
@@ -540,6 +651,13 @@ op.dev === att.deviceId  ∧  op.act === att.memberId === M
 - **T5 (member as adversary, admin included).** A member can add devices **only to their own
   record** (ADR 001 §4.0, enforced as admissibility at `authz.js:612` and write-once at
   `:626-644`). Forging another member's short inside one's own stamps is closed by check 4.
+  Filing another member's **`deviceId`** inside one's own attestation is not closed by any check
+  and cannot be — see §2.3 "A `deviceId` is a label, not an identity". It is instead made
+  worthless: the fold publishes no `deviceId → memberId` resolver, so the copied label admits
+  exactly the ops an invented label would, and the contest is reported on `deviceIdCollisions`.
+- **T2 / T3 (removed member, stolen laptop).** The attestation is **not revocable** — §2.3
+  "Revocation — the gap, and who owns it". Only the epoch bump limits the damage, and it limits
+  future *reads*, not authorship. WP-9.
 
 #### 5.2.5 Bootstrapping, and the one thing that is NOT a rejection
 
@@ -551,6 +669,13 @@ data loss on first contact and on every partial pull. This is finding **F-6**, a
 fold does the wrong thing: `authz.js:671` **rejects** `unattestedDevice`, and `store.js:699-703`
 drops the rejected op without appending it to the log, so it is never re-evaluated. A park reason
 (`ATTESTATION`) must exist in `ops.js`'s `PARK_REASONS` before WP-8 pulls from a real peer.
+
+**`att === null` now has a second cause, and it is also a park.** Since 2026-08-27 the fold
+returns `null` for a **contested** short as well as an absent one (§2.3 "Two shorts, no winner").
+`openOp` must not distinguish them: both mean *this envelope cannot be resolved to a device right
+now*, both are re-evaluable — the absent one when the attestation arrives, the contested one when
+`attestOpen`'s P2 refuses the squat — and turning either into a rejection is the same silent data
+loss. A caller that wants to *report* the difference reads `AuthzResult.shortCollisions`.
 
 Checks P2, P3, 1, 2, 3, 4 and 5 remain **hard failures**: those are protocol violations, not version
 or delivery skew.
@@ -843,6 +968,17 @@ honest client honours and a modified client does not.
 would contradict "no passwords". The honest defences are FileVault (outside our control) and,
 after the fact, device revocation plus an epoch bump, which protects the family space going
 forward and does nothing for what is already on that disk.
+
+**8.2a There is no device revocation in the authorization fold, and an attestation cannot be
+withdrawn.** *(added 2026-08-27 — round-4 row R4-16a; see §2.3 "Revocation — the gap, and who
+owns it".)* `dev.*` registers are write-once, so a `member.set{dev.<short>: null}` loses to the
+original claim and a replacement blob is rejected `writeOnce`. The attestation of a stolen laptop
+(8.2) or an ex-partner's Mac (8.1) therefore stays valid **forever**, and ADR 001 §4.0 stage 0b
+keeps admitting ops from it. What the epoch bump buys is key *distribution* — the revoked device
+stops receiving new space keys — not admissibility: it can still author ops every honest client
+folds. This is a real gap, not a documented trade, and it is **owned by WP-9** together with ADR
+003 §2. The design constraint is stated in §2.3: revocation must be a *fold* input, or two devices
+will disagree about whether an op is admissible.
 
 **8.3 Retraction is client-cooperative.** ADR 004 §5's guarantee holds for honest clients. A
 member running a modified build simply keeps their fold. Screenshots, Time Machine backups and

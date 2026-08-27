@@ -526,8 +526,10 @@ describe('F-8 — the warnings channel is one durable, inspectable array', () =>
     }));
     await relaunch();
     const q = store.diagnostics().quarantine;
-    assert.equal(q.reason, 'unrelated-log');
+    // RE-ANCHORED 2026-08-27 · ADR 006 replaced the census with one equality, so the reason enum
+    // changed with it: a bare `ops.jsonl` has no header and therefore no lineage to compare.
+    assert.equal(q.reason, 'no-checkpoint');
     assert.equal(q.tailLines, 1);
-    assert.match(q.detail, /NONE of the/);
+    assert.match(q.detail, /carries no header and therefore no lineage/);
   });
 });

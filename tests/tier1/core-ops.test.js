@@ -49,6 +49,7 @@ import {
   localKey, noteKey, barKey, catKey, padKey, familyKey, familyKeyFor, memberKey, spaceKey,
   parseEntityKey, kindOfEntity, ownerOfEntity, idOfEntity, isEntityKey,
   isMemberId, isDeviceId, isSpaceId, isOpId, isEntityUuid, isMonthKey, isDateString,
+  DATE_RE, EARLIEST_DATE, LATEST_DATE,
   p2, iso, parseISO, isLeap, daysInMonth, addDays, diffDays, projectYearly, reanchorRepeat,
   categoryVisibilityOf, visibleNotes, visibleBars,
   noteOccurrences, noteOccurrencesInRange, notesOnDate, barsOnDate, barsInRange,
@@ -930,6 +931,48 @@ test('the date primitives in core/entities.js agree with src/js/dates.js, exhaus
   }
   assert.ok(checked > 16000, `only ${checked} dates checked`);
   assert.equal(p2(3), v1dates.p2(3));
+});
+
+test('EARLIEST_DATE and LATEST_DATE really are the two ends of DATE_RE (R5-11)', () => {
+  // `migrate1to2.js:coerceToV1BarEdge` carries a bar edge that names no day across as the end of
+  // the alphabet it SORTED against, because `layout.js:133` compares a bar edge and never parses
+  // it. The whole argument rests on these two strings being the extremes of the accepted set: if
+  // some accepted date sorted below EARLIEST_DATE, an edge mapped there would still be painted in
+  // that month, and R5-11 would be half closed. This is that pin.
+  assert.equal(isDateString(EARLIEST_DATE), true, 'the floor is itself a legal date');
+  assert.equal(isDateString(LATEST_DATE), true, 'and so is the ceiling');
+
+  // The proof is lexicographic and it is complete, in two parts, because every accepted string is
+  // exactly ten characters of the fixed shape `dddd-dd-dd` — so string order IS field order.
+  //   1. the YEAR field, exhaustively: every four-digit prefix sits between '0000' and '9999'.
+  for (let y = 0; y <= 9999; y++) {
+    const yyyy = String(y).padStart(4, '0');
+    assert.ok(yyyy >= '0000' && yyyy <= '9999', `year ${yyyy} escapes the field`);
+  }
+  //   2. the MONTH and DAY fields, exhaustively, at both year extremes — the only years where the
+  //      year field cannot decide the comparison on its own.
+  let checked = 0;
+  for (const yyyy of ['0000', '9999']) {
+    for (let m = 0; m <= 99; m++) {
+      for (let d = 0; d <= 99; d++) {
+        const s = `${yyyy}-${p2(m)}-${p2(d)}`;
+        if (!DATE_RE.test(s)) continue;              // not an accepted date; it may sort anywhere
+        assert.ok(s >= EARLIEST_DATE, `${s} sorts below the floor`);
+        assert.ok(s <= LATEST_DATE, `${s} sorts above the ceiling`);
+        checked++;
+      }
+    }
+  }
+  assert.equal(checked, 2 * 12 * 31, 'both extreme years, every month, every day the regex allows');
+
+  // …and the falsifier: the strings one step outside on each side are REFUSED, which is what
+  // makes these the ends of the ACCEPTED set rather than merely two dates in it.
+  for (const outside of ['0000-00-01', '0000-01-00', '9999-13-01', '9999-12-32', '999-12-31']) {
+    assert.equal(isDateString(outside), false, `${outside} must not be an accepted date`);
+  }
+  // The two shapes the class is about, on either side, so the constants are not vacuous:
+  assert.ok('' < EARLIEST_DATE && ' ' < EARLIEST_DATE && '0' < EARLIEST_DATE);
+  assert.ok('zzz' > LATEST_DATE && 'irgendwann' > LATEST_DATE && 'unbekannt' > LATEST_DATE);
 });
 
 test('projectYearly agrees with v1 across every leap boundary (story 9.4)', () => {

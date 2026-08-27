@@ -15,6 +15,26 @@ file is mutation-tested** — reverted in a scratch copy of the tree, and requir
 named row. The table is §7. *A fix with no test that dies is not recorded as fixed*, and one
 "fix" that survived its own mutant is recorded as what it actually is instead.
 
+**Updated again 2026-08-27, rounds 4 and 5 + their integration pass.** Two more adversary rounds
+ran against the retrofit and the authority rule, and this register did not keep up with them — the
+`R4-*` and `R5-*` rows lived only in `tests/attack/` and in ADR 006's header. That is the failure
+mode this file exists to prevent, so the round-5 findings are folded in below and §1's counts are
+recomputed from the rows rather than carried forward.
+
+Three things in this update are corrections to *earlier entries in this register*, not new
+findings, and they are the reason the round was worth running:
+
+- **A3-C1 was reachable again**, through the one branch its own fix created (`R7`, the
+  absent-`board.json` recovery). Filed as **R5-3**, closed, and A3-C1's row now says so.
+- **A3-M5 was not "latent"**, as it was filed. It was load-bearing on every launch after the
+  first, and it was the most consequential defect this project has had. It is promoted from
+  MEDIUM to **HIGH** and closed.
+- **I-3 is worse than filed.** Round 5 turned it from "a member can take a lookup" into a remote
+  denial of service against any family member's device, and showed that WP-6's owed P2 check does
+  not close it. Escalated to **HIGH** and moved to §4 as a decision.
+
+Every round-5 closure carries its own mutant in §7, on the same rule as the first pass.
+
 **Status vocabulary**
 
 | status | means |
@@ -35,23 +55,37 @@ closed: invert the row, do not repair the test.** Rows that have already been th
 
 | severity | open | accepted | decision | fixed | total |
 |---|---|---|---|---|---|
-| **CRITICAL** | — | — | — | 1 | **1** |
-| **HIGH** | 3 | — | — | 3 | **6** |
-| **MEDIUM** | 8 | — | — | 2 | **10** |
-| **LOW** | 4 | 1 | 1 | 3 | **9** |
+| **CRITICAL** | — | — | — | 2 | **2** |
+| **HIGH** | 3 | — | 1 | 4 | **8** |
+| **MEDIUM** | 8 | — | 1 | 5 | **14** |
+| **LOW** | 4 | 2 | 1 | 3 | **10** |
 | **INFO / gap** | 2 | 2 | — | 1 | **5** |
-| | **17** | **3** | **1** | **10** | **31** |
+| | **17** | **4** | **3** | **15** | **39** |
 
-Nothing in this register breaks the app that ships today. Read §3 before starting WP-8: **seven of
+Nothing in this register breaks the app that ships today. Read §3 before starting WP-8: **six of
 the seventeen open rows go from latent to live the moment a second device exists.**
 
-**The one CRITICAL is closed**, and so are the three HIGHs that a file on disk could reach. The
-three HIGHs that remain are one convergence blocker (A3-H4) and two rows this pass found *while
-proving the others* (I-1, I-2) — the same class as A3-H1, one door further in.
+**Both CRITICALs are closed** — A3-C1 and the R7 branch that re-opened it (R5-3) — and so are the
+four HIGHs that a file on disk could reach, including A3-M5, which round 5 promoted out of MEDIUM
+because it was mis-filed as latent. The three HIGHs that remain are one convergence blocker
+(A3-H4) and two rows found *while proving other fixes* (I-1, I-2). The HIGH **decision** is I-3,
+which round 5 escalated: §4.5.
 
-**Suites at the close of the pass**, all four green:
-`npm test` **1360**/0 · `npm run test:property` **51**/0 · `npm run test:attack` **340**/0 ·
-`npm run test:dom` **278**/0 over 15 files, tier 2 PASS.
+**What moved between severities, and why** — recorded because a severity that changes silently is
+worth as little as a finding that is never written down:
+
+| row | was | is | what changed the reading |
+|---|---|---|---|
+| **A3-M5** | MEDIUM, open, "latent — nothing appends, so nothing grows" | **HIGH, fixed** | It was never latent. R5-4 measured it live on every launch after the first: no op the user made was written to the log again, ever. |
+| **I-3** | MEDIUM, open | **HIGH, decision (§4.5)** | R5-7 turned a lookup-shadowing trick into a permanent remote mute of a named device, self-authorizing and irrevocable. |
+| **A3-C1** | CRITICAL, fixed | **CRITICAL, fixed** (unchanged) — but see **R5-3** | The rule held; the *implementation* grew a second door into it. Recorded as its own row rather than by quietly re-opening the old one. |
+
+**Suites at the close of the round-5 integration pass**, all four green:
+`npm test` **1374**/0 · `npm run test:property` **51**/0 · `npm run test:attack` **512**/0 ·
+`npm run test:dom` 15 files, tier 2 PASS.
+
+*(For the record, the counts at the close of the first fix pass were 31 rows and
+`npm test` 1360 · `test:attack` 340.)*
 
 ---
 
@@ -64,7 +98,8 @@ navigable. Line numbers are against `c0306ac`.
 
 | id | aka | one line | file:line | owner | status |
 |---|---|---|---|---|---|
-| **A3-C1** | C-1 | One well-formed line in `ops.jsonl` discards `board.json` entirely — 0 notes, 0 bars, 0 categories, **no warning** — and the first autosave commits the empty board to disk, to `snapshots.json`, and to the next migration | `src/js/store.js:465-478` | **WP-8** | **fixed** |
+| **A3-C1** | C-1 | One well-formed line in `ops.jsonl` discards `board.json` entirely — 0 notes, 0 bars, 0 categories, **no warning** — and the first autosave commits the empty board to disk, to `snapshots.json`, and to the next migration | `src/js/store.js:465-478` | **WP-8** | **fixed** (third attempt — ADR 006; see **R5-3**) |
+| **R5-3** | R5-3a/b/c | A3-C1 **reachable again**, behind one corrupted byte: an unreadable `board.json` fell into R7's recovery branch, which performs **no lineage check of any kind**, so a planted log became the board — and `persistNow()` then committed it over the file that was merely unparseable | `src/js/store.js` (`init`, `_recoverFromLog`), `src/js/storage.js` (`loadBoardText`) | **WP-3** | **fixed** |
 
 `shouldMigrate(board, {opsLogExists})` has exactly one input about the log — *does one exist* — and
 none about whether that log has anything to do with **this** board. On the log branch `init()` does
@@ -120,6 +155,87 @@ that does not match `board.json` must be **quarantined**, not trusted.
 > consult `store.quarantine` first**. Turning the flag on over a quarantined log would overwrite
 > the very bytes the quarantine exists to preserve. Noted at the call site.
 
+> ### A3-C1's THIRD ATTEMPT, AND THE DOOR IT LEFT OPEN
+>
+> The register recorded A3-C1 as fixed by the two-layer check below. **Round 4 killed that check**
+> (R4-1a: the census quarantines only on *zero* overlap, and `pad:<YYYY-MM>` is a month key every
+> board that ever existed shares — one guess), and the rule was rewritten a third time as
+> **ADR 006**: `board.json` is the truth, the op log is history, adoption turns on one equality
+> and can never change content. **Round 5 confirmed that rule holds.** What it broke was the
+> implementation, and R5-3 is the worst of it.
+>
+> **The attack.** ADR 006 §5.5 names one asymmetric branch: with no `board.json` there is nothing
+> for a log to overrule, so a readable log becomes the truth (R7). The branch was entered on
+> `kind !== 'ok'`, not on `kind === 'absent'` — so a `board.json` that merely **failed to parse**
+> took it. One truncated byte in the victim's board, a legitimate `checkpoint.json` + `ops.jsonl`
+> pair for the **attacker's own** board beside it, and A3-C1's original outcome is back: the
+> stranger's board on screen, `persistNow()` committing it over the victim's file, and — one
+> launch later — the quarantine machinery *renaming the evidence away*.
+>
+> Two smaller doors fed the same branch. `loadBoardText()` turned a **thrown** native read (a
+> locked file, a dismissed permission prompt, an EIO) into `txt = null`, which is
+> indistinguishable from *there is no board file* — so a transient error was a recovery. And
+> nothing consulted `snapshots.json`, which is §8.2's own stated answer for exactly this morning.
+>
+> **THE FIX — the precondition, and a boot that refuses to write.**
+>
+> 1. `storage.loadBoardFile()` reports **four** statuses, not two: `ok` / `absent` /
+>    `unparseable` / `read-failed`. A thrown read is a **fact** (`read-failed`), never an absence.
+>    `loadBoardText()` is now a thin wrapper over it and keeps its two historic keys byte for byte.
+> 2. `store.classifyBoardFile()` adds the fifth case `splitBoardEnvelope` was silently folding
+>    into "absent": **`not-a-board`** — valid JSON that is `[]`, `"a string"`, `null` or `7`.
+> 3. `init()` branches on the kind. **`_recoverFromLog` is reachable only when
+>    `kind === 'absent'`** — which is, finally, the precondition ADR 006 §5.5 argues for.
+> 4. Everything else goes to **`_bootUnreadableBoard`**, whose order is the whole fix: set
+>    `bootFailure` so the session is read-only **before** anything can write; quarantine any log
+>    as **`board-unreadable`** (an unreadable board has no `_v2.lineageId`, so nothing ties a log
+>    to it — *a log is refused on the absence of a tie, never adopted on it*); then show the
+>    newest usable `snapshots.json` entry, or an empty stand-in, and say so.
+> 5. **`_sequesterQuarantine()` is gated on `!bootFailure`.** A read-only session's promise is
+>    that every file is exactly as it was, and a move-aside is a write. This is what stops R5-3b's
+>    second half: the evidence is no longer renamed away one launch after the board.
+> 6. Genuine-absent recovery now says out loud that **nothing verified the log belongs to this
+>    board**, names `snapshots.json`, and adopts the checkpoint's `lzp.lineageId` — so the
+>    recovered board is written back carrying `_v2` and the *next* launch does not quarantine and
+>    rename the only copy of the board it just rebuilt.
+> 7. `diagnostics().recoveredFrom` tells R7's genuine recovery apart from the read-only disaster
+>    boot that used to hide inside the same `source: 'recovery'`. `source` keeps its three
+>    documented values.
+>
+> **Human-facing copy** (DE ships; EN twins) is written verbatim into `_bootUnreadableBoard`'s
+> docblock, keyed off `bootFailure.reason`, and is the seam a settings pane renders from. Its
+> first promise is the one that matters: *„Ihre Daten sind NICHT gelöscht — die Datei liegt
+> unverändert an ihrem Platz."*
+>
+> **Two seams the parallel fixers could not reach, closed in the integration pass** — both were
+> **unproven** when integration began (reverting either killed no row in any suite, which is the
+> same thing as not having a fix):
+>
+> - **`_projectSafe` clobbered `bootFailure`.** If the *snapshot* standing in for the unreadable
+>   board also refused to project, `reason` became `unprojectable` — a claim that the board is
+>   BROKEN, made about a file nothing has successfully parsed — and `shownInstead`, `logPresent`
+>   and the copy keyed off them went with it. First reason now wins; the projection error is
+>   recorded beside it as `projectionFailure`. → **R5-3e**.
+> - **`persistNow`'s read-only sentence** told all four reasons *"the board on disk could not be
+>   **drawn**"*. On the three `board-*` reasons nothing has read the file, so nothing has tried to
+>   draw it; the honest sentence is that the app could not **open** it, and on a dismissed
+>   permission prompt that is the difference between relaunching and giving up. `readOnlyBecause()`
+>   branches on the reason, and the `unprojectable` sentence is kept unchanged where it is true.
+>   → **R5-3f**, whose third clause is the non-vacuity control.
+>
+> **Rows inverted:** R5-3a, R5-3b, R5-3c in `tests/attack/round5-authority.test.js`; R5-3e and
+> R5-3f added by the integration pass. **Mutants (§7):** rows 24-30. Restoring both files makes
+> all four original R5-3 rows green again — the control that says the rows measure the fix and not
+> the weather.
+>
+> **Still owed on this path:** the first-run tour still shows over a disaster boot with no
+> snapshot, because `seenFirstRun` is left at v1's `false` and
+> `tests/tier1/store-persistence.test.js:240` characterizes that by name. Re-baselining a v1
+> observable is the tier-1 owner's call; the read-only guard and the warning are what actually
+> protect the file. And `quarantineLogAside` on the native path still cannot move anything (the
+> owed `quarantine_logs` shell command) — now much less pressing, since a failed boot never
+> sequesters at all.
+
 ### HIGH
 
 | id | aka | one line | file:line | owner | status |
@@ -130,6 +246,8 @@ that does not match `board.json` must be **quarantined**, not trusted.
 | **A3-H4** | H-4 | Two Macs over one board **cannot converge at all**: stamps and opIds agree exactly as ADR 001 §8.1 promises, but `_me` is ephemeral per process, so each refuses the other's ops with `notMyAct` | `src/js/store.js:415-425`, `src/js/core/authz.js:490-494` | **WP-6** → WP-8 | open |
 | **I-1** | new | `replaceAll()` discards the live board **before** the projection that can refuse it — an import or an 11.5 snapshot restore that throws leaves `state` a blank the app can never have produced, and the ordinary 700 ms autosave writes the blank to `board.json` | `src/js/store.js` (`replaceAll`, `restoreSnapshot`) | **WP-4** | open |
 | **I-2** | new | `init()` throws `MaterializeError` on a **poisoned `board.json`** (`startMonth: "nope"`, `pageYears: 1e9`) and `ready` stays `false` — the white screen A3-H1 closed, reached through the board rather than the checkpoint | `src/js/store.js` (`init` → `_project`) | **WP-3** | open |
+| **A3-M5** | M-5 · R5-4 | **PROMOTED FROM MEDIUM.** `_persistOps()` documents itself as "append the tail, then checkpoint" and **never calls `appendOps`**; `truncateOps(0)` is guarded `keepFromLine > 0` so it **keeps every line**. Filed as latent. It was not: from the **second launch onward nothing the user did was ever written to the log again** | `src/js/store.js` (`_persistOps`), `src/js/core/oplog.js` (`resolveHorizon`) | **WP-3** | **fixed** |
+| **I-3** | new · R5-7 | **ESCALATED FROM MEDIUM.** A contested `deviceShort` is resolved by **refusing it**, and the short is trivially discoverable — so one `member.set` filed under a peer's short makes every sealed envelope from that Mac park **for ever** | `src/js/core/authz.js` (`attestationOf`, `shortCollisions`) | **PO** → WP-6 | **decision** — §4.5 |
 
 - **A3-H1** — the asymmetry is the point: `storage.loadCheckpoint()` catches a JSON parse error and
   returns `null` (safe — R3-36 pins that an unparsable checkpoint lets the board through
@@ -233,6 +351,75 @@ that does not match `board.json` must be **quarantined**, not trusted.
   log rather than widened to swallow this, so the row stays green and honest until someone
   decides what the app should *show* here. → `upgrade-day-restore.test.js`, the last `HELD` row.
 
+> ### A3-M5 / R5-4 — THE LOG STOPS RECORDING ON THE SECOND LAUNCH
+>
+> **This row is here because its severity was wrong, and the reason it was wrong is instructive.**
+> It was filed as *"latent — nothing appends, so nothing grows"*: `_persistOps` never called
+> `appendOps`, so `ops.jsonl` never existed, so it could not grow past `LS_OPS_CAP`. That reading
+> looked only at the file that was missing. Round 5 looked at the ops.
+>
+> **What was actually happening.** The body was `saveCheckpoint(this._log.checkpoint())` +
+> `truncateOps(0)`, and **both halves were inert**:
+>
+> - `checkpoint()` folds to `resolveHorizon(opts, 'read')` = `horizon ?? maxLiveStamp()`, and
+>   `horizon` is **non-null for any log that has been `load()`ed**. So from the second launch
+>   onward the persisted checkpoint was frozen at the horizon it was read with, and every op
+>   minted since was above it and simply **not in the file**.
+> - Nothing called `appendOps`, so the ops the checkpoint did not carry had **nowhere else to be**.
+>   `truncateOps(0)` means "keep from the beginning", i.e. keep everything — harmless only because
+>   the file it kept was always empty.
+>
+> **Three measured consequences** (R5-4a-d), none of them latent:
+>
+> 1. No op after the first persist was ever written to the log. WP-8's outbox — ADR 006 §9.2's
+>    whole mechanism — had no producer.
+> 2. **Every ordinary launch reconciled a growing number of "changes `board.json` carried that the
+>    log did not (expected after a crash)"**, so ADR 006's happy path and its crash path were
+>    indistinguishable *forever*. The diagnostic that is supposed to reveal a real crash was
+>    permanently crying wolf.
+> 3. Every entry created after the first persist was re-minted `_born: true` at a fresh stamp on
+>    **every** launch — and ADR 001 §5 step 5 calls array order "MANDATORY, NOT COSMETIC", so an
+>    entry's position on the board became a function of when the app was last opened.
+>
+> **THE FIX — the four steps ADR 006 §6 names, each of them checked rather than assumed:**
+>
+> ① **APPEND** what the coming checkpoint will *not* carry — `_uncommittedTailLines()`, which is
+> the outbox exactly: not parked (parked lines ride in `checkpoint().parked` with the reasons
+> `load()` cannot re-derive), not folded by the coming checkpoint, not already on disk. Keyed by
+> opId **and body**, so an envelope splice is appended rather than mistaken for the line already
+> written. ② **COMPACT** when the tail has grown past `TAIL_COMPACT_AT`, which is the only thing
+> that advances the horizon and therefore the only thing that lets ④ ever drop a line.
+> ③ **CHECKPOINT.** ④ **TRUNCATE, and only lines ③ already folds** — the condition is *checked*:
+> if one admitted op is above the checkpoint's horizon, the tail is the only copy of it and the
+> file is left alone. That is the half that makes a crash between ③ and ④ cost nothing.
+>
+> **One fix in `core/oplog.js` came with it**, and it is the subtlest thing in the round:
+> `resolveHorizon(opts, 'advance')` now takes the **max** of `maxLiveStamp()` and `horizon`
+> instead of `maxLiveStamp() ?? horizon`. One live line *below* the horizon — a late op (ADR 001
+> §7.2), or a tail the checkpoint already folds after a crash between ③ and ④ — used to make
+> `compact()` throw for the rest of that log's life, **permanently disabling the one call that
+> bounds `ops.jsonl`**.
+>
+> **THE ACCEPTANCE CHECK — R5-4f**, written as a sequence because the defect was only ever visible
+> as one: *boot · edit · restart · edit · restart*. It asserts two things that are not the same
+> claim: (a) an ordinary launch reconciles **0**, and (b) an op minted in session N is on disk in
+> `checkpoint.json` ∪ `ops.jsonl` and is projected back in session N+1. Without (b),
+> `reconciled: 0` is satisfiable by a store that adopts nothing and diffs nothing. The first
+> launch is pinned at `reconciled: null` (there is no log yet — *nothing to reconcile* is not the
+> same as *reconciled nothing*), and a genuine crash still reports exactly **1**, so the quiet
+> launches mean something.
+>
+> **Rows inverted:** R5-4a/b/c/d, plus **R5-4e** for the bound A3-M5 was originally filed under,
+> and **R5-4f** added by the integration pass. **R3-39 is inverted too** — it was still asserting
+> "`_persistOps()` never appends" as a live defect, and its file header's claim that "`store.js`
+> never writes `ops.jsonl`" is corrected to the narrower one R3-38 actually pins. A new tier-1 row
+> in `core-oplog.test.js` pins the `resolveHorizon` half. **Mutants (§7):** rows 31-35.
+>
+> **Not implemented, and recorded rather than glossed:** ADR 001 §7.2's "30-day tail for
+> debuggability" is *not* honoured — the compaction is total, because `truncateOps` can only drop
+> a prefix and the store does not track which file line an op is on. The 2 MB-at-launch trigger is
+> also absent. Both are in ADR 006 §8.5 and in the `TAIL_COMPACT_AT` docblock.
+
 ### MEDIUM
 
 | id | aka | one line | file:line | owner | status |
@@ -243,9 +430,14 @@ that does not match `board.json` must be **quarantined**, not trusted.
 | **F-2** | F-2 · M-1 | The `apply()` door **throws** on 27 of 36 hostile field values where the `mutate()` door truncates-and-warns — in **two** error classes, `OpError` and `EntityKeyError` | `src/js/core/ops.js` (`MUTATIONS`, `makeOp`), `src/js/core/entities.js`, `src/js/store.js:206` vs `:672` | **WP-8** | open |
 | **A3-M3** | M-3 | A **nested** `mutate()` spends one ⌘Z on two actions, and the R5 shadow guard then throws *after* the ops are appended and *before* `schedulePersist()`/`emit()` — board changed, unsaved, un-redrawn | `src/js/store.js:642-653`, `:756-766` | **WP-4** | open |
 | **A3-M4** | M-4 | A throwing `mutate()` callback's half-edit is adopted into the log **permanently** by the *next* action, with no undo step that can reach it | `src/js/store.js:586-594` | **WP-4** | open |
-| **A3-M5** | M-5 | `_persistOps()` documents itself as "append the tail, then checkpoint" and **never calls `appendOps`**; `truncateOps(0)` is guarded `keepFromLine > 0` so it **keeps every line** | `src/js/store.js:830-834`, `src/js/storage.js:192-207`, `shell-macos/main.swift:785`, `src-tauri/src/lib.rs:134` | **WP-8** | open |
+| **A3-M5** | M-5 | *(moved to **HIGH** — round 5 proved it was not latent. See the HIGH table.)* | | | **fixed** |
 | **F-10** | Part C | `foldAuthorized` returns `memberOfDevice(deviceId)` and **discards the decoded attestation payload**, so `openOp` cannot perform ADR 002 §5.2's checks — **the concrete WP-6 unblocker** | `src/js/core/authz.js:650-663`, `:853-854` | **WP-6** | **fixed** |
-| **I-3** | new | ADR 002 §2.3 claims `deviceShort → DeviceAttestation` is a **function**; nothing in the fold enforces it, so a member can mint a well-formed attestation under a peer's short and, **backdated**, take the lookup | `src/js/core/authz.js` (`attestationOf`, `shortCollisions`) | **WP-6** | open |
+| **I-3** | new | *(escalated to **HIGH** and moved to §4.5 — round 5 (R5-7) turned this into a permanent remote mute of any named device, self-authorizing and irrevocable.)* | | | **decision** |
+| **R5-11** | R5-11 | An **unreadable bar edge** is dropped, and a dropped edge is anchored to the other end — so a bar v1 painted **nowhere** is painted by v2 across every column to the horizon, with chevrons, taking a lane from bars that are real | `src/js/core/migrate1to2.js`, `src/js/core/replace.js`, `src/js/core/entities.js` | **WP-3** | **fixed** (narrowed — residual §4.6) |
+| **R5-5a** | R5-5a | The reconciler walks `COLLECTION[].fields`; the R4 post-condition walked **the same list**. A field outside it — `_born`, which decides user-visible **array order** — could be neither minted nor checked | `src/js/store.js` (`v1ContentOf`, `postConditionDetail`) | **WP-3** | **fixed** |
+| **R5-5b** | R5-5b | …and the same hole swallows a field `board.json` **cannot express at all** (`visibility`, `coEdit`, `defaultVisibility`, a foreign `ownerId`): no post-condition written in terms of `board.json` can see it | `src/js/store.js`, `src/js/core/oplog.js` | **WP-8** | open (bounded — ADR 006 §8.4) |
+| **R5-2e** | R5-2e | ADR 006 §12.6 ("reconcile so the post-condition holds") and ADR 001 §1.3 (no stamp beyond `MAX_FUTURE_DRIFT_MS`) are **jointly unsatisfiable** when the machine's clock is behind the log's newest stamp — and the loser was the user's entire history | `src/js/store.js` (`_clockSkew`, `_sequesterQuarantine`), ADR 006 §12.6 | **WP-3** | **fixed** |
+| **R5-2g** | R5-2g | A Time-Machine restore of a **pre-lineage** `board.json` beside a current log destroys the log: the restored board carries no `_v2`, so `adoptable` refuses on `board-carries-no-lineage` and the history is quarantined | `src/js/store.js` (`adoptable`) | **WP-3** | open |
 | **I-5** | new | A `board.json` whose `settings` nest a few thousand deep flattens into ONE register name with a few thousand dots; the projection rebuilds it iteratively and survives, and `_project`'s `structuredClone(state.settings)` then **overflows the stack out of `init()`** — outside every door, `ready === false` | `src/js/core/ops.js` (`flattenPref`), `src/js/store.js:859` | integration | **fixed** |
 
 - **F-5** — `store.applyRemote` gates at admission *precisely so* "`registers()` stays the authorized
@@ -349,6 +541,109 @@ that does not match `board.json` must be **quarantined**, not trusted.
   those depths, so this is a place v2 is now **strictly better** than v1 rather than equally bad —
   which matters, because "v1 does it too" was the only argument for leaving it.
 
+> ### R5-11 — THE COERCION CLASS: A BAR v1 DREW NOWHERE, DRAWN EVERYWHERE
+>
+> **The rule the fix turns on, and it is not the obvious one.** v1 never *parses* a bar edge — it
+> **compares** it (`layout.js:133-135`). So the faithful v2 value for an unreadable edge is not
+> "the day this text means" (it means no day at all) but **"a date that sorts where this text
+> sorted"**. For the two classes where such a date exists — text outside `DATE_RE`'s alphabet —
+> it is the **end** of that alphabet.
+>
+> **What v2 did instead.** The edge failed `coerceToV1Date`, so the *field* was dropped; a bar
+> with one end is then anchored to the other (R4-10, correct on its own terms); and the bar runs
+> to the horizon. `endDate: ""` — the single commonest hand-edit there is — turned a bar v1 drew
+> **nowhere** into a bar drawn across every column, with `contBot`/`beyondEnd` chevrons, **taking
+> a lane from bars that are real**. Two entirely reasonable behaviours composing into a wrong one.
+>
+> **The fix.** `EARLIEST_DATE = '0000-01-01'` / `LATEST_DATE = '9999-12-31'`, declared next to
+> `DATE_RE` because the claim they make is a claim *about* `DATE_RE`; a shared
+> `coerceToV1BarEdge(kind, name, value)` — bar edges only, strings only, `< EARLIEST ⇒ EARLIEST`,
+> `> LATEST ⇒ LATEST`, everything else `null`; wired into **both doors** *before* `coerceToV1Date`
+> (which trims, so `' 2026-03-04'` would read as a good date there, and v1 painted it nowhere).
+> A load-time assertion pins that both edges are still `date` fields.
+>
+> **Notes are deliberately untouched.** `layout.js:61-79` places a note by map **equality**, so
+> absent and `'zzz'` already land on the same nowhere — and a substituted date on a
+> `repeatsYearly` note would be *expanded* onto days the user never wrote.
+>
+> **The warning was wrong too** (R5-11b), in the direction that matters: `gridPlacementWarning`
+> printed *"that is exactly what v1 painted for it … nothing on your board moves"* for an edge the
+> file **never carried**, which was true, and for one that was **dropped**, which was not. A
+> `dropped` out-parameter now threads through both `buildPatch`es so the tail is printed only
+> where it is true, and a `NOT DRAWN on any day` branch was added for a bar whose stored dates put
+> it outside every column. **R5-11h** pins that the sentence is still printed where it *is* true.
+>
+> **Measured** (R5-11a/c/d/e/f, against `buildBoard`): `endDate ∈ {'', ' ', '-', '(offen)', '0',
+> ' 2026-03-04'}` → v1 nowhere, v2 nowhere, `'0000-01-01'` in the file, entry kept.
+> `startDate ∈ {'zzz', 'unbekannt', 'ab wann?'}` → both nowhere. Lanes are byte-identical to v1's.
+> **R5-11e became an inversion rather than a control**: `'irgendwann'` matched v1's *segments* but
+> not its chevrons — an absent edge raises none and `'9999-12-31'` raises all three — so the same
+> fix closed a half nobody had measured.
+>
+> **The corpus is why this survived four rounds.** `generateUglyBoard` reached one side of the
+> boundary only. It now generates **both** (`EDGE_BELOW` / `EDGE_ABOVE`, both edges) and reports
+> them as **two separate classes** — a merged count would go green on a corpus that had quietly
+> become one-sided again, which is exactly how this hid. §6b has the refreshed table; P14 enforces
+> the 1% floor on both new classes. **Mutants (§7):** rows 36-41.
+>
+> **The residual is narrowed, not closed, and it is a PO question:** §4.6.
+
+> ### R5-5a / R5-5b — THE RECONCILER'S FIELD LIST WAS ITS GUARD'S BLIND SPOT
+>
+> ADR 006 R4 is the rule that makes the whole design safe: *after reconciling, assert
+> `content(project(log)) ≡ content(board.json)`; if it does not hold, quarantine.* **"Every
+> conceivable failure of the reconciler degrades to history lost, content kept."** That argument
+> is only as good as what `content()` can see.
+>
+> The reconciler is `diffCollection`, which walks `COLLECTION[].fields`. The post-condition was
+> `sameV1Content` → `v1ContentOf`, which walked **the same list**. Any field outside it was
+> invisible to *both*: it could not be minted, and it could not be checked.
+>
+> **`_born` is outside that list**, and ADR 001 §5 step 5 is explicit that it is not cosmetic —
+> v1's capacity slice and its per-column lane rescue are order-sensitive, so array order is
+> user-visible. A log that disagrees with `board.json` about `_born` therefore changed **what the
+> user sees**, through a field R3 could not mint and R4 could not catch.
+>
+> **The two halves part company here, and that is the finding.** `_born` is `writeOnce`, so R3
+> *cannot* be satisfied by minting the difference — but the order it decides **is** asserted by
+> `board.json`, in its array order, so **R4 can refuse a log that disagrees**. That is R5-5a:
+> `v1ContentOf` now emits `order[spec.key]` (the id sequence) alongside the id→field maps, and
+> `postConditionDetail(theirs, mine)` says **which half** failed, so `reconcile-failed` names the
+> order and `_born`'s write-once-ness instead of naming the post-condition it tripped.
+>
+> **R5-5b is the half that stays open, deliberately.** No post-condition written in terms of
+> `board.json` can see a field `board.json` **cannot carry** — `visibility`, `coEdit`,
+> `defaultVisibility`, a foreign `ownerId`. There is no clever version of the check that fixes
+> this; the real answer is folding an adopted checkpoint through `applyRemote`'s admissibility
+> gate, which is **F-5**, which is WP-8. ADR 006 §8.4's residual list was a two-item prose aside
+> and is now a four-row table naming how each is bounded. R5-5b's attack row stays green because
+> the defect is still there. **Mutants (§7):** rows 42-43.
+
+> ### R5-2e — TWO NORMATIVE RULES THAT COULD NOT BOTH BE OBEYED
+>
+> ADR 006 §12 rule 6 said *reconcile so the post-condition holds*. ADR 001 §1.3/§7.4 says *no
+> stamp beyond `MAX_FUTURE_DRIFT_MS` into the future*. Put the machine's clock behind the log's
+> newest stamp — a dead RTC battery, a laptop opened in another timezone, a restore — and
+> reconciliation must mint above a horizon the clock refuses. §12.6 loses, and the way it lost was
+> the whole finding: the reconcile threw, the log was quarantined `reconcile-failed`, **and the
+> files were renamed away**. The user's entire history, destroyed by a wrong date.
+>
+> **THE FIX is a deferral, not a repair**, because the condition is *expected to stop being true*:
+> `_clockSkew(log, checkpoint)` is asked **before** reconciliation is attempted at all, and
+> quarantines `clock-skew` when the log's newest stamp is beyond the drift window. The detail
+> names **the clock**, both dates, the number of hours, and the 24-hour rule, and says plainly
+> that the log is not being discarded. `DEFERRED_QUARANTINE` makes `_sequesterQuarantine` **refuse
+> to move a deferred log aside**, so the files keep the names the next launch looks under, and
+> `quarantine.deferred === true`.
+>
+> **The ADR was corrected, not the code alone**, which is the part that keeps this closed: ADR 006
+> gains **§7.1** (the two rules, and why §12.6 loses), `clock-skew` joins §7's reason table, and
+> **§12 rule 6 is amended** to *"a precondition for adoption, not an instruction to try"*. **ADR
+> 001 §1.3/§7.4 is left exactly as it was** — it is the rule protecting something real, and the
+> one that had to give was the one asking for the impossible. The row asserts the 12-hour
+> non-vacuity control first, and proves the same log is adopted with `reconciled === 0` once the
+> skew is inside the window. **Mutants (§7):** rows 44-45.
+
 ### LOW
 
 | id | aka | one line | file:line | owner | status |
@@ -361,6 +656,7 @@ that does not match `board.json` must be **quarantined**, not trusted.
 | **A3-M1a** | M-1 | The door policy is two rules: it **throws** on 27 hostile values and silently **accepts** 3 | `src/js/core/ops.js` | **PO** | **fixed** — §4.3 ruled; residual is F-2 |
 | **F-4** | F-4 | ATT-5: deleting an already-deleted entry records 1 undo step where v1 recorded 2 | `src/js/core/undo.js` | — | **accepted** — strictly better |
 | **I-4** | new | `GENESIS(index)` throws `RangeError` above 1,000,000 entities — a **data-driven throw out of the migration door**, which is the one thing A3-M1a's ruling forbids | `src/js/core/migrate1to2.js:127` | **PO** | **decision** — §4.4 |
+| **R5-12d** | R5-12d | `coerceToV1Date`'s ISO tail is accepted **un-range-checked** (`'2026-03-04T25:00'` passes) — filed as a defect, closed as a **corrected claim**: the tail is a *shape*, and the invariant that matters is that nothing in it may change which day the value names | `src/js/core/migrate1to2.js:641-681` | **WP-3** | **accepted** |
 | **I-6** | new | A quarantined op log is left on disk and therefore **re-derived and re-reported on every launch** — safe, but noisy, and there is no way for the user to make it stop | `src/js/storage.js` | **WP-8** | open |
 
 - **F-8** is against **principle 6** and story 11.6. `migrate1to2.js` builds `MigrationLossyError`
@@ -424,6 +720,26 @@ that does not match `board.json` must be **quarantined**, not trusted.
   `checkpoint.quarantined-<ts>.json`. Noted in `_quarantineLog`'s docblock. **Do not "fix" it by
   deleting them.**
 
+> ### R5-12d — THE CLAIM WAS CORRECTED, NOT THE REGEX
+>
+> Filed as *"the ISO tail is not range-checked, so `T25:00` is accepted"*. Tightening it was
+> **rejected on a measurement, not on taste**, and the measurement is the record: v1 paints
+> `endDate: '2026-03-04T25:00'` in exactly **one** column (with a NaN end day of its own —
+> `parseISO` splits on `-`), v2 paints that same one column, and refusing the tail moves it to
+> **ten**. That is R5-11's cost all over again, arrived at from the opposite direction: the
+> "stricter" behaviour is the one that diverges from v1.
+>
+> So the docblock now describes the tail as **a wall-clock time by shape, deliberately
+> un-range-checked**, and states the invariant that is actually load-bearing: *nothing in the tail
+> may change which day the value names* — which is exactly why `Z` and `±HH:MM` are still refused.
+> R5-12d is inverted and pins the accepted behaviour; **R5-12e** is the new row carrying the
+> one-column-versus-ten measurement, so a future pass that finds the regex "sloppy" meets the
+> number before it meets the code. **Mutant (§7):** row 46.
+>
+> *A v1 quirk worth its own row if anyone ever cares:* `parseISO` splits on `-`, so that edge
+> gives v1 a segment with `endDay: NaN`. v1's own rendering of this class is degenerate, which is
+> part of why §4.6 is a judgement call rather than an obvious fix.
+
 ### INFO, gaps and accepted divergences
 
 | id | aka | one line | file:line | owner | status |
@@ -466,21 +782,43 @@ live. **Steps 1, 3-a and 5-a of the original list are done.** What is left, in o
 4. **F-6** — the `ATTESTATION` park reason, or retain refused ops. First contact loses data without it.
 5. **F-7**, **F-2** — the `applyRemote` seam: drop `local`-space ops, and make the throw/accept
    rule one rule. ~~**A3-H3** — guard `null`.~~ **DONE.**
-6. **A3-M5** — `_persistOps` must append, and `truncateOps` must be given the tail length.
-7. **I-3** — enforce the P2 `deviceShort ↔ sigPubRaw` binding inside `attestOpen`, so §2.3's
-   "function" claim is true at fold time rather than only after the envelope is refused.
+6. ~~**A3-M5** — `_persistOps` must append, and `truncateOps` must be given the tail length.~~
+   **DONE**, and it was not the small item this list made it look like — see its HIGH row. Two
+   things follow from it that WP-8 owns: the outbox in `ops.jsonl` now genuinely exists and has a
+   producer, and **ADR 001 §7.2's 30-day debuggability tail is still not implemented** (the
+   compaction is total). If WP-8 needs the tail for anything but bounding the file, say so before
+   building on it.
+7. **I-3** — **now a decision, not an engineering task: §4.5.** WP-6's owed P2 check was the
+   planned fix and round 5 proved it does not close the hole, because `sigPubRaw` is a public key
+   travelling in the victim's own register. Do not start this one by writing code.
+8. **R5-5b** — folding an adopted checkpoint through `applyRemote`'s gate. This is **F-5** seen
+   from the authority rule's side, and closing F-5 closes both. ADR 006 §8.1's corollary comes
+   with it: once a space exists, the persisted board is the FULL projection.
+9. **R5-2g** — a Time-Machine restore of a pre-lineage `board.json` still quarantines a current
+   log. Low frequency, high consequence, and the fix is not obvious: the restored board carries no
+   `_v2`, so there is nothing to compare, and the honest options are the same three the ADR
+   rejected for A3-C1. Decide it deliberately rather than at 3 a.m.
 
 **Not on the WP-8 path but on the shipping one:** **I-1** and **I-2** are reachable today, by any
 user with a hand-edited or third-party `board.json`, with no second device anywhere. I-1 can lose
-a board; I-2 shows a white screen. Neither waits for WP-8.
+a board; I-2 shows a white screen. Neither waits for WP-8. **R5-3's whole class is in the same
+category** and is closed, which is why it was worth the round: it needed no second device either,
+only a truncated byte.
 
 ---
 
 ## 4. Needs a decision — a PO must choose, not an engineer
 
-**Three of the four are answered.** The rulings of 2026-08-27 are recorded verbatim below the
+**Three of the seven are answered.** The rulings of 2026-08-27 are recorded verbatim below the
 trade-off that produced them, so a later reader sees what was weighed and not only what was
-chosen. **Do not re-litigate 4.1–4.3.** §4.4 is new and open.
+chosen. **Do not re-litigate 4.1–4.3.** §4.4 was opened by the first fix pass; **§4.5 and §4.6
+were opened by round 5** and are the two that block real work.
+
+| § | question | opened by | blocks |
+|---|---|---|---|
+| 4.4 | `GENESIS(index)` above a million entities | fix pass | nothing today |
+| **4.5** | **I-3 / R5-7 — a remote denial of service on any family member's device** | round 5 | **WP-6, and WP-8 behind it** |
+| **4.6** | **R5-11g — a bar edge with no faithful v2 value at all** | round 5 | nothing today; it is a fidelity ceiling |
 
 ### 4.1 F-1 — does `board.json` go back to being a fixed point?  · **DECIDED: FIX**
 
@@ -562,6 +900,70 @@ in this register whose trigger no user can reach — but it should be *chosen*, 
 
 ---
 
+### 4.5 I-3 / R5-7 — a remote denial of service on any family member's device  · **OPEN**
+
+**The trade-off, in two sentences.** `attestationOf` resolves a contested `deviceShort` by
+**refusing it**, which is the safe answer to *"two attestations claim this short"* and the
+catastrophic answer to *"someone deliberately filed one"* — so a rule written to prevent
+impersonation instead hands any family member a button that silently and permanently mutes any
+other member's Mac. Resolving contested shorts by **first claim on `(sigPubRaw, short)`** keeps a
+victim's device working and moves the failure onto the squatter, at the cost of admitting that the
+first writer wins a race the protocol does not otherwise arbitrate.
+
+**Why it is a decision and not a bug fix.** The three candidate answers differ in what they
+promise the family, not in how hard they are to code:
+
+| option | what it costs | what it buys |
+|---|---|---|
+| **(a) first-claim on `(sigPubRaw, short)`** | the first writer wins a race; a genuine 16-char collision now resolves *arbitrarily* rather than safely | the attack stops working — a squatter cannot displace a key already bound |
+| **(b) a revocation register** | a new op kind, a new authority question (*who may revoke?*), and every question ADR 004 asks about redaction, asked again | the only option that can ever **undo** a mistake; the fold currently has no way back from anything |
+| **(c) accept and bound** | the hole stays; the family is asked to trust its own members, which is what a family calendar assumes anyway | nothing to build; honest, if it is written down where a user can read it |
+
+**The mechanism, for whoever decides.** The short is the last 16 characters of every stamp that
+device has ever written, so it is **trivially discoverable** — it is not a secret and was never
+meant to be one. A bare `dev.*` attestation is **self-authorizing** (G-1), so *anyone* can file
+one. `dev.*` is **write-once**, so the victim re-attesting changes nothing. There is **no
+revocation anywhere in the fold**. The result is permanent: every sealed envelope from that Mac
+parks for ever, and the user's symptom is "my calendar stopped syncing and nobody can say why".
+
+**WP-6's owed P2 check does NOT close it**, and this is the part that must not be forgotten:
+`sigPubRaw` is a **public key travelling in the victim's own register**. The squatter copies it,
+tells the truth about it, and passes P2. Any plan of the form "we'll fix I-3 when we do the
+attestation binding" is wrong; the binding must be `(sigPubRaw, short)` **first-claim**, i.e.
+option (a), or P2 buys nothing here.
+
+→ `tests/attack/round5-attestation.test.js` R5-7b (one op mutes a device, permanently), R5-7c (P2
+does not close it — the row exists so this cannot be re-planned), R5-7d (`authz.js:882` already
+rules this trade out for the *label*, and ships it for the *short*).
+
+### 4.6 R5-11g — a bar edge with no faithful v2 value at all  · **OPEN**
+
+**The trade-off, in two sentences.** R5-11 fixed the two classes where a faithful value exists —
+text sorting outside `DATE_RE`'s alphabet, which maps to the ends of that alphabet — but an edge
+sorting **inside** it (`'1.3'`, `'2026-03-04 bis 2026-03-09'`) has **no** `YYYY-MM-DD` at its
+position, so it is still dropped and the bar still runs to the far edge where v1 drew one column
+or none. The complete fix is a **floor** — *the greatest date that still sorts before this text* —
+and it collides head-on with finding 6's normative refusal of a zoned datetime, because
+`'2026-04-01T23:00:00-05:00'` floors to `'2026-04-01'`, which is the day v1 painted and **not** the
+day that instant names in Berlin.
+
+**So the question to the PO is which fidelity wins**: matching what v1 *painted* on every input,
+or refusing to invent a day for a value that names an instant in another timezone. They cannot
+both be honoured by one rule, and R5-12b's letter breaks if the floor is taken. The residual is
+bounded and measured — the row is annotated `SUCCEEDED (defect, NARROWED)` and left green on
+purpose — so nothing regresses while this waits. It blocks no work; it is a ceiling on how close
+v2 can get to v1, and it should be an explicit ceiling rather than an accident.
+
+→ `tests/attack/round5-coercion.test.js` R5-11g.
+
+### 4.7 ADR 006 §12.6 vs ADR 001 §7.4 — **RESOLVED, not a decision**
+
+Listed here because the round-5 brief flagged it as possibly needing a ruling. **It does not.**
+R5-2e resolved it in code *and in the ADRs*: §12 rule 6 is amended to "a precondition for adoption,
+not an instruction to try", ADR 006 gains §7.1 stating the two rules and why §12.6 loses, and **ADR
+001 §1.3/§7.4 is untouched** — the rule protecting something real was kept and the rule asking for
+the impossible was the one that gave. See R5-2e's MEDIUM narrative. Nothing is owed to a PO here.
+
 ## 5. What was attacked and held — recorded so it is not re-attacked
 
 Both audits spent most of their time on things that turned out to be right.
@@ -638,32 +1040,47 @@ Not findings — **holes in the evidence**, and where the next round should star
 
 ### 6b. The ugly corpus, measured — 500 seeds
 
-The A3-H2 fix pass widened `generateUglyBoard` by six classes. **A class at zero frequency means
-the corpus cannot reach the code it was written for**, so P14 asserts every class is present in at
-least 1% of seeds and prints the table on failure. Observed, `generateUglyBoard(0…499)`:
+**A class at zero frequency means the corpus cannot reach the code it was written for**, so P14
+asserts every class is present in at least 1% of seeds and prints the table on failure. Observed,
+`generateUglyBoard(0…499, {defaults})`, **refreshed after round 5**:
 
 | ugly-value class | seeds hit | frequency | added for |
 |---|---|---|---|
 | over-length text/label | 430/500 | 86.0% | earlier round |
-| undrawable entry | 376/500 | 75.2% | earlier round |
+| a date that names one day but is not ISO | 401/500 | 80.2% | A3-H2 |
+| undrawable entry | 375/500 | 75.0% | earlier round |
 | unknown keys | 368/500 | 73.6% | earlier round |
+| a truthy non-boolean flag | 335/500 | 67.0% | A3-H2 |
 | non-string text | 334/500 | 66.8% | earlier round |
+| a bar with one end | 322/500 | 64.4% | A3-H2 |
 | null settings | 305/500 | 61.0% | earlier round |
-| duplicate ids | 192/500 | 38.4% | earlier round |
+| an id v2 cannot use | 294/500 | 58.8% | A3-H2 |
+| duplicate ids | 193/500 | 38.6% | earlier round |
+| **a bar edge sorting ABOVE every date v2 can hold** | 193/500 | 38.6% | **R5-11** |
+| **a bar edge sorting BELOW every date v2 can hold** | 166/500 | 33.2% | **R5-11** |
 | dangling categoryId | 123/500 | 24.6% | earlier round |
-| empty scratchpad | 57/500 | 11.4% | earlier round |
+| empty scratchpad | 55/500 | 11.0% | earlier round |
+| a non-string scratchpad | 47/500 | 9.4% | A3-H2 |
 | empty categories | 43/500 | 8.6% | earlier round |
 | unrenderable startMonth | 24/500 | 4.8% | earlier round |
-| **a truthy non-boolean flag** | 340/500 | 68.0% | **A3-H2** |
-| **an id v2 cannot use** | 291/500 | 58.2% | **A3-H2** |
-| **a date that names one day but is not ISO** | 288/500 | 57.6% | **A3-H2** |
-| **a bar with one end** | 116/500 | 23.2% | **A3-H2** |
-| **a non-string scratchpad** | 52/500 | 10.4% | **A3-H2** |
-| **a bar with no dates at all** | 25/500 | 5.0% | **A3-H2** |
+| a bar with no dates at all | 24/500 | 4.8% | A3-H2 |
+
+**Read the movement, not just the numbers.** Round 5's generator block consumes the rng stream, so
+several existing rows moved even though nothing about them changed — `a bar with one end` 23.2% →
+64.4%, `a date that names one day but is not ISO` 57.6% → 80.2%, `empty scratchpad` 11.4% → 11.0%,
+`a bar with no dates at all` 5.0% → 4.8%. **This is why the table is regenerated and pasted rather
+than hand-edited**: a stale corpus table reads exactly like a fresh one.
+
+**The two new classes are reported separately, on purpose.** They were one class until round 5, and
+a merged count goes green on a corpus that has quietly become one-sided — which is precisely how
+R5-11 survived four rounds: `generateUglyBoard` reached only the side that sorted *above* the
+range, so the empty-string case, the commonest hand-edit there is, was never generated. P14 now
+enforces the 1% floor on both halves independently, and **mutant row 41** is the corpus losing the
+ABOVE half again.
 
 **No class is at zero.** P13 (the two doors produce the same board for the same bytes) runs over
-this corpus and is green, and it is the property that caught **both** of the mutants that reverted
-only the import door.
+this corpus and is green; it is the property that caught **both** of the mutants that reverted only
+the import door, in the first pass and again in round 5.
 
 `{toString(){}}` is deliberately **not** in the corpus: the harness `structuredClone`s every board
 and a function kills the fixture rather than the door. That row lives in the hand-written attack
@@ -705,12 +1122,62 @@ the wrong reason.
 | 22 | **I-5 projection lock only** | **1** | a pref NAME nested past the cap is dropped by the projection |
 | 23 | **A3-H3 / clock — the reachability claim** (`validateOp` stops refusing a non-stamp `ts`) | **1** | R3-23b · ten hostile stamps, each refused by name |
 
-**F-10's four §2.3 acceptance conditions** were mutated one at a time as well, because all four
-*were* already enforced and none had an individual test — three of them could have been deleted in
-silence. Drop condition (1) `op.act === memberId` → 2 rows; (2) name === `att.deviceShort` → 2;
-(3) `att.memberId` === housing member → 1; (4) the signature check → 5; drop `attestOpen` support
-→ 1; accept a **disagreeing** `attestOpen` → 1; let the table take the last claim rather than the
-minimal one → 1; make collisions silent → 1.
+**Round 5 added twenty-six more.** Same rule, same scratch copy (`…/scratchpad/mut`, with `.git`),
+all three node suites re-run per row. **Every count below was measured by the integration pass, not
+carried over from a fixer's report** — and counting is leaf rows only: node reports a failing
+`describe` as a `not ok` line too, and including those inflates every number by one per block.
+
+| # | fix reverted | tier1 | attack | prop | first row named |
+|---|---|---|---|---|---|
+| | **R5-3 — the recovery path** | | | | |
+| 24 | `init()`'s branch back to `kind !== 'ok' && hasLog ⇒ _recoverFromLog` (round 5's own **M1**) | — | **4** | — | R5-3a · an unparseable board.json is a READ-ONLY boot |
+| 25 | `loadBoardFile` drops `failure = readError(e)`: a thrown native read is `absent` again (round 5's own **M2**) | — | **2** | — | R5-3c · storage reports four statuses |
+| 26 | classify correctly but never set `bootFailure` — right board on screen, session still writable | — | **5** | — | R5-3a |
+| 27 | drop `&& !this.bootFailure` from the sequester gate — a failed boot renames the evidence | — | **2** | — | R5-3a |
+| 28 | `const snap = null` — `snapshots.json` is never consulted | — | **2** | — | R5-3a |
+| 29 | `_projectSafe` assigns `bootFailure` again, erasing *why the board could not be read* | — | **1** | — | **R5-3e** · the FIRST reason wins |
+| 30 | `persistNow`'s read-only sentence back to one-size-fits-all "could not be drawn" | — | **1** | — | **R5-3f** · the warning says which of the four happened |
+| 30b | …and the opposite: the "could not be drawn" claim deleted for *every* reason | — | **1** | — | **R5-3f**'s third clause — the non-vacuity control |
+| | **A3-M5 / R5-4 — the log records** | | | | |
+| 31 | the `appendOps` call deleted (round 5's own **M4**) | — | **6** | — | R3-39 · `_persistOps()` appends |
+| 32 | `_stampedCheckpoint` → `checkpoint({horizon: peek()})`, emptying the outbox (round 5's own **M3**) | — | **3** | — | R3-35c · a log this build wrote is still trusted |
+| 33 | step ④'s guard dropped — truncate unconditionally | — | **5** | — | R3-39 |
+| 34 | `TAIL_COMPACT_AT = Infinity` — the tail never compacts | — | **1** | — | R5-4e · the tail is BOUNDED |
+| 35 | `resolveHorizon('advance')` back to `maxLiveStamp() ?? horizon` | **1** | — | — | `core-oplog.test.js` · compact() with every live line below the horizon |
+| | **R5-11 — the coercion class** | | | | |
+| 36 | `coerceToV1BarEdge` returns `null` — the whole fix | **1** | **11** | — | `INVERTED (R4-10)` · a bar with one end keeps ONE end |
+| 37 | the edge rule sees the **trimmed** value, i.e. runs after `coerceToV1Date` | — | **1** | — | R5-11a · `endDate = " 2026-03-04"` |
+| 38 | the edge rule wired into the **import door only** | **1** | **11** | **1** | `INVERTED (R4-10)`, and **P13** — the property that says the two doors are one door |
+| 39 | the drop is never recorded (`wasDropped → false`) | — | **1** | — | R5-11g · the false fidelity claim returns |
+| 39b | the dropped tail printed for an **absent** edge too (`wasDropped → true`) | — | **1** | — | R5-11h · R4-10 is untouched by the fix |
+| 39c | the `NOT DRAWN on any day` branch deleted | — | **1** | — | R5-11b · the warning says what the user will see |
+| 40 | `EARLIEST_DATE` / `LATEST_DATE` **swapped** | **2** | **12** | — | `INVERTED (R4-10)` |
+| 40b | `EARLIEST_DATE = '0001-01-01'` — one step inside the alphabet | **1** | **7** | — | `core-ops.test.js` · the two ends of `DATE_RE` |
+| 41 | the corpus loses the ABOVE half | — | **1** | **1** | R5-13a · both sides are generated, and **P14** |
+| | **R5-5a — the post-condition's blind spot** | | | | |
+| 42 | `v1ContentOf` stops emitting `order[spec.key]` | — | **1** | — | R5-5a · swapping two `_born` values is REFUSED |
+| 43 | `postConditionDetail` loses the order clause | — | **1** | — | R5-5a |
+| | **R5-2e — the clock skew** | | | | |
+| 44 | the `_clockSkew` precondition removed | — | **1** | — | R5-2e · a skew of >24 h DEFERS and destroys nothing |
+| 45 | `DEFERRED_QUARANTINE` emptied — a deferred log is renamed after all | — | **1** | — | R5-2e |
+| | **R5-12d — the corrected claim** | | | | |
+| 46 | R5-12d closed the other way: the ISO tail tightened to a real clock | — | **2** | — | R5-12d · the tail is a wall-clock time BY SHAPE |
+
+**Round 5's own mutants were re-run on top of the round-5 fixes and are still lethal** — the check
+that says one fix did not quietly undo another:
+
+| round 5's mutant | tier1 | attack | prop | first row named |
+|---|---|---|---|---|
+| **M2** (recovery: a thrown read is `absent`) | — | 2 | — | R5-3c · storage reports four statuses |
+| **M3** (the checkpoint folds the whole tail) | — | 3 | — | R3-35c |
+| **M4** (nothing appends) | — | 6 | — | R3-39 |
+| **M9** (`Boolean(v)` instead of probing v1) | **7** | **48** | **3** | `R3-28 INVERTED` · a truthy `repeatsYearly` keeps repeating |
+| **M10** (`coerceToV1Date` refuses every non-ISO shape) | **4** | **33** | **3** | `R4-9` · `4.3.2026` |
+
+**Two "fixes" arrived at the integration pass unproven** — rows 29 and 30. Reverting either killed
+**nothing** in any of the four suites, which is the same thing as not having a fix. R5-3e and R5-3f
+were written to close them *before* they were recorded here. That is the rule working, and it is
+written down because the alternative is a register that lists a fix nothing defends.
 
 ### 7b. The one that survived, and what was done about it
 
@@ -729,6 +1196,48 @@ redundant. Row 23 in the table is that assertion's own mutant. This is the only 
 code whose entire value is that it is currently unreachable, and the alternative — leaving
 "hardened against a hostile peer" in a report when the hostile peer never gets there — is the kind
 of claim this register exists to stop.
+
+---
+
+## 7c. The accepted-defect list — every `tests/attack/` row that is green BECAUSE a defect exists
+
+**The rule: invert one when you close its defect, never delete it.** Swept and re-verified at the
+close of the round-5 integration pass. **23 rows**, against 24 before the sweep — R3-39 was still
+asserting `_persistOps()` never appends, which A3-M5's closure made false, and it is now inverted.
+
+| row | file | the defect it pins | register row |
+|---|---|---|---|
+| R3-2 | `round3-seam.test.js` | `reconcileList` preserves an entry object's **key order** | A3-L1 |
+| R3-3 | `round3-seam.test.js` | a remote `pref.set` moves the registers and never reaches `state.settings` | F-7 |
+| R3-4 | `round3-seam.test.js` | `applyRemote` has no space filter — it admits `local`-space ops | F-7 |
+| R3-5 | `round3-seam.test.js` | `setSettings`' wholesale replace disagrees about a DRAWN layer | F-7 |
+| R3-6 | `round3-seam.test.js` | a `setSettings()` makes the next transaction emit a duplicate `pref.set` | A3-L2 |
+| R3-10 | `round3-seam.test.js` | a throwing `mutate()` callback's half-edit is adopted by the next action | A3-M4 |
+| R3-11 | `round3-seam.test.js` | a NESTED `mutate()` builds an undo step reverting two actions | A3-M3 |
+| R3-11b | `round3-seam.test.js` | when `verify()` fires, `undo()` has already changed the board | A3-M3 |
+| R3-20 | `round3-doors.test.js` | 27 of 36 hostile inputs THROW out of `apply()` | F-2 |
+| R3-21 | `round3-doors.test.js` | the throw is not always an `OpError` — `EntityKeyError` too | F-2 |
+| R3-25 | `round3-doors.test.js` | a peer's over-length value is REFUSED where the diff door truncates | F-2 |
+| R3-27 | `round3-doors.test.js` | `store.warnings` is write-only — nothing in `src/` reads it | F-8 |
+| R3-40 | `round3-persistence.test.js` | two Macs agree on stamps, not on **authors** | A3-H4 |
+| R3-41 | `round3-persistence.test.js` | the other Mac's ops are refused `notMyAct` | A3-H4 |
+| R4-11b | `round4-coercion-oracle.test.js` | `board.json` still not a fixed point after "clear a scratchpad" | F-1 residual |
+| R4-16a | `round4-attestation.test.js` | the fold has **no revocation**, and write-once means no amendment | **I-3 / §4.5** |
+| R4-19c | `round4-fixed-point.test.js` | a scratchpad held as `""` — v1 is a fixed point here, v2 is not | F-1 residual |
+| R5-2g | `round5-authority.test.js` | a Time-Machine restore of a pre-lineage `board.json` destroys the log | R5-2g |
+| R5-5b | `round5-authority.test.js` | a field `board.json` cannot express at all is invisible to both halves | R5-5b / F-5 |
+| R5-7b | `round5-attestation.test.js` | ONE well-formed op mutes a named device, permanently | **I-3 / §4.5** |
+| R5-7c | `round5-attestation.test.js` | **P2 does not close it** — `sigPubRaw` is public | **I-3 / §4.5** |
+| R5-7d | `round5-attestation.test.js` | `authz.js:882` rules this trade out for the LABEL and ships it for the SHORT | **I-3 / §4.5** |
+| R5-11g | `round5-coercion.test.js` | an edge sorting INSIDE the alphabet has no faithful v2 date | **§4.6** |
+
+**Nine of the twenty-three trace to just three register rows** — F-2/F-7 (the `applyRemote` seam),
+A3-H4 (durable identity), and I-3 (§4.5). None of them is a small independent bug; each is a
+decision or a work package. That concentration is the useful reading of this table.
+
+**Rows inverted by the round-5 integration pass:** R3-39 (`_persistOps` appends; the file header's
+"`store.js` never writes `ops.jsonl`" corrected to the narrower claim R3-38 actually pins).
+**Rows added:** R5-3e, R5-3f (the two unproven fixes), R5-4f (the headline sequence).
 
 ---
 
@@ -757,16 +1266,42 @@ touched.** These are the items that need one of those files, or a file no one ow
 ### Needs a decision before an edit is possible
 
 3. **I-4** — `GENESIS(index)` above a million entities. §4.4.
+3b. **I-3 / R5-7** — §4.5. **This one is on the WP-6 path and the plan of record for it is wrong**:
+   the owed P2 check does not close it. Read §4.5 before writing any attestation code.
+3c. **R5-11g** — §4.6. Blocks nothing; it is a fidelity ceiling that should be explicit.
 4. **I-1 / I-2** — both are `store.js` and both are *fixable*, but the fix is a re-ordering of
    `replaceAll` and a policy choice about what `init()` should show; neither is a guard that can be
    dropped in without deciding what the user sees. Filed rather than rushed, because the pass that
    found them was proving other fixes and had no mandate to change what an unbootable board does.
+
+### Owed by round 5, and by this integration pass
+
+8. **ADR 001 §7.2's compaction policy is not implemented as written.** The compaction is **total**:
+   the "30-day tail for debuggability" is absent, because `truncateOps` can only drop a prefix and
+   the store does not track which file line an op is on. The 2 MB-at-launch trigger is absent too.
+   Recorded in ADR 006 §8.5 and in the `TAIL_COMPACT_AT` docblock; **ADR 001 §7.2's own text is
+   still unamended** and should be, by whoever owns that ADR.
+9. **The first-run tour still shows over a disaster boot with no snapshot.** `seenFirstRun` is left
+   at v1's `false` because `tests/tier1/store-persistence.test.js:240` characterizes it by name
+   ("treated as a first run"). Re-baselining a v1 observable is the tier-1 owner's call. The
+   read-only guard and the warning are what actually protect the file.
+10. **`quarantineLogAside` on the native path** still cannot move anything (the owed
+    `quarantine_logs` shell command — row **I-6**). Much less pressing than it was: a failed boot
+    never sequesters at all now, so the path where this mattered most is gone.
+11. **Two files had two owners this round.** `src/js/store.js` and
+    `tests/attack/round5-authority.test.js` were assigned to two parallel fixers at once. Both used
+    anchored edits and both sets of changes survived, but the reconciliation was luck rather than
+    process. **Assign one owner per file next round.**
 
 ### Owned by WP-6, recorded so it is not rediscovered
 
 5. **Remove `attestedDevices` / `memberOfDevice`** once their callers move to `attestationOf`.
    They have live callers in `ownership-authz-content.test.js` and `ownership-authz-admin.test.js`
    and are marked in `ops.contract.js` as derivable, "do not add new ones".
-6. **Enforce the P2 binding in `attestOpen`** — row **I-3**.
+6. ~~**Enforce the P2 binding in `attestOpen`** — row **I-3**.~~ **DO NOT START HERE.** Round 5
+   (R5-7c) proved P2 does not close I-3: `sigPubRaw` is a public key travelling in the victim's own
+   register, so a squatter copies it, tells the truth, and passes. **§4.5** is the decision that has
+   to come first, and only option (a) — first-claim on `(sigPubRaw, short)` — makes the binding
+   worth writing.
 7. **`ctx.myDevices` should be derived, not plumbed** — `attestationOf` filtered by `memberId`,
    once A3-H4 lands. That removes the `act === me` degradation A3-H4 flags as a WP-8 blocker.

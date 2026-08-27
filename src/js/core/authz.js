@@ -190,8 +190,81 @@ export const isRejectReason = (r) => REJECT_CODES.has(r);
 //       the subject being the housing member, never the payload's self-declared one.
 // (3) and (4) together are what stop a member copying a peer's blob verbatim into their own
 // record: the payload names the peer, the housing record names the copier, and the two must
-// agree. §5.2.1 warns explicitly that relaxing either breaks §5.2. See `shortCollisions` for the
-// one residual the four conditions do NOT close.
+// agree. §5.2.1 warns explicitly that relaxing either breaks §5.2.
+//
+// AND HERE IS WHAT THE FOUR CONDITIONS DO **NOT** BIND: `att.deviceId`. Round 4, R4-13a.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A `deviceId` IS A LABEL, NOT AN IDENTITY (ADR 002 §2.3 as amended · round-4 finding 4)
+//
+// This block used to end with the claim that "a deviceId can only ever map to one member".
+// IT WAS FALSE, and the shape of the falsehood is worth keeping, because it is the same shape
+// §4.4 removed from ownership.
+//
+// Condition (1) binds the housing record to `op.act`. (2) binds `att.deviceShort` to the
+// register NAME. (3) and (4) bind `att.memberId` to the housing member and to the key that
+// signed. Enumerate the payload's six fields against that list and one is left over:
+// `deviceId` is a 128-bit random value with no derivational relationship to any key, asserted
+// by its own author, checked by nothing. So Eve mints an attestation that is honest in every
+// checkable respect — her record, her short, her `memberId`, her signature — and writes MAMA's
+// `deviceId` into it. All four conditions pass. Nothing is rejected.
+//
+// THE FIX IS NOT A FIFTH CONDITION. There is no fifth condition available: a pure fold cannot
+// know which member a random 128-bit label "really" belongs to, and any rule that picked a
+// winner between two claims would be picking it on a stamp, i.e. on a number the attacker
+// chooses (R4-13b showed exactly that, on the map this file used to publish). Adding a check
+// here is the move ADR 001 §4.4 refused for ownership, and it fails for the same reason.
+//
+// SO THE LABEL IS DEMOTED, THE WAY THE `owner` REGISTER WAS NEVER CREATED. The identity of a
+// device in this system is the PAIR — the housing member and the register name — and the
+// register name is `deviceShort`, which ADR 001 §1.2 derives from the device's signing key and
+// which ADR 002 §5.2.2 P2 self-certifies. Everything that enforces anything already reads the
+// pair:
+//   · stage 0b asks `attested.get(op.act).has(op.dev)` — the member's OWN record, never a
+//     global table;
+//   · §5.2.2's checks 3 and 5 read `att.deviceId` / `att.memberId` off ONE attestation resolved
+//     by `env.dv`, so both come from the same signed payload.
+// The only thing that ever treated a bare `deviceId` as a key was `memberOfDevice`, and a
+// forgeable resolver for an identity that does not exist is exactly what §4.4 deleted. It is
+// deleted here too: `memberOfDevice` is now the SOLE-CLAIMANT function — one claimant answers,
+// two or more answer `null` — and every contested label is published on `deviceIdCollisions`.
+// No stamp is consulted, so there is nothing left for a backdate to decide.
+//
+// WHAT EVE GAINS BY ADOPTING MAMA'S LABEL: nothing, and that is provable rather than hoped for.
+// The op she can author with it is `act = EVE, dev = <label>`, which stage 0b admits for ANY
+// label she has attested in her own record — a fresh random one included (pinned as R4-13d).
+// She cannot author as Mama: `act` is gated by her own attestations, and the envelope layer
+// gates the signature under `att.sigPubRaw`, which is her key and hashes to her short. The
+// forged value is therefore observationally equal to a random value, so there is nothing to
+// gain by forging it. `attestedDevices.get(EVE)` containing that label is not "Eve has Mama's
+// device"; it is "Eve has a device that answers to a colliding label", and the collision is
+// reported.
+//
+// WHAT IS STILL OWED (ADR 002 §2.3, amended): a `deviceId` is a label, so nothing may key on it
+// alone. `attestedDevices` and `memberOfDevice` are the last two accessors that come close, both
+// already marked for removal by WP-6 (`ops.contract.js` §4). A member's device COUNT is honest
+// — one register, one device, whatever the label says — so the §2.3 panel surface is unaffected.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// A CONTESTED `deviceShort` IS NOT A CREDENTIAL (finding I-3)
+//
+// The residual the four conditions leave is the mirror of the above: nothing pure and
+// synchronous can check `crock32(SHA-256(sigPubRaw)[0..10]) === att.deviceShort` (ADR 002
+// §5.2.2's P2 — it is a SHA-256, and this file may not await), so a member CAN file a
+// well-formed attestation under a PEER's short. This file used to resolve that contest
+// minimal-under-`≺` and report the short on `shortCollisions`, which handed a backdated squatter
+// `openOp`'s verification key and left the report with no reader.
+//
+// The contest is no longer resolved, because it has no correct resolution: a short claimed on
+// more than one member record is REFUSED BY `attestationOf`, which returns `null`. `null` is
+// already a defined outcome at that seam — §5.2.2 P1 PARKS the sealed envelope, unopened, and a
+// park is re-evaluable (§5.2.5) — so a squatter can stall an envelope but can never be handed
+// the key that opens it, and no honest op is lost. `shortCollisions` keeps reporting, and now
+// has a reader: this function. Two shorts are contested:
+//   · one short on two different member records; and
+//   · one `sigPubRaw` under two different shorts — a DIRECT contradiction of §1.2 that needs no
+//     hash to see, since one signing key hashes to exactly one short.
+// P2 in `attestOpen` (WP-6) still closes this at the root; until then the fold refuses to guess.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** b64url is the alphabet ADR 002 §2.3 fixes for the two raw public points. */
@@ -249,6 +322,17 @@ export function parseAttestationBlob(blob) {
     createdAt: att.createdAt,
   });
 }
+
+/**
+ * The six fields ADR 002 §2.3 fixes, in the order it lists them. `attestationVerifies` compares
+ * ALL SIX — not the four it used to (R4-15a). The two it skipped were `createdAt` and, worse,
+ * `kexPubRaw`: the KEY-AGREEMENT POINT, which is the exact thing §2.3's anti-key-injection
+ * argument is about and the exact thing §4.2 wraps the space key to. An injected opener that
+ * could disagree about it and still be believed would be a second, unlogged source of the one
+ * value the family key gets wrapped under — the key-injection hole entered through the front
+ * door, which is what the agreement check exists to refuse.
+ */
+const ATT_FIELDS = Object.freeze(['memberId', 'deviceId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'createdAt']);
 
 /** `dev.<deviceShort16>` — the register-name shape `ops.js` already validates. */
 const DEV_PREFIX = 'dev.';
@@ -524,11 +608,14 @@ const byId = (a, b) => (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0);
  * written against; the two below it are retained for existing in-repo callers and are strictly
  * derivable from it (`attestationOf(dv).memberId` / `.deviceId`). WP-6 removes them once those
  * callers move — see `docs/v2/contracts/ops.contract.js` §4.
- * @property {(dv:string) => DeviceAttestation|null} attestationOf   keyed by deviceShort ALONE
- * @property {string[]} shortCollisions      sorted deviceShorts claimed on more than one member
- *                                           record; the residual §2.3's four conditions leave
+ * @property {(dv:string) => DeviceAttestation|null} attestationOf   keyed by deviceShort ALONE;
+ *                                           `null` for a CONTESTED short (I-3) as well as a miss
+ * @property {string[]} shortCollisions      sorted contested deviceShorts — one short on two
+ *                                           member records, or one `sigPubRaw` under two shorts
  * @property {Map<string, Set<string>>} attestedDevices      memberId → attested deviceIds
- * @property {(deviceId:string) => string|null} memberOfDevice
+ * @property {(deviceId:string) => string|null} memberOfDevice  the SOLE claimant, else null
+ * @property {string[]} deviceIdCollisions   sorted deviceIds claimed on more than one member
+ *                                           record; a label with no owner (R4-13a)
  * @property {string[]} splicedIds          opIds that arrived carrying two different op bodies
  */
 
@@ -568,10 +655,9 @@ export function foldAuthorized(ops, ctx) {
     if (attestOpen) {
       const opened = attestOpen(memberId, blob);
       if (opened === null || typeof opened !== 'object') return false;
-      return opened.memberId === parsed.memberId
-        && opened.deviceId === parsed.deviceId
-        && opened.deviceShort === parsed.deviceShort
-        && opened.sigPubRaw === parsed.sigPubRaw;
+      // ALL SIX, not four (R4-15a). `kexPubRaw` is the key-agreement point §4.2 wraps the space
+      // key to; an opener allowed to disagree about it is a key-injection channel.
+      return ATT_FIELDS.every((f) => opened[f] === parsed[f]);
     }
     if (attestVerifyFn) return !!attestVerifyFn(memberId, blob);
     return false;
@@ -678,10 +764,11 @@ export function foldAuthorized(ops, ctx) {
   all.sort(opOrder);
 
   // ── Stage 0a. Attestation registers — self-authorizing ────────────────────
-  const attested = new Map();          // memberId -> Set<deviceId>
-  const memberOfDevice = new Map();    // deviceId -> memberId
-  const attByShort = new Map();        // deviceShort -> { att: DeviceAttestation, write }
-  const shortCollisions = new Set();   // deviceShorts claimed on more than one member record
+  const attested = new Map();          // memberId -> Set<deviceId>  — the PAIR, per §2.3 amended
+  const claimants = new Map();         // deviceId -> Set<memberId>  — a label may be claimed twice
+  const attByShort = new Map();        // deviceShort -> { att: DeviceAttestation, member }
+  const shortOfSigPub = new Map();     // sigPubRaw -> deviceShort   — §1.2 is a function
+  const shortCollisions = new Set();   // contested deviceShorts: `attestationOf` refuses these
   const attestOps = [];
   const wellFormed = [];
   const rest = [];
@@ -753,29 +840,47 @@ export function foldAuthorized(ops, ctx) {
       if (!isDevRegisterName(name)) continue;
       const att = parseAttestationBlob(cell.value);
       if (!att) continue;
+      // THE PAIR. `(housing member, deviceId)` is the only device fact this fold asserts, and it
+      // is the one stage 0b reads. It is scoped by construction: the deviceId is read out of a
+      // register that lives in `subject`'s own record and nowhere else.
       if (!attested.has(subject)) attested.set(subject, new Set());
       attested.get(subject).add(att.deviceId);
-      // A deviceId can only ever map to one member: the blob is signed over a payload naming
-      // `memberId`, and the register it lives in must agree with it, so a second member cannot
-      // adopt somebody else's attested device.
-      if (!memberOfDevice.has(att.deviceId)) memberOfDevice.set(att.deviceId, subject);
+      // THE LABEL. `att.deviceId` is asserted by its own author and bound by none of §2.3's four
+      // conditions (R4-13a). It is therefore recorded as a MULTI-valued claim, never as a key: a
+      // deviceId with two claimants has no owner, and `memberOfDevice` says so rather than
+      // picking the one whose author chose the smaller stamp.
+      if (!claimants.has(att.deviceId)) claimants.set(att.deviceId, new Set());
+      claimants.get(att.deviceId).add(subject);
       // THE `deviceShort → DeviceAttestation` TABLE (F-10). One short can appear at most once
       // per member record — the register NAME is the short, and a Map has one cell per name —
-      // so a second sighting is always a second MEMBER claiming the same short. §2.3 argues
-      // that cannot happen honestly (it would need the same signing private key), and the four
-      // conditions above do not make it impossible, only dishonest: nothing in a pure,
-      // synchronous fold can check `crock32(SHA-256(sigPubRaw)[0..10]) === deviceShort`, which
-      // is exactly ADR 002 §5.2.2's P2 and lives in `openOp`. So the contest is resolved the
-      // same way `dev.*` write-once is — MINIMAL under `≺`, a property of the writes and
-      // therefore a function of the SET, never of arrival — and the short is reported on
-      // `shortCollisions` so it is auditable rather than merely survivable.
-      const write = { stamp: cell.stamp, op: cell.op ?? '', value: cell.value };
+      // so a second sighting is always a second MEMBER claiming the same short. §2.3 argues that
+      // cannot happen honestly (it would need the same signing private key), and the four
+      // conditions do not make it impossible, only dishonest. The contest is NOT resolved (I-3):
+      // `attestationOf` refuses a contested short outright, so no ordering, no stamp and no
+      // arrival decides who gets handed `openOp`'s verification key.
       const prior = attByShort.get(att.deviceShort);
-      if (prior === undefined) { attByShort.set(att.deviceShort, { att, write }); continue; }
-      shortCollisions.add(att.deviceShort);
-      if (cmpWrites(write, prior.write) < 0) attByShort.set(att.deviceShort, { att, write });
+      if (prior === undefined) attByShort.set(att.deviceShort, { att, member: subject });
+      else if (prior.member !== subject) shortCollisions.add(att.deviceShort);
+      // The one half of ADR 001 §1.2 a pure fold CAN check: the short is a hash of `sigPubRaw`,
+      // so one signing key hashes to exactly one short. Two shorts over one key is a direct
+      // contradiction — visible without hashing anything — and both shorts are contested. This
+      // catches the squat that lands BEFORE its victim's own attestation, when the member test
+      // above has nothing yet to collide with.
+      const seenShort = shortOfSigPub.get(att.sigPubRaw);
+      if (seenShort === undefined) shortOfSigPub.set(att.sigPubRaw, att.deviceShort);
+      else if (seenShort !== att.deviceShort) {
+        shortCollisions.add(att.deviceShort);
+        shortCollisions.add(seenShort);
+      }
     }
   }
+  // A label with more than one claimant. Reported so the contest is auditable rather than merely
+  // survivable — and so a caller that gets `null` from `memberOfDevice` can tell "unknown device"
+  // from "contested label". Nothing is rejected for it: refusing both claims would let anybody
+  // un-attest an honest peer's device by naming its label, which is a worse trade than an
+  // unresolved query. See the §2 block for why the label buys its forger nothing.
+  const deviceIdCollisions = new Set();
+  for (const [devId, who] of claimants) if (who.size > 1) deviceIdCollisions.add(devId);
 
   // ── Stage 0b. The device gate ─────────────────────────────────────────────
   const gated = [];
@@ -968,11 +1073,23 @@ export function foldAuthorized(ops, ctx) {
     // F-10 / ADR 002 §5.2.3. Keyed by deviceShort alone, because `openOp` calls it before it
     // has decrypted anything and therefore before it knows `op.act`. Never throws on a bad key:
     // `env.dv` is peer-supplied, and peer-supplied input is refused, not thrown on.
-    attestationOf: (dv) => attByShort.get(dv)?.att ?? null,
+    //
+    // I-3: a CONTESTED short resolves to `null`, not to a winner. `null` is a defined outcome at
+    // this seam — §5.2.2 P1 parks the sealed envelope and a park is re-evaluable — so refusing
+    // costs liveness at worst, while resolving cost `openOp` its verification key to whichever
+    // claimant backdated harder. This is `shortCollisions`' reader.
+    attestationOf: (dv) => (shortCollisions.has(dv) ? null : attByShort.get(dv)?.att ?? null),
     shortCollisions: [...shortCollisions].sort(),
     // Retained for existing callers; both fall out of `attestationOf`. WP-6 removes them.
     attestedDevices: attested,
-    memberOfDevice: (d) => memberOfDevice.get(d) ?? null,
+    // The SOLE-CLAIMANT function, not a first-writer-wins map (R4-13a/b). A `deviceId` is a
+    // label its own author asserts; one claimant is an answer, two or more is `null` and a row
+    // on `deviceIdCollisions`. No stamp is read, so backdating decides nothing.
+    memberOfDevice: (d) => {
+      const who = claimants.get(d);
+      return who !== undefined && who.size === 1 ? [...who][0] : null;
+    },
+    deviceIdCollisions: [...deviceIdCollisions].sort(),
     rejectionOf: (id) => rejectionOf.get(id) ?? null,
     parkReasonOf: (id) => parkReasonOf.get(id) ?? null,
     adminOfSpace: (sid) => chainFor(`space:${sid}`).admin,
@@ -1025,6 +1142,11 @@ export function snapshot(r) {
     splicedIds: r.splicedIds.slice(),
     attestations,
     shortCollisions: r.shortCollisions.slice(),
+    // Both contest reports ride in the snapshot, so P5 ("shuffling never changes the fold")
+    // covers them: a device that reported a collision its peer did not would be a divergence in
+    // the one place the design now leans on — `attestationOf` refuses a contested short, so the
+    // report decides whether an envelope opens.
+    deviceIdCollisions: r.deviceIdCollisions.slice(),
     attestedDevices: devs,
     reasons: Object.fromEntries(
       r.rejected.filter((o) => o && typeof o === 'object' && typeof o.id === 'string')

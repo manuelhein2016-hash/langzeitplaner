@@ -332,11 +332,20 @@ describe('attack 5 — what the retrofit newly refuses, and what it silently dro
     assert.equal(store.state.notes.length, 1, 'a note with no id gets a derived one');
     assert.ok(store.state.notes[0].id, 'and it is a real id, so the UI can address it');
 
+    // R4-10 OVERRULED THIS ROW'S SECOND HALF. It used to assert `['2026-03-01', '2026-03-01']` —
+    // the anchor — on the reasoning that v1 drew this bar to the horizon, the horizon depends on
+    // TODAY, and TODAY cannot be migrated (R12). Round 4 painted the same bar with the shipping
+    // `layout.js` and found v1 drawing NINE column-segments where the anchor drew one day, plus
+    // an `endDate` written into the user's file that the file never held. The premise held; the
+    // conclusion did not, because the horizon is not data — it is what `layout.js` does with an
+    // absent edge, in v2 exactly as in v1. So the edge stays absent and the renderer does the
+    // rest. What this row was really about is unchanged and still asserted: the bar is KEPT.
     await boot(store, board({ bars: [{ id: 'b', startDate: '2026-03-01', label: 'Urlaub', categoryId: 'c1' }] }));
+    assert.equal(store.state.bars.length, 1, 'the bar is on the board …');
     assert.deepEqual(
       [store.state.bars[0].startDate, store.state.bars[0].endDate],
-      ['2026-03-01', '2026-03-01'],
-      'v1 drew it to the horizon, which depends on TODAY; the anchor is the edge the file carried',
+      ['2026-03-01', undefined],
+      '… with the edge the file carried, and nothing at the edge it did not',
     );
 
     await boot(store, board({ scratchpads: { '2026-03': 42 } }));

@@ -278,12 +278,46 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * ADR 002 §5.2.2 needs `sigPubRaw` BEFORE it may decrypt (P2/P3) and `deviceId` / `memberId`
  * after (checks 3 and 5), none of which the two derived entries below carry.
  * @property {(dv:DeviceShort) => DeviceAttestation|null} attestationOf
- * @property {DeviceShort[]} shortCollisions    sorted; see the residual note below
+ * @property {DeviceShort[]} shortCollisions    sorted CONTESTED shorts; `attestationOf` refuses
+ *                                              every one of them — see the I-3 note below
  * @property {Map<MemberId, Set<DeviceId>>} attestedDevices   memberId -> attested deviceIds
- * @property {(devId:DeviceId) => MemberId|null} memberOfDevice
+ * @property {(devId:DeviceId) => MemberId|null} memberOfDevice   the SOLE claimant, else null
+ * @property {DeviceId[]} deviceIdCollisions    sorted deviceIds claimed on more than one member
+ *                                              record — a label with no owner
  *
  * [AMENDED 2026-08-27] `attestedDevices` was typed `Set<DeviceShort>` here and has always been
  * `Map<MemberId, Set<DeviceId>>` in `authz.js` — two different things. Corrected above.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * [AMENDED 2026-08-27 — round-4 finding 4. A `deviceId` IS A LABEL, NOT AN IDENTITY.]
+ *
+ * ADR 002 §2.3's four acceptance conditions bind `att.memberId` to the housing record and
+ * `att.deviceShort` to the register name. They bind **nothing** to `att.deviceId`, which is 128
+ * random bits its own author asserts. `authz.js` used to claim otherwise in a comment and
+ * publish `memberOfDevice` as a first-writer-wins map, so a member could file a peer's deviceId
+ * inside her own perfectly valid attestation and, by backdating, make that peer's device resolve
+ * to her — with `shortCollisions` empty, so nothing reported it.
+ *
+ * It is fixed the way ADR 001 §4.4 fixed ownership: not with a fifth condition (there is none
+ * available — no pure fold can know which member a random label "really" belongs to, and any
+ * tie-break would be decided by a stamp the attacker picks), but by removing the forgeable
+ * resolver. **The identity of a device is the PAIR — housing member and register name — and the
+ * register name is the key-derived `deviceShort`.** Everything that enforces anything already
+ * reads the pair: stage 0b asks `attestedDevices.get(op.act).has(op.dev)`, and ADR 002 §5.2.2's
+ * checks 3 and 5 read `deviceId` and `memberId` off ONE attestation resolved by `env.dv`.
+ *
+ * **RULE FOR EVERY CONSUMER: nothing may key on a bare `DeviceId`.** `memberOfDevice` now
+ * answers only when there is exactly one claimant and returns `null` otherwise, with every
+ * contest published on `deviceIdCollisions` so a caller can tell "unknown" from "contested". A
+ * contested claim is NOT rejected: refusing both would hand anybody a way to un-attest an honest
+ * peer's device, which is a worse trade than an unresolved query. It costs the forger nothing
+ * either — an op she can author with a copied label she can author with an invented one, so the
+ * copy is a name collision and not a capability (pinned as R4-13d).
+ *
+ * WP-9's device purge (story 20.2, `deleteOpsByDevices`) and any per-member device panel MUST
+ * therefore key on `deviceShort` — which the relay derives and self-certifies (§5.2.0) — or on
+ * the pair. Never on `op.dev` alone.
+ * ─────────────────────────────────────────────────────────────────────────────
  *
  * [DELIVERED 2026-08-27 — finding F-10, ADR 002 §5.2.3. Was OWED.] `attestationOf` is live in
  * `src/js/core/authz.js`; the decoded payload is kept rather than discarded at the register walk,
@@ -295,16 +329,30 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * `ownership-authz-admin.js`, `core-authz.test.js`. **WP-6 removes them when it moves those
  * callers.** Do not add new ones.
  *
- * [RESIDUAL — WP-6 must not miss this] `shortCollisions` reports every `deviceShort` claimed on
- * more than one member record. ADR 002 §2.3 argues `deviceShort -> DeviceAttestation` is a
- * FUNCTION because two members would need the same signing PRIVATE key; the four acceptance
- * conditions do not enforce that, because nothing in a pure synchronous fold can check
- * `crock32(SHA-256(sigPubRaw)[0..10]) === deviceShort` — that is §5.2.2's **P2**, and it lives in
- * `openOp`. So a member CAN mint a well-formed attestation under a peer's short. The fold
- * resolves the contest MINIMAL-under-`≺` (the same rule as `dev.*` write-once, so it is a
- * function of the SET), which means a BACKDATED squatter takes the lookup; P2 is what then
- * refuses the envelope, because the squatter's `sigPubRaw` does not hash to that short. Stage 0b
- * is unaffected either way — the device gate is per-member.
+ * [I-3 — AMENDED 2026-08-27. A CONTESTED SHORT IS NOT A CREDENTIAL.] ADR 002 §2.3 argues
+ * `deviceShort -> DeviceAttestation` is a FUNCTION because two members would need the same
+ * signing PRIVATE key; the four acceptance conditions do not enforce that, because nothing in a
+ * pure synchronous fold can check `crock32(SHA-256(sigPubRaw)[0..10]) === deviceShort` — that is
+ * §5.2.2's **P2**, and it lives in `openOp`. So a member CAN mint a well-formed attestation
+ * under a peer's short.
+ *
+ * The fold used to resolve that contest MINIMAL-under-`≺`, which handed a BACKDATED squatter the
+ * lookup — i.e. handed `openOp` the squatter's verification key — and left `shortCollisions`
+ * with no reader at all. **The contest is no longer resolved: `attestationOf` returns `null` for
+ * every short on `shortCollisions`.** `null` is a defined outcome at that seam — §5.2.2 P1 PARKS
+ * the sealed envelope, unopened, and a park is re-evaluable (§5.2.5) — so a squatter can stall
+ * an envelope and can never be handed the key that opens it. Stage 0b is unaffected either way:
+ * the device gate is per-member, so the victim's own plaintext ops keep folding.
+ *
+ * `shortCollisions` therefore HAS a reader now: `attestationOf` itself. Two things contest a
+ * short, both decided by equality alone, with no ordering and no stamp:
+ *   (a) one short on two different member records; and
+ *   (b) one `sigPubRaw` under two different shorts — a direct contradiction of ADR 001 §1.2
+ *       ("one signing key hashes to one short") that needs no hash to see, and the one that
+ *       catches a squat landing BEFORE its victim's own attestation.
+ * WP-6's `attestOpen` enforcing P2 still closes this at the root; until then the fold refuses to
+ * guess. A diagnostics/member-list surface SHOULD render both collision arrays — §2.3 already
+ * calls the member list a security surface.
  * @property {OpId[]} splicedIds                two different bodies under one opId; one is
  *                                              admitted by canonical form so every device agrees
  */
@@ -340,9 +388,17 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * injected function would be a second, unlogged source of device identity, which is the
  * key-injection hole ADR 002 §2.3 exists to close, entered through the front door. Both
  * injections FAIL CLOSED when absent: no family op is admitted. WP-6 supplies `attestOpen` and
- * its implementation SHOULD also enforce §5.2.2's P2
+ * its implementation MUST also enforce §5.2.2's P2
  * (`deviceShortOf(att.sigPubRaw) === att.deviceShort`), which the pure fold cannot — see
  * `shortCollisions` above.
+ *
+ * [AMENDED 2026-08-27 — R4-15a] The agreement check compares **all six** fields of the payload,
+ * not four. The two it used to skip were `createdAt` and `kexPubRaw` — the KEY-AGREEMENT point,
+ * which is the exact value ADR 002 §4.2 wraps the family space key to and the exact thing §2.3's
+ * anti-key-injection argument is about. An opener permitted to disagree about `kexPubRaw` and
+ * still be believed was a key-injection channel through the door the agreement check exists to
+ * shut. An unknown EXTRA field on the opener's return is still not a disagreement (version
+ * skew); it simply never reaches the table.
  *
  * [WP-1] Stage 0 would otherwise regress infinitely — the ops that CREATE attestations are
  * themselves ops. A `member.set` patch consisting SOLELY of `dev.*` registers is

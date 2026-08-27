@@ -36,7 +36,7 @@ import { b64u } from './b64.js';
 import { canonicalJSON, utf8 } from './canon.js';
 import {
   isMemberId, isDeviceId, isSpaceId, isMonthKey, isEntityUuid, isDateString, renderable,
-  categoryVisibilityOf, noteOccurrences, iso,
+  categoryVisibilityOf, noteOccurrences, iso, EARLIEST_DATE, LATEST_DATE,
 } from './entities.js';
 import { stripV2Fields } from './materialize.js';
 import {
@@ -605,8 +605,8 @@ export function coerceToV1Bool(kind, name, value) {
  * Every shape below names exactly one day, with no assumption a reader could get wrong:
  *
  *   · `2026-3-1`, `2026-03-1`      — ISO with an unpadded field. Padding invents nothing.
- *   · `2026-01-01T09:00`           — an ISO datetime. The date part is not a guess, it is the
- *                                    date; the time is what has no register.
+ *   · `2026-01-01T09:00`           — an ISO datetime with a FLOATING time. The date part is not a
+ *                                    guess, it is the date; the time is what has no register.
  *   · `4.3.2026`                   — the German form this product is written in (`i18n.js`, the
  *                                    whole `de` half). Day first, month second — the PO's board
  *                                    is a German board and `4.3.2026` is 4 March.
@@ -616,6 +616,47 @@ export function coerceToV1Bool(kind, name, value) {
  * And what it REFUSES, because there is no single answer: `3/4/2026` (4 March in London, 3 April
  * in New York), a millisecond timestamp, `March 4th`, anything with a two-digit year. Those keep
  * the ENTRY and lose the FIELD (rule 3 above) — a note with no date is one v1 never drew either.
+ *
+ * ─── R4-9g / R4-9h — the two shapes this used to read WRONG rather than refuse ─────────────────
+ * The ISO branch's tail was `(?:[T ].*)?$`, which is not "a time" but "anything at all", and it
+ * cost the rule above its one guarantee — that every accepted shape names exactly ONE day:
+ *
+ *   · `2026-04-01T23:00:00-05:00` — a real instant, with a real UTC offset. In this product's
+ *     timezone (Europe/Berlin; this is a German Jahresplaner) that instant is **2 April**. The
+ *     offset was matched by `.*` and thrown away, so the migration silently wrote 1 April. The
+ *     answer is NOT to honour it: the product's fixed constraint is that a date is a plain
+ *     `YYYY-MM-DD` with no time and no zone, ever (DESIGN-DECISIONS „Datum ohne Uhrzeit"), so
+ *     „welcher Tag ist das" has no answer here that does not smuggle a timezone into a file
+ *     format that has none. A DESIGNATED zone (`Z`, `+HH:MM`, `-HH:MM`) is therefore refused —
+ *     the entry is kept, the field is dropped, and the drop is on the warnings channel.
+ *   · `2026-03-04 bis 2026-03-09` — a user typing a RANGE into a date field. `.*` swallowed
+ *     „bis 2026-03-09" and produced the first day with nothing said about the rest. The tail is
+ *     now a time and only a time (`hh:mm`, optional `:ss`, optional fraction), so this falls
+ *     through to the refusal path with the whole value quoted back in the warning.
+ *
+ * The rule that decides both: a FLOATING time is a day in whatever timezone you read it in, so
+ * dropping it invents nothing; an OFFSET time is a different day depending on where you stand,
+ * so reading it picks one — which is the guessing this whole section exists to refuse.
+ *
+ * ─── R5-12d — what the tail is, stated as narrowly as it is written ────────────────────────────
+ * The tail below is a wall-clock time by SHAPE — `hh:mm`, optionally `:ss`, optionally a
+ * fraction — and its fields are deliberately NOT range-checked: `25:00` and `99:99:99` match.
+ * Round 5 was right that "a floating wall-clock time and nothing else" claimed more than the
+ * regex delivers, and the claim is corrected here rather than the regex tightened, because
+ * tightening it would COST something and correcting it costs nothing:
+ *
+ *   · the tail is DISCARDED. Only `y`, `m` and `d` are read, and the day is then validated by
+ *     `isDateString`. An impossible HOUR cannot make the day ambiguous, so `2026-03-04T25:00`
+ *     still names exactly one day and the invariant this function is built on — every accepted
+ *     shape names exactly ONE day — holds for it.
+ *   · refusing it would drop that day. For a note the entry survives and simply is not drawn — v1
+ *     drew it on no day either — but for a BAR EDGE the drop is not free at all (see
+ *     `coerceToV1BarEdge`). Measured: `endDate: '2026-03-04T25:00'` is painted by v1 in exactly
+ *     ONE column, and a refusal moves it to TEN. R5-12e runs both numbers.
+ *
+ * What the tail must NOT do is change WHICH DAY the value names, and that is why a zone
+ * designator (`Z`, `±HH:MM`) and trailing prose stay refused. `R5-12d` pins the accepted
+ * behaviour; the words above are now the ones the regex can keep.
  *
  * Calendar validity is NOT checked, only the format, exactly as `ops.js` checks it: v1 can hold
  * `2026-02-30` and `entities.js:reanchorRepeat` produces a Feb-29 anchor in a non-leap year ON
@@ -637,7 +678,11 @@ export function coerceToV1Date(kind, name, value) {
 
   let y; let m; let d;
   let mt;
-  if ((mt = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ].*)?$/.exec(s))) {
+  // The tail is a wall-clock time BY SHAPE and nothing else — see R4-9g / R4-9h and R5-12d
+  // above. No `Z`, no `±HH:MM`, no trailing prose: anything that could change which day the
+  // value names makes the whole value unreadable rather than a prefix of one. The hour and
+  // minute are not range-checked because the tail is discarded and cannot move the day.
+  if ((mt = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ]\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)?$/.exec(s))) {
     [, y, m, d] = mt;
   } else if ((mt = /^(\d{1,2})\.(\d{1,2})\.(\d{4})\.?$/.exec(s))) {
     [, d, m, y] = mt;                                      // German: day first (de is the default)
@@ -648,6 +693,111 @@ export function coerceToV1Date(kind, name, value) {
   }
   const kept = iso(Number(y), Number(m), Number(d));
   return isDateString(kept) ? { kept } : null;             // month 13, day 32 — refuse, do not clamp
+}
+
+/**
+ * A BAR EDGE the file holds as text that names no day at all, kept as the end of the date
+ * alphabet it sorts against — R5-11.
+ *
+ * ─── the premise finding 5 was closed on, and the half of it that is false ─────────────────────
+ * `buildPatch`'s absent-field branch says „ABSENT IN v1 STAYS ABSENT IN v2", and for an absent
+ * edge that is exactly right (R5-9 measures it: v1 and v2 paint the same board for all four
+ * shapes). But migration does two things, not one: it also turns UNREADABLE into absent, and in
+ * `layout.js:133` those are NOT the same bar.
+ *
+ *     if (b.endDate < mFirst || b.startDate > mLast) continue;
+ *
+ *   · `undefined < '2026-03-01'` is `false` — the comparison is NaN, so an ABSENT edge is never
+ *     skipped and the bar runs to the horizon.
+ *   · `'' < '2026-03-01'` is `true` — a STRING that sorts below the range skips EVERY column, so
+ *     v1 painted the bar on no day of the year.
+ *
+ * Measured against the real v1 renderer: `endDate: ''`, `' '`, `'-'`, `'(offen)'`, `'0'` were all
+ * painted NOWHERE by v1 and across ten columns by v2 — taking a lane from every bar the user
+ * actually made in each of them — and the warning then told the user „that is exactly what v1
+ * painted for it, so nothing on your board moves". The mirror is a `startDate` that sorts ABOVE
+ * the range (`'zzz'`, `'unbekannt'`): invisible in v1, three columns in v2. The reason this was
+ * missed is that `'irgendwann'` — the value everybody reaches for — starts with `i`, sorts ABOVE
+ * `'2'`, and is one of the shapes the premise gets right.
+ *
+ * ─── the rule ──────────────────────────────────────────────────────────────────────────────────
+ * v1 does not PARSE a bar edge, it COMPARES it. So the faithful v2 value is not "the day this
+ * text means" (it means none) but "a date that sorts where this text sorted", and for the two
+ * classes where such a date exists it is the end of `DATE_RE`'s alphabet (`entities.js`):
+ *
+ *   · below every date v2 can hold ⇒ `EARLIEST_DATE`. As an `endDate` the bar is skipped in every
+ *     column, which is what v1 painted; as a `startDate` the bar begins at the near edge and is
+ *     marked as continuing before it, which is also what v1 painted.
+ *   · above every date v2 can hold ⇒ `LATEST_DATE`. As a `startDate` the bar is skipped in every
+ *     column; as an `endDate` it runs to the far edge and is marked as continuing past it — which
+ *     is the one shape the absent edge already reproduced, EXCEPT for the continuation chevron
+ *     and `col.horizon` (`layout.js:148,151,260`), which an absent edge does not raise and a
+ *     string above the range does.
+ *
+ * ─── what it deliberately does NOT touch ───────────────────────────────────────────────────────
+ *   · NOTES. `layout.js:61-79` puts a note on a day by MAP EQUALITY, never by `<`, so every
+ *     non-date key — absent, `''` and `'zzz'` alike — lands on no day. Absent already reproduces
+ *     v1 there, and a substitute would be worse than motion without meaning: a note with an
+ *     invented date and `repeatsYearly` set would be EXPANDED into the window (`layout.js:72`)
+ *     and appear on a day the user never wrote.
+ *   · NON-STRINGS. `42 < '2026-03-01'` is `false`, and so is every other comparison a number, a
+ *     boolean or an object makes — a non-string edge behaves in `layout.js` exactly like an
+ *     absent one, so dropping it is already faithful and there is nothing to substitute.
+ *   · A VALUE THAT SORTS INSIDE THE RANGE. `'1.3'`, `'2026-03-04 bis 2026-03-09'` — these sort
+ *     between two real dates, and no date v2 can hold sorts where they do. They keep today's
+ *     behaviour (the field is dropped, the bar runs to the horizon) and the drop is reported with
+ *     a warning that does NOT claim v1 painted the same thing, because for this class it did not.
+ *     See `gridPlacementWarning` and the register entry.
+ *
+ * The substituted value is written to `board.json` — that is the point of it — so it is a
+ * `loss`-reported COERCION, with the original text quoted back, exactly like every other entry in
+ * §4b. It is not an invention of a day the user meant: it is the position their text occupied.
+ *
+ * @param {string} kind @param {string} name @param {unknown} value
+ * @returns {{kept: string, side: 'below'|'above', why: string}|null}
+ */
+export function coerceToV1BarEdge(kind, name, value) {
+  if (kind !== 'bar' || (name !== 'startDate' && name !== 'endDate')) return null;
+  const spec = FIELDS[kind]?.[name];
+  if (!spec || spec.t !== 'date') return null;             // pinned by the assertion below
+  if (typeof value !== 'string' || isDateString(value)) return null;
+  const side = value < EARLIEST_DATE ? 'below' : value > LATEST_DATE ? 'above' : null;
+  if (side === null) return null;
+  const kept = side === 'below' ? EARLIEST_DATE : LATEST_DATE;
+  const hides = (name === 'endDate') === (side === 'below');
+  const painted = hides
+    ? 'so v1 skipped this bar in EVERY column (layout.js:133) and painted it on no day of the year'
+    : (name === 'endDate'
+      ? 'so v1 ran this bar to the FAR EDGE of the visible year and marked it as continuing past '
+        + 'it (layout.js:135,148)'
+      : 'so v1 began this bar at the NEAR EDGE of the visible year and marked it as continuing '
+        + 'before it (layout.js:134,147)');
+  return {
+    kept,
+    side,
+    why: `field ${q(name)} = ${q(value)} names no day at all, so v2 cannot store it — but v1 did `
+      + `not read a bar edge, it COMPARED it, and this text sorts ${side === 'below' ? 'BEFORE' : 'AFTER'} `
+      + `every date v2 can hold, ${painted}. It was kept as ${q(kept)}, the `
+      + `${side === 'below' ? 'earliest' : 'latest'} date v2 can hold — the one value that sorts `
+      + `where your text sorted against every month the grid can show, so that v2 paints what v1 `
+      + `painted. Dropping it would have ${hides
+        ? 'run the bar across the year and taken a lane from every bar you made in it'
+        : 'lost the continuation marker v1 drew'} (R5-11)`,
+  };
+}
+
+/**
+ * Both carried bar edges are `date` fields, asserted at load for the same reason
+ * `V1_BOOL_READING` is: `coerceToV1BarEdge` reasons about `layout.js:133`'s STRING comparison,
+ * and a field that stopped being a date would silently stop being reasoned about.
+ */
+for (const name of ['startDate', 'endDate']) {
+  if (FIELDS.bar?.[name]?.t !== 'date') {
+    throw new MigrationError(
+      `migrate1to2: bar.${name} is not a date field; coerceToV1BarEdge reasons about the string `
+      + 'comparison layout.js:133 makes on exactly these two fields (R5-11).',
+    );
+  }
 }
 
 /**
@@ -708,50 +858,103 @@ export function mintedId(kind, entry, taken) {
 }
 
 /**
- * The date v1 drew for a bar edge the file does not carry — see `entities.js:renderableBar` for
- * what v1 actually draws and why "to the horizon" cannot be migrated.
+ * WHERE THE GRID PUTS THIS ENTRY — the warning, stated in terms that are true of the renderer
+ * that is actually shipping (R4-10, round 4).
  *
- * The bar is anchored to the edge the file DOES carry, so it survives on the board, on its own
- * day, in its own category, with its own label, and the warning names the absence so the user can
- * drag the other end where they want it. The alternatives were: invent a length (a lie the file
- * never told), read the clock (R12 — my two Macs would migrate the same file differently), or
- * drop the bar (the defect this closes).
+ * ─── why this replaced `notDrawnReason` outright ───────────────────────────────────────────────
+ * The old function answered one question — "is anything missing?" — and its caller wrapped the
+ * answer in one sentence: „… is on the board but will not be DRAWN on any day". Round 4 measured
+ * that sentence against `src/js/layout.js`, which is the same file in both builds and is the only
+ * oracle that can answer "where did v1 paint this", and it is FALSE for every bar it was written
+ * about:
  *
- * @param {string} name `'startDate'` or `'endDate'` — the edge that is missing
- * @param {Object} entry the v1 entry @param {Object} patch the patch built so far
- * @returns {{kept: string, from: string}|null}
+ *   · a bar with only a `startDate` is painted in NINE column-segments (its start to the far
+ *     edge of the visible year), not zero;
+ *   · a bar with only an `endDate` in FOUR;
+ *   · a bar with NEITHER is painted as a full-height stripe in ALL TWELVE columns, and takes a
+ *     lane from every other bar while it is at it (`layout.js:50`, where `undefined` clashes with
+ *     everything).
+ *
+ * A warning that says an entry is invisible when the renderer draws it twelve times is worse than
+ * no warning: it is the only thing the user is told, and it tells them to go looking for
+ * something that is in front of them. So each shape now describes what the user will SEE.
+ *
+ * NOT `lossy`, on every branch: the entry is on the board, in the file and in every export, and
+ * it is drawn exactly where v1 drew it. Nothing was lost; something needs explaining.
+ *
+ * ─── R5-11 — the sentence that was false for a whole class, and the two things that fixed it ───
+ * The tail below („that is exactly what v1 painted for it … nothing on your board moves") is true
+ * of an edge the file never carried, and it was printed for an edge the file carried and this
+ * module DROPPED. Those are different bars in `layout.js:133`: an absent edge is a NaN comparison
+ * and runs to the horizon; a dropped one may have been a string v1 compared and skipped in every
+ * column. Two changes, together:
+ *
+ *   1. the class where a faithful value EXISTS no longer reaches this function with a hole in the
+ *      patch at all — `coerceToV1BarEdge` writes the end of the date alphabet the text sorted
+ *      against, and the new „NOT DRAWN" branch below explains what that value does;
+ *   2. the class where it does not (`'1.3'` — a text that sorts between two real dates) still
+ *      arrives here as a missing edge, and is now told apart from an absent one by `dropped`, so
+ *      the v1-fidelity claim is made only where it is true.
+ *
+ * @param {'note'|'bar'} kind
+ * @param {string} singular the noun for the message („note", „bar")
+ * @param {string} id       the entity id, for the message
+ * @param {Object} patch    the patch built so far — the fields that will actually reach the log
+ * @param {Set<string>|null} [dropped] field names the file CARRIED and this door could not store.
+ *        Absent from the file and dropped by the door look identical in `patch` and are different
+ *        bars on the grid, so the door has to say which one it is. Omitted ⇒ nothing was dropped.
+ * @returns {string|null} the complete warning, or null when the entry lands the ordinary way
  */
-export function missingBarEdge(name, entry, patch) {
-  const other = name === 'endDate' ? 'startDate' : 'endDate';
-  const done = patch[other];
-  if (isDateString(done)) return { kept: done, from: other };
-  const raw = entry[other];
-  if (isDateString(raw)) return { kept: raw, from: other };
-  const coerced = coerceToV1Date('bar', other, raw);
-  return coerced ? { kept: coerced.kept, from: other } : null;
-}
-
-/**
- * Why this entry will be on the board and not on the GRID — the warning that replaces "it will
- * not be renderable", which was true of the projection and is no longer true of anything.
- *
- * The entry survives (A3-H2); it simply has no day to sit on, which is exactly what v1 did with
- * it. Reported so the user is told before the file that held it stops being the board, and NOT
- * `lossy`: nothing the user could see in v1 is missing in v2.
- *
- * @param {string} kind @param {Object} patch @returns {string|null}
- */
-export function notDrawnReason(kind, patch) {
-  if (kind === 'note' && !isDateString(patch.date)) {
-    return 'it has no date, so no day row can hold it — v1 kept it in the file and did not draw '
-      + 'it either. It is on the board and in every export; give it a date and it appears';
+export function gridPlacementWarning(kind, singular, id, patch, dropped = null) {
+  const who = `${singular} ${q(id)}`;
+  const wasDropped = (name) => !!dropped && dropped.has(name);
+  if (kind === 'note') {
+    if (isDateString(patch.date)) return null;
+    return `${who} is on the board but will not be DRAWN on any day: it has no date, so no day row `
+      + 'can hold it — v1 kept it in the file and did not draw it either. It is on the board and '
+      + 'in every export; give it a date and it appears';
   }
-  if (kind === 'bar' && (!isDateString(patch.startDate) || !isDateString(patch.endDate))) {
-    return 'it has no usable date at either end, so there is no span to anchor it to. It is on '
-      + 'the board and in every export, and v1 paints exactly this bar as a stripe down every '
-      + 'column; give it two dates and it lands where you want it';
+  if (kind !== 'bar') return null;
+  const hasStart = isDateString(patch.startDate);
+  const hasEnd = isDateString(patch.endDate);
+  // R5-11. Both edges are present and the bar is still painted NOWHERE, because one of them is
+  // the end of the alphabet `layout.js:133` compares against. Stated as a fact about the VALUE,
+  // not about how it got there: a file that carries `endDate: "0000-01-01"` by hand is the same
+  // bar, and v1 skipped that one in every column too.
+  if (hasStart && hasEnd && (patch.endDate === EARLIEST_DATE || patch.startDate === LATEST_DATE)) {
+    const which = patch.endDate === EARLIEST_DATE
+      ? `its end date is ${q(EARLIEST_DATE)}, the earliest date v2 can hold, and layout.js:133 `
+        + 'skips a bar in every column whose month begins after that end'
+      : `its start date is ${q(LATEST_DATE)}, the latest date v2 can hold, and layout.js:133 skips `
+        + 'a bar in every column whose month ends before that start';
+    return `${who} is NOT DRAWN on any day: ${which} — which is every month of the grid except the `
+      + 'one containing that date. It is on the board and in every export; give it dates inside '
+      + 'the year you want to see and it appears';
   }
-  return null;
+  if (hasStart && hasEnd) return null;
+  const tail = (wasDropped('startDate') || wasDropped('endDate'))
+    // R5-11, the class with no faithful value: the text sorted BETWEEN two real dates, so v1
+    // placed the bar by comparing it and v2 cannot. Nothing is claimed about v1 here, because
+    // depending on the text v1 drew more of the year than this, or none of it.
+    ? 'v1 did not read that text as a date either — it COMPARED it against the first and last day '
+      + 'of each month (layout.js:133-135) and drew the bar wherever the comparison let it '
+      + 'through. v2 cannot store the text, so where the bar lands is no longer decided by it. '
+      + 'Give it'
+    : 'That is exactly what v1 painted for it (layout.js:133-135), so nothing on your '
+      + 'board moves — but it is not what you probably meant. Give it';
+  if (!hasStart && !hasEnd) {
+    return `${who} IS DRAWN, and it is drawn EVERYWHERE: it has no date at either end, so it has `
+      + 'no span, and it is painted as a full-height stripe down all twelve columns — taking a '
+      + `lane from every other bar in every month. ${tail} two dates and it lands where you want it`;
+  }
+  if (!hasEnd) {
+    return `${who} IS DRAWN from ${q(patch.startDate)} to the FAR EDGE of the visible year, and `
+      + 'the far edge moves with today: it has no endDate, so it has no end. '
+      + `${tail} an end date and it stops where you want it`;
+  }
+  return `${who} IS DRAWN from the NEAR EDGE of the visible year to ${q(patch.endDate)}, and the `
+    + 'near edge moves with today: it has no startDate, so it has no beginning. '
+    + `${tail} a start date and it begins where you want it`;
 }
 
 /**
@@ -902,7 +1105,13 @@ export function migrateV1(v1board, ctx) {
   //
   // The field ORDER is `FIELDS[kind]`'s declaration order, so the JSON bytes of an op are a
   // function of the vocabulary and not of the order somebody happened to write a literal in.
-  const buildPatch = (kind, entry, where) => {
+  //
+  // `dropped` is an OUT-parameter, not a return value, because the only caller that needs it is
+  // the one that also needs the patch, and threading a second return through four call sites for
+  // one of them is how the two doors drift. It collects the fields the FILE CARRIED and this door
+  // could not store — which `gridPlacementWarning` cannot tell from a field the file never had,
+  // and which is a different bar on the grid (R5-11).
+  const buildPatch = (kind, entry, where, dropped = new Set()) => {
     const add = V2_ADDITIONS[kind];
     const carried = V1_FIELDS[kind];
     const f = {};
@@ -922,25 +1131,28 @@ export function migrateV1(v1board, ctx) {
         // and it is not an invention, because `''` is the value v1's own inline create writes.
         if (kind === 'note' && name === 'text') {
           value = '';
-        } else if (kind === 'bar' && (name === 'startDate' || name === 'endDate')) {
-          // A3-H2. The same argument one entry kind along: a bar needs BOTH ends to be drawn at
-          // all (`entities.js:renderableBar`), so an absent one used to take the user's Urlaub
-          // off the board and out of the file. `missingBarEdge` anchors it to the edge the file
-          // does carry — see its docblock for what v1 drew and why "to the horizon" cannot be
-          // migrated without reading the clock.
-          const edge = missingBarEdge(name, entry, f);
-          if (!edge) continue;                           // neither end is usable; the entry stays
-          loss(
-            `${where}: no ${q(name)}; v1 drew this bar from its ${edge.from} to the far edge of `
-            + `the visible year, which depends on TODAY and cannot be migrated (R12). It was `
-            + `anchored to its ${edge.from} (${q(edge.kept)}) so it stays on the board — drag the `
-            + 'other end to where you want it',
-            where, name, 'coerced', { value: undefined, kept: edge.kept },
-          );
-          f[name] = edge.kept;
-          continue;
         } else {
-          continue;                                      // absent in v1 stays absent in v2
+          // ABSENT IN v1 STAYS ABSENT IN v2 — including a bar edge, R4-10.
+          //
+          // This branch used to ANCHOR a one-ended bar to the edge the file did carry, on the
+          // reasoning that a bar needs both ends to be drawn at all. Two things were wrong with
+          // it, and round 4's oracle found both:
+          //
+          //   1. THE PREMISE EXPIRED. `entities.js:renderableBar` already keeps an OWN bar with
+          //      no dates at all, precisely so that `layout.js` — the same file in both builds —
+          //      can paint it the way it always did. A one-ended bar needed no rescue.
+          //   2. THE RESCUE WAS A REGRESSION. v1 paints `{startDate: '2026-04-10'}` from 10 April
+          //      to the far edge of the window: NINE column-segments. The anchor turned that into
+          //      ONE DAY — and wrote an `endDate` into the user's `board.json` that the file never
+          //      carried, which in solo mode (where `board.json` IS the checkpoint) is permanent
+          //      at the first autosave.
+          //
+          // Leaving the edge absent reproduces v1 exactly, invents nothing, reads no clock, and
+          // makes `board.json` a FIXED POINT for this shape instead of rewriting it. The horizon
+          // is not migrated because it is not DATA: it is what `layout.js` does with an absent
+          // edge, and it does it in v2 too. `gridPlacementWarning` tells the user what they will
+          // see; nothing is lost, so nothing here is a `loss`.
+          continue;
         }
       }
       {
@@ -979,6 +1191,18 @@ export function migrateV1(v1board, ctx) {
           f[name] = cut.kept;
           continue;
         }
+        // R5-11 — BEFORE `coerceToV1Date`, and the order is load-bearing. `coerceToV1Date` trims,
+        // so `" 2026-03-04"` reads as a perfectly good date there — and a leading space is
+        // exactly the class this branch exists for: v1 compared the raw text, it sorted below
+        // every month, and v1 painted the bar nowhere. The edge rule sees the untrimmed value and
+        // gets the first word.
+        const asEdge = coerceToV1BarEdge(kind, name, value);
+        if (asEdge) {
+          loss(`${where}: ${asEdge.why}`, where, name, 'coerced',
+            { value, kept: asEdge.kept, side: asEdge.side });
+          f[name] = asEdge.kept;
+          continue;
+        }
         // A3-H2 — COERCE TO v1's MEANING (§4b). Each of these reads the value the way v1's own
         // code read it; each is reported with the old value and the new one.
         const asV1 = coerceToV1Bool(kind, name, value)
@@ -993,22 +1217,14 @@ export function migrateV1(v1board, ctx) {
           f[name] = asV1.kept;
           continue;
         }
-        // A bar edge that cannot be READ is the same problem as a bar edge that is not THERE, and
-        // it gets the same answer — otherwise `endDate: "irgendwann"` would drop the bar off the
-        // board while `endDate` absent kept it, which is the sort of split the two doors were
-        // built to avoid within one door.
-        if (kind === 'bar' && (name === 'startDate' || name === 'endDate')) {
-          const edge = missingBarEdge(name, entry, f);
-          if (edge) {
-            loss(
-              `${where}: field ${q(name)} = ${q(value)} is not a date v2 can read; the bar was `
-              + `anchored to its ${edge.from} (${q(edge.kept)}) so that it stays on the board`,
-              where, name, 'coerced', { value, kept: edge.kept },
-            );
-            f[name] = edge.kept;
-            continue;
-          }
-        }
+        // A bar edge that cannot be READ *and* cannot be POSITIONED is the last stop, and R5-11
+        // narrowed it to what it can honestly hold: a text that sorts BETWEEN two real dates
+        // (`'1.3'`, `'2026-03-04 bis 2026-03-09'`). Everything that sorts outside the alphabet
+        // was taken by `coerceToV1BarEdge` above, because for those v1's rendering IS
+        // reproducible; for these it is not, since no date v2 can hold sorts where the text does.
+        // The drop is recorded so `gridPlacementWarning` does not tell the user that v1 painted
+        // the same thing — it is the one class where that sentence was false (R5-11b).
+        dropped.add(name);
         loss(
           `${where}: field ${q(name)} = ${q(value)} is not representable in v2 and the FIELD was ` +
           'DROPPED (hand-edited or imported board.json). The entry itself is kept',
@@ -1137,18 +1353,19 @@ export function migrateV1(v1board, ctx) {
         id = fresh;
       }
       seen[kind].add(id);
-      const patch = buildPatch(kind, entry, `${plural} ${q(id)}`);
+      const dropped = new Set();
+      const patch = buildPatch(kind, entry, `${plural} ${q(id)}`, dropped);
       // A3-H2. This used to read "will not be renderable after migration", and it was a LOSS,
       // because the projection refused such an entry and it left the board and then the file.
       // It no longer leaves anything: `entities.js:renderableNote` keeps an own entry in the
-      // ARRAY the way v1's `state.notes` did, and `missingBarEdge` above anchors a one-ended bar.
-      // What remains true is that the GRID has nowhere to put it, which is exactly what v1 did
-      // with it too — so it is reported, and it is NOT lossy: nothing the user could see in v1 is
-      // missing in v2.
-      const undrawn = notDrawnReason(kind, patch);
-      if (undrawn) {
-        warn(`${plural} ${q(id)} is on the board but will not be DRAWN on any day: ${undrawn}`, false);
-      }
+      // ARRAY the way v1's `state.notes` did, and `renderableBar` does the same for a bar with
+      // one edge or none. What remains true is that the grid places it somewhere the user did not
+      // ask for — which is exactly what v1 did with it too — so it is reported, in the words
+      // `gridPlacementWarning` works out from the patch, and it is NOT lossy: nothing the user
+      // could see in v1 is missing in v2. (R4-10d: the sentence used to be false for three of the
+      // four bar shapes it was written about.)
+      const placement = gridPlacementWarning(kind, plural, id, patch, dropped);
+      if (placement) warn(placement, false);
       const set = kind === 'note' ? noteSet : barSet;
       emit(kind, `${kind}:${id}`, (o) => set(o, id, patch, { born: true }));
     }
@@ -1201,7 +1418,30 @@ export function migrateV1(v1board, ctx) {
         padText = '';
       }
     }
-    if (padText === '') continue;                         // §8.2: non-empty keys only
+    // §8.2: non-empty keys only.
+    //
+    // R4-11a. This was a bare `continue`, and it was the ONE drop in the whole door that reached
+    // the warnings channel in some spellings and not in others: a pad the file held as `null` was
+    // reported („painted an empty month"), a pad the file held as `0` was reported („kept as the
+    // text v1 paints for it"), and a pad the file held as `''` — the one spelling a human writes
+    // — was dropped in silence. §4b rule 2 is „EVERY coercion is reported so it is auditable",
+    // and a rule with one silent case is a rule with a hole in it.
+    //
+    // Still not `lossy`, and the reason is unchanged: v1 paints a pad as
+    // `state.scratchpads[key] || ''` (`layout.js:259`), so `''` and absent are the same empty
+    // textarea, and v1's own editor DELETES the key when the text is blank
+    // (`interact.js:620,634`). What the user loses is a key in an export, not a month of typing —
+    // so it is said out loud and it is not called a loss. `replace.js` says the same sentence for
+    // the same bytes (REG-23).
+    if (padText === '') {
+      if (text === '') {
+        warn(`scratchpad ${q(month)} is an empty string in the file; §8.2 writes no register for `
+          + 'an empty month, so the KEY is not carried into v2 — v1 painted an empty textarea for '
+          + "it and so does v2, and v1's own editor deletes a blank key too (interact.js:620)",
+        false);
+      }
+      continue;
+    }
     emit('pad', `pad:${month}`, (o) => padSet(o, month, buildPatch('pad', { text: padText }, `scratchpad ${q(month)}`), { born: true }));
   }
 

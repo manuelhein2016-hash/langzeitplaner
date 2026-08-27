@@ -16,12 +16,15 @@
 // warning, on the first autosave. That is this file's first row and it is the worst thing round 3
 // found.
 //
-// REACHABILITY, STATED HONESTLY. `store.js` never writes `ops.jsonl` today (row R3-38 pins that),
-// so nothing in the shipping app can create the precondition on its own. It becomes reachable the
-// moment WP-8 appends a single op, or a crash interrupts an append, or — on the browser/dev
-// branch, which is how the board is previewed — anything else writes that `localStorage` key.
-// The defect is not "the app loses boards today"; it is "the door has no lock on it and WP-8 is
-// the next work package".
+// REACHABILITY, STATED HONESTLY — AND RE-STATED AFTER ROUND 5. As filed, this paragraph read
+// "`store.js` never writes `ops.jsonl` today", which was true of SOLO MODE and was then quietly
+// read as true of the store. R5-4 found the rest: `_persistOps` never called `appendOps` at all,
+// on any path, so the file could not exist even with `_opsPersisted` on — and that was not a
+// dormant gap but the thing making every launch after the first reconcile a growing diff. It is
+// closed (R3-39 is inverted below; R5-4a-f own it in full). What remains true is the narrower
+// claim R3-38 actually pins: SOLO mode writes exactly the two v1 slots and no third file. The
+// precondition for this file's attacks therefore arrives with WP-8 turning `_opsPersisted` on —
+// which it now genuinely does, rather than "one day might".
 //
 // Rows tagged `SUCCEEDED (defect)` are green BECAUSE the defect is there.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,6 +37,7 @@ import { localStorage as LS, resetStorage, seedBoard } from '../helpers/env.js';
 import { store } from '../../src/js/store.js';
 import * as storage from '../../src/js/storage.js';
 import { serializeRegisters } from '../../src/js/core/registers.js';
+import { readFileSync } from 'node:fs';
 
 const BOARD_KEY = 'langzeitplaner.board';
 const OPS_KEY = 'langzeitplaner.ops';
@@ -100,16 +104,23 @@ after(quiet);
 // ─────────────────────────────────────────────────────────────────────────────
 describe('the three files disagreeing', () => {
   // ── R3-31 … R3-35 · INVERTED 2026-08-27 · A3-C1 (CRITICAL) and A3-H1 (HIGH) are CLOSED ──
+  // ── RE-ANCHORED 2026-08-27 · ADR 006 replaced the rule these rows were written against ──
   //
   // The five rows below were green because the defects existed. They now assert the fix, and
   // between them they walk every reach-path the finding named: an unrelated op line, a torn
   // append, an unreadable checkpoint, and a checkpoint that parses but is not a checkpoint.
   //
-  // THE RULE THE STORE NOW FOLLOWS: `shouldMigrate`'s `opsLogExists` still answers "has migration
-  // already run?", and a second, separate check answers "is this log READABLE and is it a log of
-  // THIS board?". Only both together may discard `board.json`. A log that fails either is
-  // QUARANTINED — not applied, not deleted, not written to — and the board loads exactly as it
-  // does on a machine with no log at all. See `logBelongsToBoard` / `_useLog` in store.js.
+  // THE RULE THE STORE NOW FOLLOWS (ADR 006): `board.json` is the truth and the op log is
+  // history. Every launch migrates `board.json` into an op set — no predicate, no branch — and
+  // the log is reconciled ONTO it. A log's history is adopted on exactly one equality,
+  // `checkpoint.lzp.lineageId === board._v2.lineageId`; anything else is a QUARANTINE — not
+  // applied, not deleted, not written to — and the board loads exactly as it does on a machine
+  // with no log at all. The REASONS changed with the rule and are now exact: `no-checkpoint`,
+  // `board-carries-no-lineage`, `log-carries-no-lineage`, `foreign-lineage`, `unreadable-log`,
+  // `reconcile-failed`. See `adoptable` / `_adoptHistory` in store.js.
+  //
+  // I-6 also landed: a refused log is MOVED ASIDE (`…ops.quarantined-<ts>`), so it is refused
+  // once rather than once per launch. Moving is not deleting — the rows below assert the bytes.
 
   test('R3-31 FAILED (held, A3-C1 closed): one stray line in ops.jsonl is quarantined and board.json is loaded untouched', async () => {
     disk({ ops: JSON.stringify(ONE_OP) });
@@ -119,16 +130,19 @@ describe('the three files disagreeing', () => {
     await launch();
     assert.equal(contentCount(store.state), 7, 'the whole board is on screen …');
     assert.equal(store.state.categories.length, 1, '… categories included …');
-    assert.ok(store.warnings.some((w) => /QUARANTINED \(unrelated-log\)/.test(w)),
+    assert.ok(store.warnings.some((w) => /QUARANTINED \(no-checkpoint\)/.test(w)),
       '… and the refusal is on the warnings channel, not silent: ' + JSON.stringify(store.warnings));
-    assert.equal(store.diagnostics().quarantine.reason, 'unrelated-log');
+    assert.equal(store.diagnostics().quarantine.reason, 'no-checkpoint',
+      'a bare ops.jsonl has no header, so it carries no lineage and is never adopted');
     assert.equal(store.diagnostics().source, 'board.json');
 
     await store.persistNow();
     quiet();
     assert.equal(LS.getItem(BOARD_KEY), before, 'board.json is byte-identical after the first autosave');
-    assert.equal(LS.getItem(OPS_KEY), JSON.stringify(ONE_OP),
-      'and the refused log is still on disk, unmodified — quarantined, not deleted');
+    const moved = store.quarantine.movedAside;
+    assert.equal(LS.getItem(moved.ops), JSON.stringify(ONE_OP),
+      'and the refused log is still on disk, byte for byte — moved aside (I-6), never deleted');
+    assert.equal(LS.getItem(OPS_KEY), null, 'so the same refusal is not re-derived on every launch');
   });
 
   test('R3-32 FAILED (held): the day\'s snapshot preserves the REAL board, so 11.5 still works after a poisoned log', async () => {
@@ -147,7 +161,7 @@ describe('the three files disagreeing', () => {
     await launch();
     assert.equal(contentCount(store.state), 7,
       '`parseJSONL` still skips the torn line; the surviving line is still "a log"; it is simply not a log of THIS board');
-    assert.equal(store.quarantine.reason, 'unrelated-log');
+    assert.equal(store.quarantine.reason, 'no-checkpoint');
     assert.equal(store.quarantine.tailLines, 1, 'and the quarantine record says what it refused');
   });
 
@@ -156,8 +170,8 @@ describe('the three files disagreeing', () => {
     await launch();
     assert.equal(contentCount(store.state), 7, 'a checkpoint no longer outranks a perfectly good board.json …');
     assert.equal(store.ready, true, '… and the app is ready, with the real board on it');
-    assert.equal(store.quarantine.reason, 'no-provenance',
-      'it carries no `lzp` envelope, so it was not written by this app over this board');
+    assert.equal(store.quarantine.reason, 'board-carries-no-lineage',
+      'this board has never had a log bound to it, so there is no history to adopt');
   });
 
   test('R3-35 FAILED (held, A3-H1 closed): a checkpoint that PARSES but carries no format version boots the app off board.json', async () => {
@@ -199,7 +213,8 @@ describe('the three files disagreeing', () => {
       assert.equal(store.state.categories.length, 1, `${what}: categories included`);
       await store.persistNow(); quiet();
       assert.equal(contentCount(JSON.parse(LS.getItem(BOARD_KEY))), 7, `${what}: and the autosave did not empty the file`);
-      assert.equal(LS.getItem(CHECKPOINT_KEY), bytes, `${what}: the refused checkpoint is untouched on disk`);
+      const slot = store.quarantine?.movedAside?.checkpoint ?? CHECKPOINT_KEY;
+      assert.equal(LS.getItem(slot), bytes, `${what}: the refused checkpoint is still on disk, byte for byte`);
     }
   });
 
@@ -211,15 +226,24 @@ describe('the three files disagreeing', () => {
     await store.persistNow(); quiet();
     assert.ok(LS.getItem(CHECKPOINT_KEY), 'a real checkpoint was written');
     const cp = JSON.parse(LS.getItem(CHECKPOINT_KEY));
-    assert.equal(cp.lzp.v, 1, 'and it carries the provenance envelope …');
-    assert.equal(typeof cp.lzp.boardFp, 'string');
-    assert.equal(cp.lzp.boardN, 8, '… naming the board it was folded from (5 notes + 1 bar + 1 pad + 1 category)');
+    assert.equal(cp.lzp.v, 2, 'and it carries the ADR 006 envelope …');
+    assert.ok(/^lin_[0-9A-Za-z_-]+$/.test(cp.lzp.lineageId), '… naming the lineage it belongs to …');
+    assert.equal(cp.lzp.lineageId, JSON.parse(LS.getItem(BOARD_KEY))._v2.lineageId,
+      '… which is the lineage board.json names, written in the same persist');
+    assert.match(cp.lzp.boardHash, /^[0-9a-f]{8}:\d+$/, '… plus a hash of the exact bytes written (never a gate)');
 
     const stateBefore = structuredClone(store.state);
+    const regsBefore = JSON.stringify(serializeRegisters(store.registers()));
     await launch();
     assert.equal(store.quarantine, null, 'the relaunch trusts it …');
     assert.equal(store.diagnostics().source, 'op-log');
     assert.deepEqual(store.state, stateBefore, '… and the board comes back exactly');
+    // INV-4, the anti-churn control: an exact match reconciles ZERO ops, so every stamp, `_born`
+    // and tombstone survives byte-identically. Swapping `_diff` for `planReplaceAll` in
+    // `_reconcileOntoBoard` reddens this line and nothing else.
+    assert.equal(store.diagnostics().lineage.reconciled, 0, 'and the reconciliation plan was empty');
+    assert.equal(JSON.stringify(serializeRegisters(store.registers())), regsBefore,
+      'the register map is byte-identical across the restart — nothing was re-stamped');
   });
 
   test('R3-35d FAILED (held): a checkpoint from ANOTHER board is refused even though it is perfectly well-formed', async () => {
@@ -238,7 +262,8 @@ describe('the three files disagreeing', () => {
     seedBoard(mine);
     LS.setItem(CHECKPOINT_KEY, foreign);
     await launch();
-    assert.equal(store.quarantine.reason, 'unrelated-log', 'a well-formed checkpoint of someone else\'s board is still not this board\'s checkpoint');
+    assert.equal(store.quarantine.reason, 'board-carries-no-lineage',
+      'a well-formed checkpoint of someone else\'s board is still not this board\'s checkpoint');
     assert.deepEqual(store.state.notes.map((n) => n.id), ['zz9'], 'and my board is the one on screen');
   });
 
@@ -324,24 +349,51 @@ describe('what the store actually writes', () => {
     assert.deepEqual(LS._keys().sort(), [BOARD_KEY, SNAP_KEY], 'ADR 001 §9/§11, kept');
   });
 
-  test('R3-39 SUCCEEDED (defect, latent): `_persistOps()` never appends, and `truncateOps(0)` keeps every line — the "checkpoint, then drop the tail" it documents does not happen', async () => {
-    // `storage.truncateOps` guards `keepFromLine > 0`, so line 0 means "keep from the beginning",
-    // i.e. keep everything. `store._persistOps()` calls `saveCheckpoint()` and then
-    // `truncateOps(0)`, and never calls `appendOps()` at all. Measured on storage.js directly so
-    // the row does not depend on the unreachable `_opsPersisted === true` branch.
+  test('R3-39 INVERTED (closed by R5-4): `_persistOps()` appends, and the truncate is given a LINE COUNT — "checkpoint, then drop the tail" now happens', async () => {
+    // AS FILED (round 3, "latent"): `store._persistOps()` called `saveCheckpoint()` and then
+    // `truncateOps(0)`, and never called `appendOps()` at all. Both halves were inert, and the
+    // row was filed as latent on the grounds that nothing appends, so nothing grows.
+    //
+    // That was wrong twice over, which round 5 measured as R5-4: the missing `appendOps` was not
+    // latent but LOAD-BEARING (from the second launch on, `checkpoint()` folds only to the
+    // horizon it was loaded with, so every op minted since had nowhere to be), and once the
+    // append exists the no-op truncate is what lets `ops.jsonl` grow without bound.
+    //
+    // The storage-level fact this row measured is UNCHANGED and is kept as the control, because
+    // it is the reason `truncateOps(0)` was a no-op and not an error: `storage.truncateOps`
+    // guards `keepFromLine > 0`, so line 0 legitimately means "keep from the beginning".
     resetStorage();
     await storage.appendOps([{ a: 1 }, { a: 2 }, { a: 3 }]);
     assert.equal((await storage.loadOps()).length, 3);
     await storage.truncateOps(0);
     assert.equal((await storage.loadOps()).length, 3,
-      'DEFECT: the tail the store meant to drop is still there — §7.2 compaction never trims the file');
+      'storage.js is unchanged: line 0 means "keep from the beginning", which is why the old call was inert');
     await storage.truncateOps(3);
-    assert.equal((await storage.loadOps()).length, 0, 'a positive line number does trim, so the intent was `truncateOps(tail.length)`');
+    assert.equal((await storage.loadOps()).length, 0, 'a positive line number trims — the intent was always `truncateOps(tail.length)`');
 
-    // And the other half: nothing in `store.js` ever calls `appendOps`, so once `_opsPersisted`
-    // is true the ops minted this session live ONLY inside `checkpoint.json`. Fine for state,
-    // fatal for WP-8's outbox, which needs the ops themselves.
-    assert.equal(typeof storage.appendOps, 'function');
+    // THE INVERSION. `store.js` now calls both, and the truncate is given a count.
+    const src = readFileSync(new URL('../../src/js/store.js', import.meta.url), 'utf8');
+    assert.match(src, /await storage\.appendOps\(/,
+      '`store.js` CALLS appendOps — §9.2\'s outbox has a producer (A3-M5 / R5-4d closed)');
+    assert.equal(/storage\.truncateOps\(0\)/.test(src), false,
+      'and the no-op truncate is gone');
+    assert.match(src, /truncateOps\(this\._tailLines\)/,
+      'it is given a line count, guarded by "the checkpoint just written folds every one of them"');
+
+    // And behaviourally, end to end: an op minted in session 2 is ON DISK when session 2 ends.
+    // R5-4a/f own this claim in full; it is restated here so this row is not source-grep-only.
+    disk();
+    await launch();
+    store._opsPersisted = true;
+    await store.persistNow(); quiet();
+    await launch();
+    store._opsPersisted = true;
+    store.mutate('add', (s) => s.notes.push({ id: 'nNEW', date: '2026-04-01', text: 'Steuer', categoryId: 'c1', repeatsYearly: false }));
+    quiet();
+    await store.persistNow(); quiet();
+    const tail = (LS.getItem(OPS_KEY) || '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    assert.ok(tail.some((l) => l.op.e === 'note:nNEW'),
+      'the second session\'s op is a line of ops.jsonl — under the defect this file did not exist at all');
   });
 });
 

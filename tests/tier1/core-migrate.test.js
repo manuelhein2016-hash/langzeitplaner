@@ -1562,37 +1562,76 @@ describe('hostile and hand-edited boards', () => {
     assert.match(warnings.join('\n'), /will not be DRAWN on any day/);
   });
 
-  test('A3-H2 — a bar with one end is anchored to the other; v1 drew it to the horizon', () => {
+  test('INVERTED (R4-10) — a bar with one end keeps ONE end; the horizon is the renderer\'s job', () => {
+    // THIS ROW USED TO ASSERT THE ANCHOR. `{startDate: '2026-03-01'}` was migrated as
+    // `['2026-03-01', '2026-03-01']` — one day — on the reasoning that v1 drew it "to the
+    // horizon", the horizon is a function of TODAY, and TODAY cannot be migrated (R12).
+    //
+    // Round 4 measured that against `src/js/layout.js`, the file both builds share: v1 paints
+    // this bar in NINE column-segments, and the anchor painted one day AND wrote an `endDate`
+    // into `board.json` that the file never carried. The premise was right; the conclusion was
+    // not. The third option — write nothing, and let the renderer do what it always did — costs
+    // no clock, invents no value, and reproduces v1 exactly. See `entities.js:renderableBar`.
     const b = base();
     b.bars = [
       { id: 'b1', startDate: '2026-03-01', label: 'kein Ende', categoryId: 'c1' },
       { id: 'b2', endDate: '2026-05-05', label: 'kein Anfang', categoryId: 'c1' },
       { id: 'b3', startDate: '2026-04-01', endDate: 'irgendwann', label: 'unlesbar', categoryId: 'c1' },
     ];
-    const { ops, warnings } = migrateV1(b, CTX);
+    //
+    // R5-11 CHANGED ONE THIRD OF THIS ROW, and only that third. `b1` and `b2` are edges the file
+    // NEVER CARRIED and they still stay absent — that is the whole of R4-10 and it is untouched.
+    // `b3`'s edge is a value the user TYPED, and „irgendwann" sorts above every date v2 can hold,
+    // so v1 ran the bar to the far edge AND marked it as continuing past it (`layout.js:148`,
+    // `col.horizon`). An absent edge raises neither marker, so dropping it reproduced v1's
+    // segments and not v1's chevron. It is now positioned at the end of the alphabet it sorted
+    // against — see `coerceToV1BarEdge`, and R5-11e for the measurement against the v1 renderer.
+    const { ops, warnings, lossy } = migrateV1(b, CTX);
     const bars = ops.filter((o) => o.k === 'bar.set');
     assert.deepEqual(bars.map((o) => [o.f.startDate, o.f.endDate]), [
-      ['2026-03-01', '2026-03-01'],
-      ['2026-05-05', '2026-05-05'],
-      ['2026-04-01', '2026-04-01'],
-    ], 'each bar is anchored to the edge the file DID carry');
+      ['2026-03-01', undefined],
+      [undefined, '2026-05-05'],
+      ['2026-04-01', '9999-12-31'],
+    ], 'an ABSENT edge stays absent; an UNREADABLE one is placed where it sorted');
     assert.equal(materializeSolo(fold(ops)).bars.length, 3, 'all three are on the board');
-    assert.equal(warnings.filter((w) => /anchored to its/.test(w)).length, 3);
+    assert.equal(warnings.filter((w) => /anchored to its/.test(w)).length, 0, 'nothing anchors');
+    // Each one is told what it WILL look like, and the sentence names the real edge.
+    // (Written with `j` rather than a quoted literal: `suite-integrity`'s import scanner greps
+    // tier-1 files for the import keyword followed by a quoted string, and a warning message that
+    // happens to contain that shape would be read as an import of a date. This comment cannot
+    // spell the shape out for the same reason.)
+    const says = (w) => warnings.filter((x) => x.includes(w)).length;
+    assert.equal(says(`IS DRAWN from ${j('2026-03-01')} to the FAR EDGE`), 1);
+    assert.equal(says(`IS DRAWN from the NEAR EDGE of the visible year to ${j('2026-05-05')}`), 1);
+    // `b3` is the one real loss in the three: „irgendwann" is a value the user typed and v2
+    // cannot hold. An ABSENT edge is not a loss — nothing was ever there.
+    assert.equal(lossy, true, 'because of b3\'s unreadable value, not because of b1/b2');
+    assert.equal(warnings.filter((w) => /"irgendwann" names no day at all/.test(w)).length, 1);
+    assert.equal(warnings.filter((w) => /sorts AFTER every date v2 can hold/.test(w)).length, 1,
+      'and the warning says WHY that value became a date, not that v1 read one');
+    const onlyAbsent = migrateV1({ ...base(), bars: [b.bars[0]] }, CTX);
+    assert.equal(onlyAbsent.lossy, false, 'a bar the file simply never gave an end to loses NOTHING');
   });
 
-  test('A3-H2 — a bar with NO usable date is the one nothing can anchor, and it is still kept', () => {
-    // Nothing to fall back on: the field is quarantined, the entry is not. v1 keeps this bar and
-    // paints it as a stripe down every column (`layout.js:133-135`), so keeping it is fidelity
-    // and not indulgence — `layout.js` is the same file in both builds.
+  test('INVERTED (R4-10) — a bar with NO usable date is drawn in every column, and is told so', () => {
+    // Nothing to fall back on and nothing to fall back FROM: the entry is kept whole, both edges
+    // stay absent, and v1 paints it as a full-height stripe down every column
+    // (`layout.js:133-135`) — including the lane it takes off every other bar. `layout.js` is the
+    // same file in both builds, so v2 paints exactly that. The warning used to say the bar „will
+    // not be DRAWN on any day", which was false twelve times over (R4-10d).
     const b = base();
     b.bars = [{ id: 'b1', label: 'weder noch', categoryId: 'c1' }];
-    const { ops, warnings } = migrateV1(b, CTX);
+    const { ops, warnings, lossy } = migrateV1(b, CTX);
     const bar = ops.find((o) => o.k === 'bar.set');
     assert.equal(bar.f.startDate, undefined, 'nothing was invented');
     assert.equal(bar.f.endDate, undefined);
     assert.equal(bar.f.label, 'weder noch', 'and the label the user typed is still there');
     assert.equal(materializeSolo(fold(ops)).bars.length, 1, 'the bar is on the board');
-    assert.match(warnings.join('\n'), /will not be DRAWN on any day/);
+    assert.equal(lossy, false, 'nothing was lost — the file never carried either edge');
+    assert.doesNotMatch(warnings.join('\n'), /will not be DRAWN/, 'the false sentence is gone');
+    assert.match(warnings.join('\n'), /IS DRAWN, and it is drawn EVERYWHERE/);
+    assert.match(warnings.join('\n'), /all twelve columns/);
+    assert.match(warnings.join('\n'), /taking a lane from every other bar/);
   });
 
   test('A3-H2 — a repeat with no anchor date is turned off, because v1 CRASHES on that board', () => {
@@ -1628,11 +1667,14 @@ describe('hostile and hand-edited boards', () => {
     const { warnings, ops } = migrateV1(b, CTX);
     assert.equal(ops.filter((o) => o.k === 'note.set' || o.k === 'bar.set').length, 2, 'the ops are still emitted');
     assert.equal(warnings.filter((w) => /will not be DRAWN on any day/.test(w)).length, 1,
-      'only the note: the bar was anchored to its start and IS drawn');
+      'only the note — and only the note is true of it (R4-10d)');
+    assert.equal(warnings.filter((w) => w.includes(`IS DRAWN from ${j('2026-01-01')} to the FAR EDGE`)).length, 1,
+      'the bar is drawn, so it gets the sentence that says where');
     const state = materializeSolo(fold(ops));
     assert.equal(state.notes.length, 1, 'the dateless note is on the board and in the next export');
     assert.equal(state.notes[0].date, undefined, 'with no date — nothing was invented');
-    assert.deepEqual(state.bars.map((x) => [x.startDate, x.endDate]), [['2026-01-01', '2026-01-01']]);
+    assert.deepEqual(state.bars.map((x) => [x.startDate, x.endDate]), [['2026-01-01', undefined]],
+      'R4-10: and no endDate was invented either');
   });
 
   test('an empty-string note text is a VALUE and stays renderable', () => {

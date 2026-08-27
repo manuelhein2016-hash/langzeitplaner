@@ -655,37 +655,115 @@ test('F-10: ctx.attestOpen is accepted, and its answer may not disagree with the
   assert.equal(foldAuthorized(ops, { me: ME }).admitted.length, 0, 'and neither injection is fail-open');
 });
 
-test('F-10 residual: two members claiming ONE deviceShort resolve deterministically and are reported', () => {
+test('I-3: a CONTESTED deviceShort resolves to nobody, at any stamp', () => {
   // §2.3 argues `deviceShort → DeviceAttestation` is a function because two members would need
   // the same signing PRIVATE key. The four conditions do not enforce that: nothing in a pure,
   // synchronous fold can check `crock32(SHA-256(sigPubRaw)[0..10]) === deviceShort` — that is
   // §5.2.2's P2 and it lives in `openOp`. So a member CAN mint a well-formed attestation under a
-  // peer's short. What must not happen is two devices disagreeing about who won.
+  // peer's short.
+  //
+  // This used to be resolved minimal-under-`≺`, which handed the lookup — and therefore
+  // `openOp`'s verification key — to whichever claimant backdated harder, and left
+  // `shortCollisions` with no reader at all. The contest is no longer resolved: `attestationOf`
+  // REFUSES a contested short. `null` there is a defined outcome (P1 parks the sealed envelope,
+  // §5.2.5), so a squatter can stall an envelope and can never be handed the key that opens it.
   const { ops } = family({ members: [ME] });
   const squat = (ms) => mk('member.set', memberKey(EVE), {
     [`dev.${D[ME].short}`]: attBlob({ memberId: EVE, deviceId: devIdOf('EVEX'), deviceShort: D[ME].short }),
   }, { act: EVE, dev: devIdOf('EVEX'), ts: S(ms, 0, short16('EVEX')), space: FSP, id: pad22('squat') });
 
-  const late = foldAuthorized([...ops, squat(BASE + 5000)], CTX());
-  assert.deepEqual(late.shortCollisions, [D[ME].short], 'the contest is REPORTED, not silently survived');
-  assert.equal(late.attestationOf(D[ME].short).memberId, ME, 'minimal under ≺ wins — the honest claim is older');
+  for (const ms of [BASE + 5000, 0]) {
+    const r = foldAuthorized([...ops, squat(ms)], CTX());
+    assert.deepEqual(r.shortCollisions, [D[ME].short], `ms=${ms}: the contest is REPORTED`);
+    assert.equal(r.attestationOf(D[ME].short), null,
+      `ms=${ms}: and REFUSED — no stamp the squatter picks buys the lookup any more`);
+  }
 
-  // Backdated, the squatter wins the lookup. That is the honest characterization of the residual
-  // and the reason `shortCollisions` exists: `openOp`'s P2 is what actually stops the envelope,
-  // because Eve's `sigPubRaw` does not hash to Mama's short. Recorded so WP-6 cannot miss it.
-  const early = foldAuthorized([...ops, squat(0)], CTX());
-  assert.deepEqual(early.shortCollisions, [D[ME].short]);
-  assert.equal(early.attestationOf(D[ME].short).memberId, EVE,
-    'characterizing: minimal-under-≺ hands a backdated squatter the lookup — openOp P2 is the defence');
   // Stage 0b is untouched either way: the device gate is per-member, so ME's own ops still stand.
+  const early = foldAuthorized([...ops, squat(0)], CTX());
   assert.equal(early.attestedDevices.get(ME).has(D[ME].id), true);
   assert.equal(early.memberOfDevice(D[ME].id), ME);
+  assert.equal(early.rejected.length, 0, 'and nothing is rejected — refusing both claims would be a DoS handle');
 
   // The only thing that would be fatal: two devices resolving the short differently.
   for (const seed of [1, 2, 3, 4, 5]) {
     assert.deepEqual(snapshot(foldAuthorized(shuffled(mulberry32(seed), [...ops, squat(0)]), CTX())),
-      snapshot(early), `shuffle ${seed} changed who owns the short`);
+      snapshot(early), `shuffle ${seed} changed how the short resolves`);
   }
+});
+
+test('I-3: one sigPubRaw under two deviceShorts is contested without hashing anything', () => {
+  // The half of ADR 001 §1.2 a pure fold CAN enforce. P2 needs SHA-256 and lives in `openOp`,
+  // but "one signing key hashes to exactly one short" is an EQUALITY, and it catches the squat
+  // that lands before its victim's own attestation — when there is no second member record yet
+  // for the collision test above to fire on.
+  const twinShort = short16('TWNX');
+  const own = mk('member.set', memberKey(EVE), {
+    [`dev.${D[EVE].short}`]: attBlob({ memberId: EVE, deviceId: D[EVE].id, deviceShort: D[EVE].short }),
+  }, { act: EVE, dev: D[EVE].id, ts: S(BASE, 0, D[EVE].short), space: FSP });
+  const twin = mk('member.set', memberKey(EVE), {
+    [`dev.${twinShort}`]: attBlob({ memberId: EVE, deviceId: D[EVE].id, deviceShort: twinShort }),
+  }, { act: EVE, dev: D[EVE].id, ts: S(BASE + 1, 0, D[EVE].short), space: FSP });
+
+  const r = foldAuthorized([own, twin], CTX());
+  assert.deepEqual(r.shortCollisions, [D[EVE].short, twinShort].sort(),
+    'both shorts are contested: one of the two must be a lie about §1.2');
+  assert.equal(r.attestationOf(D[EVE].short), null);
+  assert.equal(r.attestationOf(twinShort), null);
+  assert.deepEqual(snapshot(foldAuthorized([twin, own], CTX())), snapshot(r));
+});
+
+test('R4-13: a deviceId is a LABEL — two claimants means no owner, not a race', () => {
+  // ADR 002 §2.3's four conditions bind `memberId` and `deviceShort`. They bind NOTHING to
+  // `deviceId`, which is 128 random bits its own author asserts. `authz.js` used to claim
+  // otherwise and publish `deviceId → memberId` as first-writer-wins over an order the attacker
+  // could choose by backdating (round-4 finding 4). The map is gone: `memberOfDevice` answers
+  // only when there is exactly one claimant, and every contest is on `deviceIdCollisions`.
+  const { ops } = family({ members: [ME, MAMA] });
+  // Eve's own record, Eve's own short, Eve's own memberId, signed by Eve — and MAMA's label.
+  const adopt = (ms) => mk('member.set', memberKey(EVE), {
+    [`dev.${D[EVE].short}`]: attBlob({ memberId: EVE, deviceId: D[MAMA].id, deviceShort: D[EVE].short }),
+  }, { act: EVE, dev: D[EVE].id, ts: S(ms, 0, D[EVE].short), space: FSP, id: pad22('adopt') });
+
+  for (const ms of [0, BASE + 9999]) {
+    const r = foldAuthorized([...ops, adopt(ms)], CTX());
+    assert.equal(reason(r, adopt(ms)), null, `ms=${ms}: still admitted — a rejection would be a DoS handle`);
+    assert.equal(r.memberOfDevice(D[MAMA].id), null, `ms=${ms}: the label resolves to NOBODY`);
+    assert.deepEqual(r.deviceIdCollisions, [D[MAMA].id], `ms=${ms}: and the contest is reported`);
+    assert.equal(r.attestedDevices.get(MAMA).has(D[MAMA].id), true, `ms=${ms}: Mama is not un-attested`);
+  }
+
+  // Order-independence covers the report, not just the answer: two Macs must agree on a contest.
+  const set = [...ops, adopt(0)];
+  for (const seed of [11, 12, 13]) {
+    assert.deepEqual(snapshot(foldAuthorized(shuffled(mulberry32(seed), set), CTX())),
+      snapshot(foldAuthorized(set, CTX())), `shuffle ${seed}`);
+  }
+});
+
+test('R4-13d: the adopted label confers nothing a freshly invented one would not', () => {
+  // The proof that there is nothing left to forge, rather than a promise. Whatever Eve can do
+  // holding Mama's label she can do holding a label she made up, so adopting Mama's is a name
+  // collision and not a capability — and she still cannot author as MAMA, because stage 0b reads
+  // `op.act`'s OWN record.
+  const { ops } = family({ members: [ME, MAMA] });
+  const evesOwn = (devId) => mk('member.set', memberKey(EVE), {
+    [`dev.${D[EVE].short}`]: attBlob({ memberId: EVE, deviceId: devId, deviceShort: D[EVE].short }),
+  }, { act: EVE, dev: D[EVE].id, ts: S(BASE, 0, D[EVE].short), space: FSP, id: pad22('claim') });
+  const evesOp = (devId) => memberOp(EVE, { displayName: 'Eve' }, S(BASE + 5, 0, D[EVE].short),
+    { act: EVE, dev: devId, id: pad22('evop') });
+
+  const stolen = foldAuthorized([...ops, evesOwn(D[MAMA].id), evesOp(D[MAMA].id)], CTX());
+  const fresh = foldAuthorized([...ops, evesOwn(devIdOf('FRESH')), evesOp(devIdOf('FRESH'))], CTX());
+  assert.deepEqual(stolen.rejected.map((o) => o.id), fresh.rejected.map((o) => o.id),
+    'identical outcomes ⇒ the stolen label conferred nothing');
+
+  // And the thing the forgery was for is still refused.
+  const asMama = memberOp(MAMA, { displayName: 'gekapert' }, S(BASE + 6, 0, D[EVE].short),
+    { act: MAMA, dev: D[MAMA].id, id: pad22('asmama') });
+  const r = foldAuthorized([evesOwn(D[MAMA].id), asMama], CTX());
+  assert.equal(reason(r, asMama), REJECT_REASONS.UNATTESTED_DEVICE,
+    'Eve\'s claim does not attest MAMA — the gate is the (member, device) pair');
 });
 
 test('F-10: with no contest, shortCollisions is empty and every attested short resolves', () => {

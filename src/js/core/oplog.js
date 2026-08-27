@@ -452,9 +452,20 @@ export function createOpLog(ports = {}) {
    * everything currently held. The two differ only after a compaction, and the difference is what
    * makes `{checkpoint(), ops()}` the exact pair that belongs on disk: a checkpoint whose horizon
    * ran ahead of the tail it was written beside would compact lines nobody asked it to.
+   *
+   * `'advance'` takes the MAX of the two, not `maxLiveStamp() ?? horizon` (R5-4). "Everything
+   * currently held" is the checkpoint we hold PLUS the lines above it, so a live line BELOW the
+   * horizon — an op that arrived late (§7.2), or a tail line the checkpoint already folds because
+   * a crash landed between `saveCheckpoint` and `truncateOps` — must not drag the horizon
+   * backwards. It used to: `maxLiveStamp()` was answered first, the receding-horizon guard three
+   * lines below then threw, and `compact()` threw for the rest of that log's life — which means
+   * the one call that bounds `ops.jsonl` could be permanently disabled by one late op.
    */
   function resolveHorizon(opts, mode) {
-    const fallback = mode === 'read' ? (horizon ?? maxLiveStamp()) : (maxLiveStamp() ?? horizon);
+    const live0 = maxLiveStamp();
+    const fallback = mode === 'read'
+      ? (horizon ?? live0)
+      : (live0 === null || (horizon !== null && cmp(live0, horizon) < 0) ? horizon : live0);
     const h = opts.horizon ?? fallback ?? ZERO_STAMP;
     if (!isStamp(h)) throw new OpLogError(`checkpoint: horizon must be a 37-char stamp, got ${JSON.stringify(h)}`);
     if (horizon !== null && cmp(h, horizon) < 0) {

@@ -120,12 +120,16 @@ export async function attestDevice(att, recSigPriv) { throw new Error('not imple
  * obligations on that closure:
  *   · it is called with the HOUSING member's id — the member whose record the register sits in,
  *     never the payload's self-declared `att.memberId` (§2.3 condition (4)); and
- *   · it SHOULD also check `deviceShortOf(att.sigPubRaw) === att.deviceShort` (§5.2.2 P2). The
+ *   · it MUST also check `deviceShortOf(att.sigPubRaw) === att.deviceShort` (§5.2.2 P2). The
  *     fold cannot: the binding is a SHA-256 and nothing in `authz.js` may await. Enforcing it
  *     here is what makes `deviceShort -> DeviceAttestation` a real function instead of an
- *     argued one — see `AuthzResult.shortCollisions`.
+ *     argued one — see `AuthzResult.shortCollisions`. [Was SHOULD; raised to MUST 2026-08-27,
+ *     finding I-3. Until this lands, the fold REFUSES a contested short rather than resolving
+ *     it, which costs liveness on a squatted short — so P2 here is what restores it.]
  * The fold publishes the payload decoded from the REGISTER BYTES, not the one this returns, and
- * treats a disagreement between the two as a failed verification.
+ * treats a disagreement between the two as a failed verification — on ALL SIX fields, `kexPubRaw`
+ * and `createdAt` included (R4-15a). An opener that may disagree about `kexPubRaw` while still
+ * being believed is a key-injection channel: `kexPubRaw` is what §4.2 wraps the space key to.
  *
  * @param {string} blob @param {CryptoKey} recSigPub
  * @returns {Promise<DeviceAttestation|null>} null on any failure — never throw-and-branch on names
@@ -242,10 +246,26 @@ export async function sealOp(op, keyring, sigPriv, hdr) { throw new Error('not i
  * AND ONE THING `openOp` MUST NOT SKIP. P2 is not a formality: it is the ONLY place
  * `att.deviceShort` is ever bound to `att.sigPubRaw`. The fold cannot check it — it is pure and
  * synchronous, and the binding is a SHA-256 — so a member CAN file a well-formed attestation
- * under a peer's short. `AuthzResult.shortCollisions` reports exactly that, and the fold resolves
- * the contest minimal-under-`≺`, which hands a BACKDATED squatter the lookup. P2 is what refuses
- * the envelope. WP-6's `attestOpen` implementation should enforce the same binding at fold time,
- * which closes the residual at its root.
+ * under a peer's short.
+ *
+ * [AMENDED 2026-08-27 — I-3.] The fold no longer RESOLVES that contest. It used to pick
+ * minimal-under-`≺`, which handed a backdated squatter the lookup and therefore handed THIS
+ * FUNCTION the squatter's verification key. `attestationOf` now returns `null` for any short on
+ * `AuthzResult.shortCollisions`, so a squatted short reaches P1 and PARKS the sealed envelope
+ * instead of being opened under the wrong key. Two consequences for `openOp`:
+ *   · P1's `null` now has a second cause — contested, not merely absent — and both are parks.
+ *     Do not turn either into a rejection; §5.2.5's argument covers both.
+ *   · a squatter can therefore STALL a peer's envelopes. That is the deliberate trade (a park is
+ *     re-evaluable; a wrong key is not), and P2 inside `attestOpen` is what removes the stall by
+ *     refusing the squat at fold time. Ship P2 in `attestOpen`, not only here.
+ *
+ * WHAT DOES NOT EXIST YET, AND `openOp` MUST NOT PRETEND IT DOES: **device revocation.** There
+ * is none, anywhere — see ADR 002 §2.3 "Revocation — the gap, and who owns it" (owner: WP-9).
+ * `dev.*` registers are write-once, so an attestation cannot even be amended or withdrawn; a
+ * stolen device stays attested and stays admitted until the epoch bump stops wrapping keys to
+ * it, which is a key-distribution measure and not an admissibility one. `openOp` has no
+ * revocation input, no revocation check, and no `revokedAt` to compare against — do not invent
+ * one at this seam; it belongs in the attestation register design.
  *
  * @param {Envelope} env @param {KeyRing} keyring
  * @param {(dv:string) => DeviceAttestation|null} attestationOf  AuthzResult.attestationOf
