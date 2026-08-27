@@ -212,6 +212,39 @@ describe('ATT-40 — replaceAllOps exists and honours its contract signature', (
     assert.deepEqual(plan.removed, ['note:n1']);
   });
 
+  test('A3-M1a — the door policy: a hostile BOARD is refused per field, never thrown on', () => {
+    // The lead's ruling: never throw on externally-sourced input (a file, an import, a peer);
+    // throw only on programmer error. The row below this one is the other half — a bad CTX is a
+    // call site passing a bad argument, and that still throws.
+    //
+    // The deep nesting is the one that was actually reachable: `flattenPref` recurses once per
+    // level, so a hand-edited `settings` a few thousand deep overflows the stack with a
+    // RangeError rather than an `OpError`, and the door rethrew it. It costs one key now.
+    const A = device('a', MAC_A, SHORT_A);
+    const nested = () => {
+      const root = {};
+      let cur = root;
+      for (let i = 0; i < 5000; i++) { cur.a = {}; cur = cur.a; }
+      cur.b = 1;
+      return root;
+    };
+    const HOSTILE = {
+      'deeply nested settings': () => ({ ...board(), settings: { deep: nested() } }),
+      'every field the wrong type at once': () => ({
+        ...board(),
+        notes: [{ id: 5, date: 20260304, text: 7, categoryId: 9, repeatsYearly: 'yes' }],
+        bars: [{ id: true, startDate: '4.3.2026', endDate: null, label: {}, categoryId: [] }],
+        categories: [{ id: null, name: 1, nameEn: [], paletteRef: 2, visible: 'ja' }],
+        scratchpads: { '2026-03': 42, '__proto__': 'x', '9999-99': {} },
+      }),
+      'entries that are not objects': () => ({ ...board(), notes: [[1, 2], 'nope', 42, null] }),
+    };
+    for (const [what, make] of Object.entries(HOSTILE)) {
+      assert.doesNotThrow(() => planReplaceAll(A.regs, make(), { ...A.ctx(), acceptLossy: true }), what);
+    }
+    assert.equal(({}).a, undefined, 'and nothing was written to Object.prototype on the way through');
+  });
+
   test('a bad ctx is a caller error and throws before anything is emitted', () => {
     const A = device('a', MAC_A, SHORT_A);
     assert.throws(() => planReplaceAll(A.regs, board(), { me: ME, deviceId: MAC_A }), ReplaceError);

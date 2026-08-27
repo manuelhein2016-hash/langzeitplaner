@@ -630,12 +630,40 @@ export function materialize(regs, ctx) { … }
    instantaneous and needs no crypto and no purge op); if `M ∈ ctx.hiddenMembers` (17.3);
    if not **renderable**:
    ```
-   renderable(note) = has date && (own ? has text : (pub.level === 'belegt' || has pub.text))
-   renderable(bar)  = has startDate && has endDate
+   renderable(note) = own ? has text                                          ← v1's array
+                          : has date && (pub.level === 'belegt' || has pub.text)
+   renderable(bar)  = own ? true                                              ← v1's array
+                          : has startDate && has endDate
    ```
-   **Renderability is checked against explicit fields and never inferred from absence.** A
-   Geteilt note whose `pub.text` op has not arrived yet is *invisible*, not "Belegt". Meaning is
-   never inferred from a missing field — that is the bug class ADR 004 exists to prevent.
+   > **AMENDED 2026-08-27 (A3-H2).** The predicate now splits own from foreign, and the two
+   > halves answer two different questions.
+   >
+   > **The FOREIGN half is unchanged and its rule is unchanged:** renderability is checked
+   > against explicit fields and never inferred from absence. A Geteilt note whose `pub.text` op
+   > has not arrived yet is *invisible*, not "Belegt". Meaning is never inferred from a missing
+   > field — that is the bug class ADR 004 exists to prevent, and every word of it is about the
+   > redaction path.
+   >
+   > **The OWN half is not a visibility question at all.** For my own entries there is no
+   > redaction, no partial arrival and nothing to infer: the register set is the file. The
+   > predicate's only job there is to reproduce **v1's array membership**, because `layout.js` is
+   > the same file in both builds — an entry that is in the array is drawn exactly the way it
+   > always was, and an entry that is not is one the user had before the upgrade and does not
+   > have after it. v1 keeps a note with no date (it simply lands on no day row) and paints a bar
+   > with no `endDate` to the far edge of the visible window, so requiring a date here was
+   > dropping entries v1 kept — and one autosave later dropping them out of `board.json`. That
+   > was A3-H2's five-shape loss, and it is the reason `migrate1to2.js` §4b coerces rather than
+   > drops: the door keeps the entry, and this step must not throw it away again one layer down.
+   >
+   > **The one own-side exception**, and it is a crash and not a policy: a note with
+   > `repeatsYearly` true and no anchor date. `layout.js:72` expands it with
+   > `Number(n.date.slice(0, 4))` and takes the whole board down. There is no v1 rendering of
+   > that shape to preserve, only a v1 crash, so it stays out of the array. Both doors also
+   > refuse to mint it (the flag follows the anchor), which makes this the braces to their belt.
+   >
+   > Implemented in `src/js/core/entities.js` (`renderableNote` / `renderableBar`), pinned by
+   > `tests/tier1/core-materialize.test.js` and by the H-2 rows in
+   > `tests/attack/upgrade-day-migration.test.js`.
 4. **Decorate** with the v2-additive, v1-ignored fields:
    `{ ownerId, isForeign, visibility, level, coEdit, memberColorRef, initial, redacted,
       createdAt, updatedAt, updatedBy, isNew, exposure }`.

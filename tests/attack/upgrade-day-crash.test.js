@@ -71,64 +71,88 @@ test('HELD · a clean upgrade: board.json alone, no second file created (ADR 001
 // 2. THE DEFECT — one parseable line in the log discards board.json entirely
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('DEFECT · a single parseable line in ops.jsonl erases the whole board, on screen and on disk', async () => {
+test('HELD · a single parseable line in ops.jsonl is quarantined; the board is untouched on screen and on disk', async () => {
+  // INVERTED 2026-08-27 — A3-C1 is closed. `shouldMigrate`'s existence test still answers "has
+  // migration already run?"; a separate consistency check answers "is this log READABLE, and is
+  // it a log of THIS board?". A log that fails either is quarantined: not applied, not deleted,
+  // not written to. See `logBelongsToBoard` / `_useLog` in src/js/store.js.
   const strayOp = J({ id: 'AAAAAAAAAAAAAAAAAAAAAA', k: 'note.set', e: 'note:ghost', f: { text: 'ghost' } });
   const r = await launch(() => {
     LS.setItem(LS_BOARD, J(REAL_BOARD()));
     LS.setItem(LS_OPS, `${strayOp}\n`);
   });
-  assert.deepEqual(r.onScreen, EMPTY, 'the board comes up blank');
-  assert.deepEqual(r.onDisk, EMPTY, 'and 700 ms later board.json says so too');
-  assert.equal(r.warnings.length, 0, 'and nothing was recorded, let alone shown');
-  // ZERO categories is a board v1 can never write — `migrate()` substitutes the four defaults
-  // for an empty list. So the next launch after this one is a factory-fresh board.
-  const reread = JSON.parse(LS.getItem(LS_BOARD));
-  assert.equal(reread.categories.length, 0);
-  // Even deleting the two log files does not bring anything back: `migrate()` reads the board
-  // that was just written over the user's, sees an empty category list, and hands back v1's four
-  // factory defaults. That is the end state of this path — a brand-new board.
+  assert.deepEqual(r.onScreen, FULL, 'the board comes up whole');
+  assert.deepEqual(r.onDisk, FULL, 'and the autosave writes the whole board back');
+  assert.equal(r.warnings.length, 1, 'exactly one thing to tell the user');
+  assert.match(r.warnings[0], /QUARANTINED \(unrelated-log\)/);
+  assert.equal(v2store.quarantine.reason, 'unrelated-log');
+  assert.equal(LS.getItem(LS_OPS), `${strayOp}\n`, 'the refused log is still on disk, byte for byte');
+  assert.deepEqual(r.slots, ['langzeitplaner.board', 'langzeitplaner.ops', 'langzeitplaner.snapshots'],
+    'and no checkpoint was written over it');
+
+  // And the end state is the board the user had, not a factory-fresh one.
   LS.removeItem(LS_OPS); LS.removeItem(LS_CHECKPOINT);
   await bootV2();
-  assert.equal(v2store.state.categories.length, 4, 'four fresh default categories');
-  assert.equal(v2store.state.notes.length, 0, 'and nothing else, ever again');
+  assert.deepEqual(size(v2store.state), FULL);
 });
 
-test('DEFECT · the same thing via checkpoint.json — a stub `{}` is enough', async () => {
+test('HELD · the same thing via checkpoint.json — a stub `{}` carries no provenance and is refused', async () => {
   const r = await launch(() => {
     LS.setItem(LS_BOARD, J(REAL_BOARD()));
     LS.setItem(LS_CHECKPOINT, '{}');
   });
-  assert.deepEqual(r.onScreen, EMPTY);
-  assert.deepEqual(r.onDisk, EMPTY);
+  assert.deepEqual(r.onScreen, FULL);
+  assert.deepEqual(r.onDisk, FULL);
+  assert.equal(v2store.quarantine.reason, 'no-provenance',
+    'a checkpoint this app did not write may not outrank board.json on the strength of merely existing');
+  assert.equal(LS.getItem(LS_CHECKPOINT), '{}', 'and it is left exactly where it was');
 });
 
-test('DEFECT · ADR 001 §7.2\'s own crash window: ops written, checkpoint not — plus a torn last line', async () => {
-  // This is the exact sequence the brief names. `_persistOps()` writes the checkpoint and then
-  // truncates; a crash in between, or a space-creation that got as far as the ops file, leaves
-  // ops.jsonl with a real tail and no checkpoint beside it.
+test('HELD · ADR 001 §7.2\'s own crash window: ops written, checkpoint not — plus a torn last line', async () => {
+  // The exact sequence the brief named. `_persistOps()` writes the checkpoint and then truncates;
+  // a crash in between, or a space-creation that got as far as the ops file, leaves ops.jsonl
+  // with a tail and no checkpoint beside it. The tail is not this board's tail, so it is refused.
   const op = J({ id: 'AAAAAAAAAAAAAAAAAAAAAA', k: 'note.set', e: 'note:ghost', f: { text: 'ghost' } });
+  const bytes = `${op}\n{"id":"BBBB","k":"note.se`;                 // ← the torn final line
   const r = await launch(() => {
     LS.setItem(LS_BOARD, J(REAL_BOARD()));
-    LS.setItem(LS_OPS, `${op}\n{"id":"BBBB","k":"note.se`);   // ← the torn final line
+    LS.setItem(LS_OPS, bytes);
   });
-  assert.deepEqual(r.onScreen, EMPTY);
-  assert.deepEqual(r.onDisk, EMPTY);
-  assert.ok(r.slots.includes('langzeitplaner.checkpoint'),
-    'and it writes a checkpoint of the empty board, so the state is now self-sustaining');
+  assert.deepEqual(r.onScreen, FULL);
+  assert.deepEqual(r.onDisk, FULL);
+  assert.ok(!r.slots.includes('langzeitplaner.checkpoint'),
+    'no checkpoint of an empty board is written, so nothing becomes self-sustaining');
+  assert.equal(LS.getItem(LS_OPS), bytes, 'the torn tail is preserved for a rescue pass, not truncated away');
 });
 
-test('DEFECT · once poisoned, truncateOps(0) never clears the tail, so every later launch is poisoned too', async () => {
+test('DEFECT (A3-M5, still open) · `_persistOps` passes truncateOps(0), which keeps every line', async () => {
+  // RE-ANCHORED 2026-08-27. The original setup — three stray lines beside a real board — no
+  // longer reaches `_persistOps` at all, because that log is now QUARANTINED and
+  // `_opsPersisted` stays false. Which is the point of the fix, and is asserted first here.
+  // A3-M5 is a different finding (owner: WP-8) and is measured underneath, on a log the store
+  // itself wrote and therefore trusts.
   const op = J({ id: 'AAAAAAAAAAAAAAAAAAAAAA', k: 'note.set', e: 'note:ghost', f: { text: 'ghost' } });
   LS.clear();
   LS.setItem(LS_BOARD, J(REAL_BOARD()));
   LS.setItem(LS_OPS, `${op}\n${op}\n${op}\n`);
   await bootV2();
-  const before = LS.getItem(LS_OPS).split('\n').filter(Boolean).length;
+  assert.equal(v2store.quarantine.reason, 'unrelated-log');
+  await v2store.persistNow();
+  assert.equal((LS.getItem(LS_OPS) || '').split('\n').filter(Boolean).length, 3,
+    'a quarantined tail is left alone — the store does not write to a log it refused');
+  assert.deepEqual(size(v2store.state), FULL, 'and the board is the user\'s');
+
+  // Now the same measurement on a TRUSTED log: this build writes the checkpoint, then asks
+  // storage to drop the tail it has just folded, and passes 0.
+  LS.clear();
+  LS.setItem(LS_BOARD, J(REAL_BOARD()));
+  await bootV2();
+  v2store._opsPersisted = true;
   await v2store.persistNow();                       // → saveCheckpoint(), then truncateOps(0)
-  const after = (LS.getItem(LS_OPS) || '').split('\n').filter(Boolean).length;
-  assert.equal(before, 3);
-  assert.equal(after, 3,
-    'storage.js:truncateOps treats 0 as "keep from line 0" = keep everything; `_persistOps` passes 0');
+  LS.setItem(LS_OPS, `${op}\n${op}\n${op}\n`);
+  await v2store.persistNow();
+  assert.equal((LS.getItem(LS_OPS) || '').split('\n').filter(Boolean).length, 3,
+    'DEFECT: storage.js:truncateOps treats 0 as "keep from line 0" = keep everything; `_persistOps` passes 0');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

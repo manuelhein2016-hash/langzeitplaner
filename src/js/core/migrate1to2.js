@@ -33,8 +33,11 @@
 import { fmt, MAX_STAMP_CTR } from './stamp.js';
 import { ZERO_DEVICE_SHORT, isDeviceShort, sha256 } from './ids.js';
 import { b64u } from './b64.js';
-import { utf8 } from './canon.js';
-import { isMemberId, isDeviceId, isSpaceId, isMonthKey, isEntityUuid, renderable } from './entities.js';
+import { canonicalJSON, utf8 } from './canon.js';
+import {
+  isMemberId, isDeviceId, isSpaceId, isMonthKey, isEntityUuid, isDateString, renderable,
+  categoryVisibilityOf, noteOccurrences, iso,
+} from './entities.js';
 import { stripV2Fields } from './materialize.js';
 import {
   FIELDS,
@@ -519,6 +522,255 @@ export function truncateToFit(kind, name, value) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 4b. COERCE TO v1's MEANING  (A3-H2 — the PO's decision, 2026-08-27)
+//
+// v2's `FIELDS` is a type table; v1 had none. Five entry shapes v1 opens, keeps and writes back
+// were dropped by the type table, and — because in solo mode `board.json` IS the checkpoint — the
+// drop was committed to the user's file on the first autosave and the register went with it at
+// the next launch. The most user-visible instance did not even look like a loss: `repeatsYearly:
+// 'yes'` is truthy in v1 so the birthday repeats, is not a boolean so v2 dropped the key, and the
+// renderer then read it as falsy — a yearly entry silently became a one-off.
+//
+// THE RULE THIS SECTION IMPLEMENTS, and it is a decision, not a preference:
+//
+//   1. COERCE to what v1 MEANT by the value, never to what looks tidy. v1's meaning is read out
+//      of v1's own code, and where that code still lives in this tree the coercion PROBES it
+//      rather than restating it (`V1_BOOL_READING` below) — the same discipline `truncateToFit`
+//      applies to the length limit and `RENDER_REQUIRED` applies to §5 step 3.
+//   2. EVERY coercion is reported to the warnings channel with the entity, the field, the old
+//      value and the new one. Auditable, per the decision.
+//   3. A value that cannot be coerced without INVENTING meaning does not cost the ENTRY. The
+//      field is quarantined — dropped, reported — and the entry stays on the board and in the
+//      file. That half is enforced one module away, in `entities.js:renderableNote`.
+//   4. BOTH DOORS. `replace.js` imports every function below rather than growing a second copy;
+//      property P13 asserts the two doors build the same board from the same bytes, and a
+//      coercion that existed on one door and not the other is precisely the class it exists for.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * How v1 READS a boolean field — probed from the v1 expressions this tree still carries, because
+ * the two carried booleans do not agree and guessing gets one of them wrong:
+ *
+ *   · `cat.visible` is `c.visible !== false` (`layout.js:111`, `legend.js:25`, `print.js:71`,
+ *     v1 `store.js:901`). Only a LITERAL `false` hides a category, so `visible: 'ja'` is visible
+ *     and — the one a `Boolean(v)` shortcut would get wrong — so is `visible: 0`.
+ *   · `note.repeatsYearly` is plain truthiness (`layout.js:71`, `if (!n.repeatsYearly)`), so
+ *     `'yes'` and `'nein'` both repeat and `0` does not.
+ *
+ * Neither rule is restated here: `categoryVisibilityOf` and `noteOccurrences` in `entities.js`
+ * ARE those two expressions (ADR 005 §3 — one implementation per question), so the table below
+ * asks them. A repeat yields one occurrence per year of the window and a one-off exactly one,
+ * which is how the second probe reads its answer.
+ */
+const V1_BOOL_READING = Object.freeze({
+  'cat.visible': (v) => categoryVisibilityOf({ categories: [{ id: 'probe', visible: v }] })('probe'),
+  'note.repeatsYearly': (v) => noteOccurrences(
+    [{ id: 'probe', date: '2026-03-04', repeatsYearly: v }], '2026-01-01', '2027-12-31',
+  ).size > 1,
+});
+
+/**
+ * A carried BOOLEAN field the file holds as something else, read the way v1 read it.
+ *
+ * `null` is deliberately NOT coerced. It is a legal register value, and it lands on v1's answer
+ * without any help: `visible: null` is `null !== false` ⇒ visible, and a null register is skipped
+ * by `materialize`, which leaves `visible` absent, which is `!== false` ⇒ visible. Same for
+ * `repeatsYearly`, falsy either way. Coercing it would be motion without meaning.
+ *
+ * @param {string} kind @param {string} name @param {unknown} value
+ * @returns {{kept: boolean}|null} null when this is not a boolean field, or nothing to do
+ */
+export function coerceToV1Bool(kind, name, value) {
+  const spec = FIELDS[kind]?.[name];
+  if (!spec || spec.t !== 'bool') return null;
+  if (typeof value === 'boolean' || value === undefined || value === null) return null;
+  const read = V1_BOOL_READING[`${kind}.${name}`];
+  if (!read) return null;                                  // pinned by the assertion below
+  return { kept: read(value) === true };
+}
+
+/**
+ * A carried DATE field the file holds in a shape `FIELDS` refuses, read as the DAY IT NAMES.
+ *
+ * ─── why this file used to refuse, and why the refusal was wrong ───────────────────────────────
+ * `truncateToFit`'s docblock says a malformed date is deliberately not repaired, because "the
+ * longest accepted prefix of `'2026-01-01T09:00'` is a perfectly plausible `'2026-01-01'`, and
+ * inventing a date the user never wrote is worse than dropping a value they cannot see anyway".
+ * The first half of that sentence is still true and is why this is a PARSER and not a prefix; the
+ * second half was measured and found false. Dropping the date did not drop "a value they cannot
+ * see" — it took the whole NOTE off the board (§5 step 3) and then out of `board.json`, so the
+ * user lost the text, the category and the entry along with the date they had mistyped.
+ *
+ * ─── what it will and will not read ────────────────────────────────────────────────────────────
+ * Every shape below names exactly one day, with no assumption a reader could get wrong:
+ *
+ *   · `2026-3-1`, `2026-03-1`      — ISO with an unpadded field. Padding invents nothing.
+ *   · `2026-01-01T09:00`           — an ISO datetime. The date part is not a guess, it is the
+ *                                    date; the time is what has no register.
+ *   · `4.3.2026`                   — the German form this product is written in (`i18n.js`, the
+ *                                    whole `de` half). Day first, month second — the PO's board
+ *                                    is a German board and `4.3.2026` is 4 March.
+ *   · `2026/03/04`                 — year first, so the order is unambiguous.
+ *   · `20260304` (string or number) — YYYYMMDD, eight digits, the only reading that fits.
+ *
+ * And what it REFUSES, because there is no single answer: `3/4/2026` (4 March in London, 3 April
+ * in New York), a millisecond timestamp, `March 4th`, anything with a two-digit year. Those keep
+ * the ENTRY and lose the FIELD (rule 3 above) — a note with no date is one v1 never drew either.
+ *
+ * Calendar validity is NOT checked, only the format, exactly as `ops.js` checks it: v1 can hold
+ * `2026-02-30` and `entities.js:reanchorRepeat` produces a Feb-29 anchor in a non-leap year ON
+ * PURPOSE (ADR 001 §12.8). Refusing 30 February here would be a second, stricter date rule.
+ *
+ * @param {string} kind @param {string} name @param {unknown} value
+ * @returns {{kept: string}|null} null when this is not a date field, or nothing can be read
+ */
+export function coerceToV1Date(kind, name, value) {
+  const spec = FIELDS[kind]?.[name];
+  if (!spec || spec.t !== 'date') return null;
+  if (value === undefined || value === null || isDateString(value)) return null;
+
+  const s = typeof value === 'string' ? value.trim()
+    : (typeof value === 'number' && Number.isInteger(value) && value >= 10000101 && value <= 99991231)
+      ? String(value)
+      : null;
+  if (s === null) return null;
+
+  let y; let m; let d;
+  let mt;
+  if ((mt = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T ].*)?$/.exec(s))) {
+    [, y, m, d] = mt;
+  } else if ((mt = /^(\d{1,2})\.(\d{1,2})\.(\d{4})\.?$/.exec(s))) {
+    [, d, m, y] = mt;                                      // German: day first (de is the default)
+  } else if ((mt = /^(\d{4})(\d{2})(\d{2})$/.exec(s))) {
+    [, y, m, d] = mt;
+  } else {
+    return null;
+  }
+  const kept = iso(Number(y), Number(m), Number(d));
+  return isDateString(kept) ? { kept } : null;             // month 13, day 32 — refuse, do not clamp
+}
+
+/**
+ * A v1 entity id, or a `categoryId` reference, that is not a STRING but names one.
+ *
+ * v1 compares ids with `===` and builds `new Set(categories.map((c) => c.id))`, so a numeric
+ * `id: 42` works perfectly well in v1 as long as everything that points at it is also the number
+ * 42. v2's `ENTITY_UUID_RE` and the `id` field type both want a string. `String(42)` is the same
+ * token, and it is applied to the ENTITY id and to the `categoryId` that references it alike —
+ * which is what keeps the note in the category v1 had it in. Applying it to only one of the two
+ * would silently re-parent every entry in that category to the fallback (§5 step 7).
+ *
+ * Refused for anything whose string form is not a legal id — an object, an empty string, a `/`
+ * or `:` (the family-key separators, ADR 001 §4.4). Those go to `mintedId` instead, which is a
+ * different answer to a different question: this one PRESERVES a reference, that one REPLACES a
+ * missing token.
+ *
+ * @param {unknown} value @returns {{kept: string}|null}
+ */
+export function coerceToV1Id(value) {
+  if (typeof value === 'string' || value === undefined || value === null) return null;
+  if (typeof value !== 'number' && typeof value !== 'boolean') return null;
+  if (typeof value === 'number' && !Number.isFinite(value)) return null;
+  const kept = String(value);
+  return isEntityUuid(kept) ? { kept } : null;
+}
+
+/**
+ * A deterministic id for an entry that arrives WITHOUT a usable one (A3-H2).
+ *
+ * The old comment on `entityIdOf` said an id must never be invented here, because it would have
+ * to come either from the content (two identical entries would collide) or from a CSPRNG (two
+ * migrations of the same file would differ, R12). Both hazards are real and neither one argues
+ * for DROPPING the entry, which is what the code did: v1 keeps an id-less note in its array and
+ * paints it, so the drop is a note the user could see before the upgrade and cannot see after it.
+ *
+ * So the id is derived from the entry's CONTENT plus an occurrence counter, and the collision the
+ * first hazard names is the very thing the counter resolves: two byte-identical id-less notes are
+ * two notes, they get `n = 1` and `n = 2`, and both survive. Both doors walk the same collections
+ * in the same order over the same file, so both hand the same entry the same `n` — which is what
+ * P13 needs and what a CSPRNG could never give.
+ *
+ * `canonicalJSON` sorts keys, so the id does not depend on the order the file was written in. A
+ * value it refuses (a float, an unpaired surrogate, a cycle) is not a reason to fail: the shape
+ * degrades to a constant and the counter carries the whole distinction.
+ *
+ * @param {string} kind @param {Object} entry @param {Set<string>} taken ids already used
+ * @returns {string} 22 base64url characters, unused
+ */
+export function mintedId(kind, entry, taken) {
+  let shape;
+  try { shape = canonicalJSON(entry); } catch { shape = ' unserialisable'; }
+  for (let n = 1; n < 1000; n++) {
+    const fresh = derive('lzp.migrate.mintid', [kind, shape, String(n)]);
+    if (!taken.has(fresh)) return fresh;
+  }
+  throw new MigrationError(`migrate1to2: could not mint a free id for an id-less ${kind}`);
+}
+
+/**
+ * The date v1 drew for a bar edge the file does not carry — see `entities.js:renderableBar` for
+ * what v1 actually draws and why "to the horizon" cannot be migrated.
+ *
+ * The bar is anchored to the edge the file DOES carry, so it survives on the board, on its own
+ * day, in its own category, with its own label, and the warning names the absence so the user can
+ * drag the other end where they want it. The alternatives were: invent a length (a lie the file
+ * never told), read the clock (R12 — my two Macs would migrate the same file differently), or
+ * drop the bar (the defect this closes).
+ *
+ * @param {string} name `'startDate'` or `'endDate'` — the edge that is missing
+ * @param {Object} entry the v1 entry @param {Object} patch the patch built so far
+ * @returns {{kept: string, from: string}|null}
+ */
+export function missingBarEdge(name, entry, patch) {
+  const other = name === 'endDate' ? 'startDate' : 'endDate';
+  const done = patch[other];
+  if (isDateString(done)) return { kept: done, from: other };
+  const raw = entry[other];
+  if (isDateString(raw)) return { kept: raw, from: other };
+  const coerced = coerceToV1Date('bar', other, raw);
+  return coerced ? { kept: coerced.kept, from: other } : null;
+}
+
+/**
+ * Why this entry will be on the board and not on the GRID — the warning that replaces "it will
+ * not be renderable", which was true of the projection and is no longer true of anything.
+ *
+ * The entry survives (A3-H2); it simply has no day to sit on, which is exactly what v1 did with
+ * it. Reported so the user is told before the file that held it stops being the board, and NOT
+ * `lossy`: nothing the user could see in v1 is missing in v2.
+ *
+ * @param {string} kind @param {Object} patch @returns {string|null}
+ */
+export function notDrawnReason(kind, patch) {
+  if (kind === 'note' && !isDateString(patch.date)) {
+    return 'it has no date, so no day row can hold it — v1 kept it in the file and did not draw '
+      + 'it either. It is on the board and in every export; give it a date and it appears';
+  }
+  if (kind === 'bar' && (!isDateString(patch.startDate) || !isDateString(patch.endDate))) {
+    return 'it has no usable date at either end, so there is no span to anchor it to. It is on '
+      + 'the board and in every export, and v1 paints exactly this bar as a stripe down every '
+      + 'column; give it two dates and it lands where you want it';
+  }
+  return null;
+}
+
+/**
+ * Every carried boolean has a v1 reading, asserted at load. A field added to `FIELDS` later
+ * without one would otherwise be coerced by whatever `coerceToV1Bool` happened to fall through
+ * to, which is exactly the guessing this section exists to prevent.
+ */
+for (const kind of Object.keys(V1_FIELDS)) {
+  for (const name of V1_FIELDS[kind]) {
+    if (FIELDS[kind][name].t !== 'bool') continue;
+    if (V1_BOOL_READING[`${kind}.${name}`]) continue;
+    throw new MigrationError(
+      `migrate1to2: ${kind}.${name} is a carried boolean with no entry in V1_BOOL_READING. ` +
+      'How v1 read it has to be established from v1, not guessed at the door (A3-H2).',
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 5. migrateV1
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -668,8 +920,28 @@ export function migrateV1(v1board, ctx) {
         // (`popover.js:193`, `n.text || '…'`) and gives it a line. `''` renders as „…" in v1 too,
         // so migrating the absence AS an empty string is what preserves v1's rendering exactly —
         // and it is not an invention, because `''` is the value v1's own inline create writes.
-        if (!(kind === 'note' && name === 'text')) continue;   // absent in v1 stays absent in v2
-        value = '';
+        if (kind === 'note' && name === 'text') {
+          value = '';
+        } else if (kind === 'bar' && (name === 'startDate' || name === 'endDate')) {
+          // A3-H2. The same argument one entry kind along: a bar needs BOTH ends to be drawn at
+          // all (`entities.js:renderableBar`), so an absent one used to take the user's Urlaub
+          // off the board and out of the file. `missingBarEdge` anchors it to the edge the file
+          // does carry — see its docblock for what v1 drew and why "to the horizon" cannot be
+          // migrated without reading the clock.
+          const edge = missingBarEdge(name, entry, f);
+          if (!edge) continue;                           // neither end is usable; the entry stays
+          loss(
+            `${where}: no ${q(name)}; v1 drew this bar from its ${edge.from} to the far edge of `
+            + `the visible year, which depends on TODAY and cannot be migrated (R12). It was `
+            + `anchored to its ${edge.from} (${q(edge.kept)}) so it stays on the board — drag the `
+            + 'other end to where you want it',
+            where, name, 'coerced', { value: undefined, kept: edge.kept },
+          );
+          f[name] = edge.kept;
+          continue;
+        } else {
+          continue;                                      // absent in v1 stays absent in v2
+        }
       }
       {
         // BEFORE `fieldAccepted`, on purpose. A literal `null` in a v1 file PASSES validation —
@@ -707,14 +979,58 @@ export function migrateV1(v1board, ctx) {
           f[name] = cut.kept;
           continue;
         }
+        // A3-H2 — COERCE TO v1's MEANING (§4b). Each of these reads the value the way v1's own
+        // code read it; each is reported with the old value and the new one.
+        const asV1 = coerceToV1Bool(kind, name, value)
+          ?? coerceToV1Date(kind, name, value)
+          ?? (FIELDS[kind][name].t === 'id' ? coerceToV1Id(value) : null);
+        if (asV1) {
+          loss(
+            `${where}: field ${q(name)} = ${q(value)} is not a v2 ${FIELDS[kind][name].t}; v1 read `
+            + `it as ${q(asV1.kept)} and it was COERCED to that rather than dropped`,
+            where, name, 'coerced', { value, kept: asV1.kept },
+          );
+          f[name] = asV1.kept;
+          continue;
+        }
+        // A bar edge that cannot be READ is the same problem as a bar edge that is not THERE, and
+        // it gets the same answer — otherwise `endDate: "irgendwann"` would drop the bar off the
+        // board while `endDate` absent kept it, which is the sort of split the two doors were
+        // built to avoid within one door.
+        if (kind === 'bar' && (name === 'startDate' || name === 'endDate')) {
+          const edge = missingBarEdge(name, entry, f);
+          if (edge) {
+            loss(
+              `${where}: field ${q(name)} = ${q(value)} is not a date v2 can read; the bar was `
+              + `anchored to its ${edge.from} (${q(edge.kept)}) so that it stays on the board`,
+              where, name, 'coerced', { value, kept: edge.kept },
+            );
+            f[name] = edge.kept;
+            continue;
+          }
+        }
         loss(
-          `${where}: field ${q(name)} = ${q(value)} is not representable in v2 and was DROPPED ` +
-          '(hand-edited or imported board.json)',
+          `${where}: field ${q(name)} = ${q(value)} is not representable in v2 and the FIELD was ` +
+          'DROPPED (hand-edited or imported board.json). The entry itself is kept',
           where, name, 'dropped', { value },
         );
         continue;
       }
       f[name] = value;
+    }
+    // A3-H2 — the one coercion that has to see the whole patch. v1 expands a repeating note with
+    // `Number(n.date.slice(0, 4))` (`layout.js:72`), which THROWS on a note whose date is missing
+    // or unreadable and takes the entire board down with it: there is no v1 rendering of that
+    // shape to preserve, only a v1 crash. So the flag follows the anchor. `entities.js`
+    // additionally refuses to project such an entry, so a hand-written op cannot recreate it.
+    if (kind === 'note' && f.repeatsYearly === true && !isDateString(f.date)) {
+      loss(
+        `${where}: it is marked as repeating yearly and has no usable date to repeat FROM; v1 `
+        + 'cannot draw that board at all (layout.js:72 throws), so the repeat was turned off and '
+        + 'the entry kept. Give it a date and switch the repeat back on',
+        where, 'repeatsYearly', 'coerced', { value: true, kept: false },
+      );
+      f.repeatsYearly = false;
     }
     // Anything v1 carried that v2 has no register for. v1's own migrate() keeps unknown keys on
     // an entry object verbatim (`store.js:71-74` copies the arrays wholesale), so this really can
@@ -754,8 +1070,7 @@ export function migrateV1(v1board, ctx) {
     emit('cat', `cat:${id}`, (o) => catSet(o, id, buildPatch('cat', c, where), { born: true }));
 
   for (const c of categories) {
-    let id = entityIdOf(c, 'category', loss);
-    if (id === null) continue;
+    let id = entityIdOf(c, 'cat', 'category', catIds, repair);
     if (catIds.has(id)) {
       // Two registers cannot share an entity key: the second would LWW over the first. v1
       // tolerates duplicate ids in an array and renders both, so discarding the second was a
@@ -809,8 +1124,7 @@ export function migrateV1(v1board, ctx) {
     ['bar', takeArray(v1board.bars, 'bars', loss), 'bar'],
   ]) {
     for (const entry of list) {
-      let id = entityIdOf(entry, plural, loss);
-      if (id === null) continue;
+      let id = entityIdOf(entry, kind, plural, seen[kind], repair);
       if (seen[kind].has(id)) {
         // ATT-90 again: v1 renders both, so both must survive. The re-key is derived, so two
         // migrations of the same file give the duplicate the same new id.
@@ -824,17 +1138,16 @@ export function migrateV1(v1board, ctx) {
       }
       seen[kind].add(id);
       const patch = buildPatch(kind, entry, `${plural} ${q(id)}`);
-      // ADR 001 §5 step 3 checks renderability against EXPLICIT fields and never infers it from
-      // absence. v1 is laxer: it renders a text-less note as "…" (`popover.js:193`) and a bar
-      // with no end date lands in `assignLanes` regardless. So an entry that arrives here
-      // incomplete WILL migrate and then WILL NOT be shown, and the user is entitled to know
-      // that before the original file is gone. The op is still emitted: the register set is
-      // complete the moment the missing field is supplied, and dropping the op would make that
-      // unrecoverable.
-      if (!renderable(kind, patch)) {
-        loss(`${plural} ${q(id)} will not be renderable after migration (ADR 001 §5 step 3): ` +
-             `it is missing ${kind === 'note' ? 'a date or a text' : 'a start or an end date'}`,
-        `${plural} ${q(id)}`, null, 'not-renderable', { patch });
+      // A3-H2. This used to read "will not be renderable after migration", and it was a LOSS,
+      // because the projection refused such an entry and it left the board and then the file.
+      // It no longer leaves anything: `entities.js:renderableNote` keeps an own entry in the
+      // ARRAY the way v1's `state.notes` did, and `missingBarEdge` above anchors a one-ended bar.
+      // What remains true is that the GRID has nowhere to put it, which is exactly what v1 did
+      // with it too — so it is reported, and it is NOT lossy: nothing the user could see in v1 is
+      // missing in v2.
+      const undrawn = notDrawnReason(kind, patch);
+      if (undrawn) {
+        warn(`${plural} ${q(id)} is on the board but will not be DRAWN on any day: ${undrawn}`, false);
       }
       const set = kind === 'note' ? noteSet : barSet;
       emit(kind, `${kind}:${id}`, (o) => set(o, id, patch, { born: true }));
@@ -865,13 +1178,31 @@ export function migrateV1(v1board, ctx) {
         `scratchpad ${q(month)}`, null, 'dropped', { value: text });
       continue;
     }
-    if (typeof text !== 'string') {
-      loss(`scratchpad ${q(month)} is not a string and was DROPPED`,
-        `scratchpad ${q(month)}`, 'text', 'dropped', { value: text });
-      continue;
+    // A3-H2. A pad the file holds as something other than a string used to be DROPPED, and a
+    // scratchpad is a month of the user's typing. v1 paints it through `state.scratchpads[key] ||
+    // ''` (`layout.js:259`), so `42` is the two characters „42" in the textarea and `null` is an
+    // empty one — which is `coerceToV1Text`'s rule exactly, on the field it was written for.
+    let padText = text;
+    if (typeof padText !== 'string') {
+      const coerced = coerceToV1Text('pad', 'text', padText);
+      if (coerced) {
+        loss(
+          `scratchpad ${q(month)} is ${typeof padText === 'object' && padText !== null ? 'an object' : q(padText)}, `
+          + `which v2 cannot store; it was kept as the text v1 paints for it (${q(coerced.kept)})`,
+          `scratchpad ${q(month)}`, 'text', 'coerced', { value: padText, kept: coerced.kept },
+        );
+        padText = coerced.kept;
+      } else {
+        // `null` and `undefined`: v1 paints an EMPTY textarea for both (`|| ''`), which is the
+        // same board as no pad at all — and §8.2 emits no op for an empty pad. Said once, not
+        // lossy, because nothing that was ever on screen is missing.
+        warn(`scratchpad ${q(month)} is ${q(padText)}; v1 painted an empty month for it and so `
+          + 'does v2 — no scratchpad register was written', false);
+        padText = '';
+      }
     }
-    if (text === '') continue;                            // §8.2: non-empty keys only
-    emit('pad', `pad:${month}`, (o) => padSet(o, month, buildPatch('pad', { text }, `scratchpad ${q(month)}`), { born: true }));
+    if (padText === '') continue;                         // §8.2: non-empty keys only
+    emit('pad', `pad:${month}`, (o) => padSet(o, month, buildPatch('pad', { text: padText }, `scratchpad ${q(month)}`), { born: true }));
   }
 
   // ── 4. settings → one `pref.set` in the `local` space ─────────────────────
@@ -893,7 +1224,12 @@ export function migrateV1(v1board, ctx) {
       // One key at a time, so a single bad key costs one key and not the whole settings object.
       Object.assign(flat, flattenPref({ [key]: settings[key] }));
     } catch (e) {
-      if (!(e instanceof OpError)) throw e;
+      // A `RangeError` is caught alongside `OpError` deliberately, and it is the door policy
+      // rather than defensiveness: `flattenPref` recurses once per level of nesting, so a
+      // hand-edited `settings` nested a few thousand deep overflows the stack — an EXTERNALLY
+      // SOURCED input that must be refused-and-warned, never thrown out of the migration door.
+      // One key at a time is what makes it cost one key.
+      if (!(e instanceof OpError) && !(e instanceof RangeError)) throw e;
       loss(`setting ${q(key)}: ${e.message}; DROPPED`, 'settings', key, 'dropped', { value: settings[key] });
     }
   }
@@ -1002,18 +1338,49 @@ function takeArray(v, name, loss) {
   return [];
 }
 
-/** @returns {string|null} */
-function entityIdOf(entry, what, loss) {
+/**
+ * The entity id to migrate this entry under — A3-H2.
+ *
+ * This used to DROP an entry whose id v2 could not use, on the reasoning that an id must never be
+ * invented here. The reasoning was about DETERMINISM and it is still right; the conclusion was
+ * about the ENTRY and it was wrong. v1 keeps an id-less note in its array and paints it, so the
+ * drop was an entry the user could see before the upgrade and could not see after it — and, in
+ * solo mode, could not get back, because the file was rewritten without it. Two answers, in
+ * order:
+ *
+ *   1. If the id is not a string but NAMES one — the number `42`, say — it is `String`-ed
+ *      (`coerceToV1Id`). That preserves the reference, because the `categoryId`s pointing at it
+ *      go through the same coercion in `buildPatch`.
+ *   2. Otherwise a fresh id is DERIVED from the entry's content plus an occurrence counter
+ *      (`mintedId`), which is reproducible on both of my Macs and through both doors.
+ *
+ * Neither is a LOSS: nothing the user had is gone, an opaque token they never see has changed.
+ * Both are reported as repairs, exactly like `rekeyed`.
+ *
+ * @param {Object} entry @param {string} kind @param {string} what prose name for the warning
+ * @param {Set<string>} taken ids already used by this collection
+ * @param {(msg:string, what:string) => void} repair
+ * @returns {string}
+ */
+function entityIdOf(entry, kind, what, taken, repair) {
   const id = entry.id;
-  if (!isEntityUuid(id)) {
-    // Never invent one HERE: an id for an entry that has none would have to come from the content
-    // (two identical entries would then collide) or from a CSPRNG (two migrations of the file
-    // would differ, R12). A DUPLICATE id is a different problem with a different answer — see
-    // `rekeyed`, where there is a real id to derive a replacement from.
-    loss(`${what} with unusable id ${q(id)} was DROPPED`, what, 'id', 'unusable-id', { entry });
-    return null;
+  if (isEntityUuid(id)) return id;
+  const asString = coerceToV1Id(id);
+  if (asString) {
+    repair(
+      `${what} has the id ${q(id)}, which is not a string; it was carried as ${q(asString.kept)} ` +
+      '— the same token, and every reference to it was coerced the same way',
+      'coercedId',
+    );
+    return asString.kept;
   }
-  return id;
+  const fresh = mintedId(kind, entry, taken);
+  repair(
+    `${what} has no usable id (${q(id)}); it was MINTED the derived id ${q(fresh)} so that the ` +
+    'entry survives. v1 kept it and drew it; dropping it was the loss (A3-H2)',
+    'mintedId',
+  );
+  return fresh;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

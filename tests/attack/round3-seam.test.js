@@ -111,15 +111,19 @@ after(quiet);
 describe('F-1 — confirming the scope, and the siblings of its class', () => {
   beforeEach(async () => { await boot(); });
 
-  test('R3-1 SUCCEEDED (defect, F-1 confirmed): board.json is not a fixed point once two scratchpads exist', async () => {
+  // ── R3-1 · INVERTED 2026-08-27 · F-1 is CLOSED (PO decision: FIX) ─────────────
+  // `reconcileMap` now rebuilds the scratchpad map in projection key order, exactly as
+  // `reconcileList` already rebuilt array order. The one-time rewrite of an existing user's
+  // `board.json` on their next save is the accepted cost (docs/v2/FINDINGS.md §4.1).
+  test('R3-1 FAILED (held, F-1 closed): board.json IS a fixed point, with two scratchpads written out of order', async () => {
     store.apply('padTyping', { month: '2026-05', text: 'Mai', born: true });
     quiet();
     store.apply('padTyping', { month: '2026-03', text: 'März', born: true });
     quiet();
 
-    // `reconcileMap` does `Object.assign` and never reorders, so the LIVE map is in creation
-    // order while the projection is in `sortScratchpads` order.
-    assert.deepEqual(Object.keys(store.state.scratchpads), ['2026-05', '2026-03']);
+    // The live map now carries the projection's key order the moment the projection lands, so
+    // `sortScratchpads` bites during the session and not only at the next launch.
+    assert.deepEqual(Object.keys(store.state.scratchpads), ['2026-03', '2026-05']);
     assert.deepEqual(Object.keys(projected().scratchpads), ['2026-03', '2026-05']);
 
     await store.persistNow(); quiet();
@@ -131,9 +135,22 @@ describe('F-1 — confirming the scope, and the siblings of its class', () => {
     await store.persistNow(); quiet();
     const gen2 = LS.getItem(BOARD_KEY);
 
-    assert.notEqual(gen0, gen1, 'F-1: the first save of the second session rewrites the file');
-    assert.equal(gen1, gen2, 'it converges after one relaunch — this is a byte, not a content, defect');
-    assert.deepEqual(JSON.parse(gen0).scratchpads, JSON.parse(gen1).scratchpads, 'content is identical');
+    assert.equal(gen0, gen1, 'F-1: the first save of the second session no longer rewrites the file');
+    assert.equal(gen1, gen2);
+    assert.deepEqual(JSON.parse(gen0).scratchpads, JSON.parse(gen1).scratchpads, 'content is identical, as it always was');
+  });
+
+  test('R3-1b FAILED (held): the scratchpads MAP keeps its object identity across the reorder', () => {
+    // `reconcileMap` deletes and re-inserts every key, which is the only way to reorder a JS
+    // object's own keys. A caller holding `state.scratchpads` (store.js header note 3, and
+    // `tests/tier2/interaction.dom.js`'s reset) must still be holding the live map afterwards.
+    const held = store.state.scratchpads;
+    store.apply('padTyping', { month: '2026-07', text: 'Juli', born: true }); quiet();
+    store.apply('padTyping', { month: '2026-02', text: 'Februar', born: true }); quiet();
+    assert.equal(held, store.state.scratchpads, 'same object …');
+    assert.deepEqual(Object.keys(held), ['2026-02', '2026-07'], '… re-laid-out in sort order …');
+    assert.equal(held['2026-07'], 'Juli', '… with every value still attached to its own month');
+    assert.equal(held['2026-02'], 'Februar');
   });
 
   test('R3-2 SUCCEEDED (defect, NEW sibling): the same class is in reconcileList — an ENTRY object\'s key order also only settles at the next launch', async () => {
@@ -445,5 +462,72 @@ describe('attack 3 — undo across the retrofit', () => {
     store.replaceAll(JSON.parse(e2)); quiet();
     assert.equal(e1, e2);
     assert.equal(e2, store.exportJSON());
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('F-8 — the warnings channel is one durable, inspectable array', () => {
+  beforeEach(async () => { await boot(); });
+
+  test('R3-43 FAILED (held, F-8 clobbering closed): replaceAll APPENDS to the channel instead of replacing it', () => {
+    // `store.js:802` did `this.warnings = plan.warnings`, so an import with nothing to report
+    // (`plan.warnings === []`) erased everything the session had accumulated — including the
+    // migration report the user had not been shown yet. The same assignment was in `init()`.
+    store.clearWarnings();
+    store.mutate('lang', (s) => {
+      s.notes.push({ id: 'n1', date: '2026-03-04', text: 'x'.repeat(120), categoryId: 'c1', repeatsYearly: false });
+    });
+    quiet();
+    assert.ok(store.warnings.length >= 1, 'the diff door truncated to 80 and said so');
+    const before = [...store.warnings];
+
+    store.replaceAll(board());                     // a clean board: plan.warnings is []
+    quiet();
+    assert.deepEqual(store.warnings.slice(0, before.length), before,
+      'an import with nothing to report no longer discards what the session already knew');
+  });
+
+  test('R3-44 FAILED (held): the array keeps its identity across init() and replaceAll(), so a consumer can hold it', async () => {
+    const held = store.warnings;
+    store.replaceAll(board());
+    quiet();
+    assert.equal(held, store.warnings, 'replaceAll did not detach the consumer');
+    await relaunch();
+    assert.equal(held, store.warnings, 'and neither did a relaunch');
+    assert.deepEqual(held, [], 'clearWarnings() empties IN PLACE — a new board starts a new report');
+  });
+
+  test('R3-45 FAILED (held): subscribeWarnings() is the UI seam, and a listener that throws cannot take the store down', () => {
+    const seen = [];
+    const off = store.subscribeWarnings((m) => seen.push(m));
+    const offBad = store.subscribeWarnings(() => { throw new Error('a settings pane with a bug'); });
+    assert.doesNotThrow(() => store.applyRemote([null]));
+    quiet();
+    assert.equal(seen.length, 1, 'the good listener still heard it');
+    assert.match(seen[0], /refused/);
+    off(); offBad();
+    store.applyRemote([null]);
+    quiet();
+    assert.equal(seen.length, 1, 'and unsubscribing works');
+  });
+
+  test('R3-46 FAILED (held): diagnostics() says where the board came from and what was refused', async () => {
+    const d = store.diagnostics();
+    assert.equal(d.ready, true);
+    assert.equal(d.source, 'board.json', 'solo mode: board.json IS the checkpoint (ADR 001 §9)');
+    assert.equal(d.quarantine, null);
+    assert.deepEqual(d.warnings, store.warnings);
+    assert.notEqual(d.warnings, store.warnings, 'a copy — a consumer cannot edit the channel through it');
+
+    LS.setItem('langzeitplaner.ops', JSON.stringify({
+      v: 1, id: 'A'.repeat(22), ts: '0001787836800000.000000.0000000000000000',
+      act: `mem_${'A'.repeat(22)}`, dev: `dev_${'A'.repeat(22)}`, gid: 'B'.repeat(22),
+      space: 'personal', k: 'note.set', e: 'note:fremd', f: { text: 'ghost' },
+    }));
+    await relaunch();
+    const q = store.diagnostics().quarantine;
+    assert.equal(q.reason, 'unrelated-log');
+    assert.equal(q.tailLines, 1);
+    assert.match(q.detail, /NONE of the/);
   });
 });

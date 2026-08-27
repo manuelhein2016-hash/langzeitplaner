@@ -633,15 +633,47 @@ export const spaceSet = (ctx, spaceId, f) => makeOp(ctx, 'space.set', spaceKey(s
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * HOW DEEP A `settings` OBJECT MAY NEST BEFORE THE DOOR STOPS READING IT.
+ *
+ * The shipped tree nests exactly two levels (`layers.feiertage`, `lastSeenSeq.<spaceId>`,
+ * `hiddenMembers.<memberId>`), so 32 is a cap nothing legitimate can reach. It is not
+ * defensiveness, it is the door policy (`docs/v2/FINDINGS.md` A3-M1a) applied one layer earlier
+ * than the `RangeError` catches in `migrate1to2.js` / `replace.js`:
+ *
+ *   · those catches handle the case where THIS RECURSION overflows the stack, and
+ *   · this cap handles the case where it SURVIVES — a `settings` a couple of thousand deep
+ *     flattens fine into ONE register name with two thousand dots, `prefsFromRegisters` rebuilds
+ *     the nesting iteratively, and `store._project`'s `structuredClone(this.state.settings)`
+ *     then overflows OUTSIDE any door, out of `init()`, with `ready === false`. A hand-edited
+ *     `board.json` must not be able to make the app unbootable.
+ *
+ * A cap here also keeps the register name inside `parseEntityKey`'s 300-character world, and it
+ * is one of the two locks: `materialize.js:prefsFromRegisters` refuses the same depth on the way
+ * back OUT, so a name that arrived from a checkpoint or a peer rather than through this function
+ * still cannot build a projection the clone cannot survive.
+ */
+export const PREF_MAX_DEPTH = 32;
+
+/**
  * Flatten one level of nesting into dotted register names, because `f` is scalars-only.
  * `setLayer({feiertage:true})` → `{'layers.feiertage': true}`.
- * @param {Object} patch @param {string} [prefix] @returns {Object}
+ *
+ * Throws `OpError` on an array and on a patch nested past `PREF_MAX_DEPTH`. Both doors call this
+ * ONE KEY AT A TIME inside a `try`, so on externally-sourced settings a refusal costs that key
+ * and is reported to the warnings channel; from `settingsSet` / `layerSet` it is a throw, which
+ * is what A3-M1a asks for — those two are internal call sites and a bad argument there is
+ * programmer error.
+ *
+ * @param {Object} patch @param {string} [prefix] @param {number} [depth] @returns {Object}
  */
-export function flattenPref(patch, prefix = '') {
+export function flattenPref(patch, prefix = '', depth = 0) {
+  if (depth > PREF_MAX_DEPTH) {
+    throw new OpError(`pref "${prefix}" nests deeper than ${PREF_MAX_DEPTH} levels; a settings register name is a field name, not a tree`);
+  }
   const out = {};
   for (const [k, v] of Object.entries(patch || {})) {
     const name = prefix ? `${prefix}.${k}` : k;
-    if (v !== null && typeof v === 'object' && !Array.isArray(v)) Object.assign(out, flattenPref(v, name));
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) Object.assign(out, flattenPref(v, name, depth + 1));
     else if (Array.isArray(v)) throw new OpError(`pref "${name}" is an array; carry set membership as ${name}.<id>: true`);
     else out[name] = v;
   }

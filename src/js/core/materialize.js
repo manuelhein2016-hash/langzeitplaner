@@ -48,7 +48,7 @@ import {
   projectable, sortNotes, sortBars, sortCategories, sortScratchpads,
   pinnedMonthsRenderable,
 } from './entities.js';
-import { FIELDS, coEditableFields } from './ops.js';
+import { FIELDS, coEditableFields, PREF_MAX_DEPTH } from './ops.js';
 import { cmpWrites, promoteRegister, withdrawnByOther, createdAt, updatedAt, updatedBy } from './registers.js';
 
 // ops.contract.js §5 groups the three derived timestamps with materialization; ADR 005 §1.1 puts
@@ -522,6 +522,13 @@ function prefsFromRegisters(regs) {
     const reg = cells.get(field);
     if (!carries(reg)) { cleared.push(field); continue; }   // → applyClearedPrefs, below
     const path = field.split('.');
+    // The second lock on `ops.js:PREF_MAX_DEPTH`. `flattenPref` refuses to MINT a name this deep,
+    // but a checkpoint (F-5 — the one input with no admissibility fold) and a peer's `pref.set`
+    // reach this map without passing through it. The rebuild below is iterative and survives any
+    // depth; `store._project`'s `structuredClone(this.state.settings)` does not, and an overflow
+    // there is outside every door and unbootable. Dropping the name is the same call the comment
+    // eight lines down makes for a scalar in a branch's place: keep the board, lose one pref.
+    if (path.length > PREF_MAX_DEPTH + 1) continue;
     let node = out;
     let ok = true;
     for (let i = 0; i < path.length - 1; i++) {
@@ -759,8 +766,14 @@ export function materialize(regs, ctx = {}) {
       case 'bar': {
         const cand = ownCandidate(regs, key, parsed, ctx);
         // Step 3 — the filter, in the ADR's stated order. `projectable` drops a tombstone
-        // (`alive === false`) and then applies `renderable()`: has date && has text for a note,
-        // has both dates for a bar.
+        // (`alive === false`) and then applies `renderable()`, which since A3-H2 splits own from
+        // foreign (`entities.js` §renderableNote/renderableBar, ADR 001 §5 step 3 as amended):
+        // an OWN note needs a text and an OWN bar is always in — that is v1's array membership,
+        // and it is what stops a coerced entry falling out one layer below the door that kept it;
+        // a FOREIGN note still needs `date && (belegt || text)` and a foreign bar both ends,
+        // because on the redaction path an absent field is absence and never a value inferred
+        // from it. The one own-side exception is a repeating note with no anchor date, which
+        // `layout.js:72` cannot survive.
         if (cand && projectable(parsed.kind, cand, filterCtx)) {
           (parsed.kind === 'note' ? notes : bars).push(finish(cand));
         }

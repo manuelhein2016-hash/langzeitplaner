@@ -22,7 +22,8 @@
 //   0a  attestation registers   `member:<M>` → `dev.<short>`. SELF-AUTHORIZING: admissible from
 //                               `op.act === M` alone, because requiring an attested device to
 //                               author an attestation is an infinite regress. Signature check is
-//                               injected (`ctx.attestVerify`).
+//                               injected (`ctx.attestOpen`, or the legacy boolean
+//                               `ctx.attestVerify`).
 //   0b  device gate             every other op: `op.dev` must be an attested device of `op.act`
 //                               (family), or a device of mine (personal/local, §4.0's "checked
 //                               against the local device set").
@@ -169,14 +170,60 @@ export const isRejectReason = (r) => REJECT_CODES.has(r);
 //     b64u(canonicalJSON(attestation)) + '.' + b64u(signature)
 // with `attestation.deviceId`, `.deviceShort` and `.memberId` inside. Decoding it is pure and
 // belongs here; VERIFYING the signature needs the member's recovery public key and is injected
-// as `ctx.attestVerify`, exactly as ops.contract.js §4 types it.
+// as `ctx.attestOpen` (ADR 001 §4.0, ADR 002 §5.2.3), with the older boolean `ctx.attestVerify`
+// still accepted — see `foldAuthorized`.
+//
+// AND THE DECODED PAYLOAD IS KEPT (finding F-10, ADR 002 §5.2.3). It used to be thrown away here
+// with only `deviceId → memberId` surviving, which left `envelope.js` unimplementable: `openOp`
+// is handed `env.dv`, a deviceShort, BEFORE it has decrypted anything — so before it knows
+// `op.act` — and needs `sigPubRaw` to verify at all (§5.2.2 P2/P3) and `deviceId`/`memberId` to
+// bind the plaintext afterwards (checks 3 and 5). `AuthzResult.attestationOf(dv)` is that table.
+//
+// THE ONE-KEY LOOKUP, AND WHAT MAKES IT SOUND. `attestationOf` is keyed by `deviceShort` ALONE
+// because `op.act` is not knowable pre-decrypt. ADR 002 §2.3's four acceptance conditions are
+// what make `deviceShort → DeviceAttestation` a function, and all four are enforced below, at
+// stage 0a:
+//   (1) `op.act === memberId`      → the `NOT_SELF` rejection on the housing record;
+//   (2) register name === `att.deviceShort`;
+//   (3) `att.memberId` === the housing member;
+//   (4) the signature verifies under THAT member's recovery key — `attestOpen(subject, blob)`,
+//       the subject being the housing member, never the payload's self-declared one.
+// (3) and (4) together are what stop a member copying a peer's blob verbatim into their own
+// record: the payload names the peer, the housing record names the copier, and the two must
+// agree. §5.2.1 warns explicitly that relaxing either breaks §5.2. See `shortCollisions` for the
+// one residual the four conditions do NOT close.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** b64url is the alphabet ADR 002 §2.3 fixes for the two raw public points. */
+const B64URL = /^[A-Za-z0-9_-]+$/;
+const isB64u = (s) => typeof s === 'string' && s.length > 0 && B64URL.test(s);
+
+/**
+ * The decoded payload half of a `dev.*` register value — ADR 002 §2.3's `DeviceAttestation`.
+ * @typedef {Object} DeviceAttestation
+ * @property {string} memberId
+ * @property {string} deviceId    `dev_` + 22 b64url
+ * @property {string} deviceShort 16 Crockford base32 (ADR 001 §1.2)
+ * @property {string} sigPubRaw   b64url of the raw P-256 signing point
+ * @property {string} kexPubRaw   b64url of the raw P-256 key-agreement point
+ * @property {string} createdAt   'YYYY-MM-DD'
+ */
 
 /**
  * Decode the payload half of a `dev.*` register value. Never throws — a malformed blob from a
- * peer is data, not a bug in this process.
+ * peer is data, not a bug in this process (the door policy: external input is refused, never
+ * thrown on).
+ *
+ * ALL SIX FIELDS ARE REQUIRED, and that is a deliberate tightening (F-10). §2.3 fixes the wire
+ * form and ADR 002 §5.2.2's pre-decrypt gate is unrunnable without `sigPubRaw`: P2 self-certifies
+ * the short against it and P3 verifies the envelope signature under it. A blob missing them is
+ * not a partially-useful attestation, it is a credential `openOp` could never use — so it never
+ * becomes one here either, and its op is rejected `badAttestation` rather than admitted into a
+ * table with a hole in it. Unknown EXTRA fields are ignored, not refused: a v2.1 attestation must
+ * stay readable by a v2.0 client (the same version-skew discipline as `classifyUnsharePatch`).
+ *
  * @param {unknown} blob
- * @returns {{memberId:string, deviceId:string, deviceShort:string}|null}
+ * @returns {DeviceAttestation|null}
  */
 export function parseAttestationBlob(blob) {
   if (typeof blob !== 'string') return null;
@@ -191,7 +238,16 @@ export function parseAttestationBlob(blob) {
   }
   if (att === null || typeof att !== 'object' || Array.isArray(att)) return null;
   if (!isMemberId(att.memberId) || !isDeviceId(att.deviceId) || !isDeviceShort(att.deviceShort)) return null;
-  return { memberId: att.memberId, deviceId: att.deviceId, deviceShort: att.deviceShort };
+  if (!isB64u(att.sigPubRaw) || !isB64u(att.kexPubRaw)) return null;
+  if (typeof att.createdAt !== 'string' || att.createdAt.length === 0) return null;
+  return Object.freeze({
+    memberId: att.memberId,
+    deviceId: att.deviceId,
+    deviceShort: att.deviceShort,
+    sigPubRaw: att.sigPubRaw,
+    kexPubRaw: att.kexPubRaw,
+    createdAt: att.createdAt,
+  });
 }
 
 /** `dev.<deviceShort16>` — the register-name shape `ops.js` already validates. */
@@ -463,6 +519,14 @@ const byId = (a, b) => (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0);
  * @property {(spaceId:string) => string|null} adminOfSpace
  * @property {(spaceId:string, at:string) => string|null} adminAtInSpace
  * @property {(spaceId:string) => Object[]} adminChainOf     the accepted chain, in causal order
+ *
+ * THE ATTESTATION SURFACE (F-10 · ADR 002 §5.2.3). `attestationOf` is the one `envelope.js` is
+ * written against; the two below it are retained for existing in-repo callers and are strictly
+ * derivable from it (`attestationOf(dv).memberId` / `.deviceId`). WP-6 removes them once those
+ * callers move — see `docs/v2/contracts/ops.contract.js` §4.
+ * @property {(dv:string) => DeviceAttestation|null} attestationOf   keyed by deviceShort ALONE
+ * @property {string[]} shortCollisions      sorted deviceShorts claimed on more than one member
+ *                                           record; the residual §2.3's four conditions leave
  * @property {Map<string, Set<string>>} attestedDevices      memberId → attested deviceIds
  * @property {(deviceId:string) => string|null} memberOfDevice
  * @property {string[]} splicedIds          opIds that arrived carrying two different op bodies
@@ -470,7 +534,9 @@ const byId = (a, b) => (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0);
 
 /**
  * @param {Iterable<Object>} ops
- * @param {{ me:string, nowMs?:number, attestVerify?:(m:string, blob:string)=>boolean,
+ * @param {{ me:string, nowMs?:number,
+ *           attestOpen?:(m:string, blob:string)=>(DeviceAttestation|null),
+ *           attestVerify?:(m:string, blob:string)=>boolean,
  *           myDevices?:Set<string>|Iterable<string>, genesisOpId?:string|null,
  *           haveEpochKey?:boolean }} ctx
  * @returns {AuthzResult}
@@ -486,7 +552,30 @@ export function foldAuthorized(ops, ctx) {
   const me = ctx.me;
   // FAIL CLOSED. With no verifier, no attestation verifies, so no family op is admitted. A
   // default that returned true would make the anti-key-injection measure (ADR 002 §2.3) opt-in.
-  const attestVerify = typeof ctx.attestVerify === 'function' ? ctx.attestVerify : () => false;
+  //
+  // TWO SHAPES, ONE SOURCE OF TRUTH FOR THE PAYLOAD. ADR 001 §4.0 / ADR 002 §5.2.3 name the
+  // injection `attestOpen(memberId, blob) => DeviceAttestation|null`; the WP-1 shape was the
+  // boolean `attestVerify(memberId, blob)`. Both are accepted so the two can cross over without
+  // a flag day — but neither supplies the payload the table is built from. That always comes
+  // from `parseAttestationBlob`, i.e. from the register bytes themselves, and an `attestOpen`
+  // whose answer disagrees with those bytes is treated as a failed verification. Otherwise the
+  // injected function could smuggle in an attestation the log does not actually carry, which is
+  // the same key-injection hole §2.3 exists to close, entered through the front door.
+  const attestOpen = typeof ctx.attestOpen === 'function' ? ctx.attestOpen : null;
+  const attestVerifyFn = typeof ctx.attestVerify === 'function' ? ctx.attestVerify : null;
+  /** @param {string} memberId @param {string} blob @param {DeviceAttestation} parsed */
+  const attestationVerifies = (memberId, blob, parsed) => {
+    if (attestOpen) {
+      const opened = attestOpen(memberId, blob);
+      if (opened === null || typeof opened !== 'object') return false;
+      return opened.memberId === parsed.memberId
+        && opened.deviceId === parsed.deviceId
+        && opened.deviceShort === parsed.deviceShort
+        && opened.sigPubRaw === parsed.sigPubRaw;
+    }
+    if (attestVerifyFn) return !!attestVerifyFn(memberId, blob);
+    return false;
+  };
   // §4.0: "Personal-space ops are checked against the local device set." When the caller does
   // not know it (solo mode before any device record exists), the check degrades to `act === me`
   // — which is all §4.4 claims for the personal space anyway: its confidentiality rests on who
@@ -591,6 +680,8 @@ export function foldAuthorized(ops, ctx) {
   // ── Stage 0a. Attestation registers — self-authorizing ────────────────────
   const attested = new Map();          // memberId -> Set<deviceId>
   const memberOfDevice = new Map();    // deviceId -> memberId
+  const attByShort = new Map();        // deviceShort -> { att: DeviceAttestation, write }
+  const shortCollisions = new Set();   // deviceShorts claimed on more than one member record
   const attestOps = [];
   const wellFormed = [];
   const rest = [];
@@ -612,12 +703,21 @@ export function foldAuthorized(ops, ctx) {
       reject(op, STAGES[0], REJECT_REASONS.NOT_SELF);
       continue;
     }
+    // ADR 002 §2.3's four acceptance conditions, all four, in one place. (1) is the `NOT_SELF`
+    // rejection immediately above — `op.act === subject`, the housing member. The rest:
+    //   (2) `att.deviceShort` === the register name;
+    //   (3) `att.memberId` === the housing member — this is what refuses a peer's blob copied
+    //       verbatim into my own record, and §5.2.1 warns that relaxing it breaks §5.2;
+    //   (4) the signature verifies under the HOUSING member's recovery key. `subject` is passed,
+    //       never `att.memberId`, so a payload cannot nominate the key that checks it — though
+    //       with (3) already enforced the two are equal by then. Belt and braces, because if (3)
+    //       ever moves this line is the one still holding.
     let bad = false;
     for (const name of devNames) {
       const blob = op.f[name];
       const att = parseAttestationBlob(blob);
       if (!att || att.memberId !== subject || att.deviceShort !== shortOfRegisterName(name)) { bad = true; break; }
-      if (!attestVerify(subject, blob)) { bad = true; break; }
+      if (!attestationVerifies(subject, blob, att)) { bad = true; break; }
     }
     if (bad) { reject(op, STAGES[0], REJECT_REASONS.BAD_ATTESTATION); continue; }
     wellFormed.push(op);
@@ -659,6 +759,21 @@ export function foldAuthorized(ops, ctx) {
       // `memberId`, and the register it lives in must agree with it, so a second member cannot
       // adopt somebody else's attested device.
       if (!memberOfDevice.has(att.deviceId)) memberOfDevice.set(att.deviceId, subject);
+      // THE `deviceShort → DeviceAttestation` TABLE (F-10). One short can appear at most once
+      // per member record — the register NAME is the short, and a Map has one cell per name —
+      // so a second sighting is always a second MEMBER claiming the same short. §2.3 argues
+      // that cannot happen honestly (it would need the same signing private key), and the four
+      // conditions above do not make it impossible, only dishonest: nothing in a pure,
+      // synchronous fold can check `crock32(SHA-256(sigPubRaw)[0..10]) === deviceShort`, which
+      // is exactly ADR 002 §5.2.2's P2 and lives in `openOp`. So the contest is resolved the
+      // same way `dev.*` write-once is — MINIMAL under `≺`, a property of the writes and
+      // therefore a function of the SET, never of arrival — and the short is reported on
+      // `shortCollisions` so it is auditable rather than merely survivable.
+      const write = { stamp: cell.stamp, op: cell.op ?? '', value: cell.value };
+      const prior = attByShort.get(att.deviceShort);
+      if (prior === undefined) { attByShort.set(att.deviceShort, { att, write }); continue; }
+      shortCollisions.add(att.deviceShort);
+      if (cmpWrites(write, prior.write) < 0) attByShort.set(att.deviceShort, { att, write });
     }
   }
 
@@ -850,6 +965,12 @@ export function foldAuthorized(ops, ctx) {
     rejected,
     parked,
     splicedIds,
+    // F-10 / ADR 002 §5.2.3. Keyed by deviceShort alone, because `openOp` calls it before it
+    // has decrypted anything and therefore before it knows `op.act`. Never throws on a bad key:
+    // `env.dv` is peer-supplied, and peer-supplied input is refused, not thrown on.
+    attestationOf: (dv) => attByShort.get(dv)?.att ?? null,
+    shortCollisions: [...shortCollisions].sort(),
+    // Retained for existing callers; both fall out of `attestationOf`. WP-6 removes them.
     attestedDevices: attested,
     memberOfDevice: (d) => memberOfDevice.get(d) ?? null,
     rejectionOf: (id) => rejectionOf.get(id) ?? null,
@@ -879,6 +1000,21 @@ export function snapshot(r) {
   }
   const devs = {};
   for (const m of [...r.attestedDevices.keys()].sort()) devs[m] = [...r.attestedDevices.get(m)].sort();
+  // The `deviceShort → DeviceAttestation` table, rendered from the result itself: the shorts that
+  // exist are exactly the `dev.*` registers that survived the fold, and `attestationOf` is asked
+  // for each one. So P5 ("shuffling never changes the fold") now covers WHICH attestation each
+  // short resolves to, which is what `openOp` will key on — a divergence there would hand two
+  // devices different verification keys for the same envelope.
+  const shorts = new Set();
+  for (const cells of r.regs.values()) {
+    for (const [name, cell] of cells) {
+      if (!isDevRegisterName(name)) continue;
+      const att = parseAttestationBlob(cell.value);
+      if (att) shorts.add(att.deviceShort);
+    }
+  }
+  const attestations = {};
+  for (const s of [...shorts].sort()) attestations[s] = r.attestationOf(s);
   return {
     regs,
     admin: r.admin,
@@ -887,6 +1023,8 @@ export function snapshot(r) {
     rejected: r.rejected.map((o) => (o && typeof o === 'object' ? o.id ?? null : null)),
     parked: r.parked.map((o) => o.id),
     splicedIds: r.splicedIds.slice(),
+    attestations,
+    shortCollisions: r.shortCollisions.slice(),
     attestedDevices: devs,
     reasons: Object.fromEntries(
       r.rejected.filter((o) => o && typeof o === 'object' && typeof o.id === 'string')

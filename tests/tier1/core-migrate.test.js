@@ -1332,6 +1332,43 @@ describe('hostile and hand-edited boards', () => {
     }
   });
 
+  test('A3-M1a — the door policy: a hostile BOARD is refused per field, never thrown on', () => {
+    // The lead's ruling: never throw on externally-sourced input (a file, an import, a peer);
+    // throw only on programmer error — which is the row above (a non-object board, i.e. a caller
+    // that did not gate on `shouldMigrate`) and the row below (a bad ctx).
+    //
+    // The deep nesting is the one that was actually reachable: `flattenPref` recurses once per
+    // level, so a hand-edited `settings` a few thousand deep overflows the stack with a
+    // RangeError rather than an `OpError`, and the door rethrew it out of `init()` — a white
+    // screen on upgrade day, from a settings key. It costs one key now.
+    const nested = () => {
+      const root = {};
+      let cur = root;
+      for (let i = 0; i < 5000; i++) { cur.a = {}; cur = cur.a; }
+      cur.b = 1;
+      return root;
+    };
+    const HOSTILE = {
+      'deeply nested settings': () => ({ ...base(), settings: { deep: nested() } }),
+      'every field the wrong type at once': () => ({
+        ...base(),
+        notes: [{ id: 5, date: 20260304, text: 7, categoryId: 9, repeatsYearly: 'yes' }],
+        bars: [{ id: true, startDate: '4.3.2026', endDate: null, label: {}, categoryId: [] }],
+        categories: [{ id: null, name: 1, nameEn: [], paletteRef: 2, visible: 'ja' }],
+        scratchpads: { '2026-03': 42, '__proto__': 'x', '9999-99': {} },
+      }),
+      'entries that are not objects': () => ({ ...base(), notes: [[1, 2], 'nope', 42, null] }),
+      'ids full of the key separators': () => ({
+        ...base(),
+        notes: [{ id: 'a/b:c', date: '2026-01-01', text: 'x', categoryId: 'c1' }],
+      }),
+    };
+    for (const [what, make] of Object.entries(HOSTILE)) {
+      assert.doesNotThrow(() => migrateV1(make(), { ...CTX, acceptLossy: true }), what);
+    }
+    assert.equal(({}).a, undefined, 'and nothing was written to Object.prototype on the way through');
+  });
+
   test('a bad ctx is refused loudly, before a single op is built', () => {
     assert.throws(() => migrateV1(base(), undefined), MigrationError);
     assert.throws(() => migrateV1(base(), { memberId: 'nope', deviceId: MAC_A }), MigrationError);
@@ -1357,15 +1394,34 @@ describe('hostile and hand-edited boards', () => {
     assert.match(warnings.join('\n'), /bars is not an array/);
   });
 
-  test('an entry with an unusable id is dropped, never given a fresh one', () => {
-    // A minted id would break byte-identical double migration; a content-derived id would make
-    // two entries with the same text collide. Dropping it, loudly, is the only honest option.
+  test('INVERTED (A3-H2) — an entry with an unusable id is MINTED one, never dropped', () => {
+    // This row used to read "dropped, never given a fresh one", on the reasoning that a minted id
+    // would break byte-identical double migration and a content-derived id would make two
+    // identical entries collide. Both hazards are real; neither argues for dropping the ENTRY.
+    // v1 keeps an id-less note in its array and paints it, so the drop was a note the user could
+    // see before the upgrade and — because `board.json` is the checkpoint in solo mode — could
+    // never get back after it (A3-H2). The id is derived from the entry's content plus an
+    // occurrence counter, which is what resolves the collision the old comment worried about.
     const b = base();
     b.notes = [{ id: 'note:with:colons', date: '2026-01-01', text: 'x', categoryId: 'c1' }, { date: '2026-01-02', text: 'no id', categoryId: 'c1' }, { id: 'ok', date: '2026-01-03', text: 'y', categoryId: 'c1' }];
-    const { ops, warnings, lossy } = migrateV1(b, CTX);
-    assert.deepEqual(ops.filter((o) => o.k === 'note.set').map((o) => o.e), ['note:ok']);
-    assert.equal(lossy, true);
-    assert.equal(warnings.filter((w) => /unusable id/.test(w)).length, 2);
+    const { ops, warnings, lossy } = migrateV1(clone(b), CTX);
+    const notes = ops.filter((o) => o.k === 'note.set');
+    assert.equal(notes.length, 3, 'all three of the user’s notes survive');
+    assert.deepEqual(notes.map((o) => o.f.text), ['x', 'no id', 'y'], 'in v1 array order');
+    assert.equal(notes[2].e, 'note:ok', 'an entry that HAD a usable id keeps it');
+    assert.equal(new Set(notes.map((o) => o.e)).size, 3, 'three distinct entity keys');
+    assert.equal(lossy, false, 'an opaque token changed; nothing the user had is gone');
+    assert.equal(warnings.filter((w) => /MINTED/.test(w)).length, 2);
+
+    // R12: the mint is DERIVED, so the second migration of the same file agrees byte for byte.
+    assert.equal(j(migrateV1(clone(b), CTX).ops), j(ops));
+
+    // Two byte-identical id-less notes are two notes, and the occurrence counter is what keeps
+    // them apart — the exact collision the old comment gave as the reason to drop them.
+    const twins = base();
+    twins.notes = [{ date: '2026-01-02', text: 'same', categoryId: 'c1' }, { date: '2026-01-02', text: 'same', categoryId: 'c1' }];
+    const t = migrateV1(twins, CTX).ops.filter((o) => o.k === 'note.set');
+    assert.equal(new Set(t.map((o) => o.e)).size, 2, 'both survive, under distinct keys');
   });
 
   test('ATT-90 — a duplicate id is RE-KEYED, not discarded: two registers cannot share a key', () => {
@@ -1429,29 +1485,126 @@ describe('hostile and hand-edited boards', () => {
     assert.deepEqual(ops.map((o) => o.f.text), ['t1', 't2', 't3', 't4']);
   });
 
-  test('ATT-82 — a value v2 cannot represent is dropped, but a TOO-LONG STRING is truncated', () => {
-    // INVERTED (ATT-82). `repeatsYearly: 'yes'` and `visible: 'true'` are still dropped — there is
-    // no honest coercion for either. A 300-character `text` is different in kind: v1's 80 is a DOM
-    // `maxLength` (`interact.js:466`, `popover.js:146`) that never applied to a FILE, so a real
-    // board can hold one, v1 renders it, and dropping the register took the note off the board
-    // entirely — `text` is half of a note's renderability (§5 step 3).
+  test('INVERTED (A3-H2) — a too-long string is truncated AND a non-boolean is coerced to v1\'s reading', () => {
+    // This row used to end "a non-boolean has no honest truncation" and assert that
+    // `repeatsYearly: 'yes'` and `visible: 'true'` were DROPPED. There is no honest TRUNCATION of
+    // a boolean, which is true and beside the point: there is an honest READING, and it is v1's
+    // own. `layout.js:71` is `if (!n.repeatsYearly)`, so `'yes'` repeats — dropping the key made a
+    // birthday silently stop repeating, which is A3-H2's most user-visible instance.
+    //
+    // The two carried booleans do NOT read alike, which is why neither is guessed: `visible` is
+    // `c.visible !== false` (`layout.js:111`), so `visible: 'true'` — and `visible: 0` — are
+    // VISIBLE, while `repeatsYearly: 0` does not repeat.
     const b = base();
     b.notes = [{ id: 'n1', date: '2026-01-01', text: 'x'.repeat(300), categoryId: 'c1', repeatsYearly: 'yes' }];
     b.categories[0].visible = 'true';
     const { ops, warnings, lossy } = migrateV1(b, CTX);
     const n = ops.find((o) => o.k === 'note.set');
     assert.equal(n.f.text, 'x'.repeat(80), 'truncated to the str80 limit, not dropped');
-    assert.equal(n.f.repeatsYearly, undefined, 'a non-boolean has no honest truncation');
+    assert.equal(n.f.repeatsYearly, true, "v1 read 'yes' as a repeat, so v2 does too");
     assert.equal(n.f.date, '2026-01-01', 'the rest of the entity still migrates');
-    assert.equal(ops.find((o) => o.k === 'cat.set').f.visible, undefined);
+    assert.equal(ops.find((o) => o.k === 'cat.set').f.visible, true);
     assert.equal(lossy, true, 'a truncation IS a loss and says so');
-    assert.equal(warnings.filter((w) => /not representable/.test(w)).length, 2);
+    assert.equal(warnings.filter((w) => /COERCED/.test(w)).length, 2, 'every coercion is auditable');
     assert.equal(warnings.filter((w) => /TRUNCATED/.test(w)).length, 1);
 
     // and the note is still on the board, which is the whole point
     const state = materializeSolo(fold(ops));
     assert.equal(state.notes.length, 1);
     assert.equal(state.notes[0].date, '2026-01-01');
+    assert.equal(state.notes[0].repeatsYearly, true);
+  });
+
+  test('A3-H2 — the two booleans are read the way v1 read them, and they do not agree', () => {
+    const bool = (visible, repeats) => {
+      const b = base();
+      b.categories[0].visible = visible;
+      b.notes = [{ id: 'n1', date: '2026-01-01', text: 'x', categoryId: 'c1', repeatsYearly: repeats }];
+      const { ops } = migrateV1(b, CTX);
+      return {
+        visible: ops.find((o) => o.k === 'cat.set').f.visible,
+        repeats: ops.find((o) => o.k === 'note.set').f.repeatsYearly,
+      };
+    };
+    // `visible` is v1's tri-state: only a literal `false` hides. `0` is NOT false.
+    assert.deepEqual(bool('ja', 'yes'), { visible: true, repeats: true });
+    assert.deepEqual(bool(0, 0), { visible: true, repeats: false }, '`Boolean(v)` would get `visible: 0` wrong');
+    assert.deepEqual(bool('nein', 'nein'), { visible: true, repeats: true }, 'a truthy string repeats — v1 says so');
+    assert.deepEqual(bool(1, 1), { visible: true, repeats: true });
+  });
+
+  test('A3-H2 — a date v1 could not draw either is COERCED to the day it names, or the FIELD alone is dropped', () => {
+    const dated = (date) => {
+      const b = base();
+      b.notes = [{ id: 'n1', date, text: 'Zahnarzt', categoryId: 'c1' }];
+      const { ops } = migrateV1(b, CTX);
+      const notes = ops.filter((o) => o.k === 'note.set');
+      assert.equal(notes.length, 1, `${j(date)}: the ENTRY always survives`);
+      return notes[0].f.date;
+    };
+    assert.equal(dated('4.3.2026'), '2026-03-04', 'the German form this product is written in');
+    assert.equal(dated('2026-3-1'), '2026-03-01', 'padding invents nothing');
+    assert.equal(dated('2026-01-01T09:00'), '2026-01-01', 'the date part of a datetime is not a guess');
+    assert.equal(dated('2026/03/04'), '2026-03-04', 'year first, so the order is unambiguous');
+    assert.equal(dated(20260304), '2026-03-04', 'YYYYMMDD is the only reading that fits');
+    // …and the ones with no single answer keep the ENTRY and lose the FIELD.
+    assert.equal(dated('3/4/2026'), undefined, '4 March in London, 3 April in New York — refuse');
+    assert.equal(dated('2026-13-45'), undefined, 'no clamping to a month that exists');
+    assert.equal(dated(''), undefined);
+    assert.equal(dated('nächsten Dienstag'), undefined);
+    // The entry with the un-readable date is still on the board, and still says so.
+    const b = base();
+    b.notes = [{ id: 'n1', date: '3/4/2026', text: 'Zahnarzt', categoryId: 'c1' }];
+    const { ops, warnings } = migrateV1(b, CTX);
+    const state = materializeSolo(fold(ops));
+    assert.equal(state.notes.length, 1, 'the note is on the board');
+    assert.equal(state.notes[0].text, 'Zahnarzt');
+    assert.match(warnings.join('\n'), /will not be DRAWN on any day/);
+  });
+
+  test('A3-H2 — a bar with one end is anchored to the other; v1 drew it to the horizon', () => {
+    const b = base();
+    b.bars = [
+      { id: 'b1', startDate: '2026-03-01', label: 'kein Ende', categoryId: 'c1' },
+      { id: 'b2', endDate: '2026-05-05', label: 'kein Anfang', categoryId: 'c1' },
+      { id: 'b3', startDate: '2026-04-01', endDate: 'irgendwann', label: 'unlesbar', categoryId: 'c1' },
+    ];
+    const { ops, warnings } = migrateV1(b, CTX);
+    const bars = ops.filter((o) => o.k === 'bar.set');
+    assert.deepEqual(bars.map((o) => [o.f.startDate, o.f.endDate]), [
+      ['2026-03-01', '2026-03-01'],
+      ['2026-05-05', '2026-05-05'],
+      ['2026-04-01', '2026-04-01'],
+    ], 'each bar is anchored to the edge the file DID carry');
+    assert.equal(materializeSolo(fold(ops)).bars.length, 3, 'all three are on the board');
+    assert.equal(warnings.filter((w) => /anchored to its/.test(w)).length, 3);
+  });
+
+  test('A3-H2 — a bar with NO usable date is the one nothing can anchor, and it is still kept', () => {
+    // Nothing to fall back on: the field is quarantined, the entry is not. v1 keeps this bar and
+    // paints it as a stripe down every column (`layout.js:133-135`), so keeping it is fidelity
+    // and not indulgence — `layout.js` is the same file in both builds.
+    const b = base();
+    b.bars = [{ id: 'b1', label: 'weder noch', categoryId: 'c1' }];
+    const { ops, warnings } = migrateV1(b, CTX);
+    const bar = ops.find((o) => o.k === 'bar.set');
+    assert.equal(bar.f.startDate, undefined, 'nothing was invented');
+    assert.equal(bar.f.endDate, undefined);
+    assert.equal(bar.f.label, 'weder noch', 'and the label the user typed is still there');
+    assert.equal(materializeSolo(fold(ops)).bars.length, 1, 'the bar is on the board');
+    assert.match(warnings.join('\n'), /will not be DRAWN on any day/);
+  });
+
+  test('A3-H2 — a repeat with no anchor date is turned off, because v1 CRASHES on that board', () => {
+    // `layout.js:72` is `Number(n.date.slice(0, 4))`. With no date it throws and the whole board
+    // fails to render — there is no v1 drawing of this shape to preserve, only a v1 crash.
+    const b = base();
+    b.notes = [{ id: 'n1', text: 'Geburtstag', categoryId: 'c1', repeatsYearly: 'yes' }];
+    const { ops, warnings } = migrateV1(b, CTX);
+    assert.equal(ops.find((o) => o.k === 'note.set').f.repeatsYearly, false);
+    assert.match(warnings.join('\n'), /no usable date to repeat FROM/);
+    const state = materializeSolo(fold(ops));
+    assert.equal(state.notes.length, 1, 'and the entry is kept');
   });
 
   test('an unknown v1 field on an entry is reported, never silently discarded', () => {
@@ -1463,20 +1616,23 @@ describe('hostile and hand-edited boards', () => {
     assert.match(warnings.join('\n'), /unknown v1 field "legacyFlag"/);
   });
 
-  test('an entry that would not be renderable after migration is reported', () => {
-    // v1 renders a text-less note as "…" (`popover.js:193`); ADR 001 §5 step 3 drops it, because
-    // renderability is checked against explicit fields and never inferred. That is a real,
-    // intended divergence and the user is entitled to be told.
+  test('INVERTED (A3-H2) — an entry the GRID cannot place is still on the board, and is reported', () => {
+    // This row used to assert `state.notes` and `state.bars` were EMPTY: the projection refused an
+    // entry it could not draw, and in solo mode `board.json` is the checkpoint, so the refusal was
+    // written back over the user's file on the first autosave. v1 keeps both of these entries in
+    // its arrays and simply never places them; v2 now does the same, and says so — without
+    // claiming a loss, because nothing the user could see in v1 is missing in v2.
     const b = base();
     b.notes = [{ id: 'n1', text: 'kein Datum', categoryId: 'c1' }];
     b.bars = [{ id: 'b1', startDate: '2026-01-01', label: 'kein Ende', categoryId: 'c1' }];
-    const { warnings, ops, lossy } = migrateV1(b, CTX);
+    const { warnings, ops } = migrateV1(b, CTX);
     assert.equal(ops.filter((o) => o.k === 'note.set' || o.k === 'bar.set').length, 2, 'the ops are still emitted');
-    assert.equal(lossy, true);
-    assert.equal(warnings.filter((w) => /not be renderable/.test(w)).length, 2);
+    assert.equal(warnings.filter((w) => /will not be DRAWN on any day/.test(w)).length, 1,
+      'only the note: the bar was anchored to its start and IS drawn');
     const state = materializeSolo(fold(ops));
-    assert.deepEqual(state.notes, []);
-    assert.deepEqual(state.bars, []);
+    assert.equal(state.notes.length, 1, 'the dateless note is on the board and in the next export');
+    assert.equal(state.notes[0].date, undefined, 'with no date — nothing was invented');
+    assert.deepEqual(state.bars.map((x) => [x.startDate, x.endDate]), [['2026-01-01', '2026-01-01']]);
   });
 
   test('an empty-string note text is a VALUE and stays renderable', () => {
@@ -1501,12 +1657,20 @@ describe('hostile and hand-edited boards', () => {
     assert.equal(lossy, false, 'v1 deletes a blank pad key; skipping one is not data loss');
   });
 
-  test('a non-string scratchpad value is dropped with a warning', () => {
+  test('INVERTED (A3-H2) — a non-string scratchpad is kept as the text v1 paints for it', () => {
+    // A scratchpad is a month of the user's typing and it used to be DROPPED for not being a
+    // string. v1 paints it through `state.scratchpads[key] || ''` (`layout.js:259`), so `42` is
+    // the two characters „42" in the textarea and `null` is an empty one — which is
+    // `coerceToV1Text`'s rule exactly, on the field it was written for.
     const b = { ...base(), scratchpads: { '2026-01': 42, '2026-02': null, '2026-03': 'ok' } };
     const { ops, warnings, lossy } = migrateV1(b, CTX);
-    assert.deepEqual(ops.filter((o) => o.k === 'pad.set').map((o) => o.e), ['pad:2026-03']);
-    assert.equal(lossy, true);
-    assert.equal(warnings.filter((w) => /is not a string/.test(w)).length, 2);
+    assert.deepEqual(ops.filter((o) => o.k === 'pad.set').map((o) => o.e), ['pad:2026-01', 'pad:2026-03']);
+    assert.equal(ops.find((o) => o.e === 'pad:2026-01').f.text, '42');
+    assert.equal(lossy, true, 'the bytes in the file are not the bytes in the register');
+    assert.equal(warnings.filter((w) => /kept as the text v1 paints/.test(w)).length, 1);
+    // `null` is v1's EMPTY textarea, and §8.2 emits no op for an empty pad — same board, so it is
+    // reported and it is not a loss.
+    assert.equal(warnings.filter((w) => /painted an empty month/.test(w)).length, 1);
   });
 
   test('an array in settings is dropped per key, not silently smuggled through', () => {
@@ -1867,18 +2031,32 @@ describe('ATT-82 / ATT-83 — a long field must never take the entry with it', (
     assert.equal(st.bars.length, 1);
   });
 
-  test('ATT-82 — a malformed DATE is NOT "truncated" into a plausible one', () => {
-    // The longest accepted prefix of '2026-01-01T09:00' is '2026-01-01'. Inventing a date the
-    // user never wrote is worse than dropping a value: only str40/str80 fields are truncatable.
-    const b = {
-      schemaVersion: 1,
-      notes: [{ id: 'n1', date: '2026-01-01T09:00', text: 'x', categoryId: 'c1' }],
-      bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
-      scratchpads: {}, settings: {},
+  test('INVERTED (A3-H2) — a malformed date is not TRUNCATED, it is READ, and only where it names one day', () => {
+    // ATT-82's rule was "only str40/str80 fields are truncatable", and it is still the rule:
+    // `truncateToFit` refuses dates, because the longest accepted PREFIX of a mistyped date is a
+    // plausible date the user never wrote. A parser is not a prefix. `2026-01-01T09:00` names one
+    // day and no reader could disagree about which, so it is read; `3/4/2026` names two, so it is
+    // not. The half of the old reasoning that was wrong is what happens to the ENTRY: dropping
+    // the date took the whole note off the board and then out of `board.json` (A3-H2).
+    const dateOf = (date) => {
+      const b = {
+        schemaVersion: 1,
+        notes: [{ id: 'n1', date, text: 'x', categoryId: 'c1' }],
+        bars: [], categories: [{ id: 'c1', name: 'A', paletteRef: 'blau', visible: true }],
+        scratchpads: {}, settings: {},
+      };
+      const { ops, report } = migrateV1(b, CTX);
+      return { date: ops.find((o) => o.k === 'note.set').f.date, report };
     };
-    const { ops, report } = migrateV1(b, CTX);
-    assert.equal(ops.find((o) => o.k === 'note.set').f.date, undefined);
-    assert.equal(report.losses[0].reason, 'dropped');
+    const read = dateOf('2026-01-01T09:00');
+    assert.equal(read.date, '2026-01-01', 'the date part of a datetime IS the date');
+    assert.equal(read.report.losses[0].reason, 'coerced');
+    assert.equal(read.report.losses[0].kept, '2026-01-01');
+    assert.equal(read.report.losses[0].value, '2026-01-01T09:00', 'the original is in the report');
+
+    const refused = dateOf('3/4/2026');
+    assert.equal(refused.date, undefined, 'ambiguous: 4 March in London, 3 April in New York');
+    assert.equal(refused.report.losses[0].reason, 'dropped');
   });
 
   test('ATT-53 — a note with NO text key migrates as \'\', so v1’s rendering is preserved', () => {

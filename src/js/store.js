@@ -16,7 +16,7 @@
 //                                                                          │
 //                              store.state ◀── stripV2Fields ◀── materialize
 //
-// FOUR THINGS TO KNOW BEFORE CHANGING ANYTHING HERE
+// FIVE THINGS TO KNOW BEFORE CHANGING ANYTHING HERE
 //
 // 1. `mutate(label, fn)` SURVIVES, and it is not a wrapper that lies. ADR 005 §2.2 says it is
 //    "removed and replaced by txn()", and that is the right call for the 22 UI sites — but
@@ -49,6 +49,14 @@
 //    would quietly repair that quirk into a merge. The registers ARE the authority on the load
 //    and import paths, where v1 also re-normalises through `migrate()`.
 //
+// 5. A LOG MAY NOT OUTRANK `board.json` UNTIL IT IS SHOWN TO BE THAT BOARD'S LOG (A3-C1).
+//    `shouldMigrate(board, {opsLogExists})` answers "has migration already run?" and nothing
+//    else. `_useLog()` answers the two questions that actually license discarding the user's
+//    file: can the log be READ, and does it BELONG to this board (`logBelongsToBoard`)? Either
+//    answer being no is a QUARANTINE — the log is not applied, not deleted and not written to,
+//    the board loads from `board.json` untouched, and `store.warnings` / `store.quarantine` say
+//    so. Never add a branch here that prefers a log on the strength of its existence alone.
+//
 // SOLO MODE WRITES NO SECOND FILE (ADR 001 §9, §11). `ops.jsonl` and `checkpoint.json` are
 // created when a space is created. Until then `board.json` IS the checkpoint: on every launch
 // the persisted v1 board is re-migrated through `migrateV1`, whose GENESIS(i) stamps are a pure
@@ -76,6 +84,8 @@ import { foldAuthorized } from './core/authz.js';
 
 export const SCHEMA_VERSION = 1;
 const UNDO_LIMIT = 50;
+/** How many warnings the channel holds before it stops growing (F-8). */
+const WARN_LIMIT = 1000;
 const SNAPSHOT_LIMIT = 7;
 const SAVE_DEBOUNCE = 700;
 
@@ -364,10 +374,23 @@ function reconcileList(cur, next) {
   for (const e of out) cur.push(e);
 }
 
-/** The same, for the scratchpads map. */
+/**
+ * The same, for the scratchpads map — and it REBUILDS the key order, exactly as `reconcileList`
+ * rebuilds array order (F-1, closed 2026-08-27).
+ *
+ * `Object.assign` onto a live object appends new keys at the end and never moves an existing one,
+ * so `core/entities.js:sortScratchpads`' key sort only bit on a map projected into a FRESH object
+ * (init / replaceAll). The consequence was that `board.json` — which is `JSON.stringify(state)`
+ * and therefore carries the live key order (11.4) — was written in creation order during a
+ * session and in sorted order after the next launch: same content, different bytes, no user
+ * action in between. ADR 001 §5 step 5 exists to make those comparisons byte-stable.
+ *
+ * The MAP object keeps its identity (a caller may hold `state.scratchpads`); only its keys are
+ * re-laid-out. Deleting and re-inserting is the only way to reorder a JS object's own keys.
+ */
 function reconcileMap(cur, next) {
-  for (const k of Object.keys(cur)) if (!(k in next)) delete cur[k];
-  Object.assign(cur, next);
+  for (const k of Object.keys(cur)) delete cur[k];
+  for (const k of Object.keys(next)) cur[k] = next[k];
 }
 
 /**
@@ -387,6 +410,130 @@ function nullPublisher() {
     askToReshare(list) { if (list && list.length) this.pendingReshares.push(...list); },
     derivePublication() { return []; },
     enqueue() {},
+  };
+}
+
+// ── is this log a log of THIS board? (A3-C1) ─────────────────────────────────
+//
+// ADR 001 §8.4's idempotence predicate asks one question about the log — `opsLogExists` — and it
+// is the RIGHT question for the predicate it belongs to: "has migration already run?". It is not,
+// on its own, a licence to throw `board.json` away, because it never asks whether the log it
+// found has anything to do with the board sitting beside it. One stray line in `ops.jsonl` used
+// to be enough to replace a full board with the empty fold of that line, write the empty board
+// back over `board.json`, and roll it into `snapshots.json` — silently (A3-C1, CRITICAL).
+//
+// So the store adds a CONSISTENCY CHECK on top of the predicate. It is deliberately two layers,
+// because the two files on disk carry different amounts of evidence:
+//
+//  1. PROVENANCE — `checkpoint.json` written by this store carries an `lzp` envelope naming the
+//     board it was folded from (`boardFp`) and the horizon it was folded at. A checkpoint with no
+//     envelope was not written by this app, and a checkpoint whose fingerprint does not match the
+//     board on disk has, at best, drifted from it. `ops.jsonl` is a line format with no header,
+//     so a tail-only log carries no provenance at all and only layer 2 applies to it.
+//  2. CENSUS — every entity `board.json` asserts the existence of must be an entity the log has
+//     heard of. Once a log exists it is authoritative and `board.json` is its projection, so a
+//     log that knows NONE of the board's entities cannot be that board's log. (Knowing SOME but
+//     not all is drift — a hand-edited file, a crash between the two writes — which is a warning,
+//     not a quarantine: the log still wins, and it says so.)
+//
+// A log that fails either layer is QUARANTINED: not applied, not deleted, not overwritten, and
+// reported on `store.warnings` + `store.quarantine`. `board.json` then loads untouched, exactly
+// as it does on a machine with no log at all. Never silently prefer a log over a board it cannot
+// be shown to belong to.
+
+/** The envelope version. Bump only when the fields below change meaning. */
+const LZP_CHECKPOINT_ENVELOPE = 1;
+
+/** FNV-1a, 32 bit, hex. Not a hash for security — a cheap stable fingerprint of a key list. */
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+/** Every entity key a v1 board asserts the existence of, in the register map's own key format. */
+function boardCensus(board) {
+  const keys = new Set();
+  const add = (kind, list) => {
+    for (const e of Array.isArray(list) ? list : []) {
+      if (e && e.id !== undefined && e.id !== null) keys.add(`${kind}:${String(e.id)}`);
+    }
+  };
+  add('note', board?.notes);
+  add('bar', board?.bars);
+  add('cat', board?.categories);
+  const pads = board?.scratchpads;
+  if (pads && typeof pads === 'object') for (const m of Object.keys(pads)) keys.add(`pad:${m}`);
+  return keys;
+}
+
+/** Every entity key a loaded log has heard of — folded, tombstoned or merely parked. */
+function logCensus(log) {
+  const keys = new Set();
+  for (const k of log.registers().keys()) if (typeof k === 'string' && !k.startsWith('pref:')) keys.add(k);
+  for (const op of log.ops({ includeParked: true })) {
+    if (op && typeof op.e === 'string' && !op.e.startsWith('pref:')) keys.add(op.e);
+  }
+  return keys;
+}
+
+/** `{fp, n}` — the fingerprint of a board's entity census, stable under key order. */
+function censusFingerprint(board) {
+  const keys = [...boardCensus(board)].sort();
+  return { fp: fnv1a(keys.join('|')), n: keys.length };
+}
+
+/**
+ * Does `log` belong to `board`? Never throws; returns a verdict the caller can act on.
+ * @returns {{ok:boolean, reason:string, detail:string, warn?:string}}
+ */
+function logBelongsToBoard(board, checkpoint, log) {
+  // 1. provenance — only a checkpoint can carry it
+  if (checkpoint) {
+    const env = checkpoint.lzp;
+    if (!env || typeof env !== 'object' || env.v !== LZP_CHECKPOINT_ENVELOPE) {
+      return {
+        ok: false,
+        reason: 'no-provenance',
+        detail: 'checkpoint.json carries no `lzp` provenance envelope, so it was not written by this '
+          + 'app over this board; a checkpoint may not outrank board.json on the strength of merely existing',
+      };
+    }
+  }
+  // 2. census — the log must have heard of what the board says exists
+  const mine = boardCensus(board);
+  if (mine.size === 0) {
+    return { ok: true, reason: 'empty-board', detail: 'board.json asserts no entities; there is nothing for the log to contradict', warn: [] };
+  }
+  const known = logCensus(log);
+  const unknown = [...mine].filter((k) => !known.has(k));
+  if (unknown.length === mine.size) {
+    return {
+      ok: false,
+      reason: 'unrelated-log',
+      detail: `the log knows ${known.size} entit${known.size === 1 ? 'y' : 'ies'} and NONE of the `
+        + `${mine.size} board.json asserts (${[...mine].slice(0, 3).join(', ')}${mine.size > 3 ? ', …' : ''})`,
+    };
+  }
+  const drift = unknown.length
+    ? `op log accepted, but board.json carries ${unknown.length} entr${unknown.length === 1 ? 'y' : 'ies'} `
+      + `the log has never heard of (${unknown.slice(0, 3).join(', ')}${unknown.length > 3 ? ', …' : ''}); `
+      + 'the log is authoritative once it exists, so those are not on the board'
+    : undefined;
+  const env = checkpoint?.lzp;
+  const fp = censusFingerprint(board).fp;
+  const stale = env && env.boardFp !== fp
+    ? `checkpoint.json was folded from a different generation of board.json (${env.boardFp} vs ${fp}) — `
+      + 'expected after a crash between the two writes, and the log wins'
+    : undefined;
+  return {
+    ok: true,
+    reason: 'related',
+    detail: `${mine.size - unknown.length}/${mine.size} of the board's entities are in the log`,
+    warn: [stale, drift].filter(Boolean),
   };
 }
 
@@ -441,7 +588,21 @@ class Store {
     this._familySpaceId = null;
     this._opsPersisted = false;
     this.publisher = nullPublisher();
+
+    // ── the warnings channel (F-8) ──────────────────────────────────────────
+    // Everything this layer knows it lost, refused or repaired ends up here. It is ONE array for
+    // the life of the store — `_warn()` pushes, `clearWarnings()` empties in place — because a
+    // consumer that holds the array (or subscribes) must not be detached by the next `init()` or
+    // `replaceAll()`. Before this, `init()` and `replaceAll()` ASSIGNED a fresh array, so a
+    // migration's report was discarded by the next import and a `plan.warnings` of `[]` erased
+    // everything the session had accumulated.
+    // STILL OWED: a consumer. `settings.js` belongs to the release pipeline this round; the seam
+    // it must wire into is `subscribeWarnings()` / `diagnostics()`. See the WP-10 note in
+    // docs/v2/FINDINGS.md F-8.
     this.warnings = [];
+    this._warnListeners = new Set();
+    /** Set by `init()` when an op log was refused. Inspectable, never written back to disk. */
+    this.quarantine = null;
 
     this.state = defaultState();
     this.snapshots = [];
@@ -466,15 +627,22 @@ class Store {
     const tail = await storage.loadOps();
     const hasLog = !!checkpoint || tail.length > 0;
     this._log = createOpLog({ now: () => Date.now() });
-    this.warnings = [];
-    if (shouldMigrate(board, { opsLogExists: hasLog }).migrate) {
+    this.clearWarnings();
+    this.quarantine = null;
+    // A3-C1 / A3-H1: the predicate says whether migration has already run; `_useLog` says whether
+    // the log it found is READABLE and BELONGS TO THIS BOARD. Only both together may discard
+    // `board.json`. Either failure quarantines the log — reported, left on disk, not applied —
+    // and the board loads exactly as it would on a machine with no log at all.
+    const useLog = !shouldMigrate(board, { opsLogExists: hasLog }).migrate
+      && hasLog
+      && this._useLog(board, checkpoint, tail);
+    if (useLog) {
+      this._opsPersisted = true;
+    } else {
       const r = migrateV1(board, { memberId: this._me, deviceId: this._device, acceptLossy: true });
-      this.warnings = r.warnings;
+      this._warnAll(r.warnings);
       for (const op of r.ops) this._log.append(op);
       this._opsPersisted = false;
-    } else {
-      this._log.load({ checkpoint, tail });
-      this._opsPersisted = true;
     }
     // The registers were replaced wholesale under stacks that survive `init()` by design (v1
     // fact, pinned at store-persistence.test.js:271). Retire their DEV shadow expectations,
@@ -486,13 +654,140 @@ class Store {
 
     const snaps = migrateSnapshots(await storage.loadSnapshots());
     this.snapshots = snaps.snapshots;
-    this.warnings = this.warnings.concat(snaps.warnings);
+    this._warnAll(snaps.warnings);
     this._lastSnapshotDay = this.snapshots[0]?.day ?? null;
     // What was on disk when the app opened. This — not the edited state — is
     // what the day's snapshot has to preserve.
     this._persisted = structuredClone(this.state);
     this.ready = true;
     this.emit('init');
+  }
+
+  /**
+   * Load the op log — but only if it can be read AND can be shown to belong to `board`.
+   *
+   * A3-H1: `storage.loadCheckpoint()` catches a JSON parse error and returns `null`, so an
+   * UNPARSABLE checkpoint was always safe; one that PARSED and was wrong reached
+   * `deserializeRegisters` and threw `RegisterError` out of `init()`, leaving `ready === false`
+   * — a white screen with the user's intact `board.json` sitting right there. That asymmetry was
+   * the bug. Anything the log throws on the way in is now a quarantine, not a dead app.
+   *
+   * A3-C1: and a log that loads cleanly still has to be THIS board's log — see
+   * `logBelongsToBoard` above.
+   *
+   * @returns {boolean} true when the log is authoritative; false when the caller must migrate
+   *          `board.json` instead.
+   */
+  _useLog(board, checkpoint, tail) {
+    const fresh = () => { this._log = createOpLog({ now: () => Date.now() }); };
+    try {
+      this._log.load({ checkpoint, tail });
+    } catch (e) {
+      fresh();
+      this._quarantineLog('unreadable-log', `${e.name}: ${e.message}`, checkpoint, tail);
+      return false;
+    }
+    let verdict;
+    try {
+      verdict = logBelongsToBoard(board, checkpoint, this._log);
+    } catch (e) {
+      verdict = { ok: false, reason: 'unreadable-log', detail: `the consistency check itself failed: ${e.name}: ${e.message}` };
+    }
+    if (!verdict.ok) {
+      fresh();
+      this._quarantineLog(verdict.reason, verdict.detail, checkpoint, tail);
+      return false;
+    }
+    for (const w of verdict.warn ?? []) this._warn(`op log: ${w}`);
+    return true;
+  }
+
+  /**
+   * Refuse an op log without destroying it (A3-C1).
+   *
+   * QUARANTINE IS THREE PROMISES: the log is not applied, the log is not deleted, and the log is
+   * not overwritten. The third is the one that used to fail — `init()` emptied `state`,
+   * `persistNow()` wrote the empty board over `board.json`, and `rollSnapshot()` rolled it into
+   * `snapshots.json`. Leaving `_opsPersisted` false is what keeps `_persistOps()` away from
+   * `checkpoint.json` and `ops.jsonl` for the rest of the session, so the refused bytes are still
+   * there for a rescue pass to read.
+   *
+   * STILL OWED (needs `src/js/storage.js`, another agent's file this round): physically moving
+   * the files aside — `ops.quarantined-<ts>.jsonl` / `checkpoint.quarantined-<ts>.json` — so the
+   * check does not have to run again on every launch. Until that exists the refusal is re-derived
+   * (and re-reported) at each launch, which is the safe direction: nothing is lost either way.
+   */
+  _quarantineLog(reason, detail, checkpoint, tail) {
+    // Structural, not incidental: whatever the caller does next, this session may not write to
+    // the two log slots. (WP-8 setting `_opsPersisted` when a space is created must consult
+    // `store.quarantine` first — see the note in docs/v2/FINDINGS.md A3-C1.)
+    this._opsPersisted = false;
+    const lines = Array.isArray(tail) ? tail : [];
+    this.quarantine = {
+      at: new Date().toISOString(),
+      reason,
+      detail,
+      checkpointHorizon: (checkpoint && typeof checkpoint === 'object' ? checkpoint.horizon : null) ?? null,
+      tailLines: lines.length,
+      // A sample, not the log: the files themselves are untouched on disk, so a rescue pass reads
+      // them there rather than out of a field that would pin an arbitrarily large log in memory.
+      checkpoint: checkpoint ?? null,
+      tailSample: lines.slice(0, 50),
+      tailSampled: Math.min(lines.length, 50),
+    };
+    this._warn(
+      `op log QUARANTINED (${reason}): ${detail}. board.json was loaded unchanged; `
+      + 'ops.jsonl and checkpoint.json are still on disk and will not be written to this session.',
+    );
+  }
+
+  // ── the warnings channel (F-8) ─────────────────────────────────────────────
+
+  /** Record one warning and tell anyone listening. Returns the message, for a caller that logs. */
+  _warn(msg) {
+    const s = String(msg);
+    if (this.warnings.length >= WARN_LIMIT) {
+      if (this.warnings.length === WARN_LIMIT) this.warnings.push(`… further warnings suppressed after ${WARN_LIMIT}`);
+      return s;
+    }
+    this.warnings.push(s);
+    for (const fn of this._warnListeners) {
+      // A consumer that throws may not take the store down with it — this channel exists to
+      // report a loss, and a reporter that can turn a loss into a crash is worse than silence.
+      try { fn(s, this.warnings); } catch (e) { console.warn('[store] a warnings listener threw', e); }
+    }
+    return s;
+  }
+  _warnAll(list) { for (const m of list ?? []) this._warn(m); }
+
+  /** Empty the channel IN PLACE — the array identity is part of the contract. */
+  clearWarnings() { this.warnings.length = 0; }
+
+  /**
+   * The UI seam a settings pane wires into (story 11.6, principle 6). `fn(message, all)` fires
+   * once per warning, synchronously, and the returned function unsubscribes.
+   */
+  subscribeWarnings(fn) {
+    this._warnListeners.add(fn);
+    return () => this._warnListeners.delete(fn);
+  }
+
+  /** Everything this layer knows about how the current board was loaded. Read-only. */
+  diagnostics() {
+    return {
+      ready: this.ready,
+      source: this._opsPersisted ? 'op-log' : 'board.json',
+      warnings: [...this.warnings],
+      quarantine: this.quarantine
+        ? {
+          at: this.quarantine.at,
+          reason: this.quarantine.reason,
+          detail: this.quarantine.detail,
+          checkpointHorizon: this.quarantine.checkpointHorizon,
+          tailLines: this.quarantine.tailLines,
+        }
+        : null,
+    };
   }
 
   // ── subscription ───────────────────────────────────────────────────────────
@@ -685,21 +980,75 @@ class Store {
    * `foldAuthorized` never reaches the log, so `registers()` stays the authorized fold and the
    * checkpoint keeps its meaning. Local ops need no gate: they are authored by me, in my own
    * personal or local space, which is admissible by construction (ADR 001 §4.4).
+   *
+   * THIS DOOR NEVER THROWS (A3-H3, and the door policy: externally-sourced input is refused and
+   * reported, never thrown on — a throw is reserved for programmer error at an internal call
+   * site). Every entry in the batch is judged on its own: one malformed op costs that op and
+   * nothing else. The refusal set used to be built defensively (`(o) => o && o.id`) and `op.id`
+   * read UNGUARDED in the very next loop, so `applyRemote([null, goodOp])` threw a bare
+   * `TypeError` and discarded the well-formed op with it. The three siblings found by auditing
+   * the rest of the path are guarded here too:
+   *   · a non-iterable argument (`applyRemote(42)`) used to throw out of the spread;
+   *   · `_clock.observe(op.ts)` THROWS `TypeError` on anything that is not a 37-char stamp;
+   *   · `_log.append(op)` throws `OpLogError` for an op below the checkpoint horizon or a body
+   *     that splices an opId already seen.
    * @param {Object[]} ops
    */
   applyRemote(ops) {
-    const list = [...(ops || [])];
+    if (ops === null || ops === undefined) return;
+    if (!Array.isArray(ops)) {
+      this._warn(`remote batch refused: expected an array of ops, got ${typeof ops}`);
+      return;
+    }
+    const list = [...ops];
     if (!list.length) return;
     this._adopt();
-    const verdict = foldAuthorized([...this._log.ops({ includeParked: true }), ...list], {
-      me: this._me,
-      nowMs: Date.now(),
-    });
-    const refused = new Set(verdict.rejected.map((o) => o && o.id));
+
+    // Shape first, so nothing downstream has to defend itself against `null`.
+    const wellFormed = [];
     for (const op of list) {
-      if (refused.has(op.id)) { this.warnings.push(`remote op ${op.id} refused: ${verdict.rejectionOf(op.id)?.reason ?? 'inadmissible'}`); continue; }
-      if (op.dev !== this._device) this._clock.observe(op.ts);
-      this._log.append(op);
+      if (op && typeof op === 'object' && !Array.isArray(op) && typeof op.id === 'string' && op.id !== '') {
+        wellFormed.push(op);
+      } else {
+        this._warn(`remote op refused: not a well-formed op (${op === null ? 'null' : typeof op})`);
+      }
+    }
+
+    let verdict;
+    try {
+      verdict = foldAuthorized([...this._log.ops({ includeParked: true }), ...wellFormed], {
+        me: this._me,
+        nowMs: Date.now(),
+      });
+    } catch (e) {
+      // The gate itself could not reach a verdict. Admitting the batch ungated would break the
+      // promise on the line above (`registers()` stays the authorized fold), so the batch is
+      // refused — loudly, and without touching the board.
+      this._warn(`remote batch refused: the authorization fold failed (${e.name}: ${e.message})`);
+      return;
+    }
+    const rejected = Array.isArray(verdict?.rejected) ? verdict.rejected : [];
+    const refused = new Set(rejected.map((o) => o && o.id));
+    const reasonOf = (id) => {
+      if (typeof verdict.rejectionOf !== 'function') return 'inadmissible';
+      try { return verdict.rejectionOf(id)?.reason ?? 'inadmissible'; } catch { return 'inadmissible'; }
+    };
+    for (const op of wellFormed) {
+      if (refused.has(op.id)) { this._warn(`remote op ${op.id} refused: ${reasonOf(op.id)}`); continue; }
+      // BELT AND BRACES, and labelled as such after mutation testing: `observe` throws
+      // `TypeError` on any non-stamp, but nothing hostile reaches it. `ops.js:validateOp` refuses
+      // an `op.ts` that is not a 37-character stamp, so `foldAuthorized` has already put every
+      // one of them in `verdict.rejected` and the line above skipped it. Reverting this catch
+      // kills no test BECAUSE THE PATH IS UNREACHABLE — the reachability claim is what is pinned,
+      // by `round3-doors.test.js` R3-23b, which drives ten hostile stamps through this door and
+      // asserts the GATE refuses each by name. If that ever stops being true this catch becomes
+      // load-bearing, which is why it stays.
+      if (op.dev !== this._device) {
+        try { this._clock.observe(op.ts); }
+        catch (e) { this._warn(`remote op ${op.id}: its stamp was not observable (${e.message}); the clock was left alone`); }
+      }
+      try { this._log.append(op); }
+      catch (e) { this._warn(`remote op ${op.id} refused by the log: ${e.name}: ${e.message}`); }
     }
     this._stacks.remoteApplied();
     this._project();
@@ -711,7 +1060,7 @@ class Store {
   _diff(before, beforeSettings) {
     const ctx = this._ctx();
     const ops = [];
-    const warn = (m) => this.warnings.push(m);
+    const warn = (m) => this._warn(m);
     for (const spec of COLLECTION) diffCollection(spec, before[spec.key], this.state[spec.key], ctx, ops, warn);
     diffPads(before.scratchpads, this.state.scratchpads, ctx, ops, warn);
     const patch = diffSettings(beforeSettings, this.state.settings, this._defaultPrefs());
@@ -741,7 +1090,7 @@ class Store {
   _pref(patch) {
     if (!patch) return;
     try { this._log.append(prefSet(this._ctx(), patch)); }
-    catch (e) { this.warnings.push(`settings: ${e.message}`); }
+    catch (e) { this._warn(`settings: ${e.message}`); }
   }
 
   canUndo() { return this._stacks.canUndo(); }
@@ -799,7 +1148,10 @@ class Store {
       newGid,
       defaultSettings: defaultState().settings,
     });
-    this.warnings = plan.warnings;
+    // APPEND, never replace (F-8). `plan.warnings` of `[]` used to erase everything the session
+    // had accumulated — including the migration report the user had not been shown yet.
+    if (plan.lossy) this._warn('import: this file could not be represented in full — see the entries below');
+    this._warnAll(plan.warnings);
     for (const op of plan.ops) this._log.append(op);
     this._stacks.clear();
     this.publisher.retract(plan.retractions);    // ← the WP-3 obligation, hand-off point
@@ -829,8 +1181,22 @@ class Store {
 
   /** WP-8's half: append the tail, then checkpoint. Never called while `_opsPersisted` is false. */
   async _persistOps() {
-    await storage.saveCheckpoint(this._log.checkpoint());
+    await storage.saveCheckpoint(this._stampedCheckpoint());
     await storage.truncateOps(0);
+  }
+
+  /**
+   * `oplog.checkpoint()` plus the provenance envelope `init()` checks on the way back in (A3-C1).
+   *
+   * `board.json` has just been written from the same `state` (see `persistNow`), so the
+   * fingerprint names exactly the generation of the file this fold belongs to. `core/oplog.js`
+   * neither writes nor reads `lzp` — the log has no business knowing what a v1 board file is —
+   * and `load()` ignores keys it does not recognise, so the envelope costs the format nothing.
+   */
+  _stampedCheckpoint() {
+    const cp = this._log.checkpoint();
+    const { fp, n } = censusFingerprint(this.state);
+    return { ...cp, lzp: { v: LZP_CHECKPOINT_ENVELOPE, boardFp: fp, boardN: n, horizon: cp.horizon, at: Date.now() } };
   }
 
   /** Synchronous last-chance write for pagehide/beforeunload. */

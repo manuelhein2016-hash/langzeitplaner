@@ -32,6 +32,8 @@
  * @property {() => boolean} redo                            [v1]
  * @property {() => boolean} canUndo                         [v1]
  * @property {() => boolean} canRedo                         [v1]
+ * @property {UndoStackView} undoStack                       [v1 shape, DIVERGENT — see F-3 below]
+ * @property {UndoStackView} redoStack                       [v1 shape, DIVERGENT — see F-3 below]
  * @property {(patch:Object) => void} setSettings            [v1] → a `pref.set` op, LOCAL space,
  *                                                            never undoable, NEVER SYNCED (17.7)
  * @property {(patch:Object) => void} setLayer               [v1] same
@@ -54,6 +56,80 @@
  * @property {(ops:Op[]) => void} applyRemote
  * @property {() => RegisterMap} registers
  * @property {Object} publisher                              derivePublication + outbox enqueue
+ *
+ * // ── the warnings channel (F-8) ─────────────────────────────────────────────
+ * @property {string[]} warnings                             STABLE IDENTITY for the store's life
+ * @property {() => void} clearWarnings                      empties IN PLACE; never reassigns
+ * @property {(fn:(w:string)=>void) => (()=>void)} subscribeWarnings   per warning, not per batch
+ * @property {() => StoreDiagnostics} diagnostics
+ * @property {?StoreQuarantine} quarantine                   null unless init() refused an op log
+ */
+
+/**
+ * F-3 — `undoStack` / `redoStack` ARE NOT ARRAYS, and the divergence is recorded here because it
+ * is invisible at the call site. v1 exposed two real arrays; v2 exposes a view over the group
+ * stacks in `undo.js`, because a v1 array entry has no op-log meaning.
+ *
+ *   · `.length` READS the group depth (v1: op depth — 5.4's "~50 steps" is now 50 GROUPS).
+ *   · `.length = 0` clears BOTH stacks, not just this one. There is one stack pair and one
+ *     clear; `store.undoStack.length = 0` is the v1 idiom for "forget the history" and that is
+ *     what it does. Setting it to any OTHER number is a silent no-op.
+ *   · `.push(entry)` is ACCEPTED AND IGNORED, returning the new depth. Nothing can be injected.
+ *   · `.toJSON()` is the depth, so a `JSON.stringify(store)` in a debugger prints a number.
+ *   · There is no `pop`, `slice`, `map`, or index access. A caller that reaches for one gets
+ *     `undefined`, not a stale entry.
+ *
+ * No shipping caller reaches past `.length` and `.length = 0` (`main.js`, `settings.js`,
+ * `backup.js` — checked). The tier-2 harnesses use `.length = 0` between gestures, which is the
+ * idiom this view exists to keep working.
+ *
+ * @typedef {Object} UndoStackView
+ * @property {number} length
+ * @property {(entry:any) => number} push  accepted, ignored, returns the depth
+ * @property {() => number} toJSON
+ */
+
+/**
+ * @typedef {Object} StoreDiagnostics
+ * @property {boolean} ready
+ * @property {'board.json'|'op-log'} source   which of the two the board on screen came from
+ * @property {string[]} warnings              a copy — mutating it does not touch the channel
+ * @property {?StoreQuarantine} quarantine
+ */
+
+/**
+ * What `init()` refused, kept for a rescue pass and for the UI. The files themselves are LEFT ON
+ * DISK, unmodified — see `store.js:_quarantineLog`'s three promises.
+ * @typedef {Object} StoreQuarantine
+ * @property {string} at
+ * @property {'no-provenance'|'unrelated-log'|'unreadable-log'} reason
+ * @property {string} detail                  prose, already user-facing
+ * @property {?number} checkpointHorizon
+ * @property {number} tailLines
+ * @property {?Object} checkpoint
+ * @property {string[]} tailSample
+ */
+
+/**
+ * THE WARNINGS CHANNEL — normative, added 2026-08-27 with A3-H2 / A3-C1 / F-8.
+ *
+ * `warnings` is ONE array for the life of the store. Callers may hold it. `clearWarnings()`
+ * empties it in place and `replaceAll()` APPENDS to it — the original `this.warnings =
+ * plan.warnings` erased the session's whole report whenever an import happened to be clean, which
+ * is precisely the launch on which the migration's report matters most.
+ *
+ * Everything the layer knows it changed or refused is on this channel and nowhere else:
+ *   · every A3-H2 coercion, with the old value and the new one,
+ *   · every field or entry either door dropped,
+ *   · every op `applyRemote` refused, with the reason,
+ *   · the op-log quarantine (A3-C1), also readable structurally via `diagnostics().quarantine`.
+ *
+ * F-8 IS NOT CLOSED BY THIS. The carrier exists and is durable; **no UI reads it** (WP-10). The
+ * seam to wire is `subscribeWarnings(fn)` for live events and `diagnostics()` for the settings
+ * pane; `diagnostics().quarantine` is what a "your op log was refused" notice should read.
+ *
+ * A listener that throws is caught and does not stop the other listeners or the store.
+ * The channel is capped at `WARN_LIMIT` (1000) entries per session.
  */
 
 /**

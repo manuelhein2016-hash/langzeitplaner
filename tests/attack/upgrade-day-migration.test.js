@@ -61,10 +61,16 @@ async function board(fixture) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. AN ENTRY WHOSE `id` IS NOT A NON-EMPTY STRING IS DELETED
+// 1. AN ENTRY WHOSE `id` IS NOT A NON-EMPTY STRING — INVERTED, A3-H2 CLOSED
 //
-// `ops.js` types an entity key as `id`: a non-empty string. `migrateV1` drops any entry whose id
-// fails that. v1 has no such rule — it renders the entry and keeps it in the file forever.
+// `ops.js` types an entity key as `id`: a non-empty string, and `migrateV1` used to DROP any
+// entry that failed it. v1 has no such rule — it renders the entry and keeps it in the file
+// forever — so the drop was an entry the user could see before the upgrade and, because
+// `board.json` is the checkpoint in solo mode, could never get back after it.
+//
+// The door now answers in two steps: an id that is not a string but NAMES one (`7`, `true`) is
+// carried as that string, along with every `categoryId` that points at it; anything else gets an
+// id DERIVED from the entry's content, so both of my Macs and both doors mint the same one.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BAD_IDS = {
@@ -76,62 +82,82 @@ const BAD_IDS = {
 };
 
 for (const [what, id] of Object.entries(BAD_IDS)) {
-  test(`DEFECT · a note whose id is ${what} is on the v1 board and gone from the v2 board`, async () => {
+  test(`INVERTED · a note whose id is ${what} is on the v1 board and STILL on the v2 board`, async () => {
     const r = await board(v1board({
       notes: [{ id, date: '2026-04-02', text: 'Zahnarzt', categoryId: 'cat-arbeit', repeatsYearly: false }],
     }));
     assert.deepEqual(r.before, ['note 2026-04-02 "Zahnarzt"'], 'v1 renders it — that is the point');
-    assert.deepEqual(r.after, [], 'v2 renders nothing');
-    assert.equal(r.v2.notes.length, 0, 'and it is not in state either, so the next autosave erases it from the file');
+    assert.deepEqual(r.after, r.before, 'and so does v2, on the same day, with the same text');
+    assert.equal(r.v2.notes.length, 1, 'so the next autosave writes it back rather than erasing it');
+    assert.equal(typeof r.v2.notes[0].id, 'string');
+    assert.ok(r.v2.notes[0].id.length > 0, 'and the UI can address it, which v1 could not always do');
   });
 }
 
-test('DEFECT · a bar with no id vanishes; v1 draws it across nine columns', async () => {
+test('INVERTED · a bar with no id keeps all nine columns v1 drew', async () => {
   const r = await board(v1board({
     bars: [{ startDate: '2026-04-01', endDate: '2026-12-24', label: 'Urlaub', categoryId: 'cat-arbeit' }],
   }));
   assert.ok(r.before.filter((x) => x.startsWith('bar ')).length >= 8, `v1 drew it: ${r.before.filter((x) => x.startsWith('bar ')).length} segments`);
-  assert.equal(r.after.filter((x) => x.startsWith('bar ')).length, 0, 'v2 draws none');
-  assert.equal(r.v2.bars.length, 0);
+  assert.deepEqual(r.lost, [], 'nothing left the board');
+  assert.equal(r.v2.bars.length, 1);
 });
 
-test('DEFECT · a category with no id is dropped, taking its legend row with it', async () => {
+test('INVERTED · a category with no id keeps its legend row', async () => {
   const r = await upgrade(v1board({
     categories: [{ name: 'Arbeit', nameEn: 'Work', paletteRef: 'blau', visible: true }, CATS()[1]],
   }));
   assert.equal(r.v1.categories.length, 2);
-  assert.equal(r.v2.categories.length, 1, 'v2 keeps only the one that had an id');
+  assert.equal(r.v2.categories.length, 2, 'both survive; the id-less one was minted a derived id');
+  assert.deepEqual(r.v2.categories.map((c) => c.name), r.v1.categories.map((c) => c.name));
+});
+
+test('A3-H2 · a numeric id keeps the entries that POINT at it in their category', async () => {
+  // The half that makes `String(7)` a repair rather than a re-parenting: v1 resolves
+  // `ids.has(n.categoryId)` with `===`, so a numeric category id and a numeric `categoryId` match
+  // each other. Coercing only one of the two would have sent every note in that category to the
+  // fallback (ADR 001 §5 step 7) without a word.
+  const r = await upgrade(v1board({
+    categories: [{ id: 7, name: 'Sieben', nameEn: 'Seven', paletteRef: 'blau', visible: true }],
+    notes: [{ id: 'n1', date: '2026-04-02', text: 'Zahnarzt', categoryId: 7, repeatsYearly: false }],
+  }));
+  assert.equal(r.v1.notes[0].categoryId, 7, 'v1 kept the association');
+  assert.equal(r.v2.categories[0].id, '7');
+  assert.equal(r.v2.notes[0].categoryId, '7', 'and so did v2 — same category, as a string');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. A TRUTHY NON-BOOLEAN `repeatsYearly` LOSES THE SERIES
+// 2. A TRUTHY NON-BOOLEAN `repeatsYearly` — INVERTED, A3-H2 CLOSED
 //
 // `layout.js:71` reads it as `if (!n.repeatsYearly)`, so `'yes'` / `1` / `'true'` ARE a yearly
-// repeat to v1. `FIELDS.note.repeatsYearly` is `bool`, so `fitValue`/`migrateV1` drop the field
-// entirely — and a dropped field is `false`, which silently ends a birthday series.
+// repeat to v1. `FIELDS.note.repeatsYearly` is `bool`, so the door used to drop the field
+// entirely — and a dropped field is `false`, which silently ended a birthday series. This is the
+// most user-visible instance of A3-H2 and it is now read the way v1 read it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 for (const truthy of ['yes', 1, 'true', {}]) {
-  test(`DEFECT · repeatsYearly ${JSON.stringify(truthy)} repeats yearly in v1 and not at all in v2`, async () => {
+  test(`INVERTED · repeatsYearly ${JSON.stringify(truthy)} repeats yearly in v1 and repeats yearly in v2`, async () => {
     const r = await board(v1board({
       notes: [note('n1', '2024-06-10', 'Geburtstag', { repeatsYearly: truthy })],
     }));
     assert.deepEqual(r.before, ['note 2026-06-10 "Geburtstag"'], 'v1 projects the 2024 anchor into the visible window');
-    assert.deepEqual(r.after, [], 'v2 shows nothing: the anchor year is outside the window and the repeat is gone');
-    assert.ok(!r.v2.notes[0].repeatsYearly, 'the field is dropped entirely — falsy, so the series is over');
-    assert.equal('repeatsYearly' in r.v2.notes[0], false, 'and unlike every v1 note, the key is not even there');
+    assert.deepEqual(r.after, r.before, 'and v2 projects it onto the same day');
+    assert.equal(r.v2.notes[0].repeatsYearly, true, 'the flag is v1\'s reading of the value, as a boolean');
+    assert.ok(r.v2warnings.some((w) => /COERCED/.test(w)), 'and the change to the file is on the record');
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. A SCRATCHPAD WHOSE VALUE IS NOT A STRING IS ERASED
+// 3. A SCRATCHPAD WHOSE VALUE IS NOT A STRING — INVERTED, A3-H2 CLOSED
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('DEFECT · a numeric scratchpad renders in v1 and is erased by the migration', async () => {
+test('INVERTED · a numeric scratchpad renders in v1 and renders the same characters in v2', async () => {
   const r = await board(v1board({ scratchpads: { '2026-04': 12345 } }));
   assert.deepEqual(r.before, ['pad 2026-04 12345'], 'v1: layout.js:259 hands the raw value to the textarea, which shows "12345"');
-  assert.deepEqual(r.after, [], 'v2: the pad is gone');
-  assert.deepEqual(Object.keys(r.v2.scratchpads), []);
+  assert.deepEqual(r.after, ['pad 2026-04 "12345"'], 'v2: the same five characters, now as the string a register can hold');
+  assert.equal(r.v2.scratchpads['2026-04'], '12345');
+  assert.equal(String(r.v1.scratchpads['2026-04']), r.v2.scratchpads['2026-04'],
+    'the textarea shows the same thing in both builds — `12345` and `"12345"` differ only in this harness\'s JSON');
 });
 
 test('HELD · a whitespace-only scratchpad survives byte-for-byte', async () => {
@@ -141,17 +167,30 @@ test('HELD · a whitespace-only scratchpad survives byte-for-byte', async () => 
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. A NOTE WHOSE `date` IS NOT A STRING IS DELETED FROM THE FILE
+// 4. A NOTE WHOSE `date` IS NOT A STRING — INVERTED, A3-H2 CLOSED
 //
-// Not visible in either build — neither renders it — but v1 KEEPS it, so the day the date is
-// repaired the note comes back. v2 erases it on the first autosave and it never can.
+// Not visible in v1 — it draws none of these — but v1 KEEPS them, so the day the date is repaired
+// the note comes back. v2 erased them on the first autosave and they never could. Now: a date
+// that names ONE day is read, the rest keep the entry and lose only the field.
 // ─────────────────────────────────────────────────────────────────────────────
 
-for (const [what, date] of Object.entries({ 'null': null, 'a number': 20260402, 'US format': '04/02/2026', 'out of range': '2026-13-45', 'empty': '' })) {
-  test(`DEFECT · a note dated ${what} is preserved by v1 and erased by v2`, async () => {
+const ODD_DATES = {
+  'null': [null, undefined],
+  'a number': [20260402, '2026-04-02'],
+  'US format': ['04/02/2026', undefined],
+  'out of range': ['2026-13-45', undefined],
+  'empty': ['', undefined],
+  'German': ['2.4.2026', '2026-04-02'],
+};
+
+for (const [what, [date, expected]] of Object.entries(ODD_DATES)) {
+  test(`INVERTED · a note dated ${what} is preserved by v1 and preserved by v2`, async () => {
     const r = await upgrade(v1board({ notes: [note('n1', date, 'Zahnarzt')] }));
     assert.equal(r.v1.notes.length, 1, 'v1 keeps it in the file');
-    assert.equal(r.v2.notes.length, 0, 'v2 does not');
+    assert.equal(r.v2.notes.length, 1, 'and so does v2 — that is the whole of A3-H2');
+    assert.equal(r.v2.notes[0].text, 'Zahnarzt', 'with its text, so the day the date is fixed it comes back');
+    assert.equal(r.v2.notes[0].date, expected,
+      expected ? 'a date that names one day is read' : 'a date that names none is dropped, and nothing is invented');
   });
 }
 

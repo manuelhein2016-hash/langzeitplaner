@@ -1193,7 +1193,6 @@ test('the empty board and the empty day are not special cases', () => {
 
 test('renderable(note) — an own note needs text; a foreign one needs Belegt or a pub.text', () => {
   assert.equal(renderableNote({ date: '2026-03-14', text: 'Zahnarzt' }), true);
-  assert.equal(renderableNote({ text: 'Zahnarzt' }), false, 'no date');
   assert.equal(renderableNote({ date: '2026-03-14' }), false, 'own note without text');
   assert.equal(renderableNote({ date: '2026-03-14', text: '' }), true, 'empty string is a VALUE');
   // A Geteilt note whose pub.text op has not arrived yet is INVISIBLE, not "Belegt". Meaning is
@@ -1203,19 +1202,46 @@ test('renderable(note) — an own note needs text; a foreign one needs Belegt or
   assert.equal(renderableNote({ date: '2026-03-14', isForeign: true, level: 'belegt' }), true);
   // a WITHDRAWN text (explicit null, ADR 004 §5.1) is absent, not empty
   assert.equal(renderableNote({ date: '2026-03-14', isForeign: true, level: 'geteilt', text: null }), false);
-  assert.equal(renderableNote({ date: null, text: 'x' }), false);
   assert.equal(renderableNote(null), false);
   assert.equal(renderable('note', { date: '2026-03-14', text: 'x' }), true);
 });
 
-test('renderable(bar) needs both ends, and only both ends', () => {
+// INVERTED — A3-H2. These four rows asserted that a note with no usable DATE is not on the board,
+// which is where the retrofit lost five boards v1 keeps: `board.json` is the checkpoint in solo
+// mode, so the projection's refusal was rewritten into the user's file on the first autosave.
+// v1's `state.notes` is the ARRAY; the date decides which day row draws it, not whether it exists.
+test('renderable(note) — an OWN note with no date is still on the board (v1 kept it too)', () => {
+  assert.equal(renderableNote({ text: 'Zahnarzt' }), true, 'no date, but v1 keeps it in state.notes');
+  assert.equal(renderableNote({ date: null, text: 'x' }), true, 'a cleared date is the same case');
+  // …and it is a GRID question: no day row can hold it, which is exactly what v1 did with it.
+  assert.deepEqual(notesOnDate({ notes: [{ id: 'n', text: 'x' }], categories: [] }, '2026-03-14'), []);
+  // The one own-note exception: `layout.js:72` expands a repeat with `n.date.slice(0, 4)` and
+  // THROWS on a note with no date, taking the whole board with it. There is no v1 rendering of
+  // that shape to preserve, so it stays out of the array — and both doors refuse to mint it.
+  assert.equal(renderableNote({ text: 'x', repeatsYearly: true }), false, 'a repeat with no anchor');
+  assert.equal(renderableNote({ text: 'x', repeatsYearly: true, date: '2026-03-14' }), true);
+  // A FOREIGN entry is untouched: absence still means absence on the redaction path.
+  assert.equal(renderableNote({ text: 'Chor', isForeign: true, level: 'geteilt' }), false, 'no date');
+});
+
+test('renderable(bar) — a FOREIGN bar needs both ends; an OWN bar is v1\'s array (A3-H2)', () => {
   assert.equal(renderableBar({ startDate: '2026-03-10', endDate: '2026-03-20' }), true);
-  assert.equal(renderableBar({ startDate: '2026-03-10' }), false);
-  assert.equal(renderableBar({ endDate: '2026-03-20' }), false);
-  assert.equal(renderableBar({ startDate: '2026-03-10', endDate: null }), false);
   assert.equal(renderableBar({ startDate: '2026-03-10', endDate: '2026-03-20', label: null }), true, 'a label is not required');
   assert.equal(renderableBar(undefined), false);
   assert.throws(() => renderable('cat', {}), EntityKeyError);
+
+  // INVERTED — a one-ended own bar used to leave the board, and (solo mode, `board.json` is the
+  // checkpoint) leave the file with it. v1 draws it to the far edge of the visible window
+  // (`layout.js:133-135`), so it belongs in the array; both doors additionally anchor a missing
+  // edge to the one the file carries, so this shape reaches the projection only from a fragment
+  // or from a co-editor's withdrawal.
+  assert.equal(renderableBar({ startDate: '2026-03-10' }), true);
+  assert.equal(renderableBar({ endDate: '2026-03-20' }), true);
+  assert.equal(renderableBar({ startDate: '2026-03-10', endDate: null }), true);
+  assert.equal(renderableBar({ label: 'x' }), true, 'v1 paints even this — as a stripe down every column');
+  // …and the foreign path is untouched: absence stays absence on the redaction path.
+  assert.equal(renderableBar({ startDate: '2026-03-10', isForeign: true, level: 'geteilt' }), false);
+  assert.equal(renderableBar({ startDate: '2026-03-10', endDate: '2026-03-20', isForeign: true, level: 'geteilt' }), true);
 });
 
 test('projectable applies ADR 001 §5 step 3 in full, in its stated order', () => {

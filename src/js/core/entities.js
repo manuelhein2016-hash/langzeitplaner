@@ -602,18 +602,72 @@ export function barsInRange(state, firstISO, lastISO, ctx = {}) {
 const has = (v) => v !== undefined && v !== null;
 
 /**
+ * A NOTE'S DATE IS A GRID QUESTION, NOT AN ARRAY QUESTION — A3-H2.
+ *
+ * `state.notes` is v1's ARRAY. `layout.js` decides which day row a note lands in, and a note it
+ * cannot place is simply never placed: `layout.js:63` is `if (date < firstISO || date > lastISO)
+ * return;`, and for a note with no date at all the comparison is `undefined < '2026-01-01'`,
+ * which is false both ways, so the occurrence lands under the key `undefined` and no day row ever
+ * asks for it. The note stays in `state.notes`, stays in `board.json`, and is simply not drawn.
+ *
+ * v2 read `has(date)` as a condition for being on the board AT ALL, which is a different claim,
+ * and at the retrofit seam it was a destructive one: in solo mode `board.json` IS the checkpoint,
+ * so a note the projection refused was rewritten out of the user's file on the first autosave and
+ * gone at the next launch. That is A3-H2, and principle 6 („nichts geht verloren") forbids it.
+ *
+ * So an OWN note is on the board when it has a TEXT — which is the field v1 paints, and which
+ * both doors supply (`''`, ATT-53) when the file omits it. Nothing else about this predicate
+ * moves:
+ *
+ *   · A CLEARED text still takes an own note off the board. `null` is how ADR 004 §5.1 withdraws
+ *     a field, a co-editor clearing my text is exactly that, and the entry has nothing left to
+ *     paint. (`tests/attack/ownership-authz-undo.test.js`, `core-integration.test.js`.)
+ *   · A FOREIGN entry is untouched — `has(date) && (belegt || has(text))`, in that order. Every
+ *     word of the paragraph above about not inferring meaning from absence is about the foreign
+ *     path, and it stays true of it.
+ *   · The ONE own-note exception is a repeat with no anchor. `layout.js:72` expands a repeating
+ *     note with `Number(n.date.slice(0, 4))`, which THROWS on a note with no date and takes the
+ *     whole board down with it — v1 does not draw that note either, it fails to draw anything.
+ *     There is no v1 rendering to preserve, so the entry is kept out of the array rather than
+ *     handed to a renderer that cannot survive it. Both doors additionally refuse to MINT that
+ *     shape (`migrate1to2.js`: a truthy `repeatsYearly` on a note with no usable date is coerced
+ *     to `false` and reported), so this guard is the belt and that is the braces.
+ *
  * @param {Object} note a materialized note entry, already decorated with `isForeign`/`level`
  * @returns {boolean}
  */
 export function renderableNote(note) {
-  if (!note || !has(note.date)) return false;
-  if (!note.isForeign) return has(note.text);
-  return note.level === 'belegt' || has(note.text);
+  if (!note) return false;
+  if (note.isForeign) return has(note.date) && (note.level === 'belegt' || has(note.text));
+  if (note.repeatsYearly && typeof note.date !== 'string') return false;
+  return has(note.text);
 }
 
-/** @param {Object} bar @returns {boolean} */
+/**
+ * A FOREIGN bar needs both ends, for `renderableNote`'s reason: absence on the redaction path is
+ * absence, never a value inferred from it.
+ *
+ * An OWN bar is v1's array again (A3-H2). v1 draws a bar with no `endDate` from its start to the
+ * END OF THE VISIBLE WINDOW — `layout.js:133-135`: `undefined < mFirst` is false, so the bar is
+ * not skipped, and `segEnd = b.endDate < mLast ? b.endDate : mLast` resolves to `mLast` in every
+ * column from its start onwards. "To the horizon" is a function of TODAY, and a migration that
+ * read the clock would produce a different file on each of my two Macs (R12), so the missing edge
+ * is filled at the DOOR instead, from the edge the file does carry
+ * (`migrate1to2.js:missingBarEdge`) — and almost every bar therefore reaches here with both.
+ *
+ * The one that does not is a bar with NO usable date at all, which no door can anchor and which
+ * this predicate used to drop off the board and, one autosave later, out of `board.json`. v1
+ * keeps it and paints it as a full-height stripe in every column — including the lane it takes
+ * from every other bar (`layout.js:50`, where `undefined` clashes with everything). That is v1's
+ * rendering, ugly and all, and reproducing it is the point: `layout.js` is the same file in both
+ * builds, so an entry that is in the array is drawn the same way it always was.
+ *
+ * @param {Object} bar @returns {boolean}
+ */
 export function renderableBar(bar) {
-  return !!bar && has(bar.startDate) && has(bar.endDate);
+  if (!bar) return false;
+  if (bar.isForeign) return has(bar.startDate) && has(bar.endDate);
+  return true;
 }
 
 /**

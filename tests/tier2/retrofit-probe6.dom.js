@@ -1,5 +1,12 @@
 // TIER 2 · WP-3 ADVERSARY PROBE, round 6 — the scratchpad key-order finding,
 // minimal and deterministic, plus what it does to board.json and to 11.5.
+//
+// INVERTED 2026-08-27 — F-1 IS CLOSED (PO decision: FIX). `store.js:reconcileMap` now rebuilds
+// the live scratchpad map in projection key order, exactly as `reconcileList` already rebuilt
+// array order, so `core/entities.js:sortScratchpads` bites during the session instead of only on
+// a board projected into a fresh object. The rows below asserted the drift; they now assert the
+// fixed point. The accepted cost is a ONE-TIME rewrite of an existing user's `board.json` on
+// their next save: same content, different byte order, nothing on screen moves.
 
 const { store } = await importApp('store.js');
 const interact = await importApp('interact.js');
@@ -42,7 +49,7 @@ function writePad(month, text) {
 
 // ── V1 · the minimal repro ──────────────────────────────────────────────────
 
-test('V1 scratchpads written in NON-alphabetical month order, then a restart', async () => {
+test('V1 scratchpads written in NON-alphabetical month order, then a restart — board.json is a fixed point', async () => {
   reset();
   const ms = monthsOnBoard();
   // Write the LAST month first and the FIRST month last, so write order and
@@ -55,6 +62,8 @@ test('V1 scratchpads written in NON-alphabetical month order, then a restart', a
   const liveOrder = Object.keys(store.state.scratchpads);
   diag('write order  =', late, mid, early);
   diag('live key order =', liveOrder.join(','));
+  assert.deepEqual(liveOrder, [...liveOrder].sort(),
+    'F-1: the live map is in sort order the moment the projection lands, not only after a relaunch');
 
   await store.persistNow();
   const rawBefore = await load();
@@ -78,25 +87,27 @@ test('V1 scratchpads written in NON-alphabetical month order, then a restart', a
     Object.entries(JSON.parse(rawBefore).scratchpads).sort(),
     Object.entries(JSON.parse(rawAfter).scratchpads).sort(),
     'a scratchpad LOST TEXT across the restart');
-  // The finding: same content, different key order, and therefore different bytes,
-  // with no user action between the two writes.
+  // The fix: same content, same key order, same bytes — because there was no user action
+  // between the two writes.
   assert.deepEqual(diskOrderAfter, [...diskOrderBefore].sort(),
-    'the restart re-sorted the scratchpad keys');
-  assert.notEqual(rawBefore, rawAfter,
-    'PINNED TO CURRENT BEHAVIOUR: board.json is not a fixed point of a restart. '
-    + 'If this goes green-by-equality the gap was closed — invert the row.');
+    'both generations are written in sorted key order');
+  assert.deepEqual(diskOrderBefore, [...diskOrderBefore].sort(),
+    'including the one written MID-SESSION, which is the half that used to drift');
+  assert.equal(rawBefore, rawAfter,
+    'F-1 CLOSED: board.json is a fixed point of a restart again (ADR 001 §5 step 5). '
+    + 'If this goes red, the fix regressed — do not re-pin the drift.');
 });
 
-test('V1b a SECOND restart is stable — the churn is one-shot per session', async () => {
+test('V1b a SECOND restart is stable — there is no churn left to be one-shot', async () => {
   const raw1 = await load();
   await store.init();
   await store.persistNow();
   const raw2 = await load();
   diag('restart 2 -> 3 identical =', raw1 === raw2);
-  assert.equal(raw1, raw2, 'the sorted order is not a fixed point either');
+  assert.equal(raw1, raw2, 'the sorted order is a fixed point, restart after restart');
 });
 
-test('V1c writing one more pad after the restart appends OUT of sort order again', async () => {
+test('V1c writing one more pad after the restart lands IN sort order, session and file alike', async () => {
   const ms = monthsOnBoard();
   const target = ms.find((m) => !(m in store.state.scratchpads));
   diag('adding a pad for', target, 'to a board whose keys are currently',
@@ -109,6 +120,8 @@ test('V1c writing one more pad after the restart appends OUT of sort order again
   diag('disk order =', disk.join(','), 'sorted =', [...disk].sort().join(','));
   diag('is the file sorted? ', disk.join(',') === [...disk].sort().join(','));
   assert.deepEqual(disk, live, '11.4 — the file still mirrors store.state exactly');
+  assert.deepEqual(live, [...live].sort(),
+    'F-1: a pad appended mid-session no longer sits at the end until the next launch');
 });
 
 // ── V2 · does the reorder reach anything the user can see? ──────────────────
@@ -125,7 +138,7 @@ test('V2 the scratchpad TEXT stays with its month across the restart', () => {
 
 // ── V3 · the same question for the daily snapshot (11.5) ────────────────────
 
-test('V3 the snapshot ring carries the same reordered map', () => {
+test('V3 the snapshot ring carries the same (now stable) map', () => {
   const snaps = store.snapshots;
   diag('snapshots =', snaps.length);
   if (!snaps.length) skip('no snapshot in this run');
@@ -139,7 +152,7 @@ test('V3 the snapshot ring carries the same reordered map', () => {
 
 // ── V4 · notes/bars/categories are NOT affected (the list path reorders) ────
 
-test('V4 lists are reconciled in projection order, so only the MAP drifts', async () => {
+test('V4 lists are reconciled in projection order — the control that isolated F-1 to the map', async () => {
   reset();
   const dates = ['3', '1', '2'].map((i) => $$('.board .col')[Number(i)].querySelectorAll('.day[data-date]')[4].dataset.date);
   for (const [i, d] of dates.entries()) {
@@ -159,7 +172,8 @@ test('V4 lists are reconciled in projection order, so only the MAP drifts', asyn
   diag('board.json identical across the restart (no pads in play) =', rawBefore === rawAfter);
   assert.equal(after, before, 'note array order drifted across a restart');
   assert.equal(rawBefore, rawAfter,
-    'with no scratchpads, board.json IS a fixed point — which isolates the finding to the map');
+    'with no scratchpads board.json was ALWAYS a fixed point — this row isolated the finding to '
+    + 'the map, and stays as the control that the map fix did not disturb the list path');
 });
 
 test('V5 no page errors', () => {

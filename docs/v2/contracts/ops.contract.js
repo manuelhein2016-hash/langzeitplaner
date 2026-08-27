@@ -244,6 +244,20 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * The decoded `dev.*` register payload — ADR 002 §2.3's wire form, restated here because §4's
+ * `AuthzResult` publishes it and `crypto.contract.js` is the other half of the pair. All six
+ * fields are REQUIRED: `parseAttestationBlob` returns `null` for a blob missing any of them,
+ * and its op is rejected `badAttestation` rather than admitted as a partial credential.
+ * @typedef {Object} DeviceAttestation
+ * @property {MemberId} memberId
+ * @property {DeviceId} deviceId
+ * @property {DeviceShort} deviceShort
+ * @property {string} sigPubRaw   b64url raw P-256 point — the key ADR 002 §5.2.2 P2/P3 need
+ * @property {string} kexPubRaw   b64url raw P-256 point — what §4.2 wraps the space key to
+ * @property {string} createdAt   'YYYY-MM-DD'
+ */
+
+/**
  * @typedef {Object} AuthzResult
  * @property {RegisterMap} regs
  * @property {MemberId|null} admin              chain-resolved current admin
@@ -259,20 +273,38 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * @property {(sid:SpaceId) => MemberId|null} adminOfSpace
  * @property {(sid:SpaceId, at:Stamp) => MemberId|null} adminAtInSpace
  * @property {(sid:SpaceId) => Op[]} adminChainOf
+ *
+ * THE ATTESTATION SURFACE. `attestationOf` is the one `envelope.js` (WP-6) is written against;
+ * ADR 002 §5.2.2 needs `sigPubRaw` BEFORE it may decrypt (P2/P3) and `deviceId` / `memberId`
+ * after (checks 3 and 5), none of which the two derived entries below carry.
+ * @property {(dv:DeviceShort) => DeviceAttestation|null} attestationOf
+ * @property {DeviceShort[]} shortCollisions    sorted; see the residual note below
  * @property {Map<MemberId, Set<DeviceId>>} attestedDevices   memberId -> attested deviceIds
  * @property {(devId:DeviceId) => MemberId|null} memberOfDevice
  *
  * [AMENDED 2026-08-27] `attestedDevices` was typed `Set<DeviceShort>` here and has always been
- * `Map<MemberId, Set<DeviceId>>` in `authz.js:853` — two different things. Corrected above.
+ * `Map<MemberId, Set<DeviceId>>` in `authz.js` — two different things. Corrected above.
  *
- * [OWED — WP-6, finding F-10] `envelope.js` cannot be written against either of the two entries
- * above. ADR 002 §5.2 (rewritten 2026-08-27, the resolution of the `deviceShort` contradiction)
- * requires the attestation PAYLOAD, keyed by deviceShort:
- * @property {(dv:DeviceShort) => DeviceAttestation|null} attestationOf
- * from which memberId, deviceId and sigPubRaw all fall out, superseding both entries above on the
- * public surface. `authz.js` already decodes exactly this object (`parseAttestationBlob`, :181)
- * and already walks the folded registers to build the table (:650-663); the payload is DISCARDED
- * at :661, where only `deviceId -> memberId` is kept. ~10 lines.
+ * [DELIVERED 2026-08-27 — finding F-10, ADR 002 §5.2.3. Was OWED.] `attestationOf` is live in
+ * `src/js/core/authz.js`; the decoded payload is kept rather than discarded at the register walk,
+ * and `parseAttestationBlob` now returns all six fields ADR 002 §2.3 fixes (a blob missing
+ * `sigPubRaw`, `kexPubRaw` or `createdAt` is refused outright — a credential `openOp` could only
+ * throw on must not become a table row). `attestedDevices` and `memberOfDevice` are RETAINED, not
+ * removed: both are strictly derivable from `attestationOf` (`.memberId` / `.deviceId`) and both
+ * still have in-repo callers — `tests/attack/ownership-authz-content.js`,
+ * `ownership-authz-admin.js`, `core-authz.test.js`. **WP-6 removes them when it moves those
+ * callers.** Do not add new ones.
+ *
+ * [RESIDUAL — WP-6 must not miss this] `shortCollisions` reports every `deviceShort` claimed on
+ * more than one member record. ADR 002 §2.3 argues `deviceShort -> DeviceAttestation` is a
+ * FUNCTION because two members would need the same signing PRIVATE key; the four acceptance
+ * conditions do not enforce that, because nothing in a pure synchronous fold can check
+ * `crock32(SHA-256(sigPubRaw)[0..10]) === deviceShort` — that is §5.2.2's **P2**, and it lives in
+ * `openOp`. So a member CAN mint a well-formed attestation under a peer's short. The fold
+ * resolves the contest MINIMAL-under-`≺` (the same rule as `dev.*` write-once, so it is a
+ * function of the SET), which means a BACKDATED squatter takes the lookup; P2 is what then
+ * refuses the envelope, because the squatter's `sigPubRaw` does not hash to that short. Stage 0b
+ * is unaffected either way — the device gate is per-member.
  * @property {OpId[]} splicedIds                two different bodies under one opId; one is
  *                                              admitted by canonical form so every device agrees
  */
@@ -295,19 +327,33 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * `att.deviceId`. ADR 002 §2.3 adds the four acceptance conditions that make
  * `deviceShort -> DeviceAttestation` a FUNCTION across the space, which is what lets `openOp`
  * resolve a device from `env.dv` alone, BEFORE decrypt and therefore before it knows `op.act`.
- * The fold therefore needs the payload, not a boolean: `attestVerify` should become
- * `attestOpen(memberId, blob) => DeviceAttestation|null`. That change is OWED (WP-6, F-10).
- * `attestVerify` FAILS CLOSED when absent: no family op is admitted.
+ * All four are enforced at stage 0a and each is pinned by its own test in
+ * `tests/tier1/core-authz.test.js` §3b — (3) and (4) are the two §5.2.1 warns must not be
+ * relaxed, and the (3) test runs with a verifier that accepts everything so that it fails for
+ * one reason only.
+ *
+ * [DELIVERED 2026-08-27 — F-10] The fold needs the payload, not a boolean, so
+ * `attestOpen(memberId, blob) => DeviceAttestation|null` is now ACCEPTED alongside the WP-1
+ * boolean `attestVerify`. Neither supplies the payload the table publishes: that always comes
+ * from `parseAttestationBlob`, i.e. from the register bytes themselves, and an `attestOpen`
+ * whose answer disagrees with those bytes counts as a FAILED verification — otherwise the
+ * injected function would be a second, unlogged source of device identity, which is the
+ * key-injection hole ADR 002 §2.3 exists to close, entered through the front door. Both
+ * injections FAIL CLOSED when absent: no family op is admitted. WP-6 supplies `attestOpen` and
+ * its implementation SHOULD also enforce §5.2.2's P2
+ * (`deviceShortOf(att.sigPubRaw) === att.deviceShort`), which the pure fold cannot — see
+ * `shortCollisions` above.
  *
  * [WP-1] Stage 0 would otherwise regress infinitely — the ops that CREATE attestations are
  * themselves ops. A `member.set` patch consisting SOLELY of `dev.*` registers is
- * self-authorizing on `op.act === memberId` (§4.0's own second sentence) and gated only by
- * `attestVerify`. A patch mixing `dev.*` with ordinary member fields has two predicates and no
- * single answer, so it is refused whole. §4.0 needs one sentence saying this.
+ * self-authorizing on `op.act === memberId` (§4.0's own second sentence) and gated only by the
+ * injected verifier. A patch mixing `dev.*` with ordinary member fields has two predicates and
+ * no single answer, so it is refused whole. §4.0 needs one sentence saying this.
  *
  * @param {Iterable<Op>} ops
  * @param {{ me: MemberId, nowMs: number,
- *           attestVerify: (memberId:MemberId, blob:string) => boolean,
+ *           attestOpen?: (memberId:MemberId, blob:string) => DeviceAttestation|null,
+ *           attestVerify?: (memberId:MemberId, blob:string) => boolean,   // WP-1 shape, retained
  *           myDevices?: Set<DeviceId>,   [WP-1] §4.0's "local device set"; absent, the check
  *                                        degrades to `act === me`, all §4.4 claims for the
  *                                        personal space
@@ -370,6 +416,31 @@ export function snapshot(result) { throw new Error('not implemented'); }
  *            scratchpads:Object<string,string>, settings:Object}}
  */
 export function materialize(regs, ctx) { throw new Error('not implemented'); }
+
+/**
+ * HOW DEEP A `settings` OBJECT MAY NEST — normative, added 2026-08-27 with finding I-5.
+ *
+ * `pref:app` holds DOTTED register names with scalar values, because `f` is scalars-only (ADR 001
+ * §2/§3.3). The shipped tree nests exactly two levels (`layers.<name>`, `lastSeenSeq.<spaceRef>`,
+ * `hiddenMembers.<memberId>`), and **32 is the cap**, enforced in two places that answer two
+ * different questions:
+ *
+ *   · `flattenPref(patch, prefix, depth)` refuses to MINT a name deeper than this, with `OpError`.
+ *     Both file doors call it ONE KEY AT A TIME inside a `try`, so on externally-sourced settings
+ *     a refusal costs that key and is reported to the warnings channel (`FINDINGS.md` A3-M1a);
+ *     from `settingsSet` / `layerSet` it throws, which is correct — those are internal call sites.
+ *   · `materialize`'s `prefsFromRegisters` DROPS a register name deeper than this on the way back
+ *     out. A `checkpoint.json` (F-5 — the one input with no admissibility fold) and a peer's
+ *     `pref.set` arrive already flattened and never pass through `flattenPref`, so the mint-side
+ *     cap alone is not the whole rule.
+ *
+ * WHY IT IS A RULE AND NOT DEFENSIVENESS: the rebuild is iterative and survives any depth, but the
+ * object it produces does not survive `structuredClone`, which `store._project` performs on
+ * `state.settings` outside any door. Without the cap a hand-edited `board.json` makes the app
+ * unbootable with `ready === false`. An implementation that raises this cap must first prove the
+ * projection it hands out is cloneable.
+ */
+export const PREF_MAX_DEPTH = 32;
 
 /** createdAt = min stamp over an entity's registers. @returns {Stamp|null} */
 export function createdAt(regs, e) { throw new Error('not implemented'); }

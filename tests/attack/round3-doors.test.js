@@ -12,12 +12,24 @@
 //    entry in an `applyRemote()` batch discards the WHOLE batch with a bare `TypeError`.
 //
 //  · Attack 5 — "anything the retrofit newly refuses". WP-1 round 1 bricked four openable boards
-//    by over-guarding. The migration door does not brick anything now, but it DROPS entries that
-//    v1 keeps in its file, and `board.json` is then rewritten without them. In solo mode
-//    `board.json` IS the checkpoint, so the loss is permanent after one autosave.
+//    by over-guarding. The migration door does not brick anything now, but it DROPPED entries
+//    that v1 keeps in its file, and `board.json` was then rewritten without them. In solo mode
+//    `board.json` IS the checkpoint, so the loss was permanent after one autosave.
 //
 // Rows tagged `SUCCEEDED (defect)` are green BECAUSE the defect is there. If one goes red the
 // gap was closed — invert it, do not repair it.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT CHANGED — A3-H2 IS CLOSED, AND THE ATTACK-5 ROWS ARE INVERTED (2026-08-27)
+//
+// The PO's decision on A3-H2 was COERCE: when a v1 board holds a value v2's type table rejects,
+// read it the way v1 read it rather than dropping the entry, and log every coercion to the
+// warnings channel so the change to the user's file is auditable. R3-26, R3-26b and R3-28 are the
+// inverted rows; R3-26c is the A3-M1a door policy (neither door throws on a hostile file).
+//
+// R3-27 is NOT inverted and must not be: it is F-8 (`store.warnings` has no consumer, WP-10). The
+// coercions are all on that channel and nothing reads it, so the board is right and the user is
+// still not told what was changed on their file.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import '../helpers/env.js';
@@ -174,7 +186,11 @@ describe('F-2 — the full scope of "apply() throws instead of declining"', () =
     assert.equal(Object.keys(MUTATIONS).length, 22);
   });
 
-  test('R3-23 SUCCEEDED (defect, NEW): the SAME class is on applyRemote() — one bad entry in a batch throws a bare TypeError and discards the good ops with it', () => {
+  // ── R3-23 · INVERTED 2026-08-27 · A3-H3 is CLOSED ────────────────────────────
+  // Edited by the store agent, whose finding this is; the rest of this file (F-2 / A3-H2 /
+  // A3-M1a) is untouched. `applyRemote` now judges every entry in the batch on its own and
+  // NEVER throws — the door policy for externally-sourced input.
+  test('R3-23 FAILED (held, A3-H3 closed): one bad entry in a remote batch costs that entry and nothing else', () => {
     const good = noteSet(
       { act: store._me, dev: store._device, gid: 'B'.repeat(22), space: 'personal', familySpaceId: null,
         mint: () => fmt(Date.now(), 0, '0'.repeat(16)), newOpId: () => 'A'.repeat(22) },
@@ -182,13 +198,52 @@ describe('F-2 — the full scope of "apply() throws instead of declining"', () =
       { born: true },
     );
     const before = store.state.notes.length;
-    assert.throws(() => store.applyRemote([null, good]), (e) => e.name === 'TypeError' && /reading 'id'/.test(e.message));
+    store.warnings.length = 0;
+    assert.doesNotThrow(() => store.applyRemote([null, good]));
     quiet();
-    assert.equal(store.state.notes.length, before,
-      'DEFECT: the well-formed op in the same batch was never applied');
-    // `applyRemote` guards `null` when it builds the refusal set (`(o) => o && o.id`) and then
-    // reads `op.id` unguarded in the very next loop. This is F-2's "becomes live the moment WP-8's
-    // remote path exists" — already live on the remote path, today, in the shipping tree.
+    assert.equal(store.state.notes.length, before + 1, 'the well-formed op in the same batch was applied');
+    assert.equal(store.state.notes.find((n) => n.id === 'zz').text, 'überlebt');
+    assert.ok(store.warnings.some((w) => /refused: not a well-formed op \(null\)/.test(w)),
+      'and the null was refused by name: ' + JSON.stringify(store.warnings));
+  });
+
+  test('R3-23b FAILED (held): the siblings on the same path — a non-iterable batch, an unobservable stamp, a log that refuses', () => {
+    // Audited alongside A3-H3, since "one missing guard" is only true if there is exactly one.
+    store.warnings.length = 0;
+    for (const notABatch of [42, 'ops', { 0: 'op' }, true]) {
+      assert.doesNotThrow(() => store.applyRemote(notABatch), `applyRemote(${JSON.stringify(notABatch)})`);
+      quiet();
+    }
+    assert.equal(store.warnings.filter((w) => /expected an array of ops/.test(w)).length, 4);
+
+    // ── THE UNOBSERVABLE STAMP — corrected 2026-08-27 by mutation testing ─────────────────────
+    //
+    // The A3-H3 pass wrapped `this._clock.observe(op.ts)` because `observe` throws `TypeError` on
+    // anything that is not a 37-character stamp, and called it "a live sibling a peer could
+    // trigger". IT IS NOT LIVE, and the row below is the correction: reverting that try/catch
+    // killed no test, and a probe of ten hostile `ts` values through `applyRemote` reached the
+    // clock with none of them. `ops.js:397` (`validateOp`) refuses `op.ts` that is not a stamp,
+    // `foldAuthorized` therefore puts every one of them in `verdict.rejected`, and the loop skips
+    // a refused op before it touches the clock. The guard is belt to that braces and is kept for
+    // it, but what is ASSERTED here is the reachability claim itself: the gate refuses these, by
+    // name and with a reason. If a future change to the gate ever lets one past, this row goes
+    // red and the guard stops being redundant — which is the only honest way to pin code whose
+    // whole value is that it is currently unreachable.
+    const ctx = { act: store._me, dev: 'dev_' + 'C'.repeat(22), gid: 'B'.repeat(22), space: 'personal', familySpaceId: null,
+      mint: () => fmt(Date.now(), 0, '0'.repeat(16)), newOpId: () => 'D'.repeat(22) };
+    const op = noteSet(ctx, 'yy', { text: 'vom Peer', date: '2026-03-05', categoryId: 'c1', repeatsYearly: false, visibility: 'privat', coEdit: false, _alive: true }, { born: true });
+    const badStamps = ['nicht-ein-stempel', '', null, undefined, 42, {}, [],
+      'A'.repeat(37), '0'.repeat(37), fmt(Date.now(), 0, '0'.repeat(16)).slice(0, 36)];
+    for (const [i, ts] of badStamps.entries()) {
+      store.warnings.length = 0;
+      const id = 'E'.repeat(21) + String.fromCharCode(65 + i);
+      assert.doesNotThrow(() => store.applyRemote([{ ...op, id, ts }]), `ts = ${JSON.stringify(ts)}`);
+      quiet();
+      assert.ok(store.warnings.some((w) => w.includes(id) && /refused/.test(w)),
+        `ts = ${JSON.stringify(ts)} must be refused BY NAME before the clock is asked to observe `
+        + `it: ${JSON.stringify(store.warnings)}`);
+      assert.equal(store.state.notes.some((n) => n.id === 'yy'), false, 'and it never lands');
+    }
   });
 
   test('R3-24 FAILED (held): every OTHER malformed remote op shape is refused with a warning rather than a throw', () => {
@@ -228,7 +283,7 @@ describe('attack 5 — what the retrofit newly refuses, and what it silently dro
     'a scratchpad holding a number': board({ scratchpads: { '2026-03': 42 } }),
   };
 
-  test('R3-26 SUCCEEDED (defect): five boards v1 keeps are silently emptied by v2, and the loss is written to board.json on the first autosave', async () => {
+  test('R3-26 INVERTED (A3-H2 closed): all five boards v1 keeps are kept by v2, and survive the autosave that used to erase them', async () => {
     const report = [];
     for (const [name, b] of Object.entries(LOSSY)) {
       await boot(v1store, structuredClone(b));
@@ -245,35 +300,78 @@ describe('attack 5 — what the retrofit newly refuses, and what it silently dro
     }
     for (const [name, v1kept, v2kept, onDisk, warned] of report) {
       assert.equal(v1kept, 1, `${name}: v1 keeps it`);
-      assert.equal(v2kept, 0, `${name}: DEFECT — v2 drops it from the board`);
-      assert.equal(onDisk, 0, `${name}: DEFECT — and rewrites board.json without it`);
-      assert.ok(warned >= 1, `${name}: migrateV1 did warn`);
+      assert.equal(v2kept, 1, `${name}: and so does v2 — the door coerces to v1's meaning`);
+      assert.equal(onDisk, 1, `${name}: and the autosave writes it back`);
+      assert.ok(warned >= 1, `${name}: and the coercion is on the warnings channel, auditable`);
     }
-    // The entry usually still EXISTS as a register — but in solo mode `board.json` is the
-    // checkpoint (ADR 001 §9), so the next launch re-migrates the FILE and the register is gone
-    // with it. One autosave and the note is unrecoverable, including from `snapshots.json`,
-    // which stores `_persisted` — the already-emptied board.
+    // AND IT SURVIVES THE SECOND LAUNCH, which is what made this permanent: in solo mode
+    // `board.json` IS the checkpoint (ADR 001 §9), so whatever the first autosave wrote is what
+    // the next migration reads. A round trip through the file is the real test.
+    for (const [name, b] of Object.entries(LOSSY)) {
+      await boot(store, structuredClone(b));
+      await store.persistNow();
+      quiet();
+      const afterFirstLaunch = JSON.parse(LS.getItem(BOARD_KEY));
+      await boot(store, afterFirstLaunch);
+      const kept = store.state.notes.length + store.state.bars.length + Object.keys(store.state.scratchpads).length;
+      assert.equal(kept, 1, `${name}: still there on the SECOND launch`);
+    }
   });
 
-  test('R3-27 SUCCEEDED (defect): store.warnings is a write-only array — nothing in src/ ever reads it, so every loss above is silent to the user', async () => {
+  test('R3-26b (A3-H2): what each of the five coerced to — v1\'s meaning, field by field', async () => {
+    await boot(store, board({ notes: [{ id: 'n', date: '4.3.2026', text: 'Zahnarzt', categoryId: 'c1', repeatsYearly: false }] }));
+    assert.equal(store.state.notes[0].date, '2026-03-04', 'the German date names one day');
+    assert.equal(store.state.notes[0].text, 'Zahnarzt');
+
+    await boot(store, board({ notes: [{ id: 'n', text: 'Zahnarzt', categoryId: 'c1', repeatsYearly: false }] }));
+    assert.equal(store.state.notes[0].date, undefined, 'no date is INVENTED …');
+    assert.equal(store.state.notes[0].text, 'Zahnarzt', '… and the entry is kept anyway');
+    assert.match(store.warnings.join('\n'), /will not be DRAWN on any day/);
+
+    await boot(store, board({ notes: [{ date: '2026-03-04', text: 'Zahnarzt', categoryId: 'c1', repeatsYearly: false }] }));
+    assert.equal(store.state.notes.length, 1, 'a note with no id gets a derived one');
+    assert.ok(store.state.notes[0].id, 'and it is a real id, so the UI can address it');
+
+    await boot(store, board({ bars: [{ id: 'b', startDate: '2026-03-01', label: 'Urlaub', categoryId: 'c1' }] }));
+    assert.deepEqual(
+      [store.state.bars[0].startDate, store.state.bars[0].endDate],
+      ['2026-03-01', '2026-03-01'],
+      'v1 drew it to the horizon, which depends on TODAY; the anchor is the edge the file carried',
+    );
+
+    await boot(store, board({ scratchpads: { '2026-03': 42 } }));
+    assert.equal(store.state.scratchpads['2026-03'], '42', 'v1 paints `42 || ""` into the textarea');
+  });
+
+  test('R3-27 SUCCEEDED (defect, F-8): store.warnings is a write-only array — nothing in src/ ever reads it, so every coercion above is invisible to the user', async () => {
     await boot(store, board({ notes: [{ id: 'n', date: '4.3.2026', text: 'Zahnarzt', categoryId: 'c1', repeatsYearly: false }] }));
     assert.ok(store.warnings.length >= 1, 'the diagnosis exists …');
-    assert.ok(/DROPPED|not renderable/.test(store.warnings.join(' ')), '… and it is precise …');
+    assert.ok(/COERCED|DROPPED|will not be DRAWN/.test(store.warnings.join(' ')), '… and it is precise …');
     // … and it has no consumer. `grep -rn warnings src/` outside `core/` matches only the eight
-    // WRITES in store.js. Principle 6 ("nothing is ever lost") is enforced at this layer by
-    // design; here the layer knows it lost something and cannot say so.
+    // WRITES in store.js. A3-H2's decision was "coerce, and log every coercion to the warnings
+    // channel so it is auditable" — the coercions are all there and nothing reads them, which is
+    // F-8, owned by WP-10. Closing A3-H2 makes this row MORE important, not less: the board is
+    // now right and the user still has no way to be told what was changed on their file.
   });
 
-  test('R3-28 SUCCEEDED (defect): a repeating note whose flag is truthy-but-not-boolean STOPS REPEATING, silently', async () => {
+  test('R3-28 INVERTED (A3-H2 closed): a repeating note whose flag is truthy-but-not-boolean KEEPS REPEATING', async () => {
     const b = board({ notes: [{ id: 'n', date: '2026-03-04', text: 'Geburtstag', categoryId: 'c1', repeatsYearly: 'yes' }] });
     await boot(v1store, structuredClone(b));
     assert.equal(v1store.state.notes[0].repeatsYearly, 'yes', 'v1 keeps the value, and it is truthy');
 
     await boot(store, structuredClone(b));
-    assert.equal('repeatsYearly' in store.state.notes[0], false,
-      'DEFECT: v2 drops the KEY — `find.js` / `layout.js` read it as falsy, so a yearly birthday becomes a one-off');
+    assert.equal(store.state.notes[0].repeatsYearly, true,
+      "v2 reads it the way v1 read it — `layout.js:71` is `if (!n.repeatsYearly)`, so 'yes' repeats");
     await store.persistNow(); quiet();
-    assert.equal('repeatsYearly' in JSON.parse(LS.getItem(BOARD_KEY)).notes[0], false, 'and the file loses it too');
+    assert.equal(JSON.parse(LS.getItem(BOARD_KEY)).notes[0].repeatsYearly, true, 'and the file carries it');
+    assert.ok(store.warnings.some((w) => /COERCED/.test(w)), 'and the change to the file is on the record');
+
+    // The counter-case, from v1's OTHER boolean: a category is hidden only by a literal `false`
+    // (`layout.js:111`), so `visible: 'ja'` — and `visible: 0` — stay VISIBLE.
+    await boot(store, board({ categories: [{ id: 'c1', name: 'A', nameEn: 'A', paletteRef: 'blau', visible: 'ja' }] }));
+    assert.equal(store.state.categories[0].visible, true);
+    await boot(store, board({ categories: [{ id: 'c1', name: 'A', nameEn: 'A', paletteRef: 'blau', visible: 0 }] }));
+    assert.equal(store.state.categories[0].visible, true, '`Boolean(0)` would have hidden a category v1 shows');
   });
 
   test('R3-29 FAILED (held): the boards WP-1 round 1 bricked, and the awkward ones around them, all still open', async () => {
@@ -300,6 +398,49 @@ describe('attack 5 — what the retrofit newly refuses, and what it silently dro
       assert.equal(store.state.categories.length, a.categories.length, `${name}: same categories`);
       assert.deepEqual(store.state.settings.layers, a.settings.layers, `${name}: same layers`);
     }
+  });
+
+  test('R3-26c (A3-M1a, the door policy): NEITHER door throws on a hostile file — refuse-or-coerce and warn', async () => {
+    // The lead's ruling on A3-M1a: never throw on externally-sourced input; throw only on
+    // programmer error. A `board.json` is externally-sourced by definition — it is a file on a
+    // disk the user can open in a text editor — so every shape below must be opened, coerced or
+    // refused per field, and warned about. None of them may take the app down on launch.
+    // A deeply nested `settings` object USED TO BE EXCLUDED from this list, and the exclusion is
+    // now gone. Both DOORS always survived it (`core-migrate.test.js` / `core-replace.test.js`
+    // put the same shape through `migrateV1` and `planReplaceAll` directly), but `_project`'s
+    // `structuredClone(state.settings)` overflowed the stack ABOVE both of them, out of `init()`,
+    // and the frozen v1 store crashed on the same file. Closed by `ops.js:PREF_MAX_DEPTH` and its
+    // second lock in `materialize.js` — depth by depth in `round3-persistence.test.js` R3-36b,
+    // and here as one more shape the door policy has to open. v2 is now strictly better than v1
+    // on this input rather than equally bad, which is the only reason parity was ever an argument.
+    const deepSettings = (n) => { let o = {}; const r = o; for (let i = 0; i < n; i++) { o.k = {}; o = o.k; } o.leaf = 1; return r; };
+    const HOSTILE = {
+      'settings nested two thousand deep': () => { const b = board(); b.settings.deepThing = deepSettings(2000); return b; },
+      'a note that is an array': () => board({ notes: [[1, 2]] }),
+      'an id full of key separators': () => board({ notes: [{ id: 'a/b:c', date: '2026-03-04', text: 'x', categoryId: 'c1' }] }),
+      'an id named __proto__': () => board(JSON.parse('{"notes":[{"id":"__proto__","date":"2026-03-04","text":"x","categoryId":"c1"}]}')),
+      'a null and an Infinity date': () => board({ notes: [{ id: 'n', date: null, text: 'x', categoryId: 'c1' }, { id: 'm', date: 1e999, text: 'y', categoryId: 'c1' }] }),
+      'a bar whose dates are containers': () => board({ bars: [{ id: 'b', startDate: {}, endDate: [], label: 'x', categoryId: 'c1' }] }),
+      'scratchpads with forbidden keys': () => board({ scratchpads: JSON.parse('{"__proto__":"x","2026-01":{"a":1},"9999-99":"y"}') }),
+      'every field the wrong type at once': () => board({
+        notes: [{ id: 5, date: 20260304, text: 7, categoryId: 9, repeatsYearly: 'yes' }],
+        bars: [{ id: true, startDate: '4.3.2026', endDate: null, label: {}, categoryId: [] }],
+        categories: [{ id: null, name: 1, nameEn: [], paletteRef: 2, visible: 'ja' }],
+        scratchpads: { '2026-03': 42 },
+      }),
+    };
+    for (const [name, make] of Object.entries(HOSTILE)) {
+      await boot(store, make());
+      quiet();
+      assert.equal(store.ready, true, `${name}: the app booted`);
+      assert.ok(store.state.categories.length >= 1, `${name}: and left a legal v1 board`);
+      // …and the same bytes through the OTHER door, which is the one 11.5 restore uses.
+      assert.doesNotThrow(() => store.replaceAll(make()), `${name}: replaceAll threw`);
+      quiet();
+      assert.ok(store.state.categories.length >= 1, `${name}: and again after the restore`);
+    }
+    assert.ok(Object.prototype.polluted === undefined && ({}).a === undefined,
+      'and nothing was written to Object.prototype on the way through');
   });
 
   test('R3-30 FAILED (held): replaceAll() — the import and snapshot-restore door — never throws, whatever it is handed', async () => {

@@ -432,7 +432,11 @@ test('an attestation whose payload names another member does not verify', () => 
 test('an attestation whose payload deviceShort disagrees with its register name is rejected', () => {
   // `dev.<deviceShort>` is the register NAME; the payload restates it. If the two may disagree,
   // the register name stops being a key that binds anything.
-  const forged = attestOp(EVE, D[EVE], S(BASE, 0, D[EVE].short), { blobShort: short16('OTHER') });
+  //
+  // The disagreeing short must be a WELL-FORMED one (`XTRA` — `O` and `U` are not in the
+  // Crockford alphabet, so `short16('OTHER')` is refused by `parseAttestationBlob` before this
+  // predicate is ever reached, and the test would pass with the predicate deleted).
+  const forged = attestOp(EVE, D[EVE], S(BASE, 0, D[EVE].short), { blobShort: short16('XTRA') });
   const r = foldAuthorized([forged], CTX());
   assert.equal(reason(r, forged), REJECT_REASONS.BAD_ATTESTATION);
 });
@@ -485,7 +489,6 @@ test('a second device of mine is attested by a second dev.* register on the same
 
 test('parseAttestationBlob refuses everything that is not the ADR 002 §2.3 wire form', () => {
   const good = attBlob({ memberId: MAMA, deviceId: D[MAMA].id, deviceShort: D[MAMA].short });
-  assert.deepEqual(parseAttestationBlob(good), { memberId: MAMA, deviceId: D[MAMA].id, deviceShort: D[MAMA].short });
   assert.equal(parseAttestationBlob(good.split('.')[0]), null, 'a payload with no signature half');
   assert.equal(parseAttestationBlob(`.${good.split('.')[1]}`), null);
   assert.equal(parseAttestationBlob(`${good.split('.')[0]}.`), null);
@@ -493,6 +496,207 @@ test('parseAttestationBlob refuses everything that is not the ADR 002 §2.3 wire
   assert.equal(parseAttestationBlob('not base64url at all!!'), null);
   assert.equal(parseAttestationBlob(`${b64u(utf8('[1,2,3]'))}.${b64u(utf8('sig'))}`), null, 'an array is not an attestation');
   assert.equal(parseAttestationBlob(`${b64u(utf8('{"memberId":"nope"}'))}.${b64u(utf8('sig'))}`), null);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3b. F-10 — the attestation PAYLOAD survives the fold (ADR 002 §5.2, §5.2.1, §5.2.3)
+//
+// `openOp` is handed `env.dv` — a deviceShort — and nothing else it can trust. Before it may
+// decrypt, it must find `att.sigPubRaw` (§5.2.2 P2/P3); after it decrypts, it must bind the
+// plaintext with `att.deviceId` and `att.memberId` (checks 3 and 5). The fold used to keep only
+// `deviceId → memberId`, which is none of those, so `envelope.js` could not be written at all.
+//
+// The lookup is keyed by `deviceShort` ALONE, because `op.act` is not knowable before decrypt.
+// §5.2.1 says in as many words that this is sound only while ADR 002 §2.3's four acceptance
+// conditions hold, and names (3) and (4) as the two whose relaxation breaks §5.2. So each of the
+// four is asserted here on its own, with the other three neutralised where that is possible —
+// a test that only fires when all four are removed at once would not notice one of them going.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('F-10: the decoded attestation carries every field ADR 002 §2.3 fixes, sigPubRaw included', () => {
+  // INVERTED. This assertion used to pin the defect: it deep-equalled the three-field object the
+  // fold kept and the payload was discarded at the register walk. WP-6 needs all six.
+  const good = attBlob({ memberId: MAMA, deviceId: D[MAMA].id, deviceShort: D[MAMA].short });
+  assert.deepEqual(parseAttestationBlob(good), {
+    memberId: MAMA,
+    deviceId: D[MAMA].id,
+    deviceShort: D[MAMA].short,
+    sigPubRaw: b64u(utf8(`sigpub:${D[MAMA].id}`)),
+    kexPubRaw: b64u(utf8(`kexpub:${D[MAMA].id}`)),
+    createdAt: '2026-08-25',
+  });
+  assert.ok(Object.isFrozen(parseAttestationBlob(good)), 'the table hands out an immutable credential');
+});
+
+test('F-10: an attestation missing a field openOp needs is not a partial credential, it is none', () => {
+  // `sigPubRaw` is the whole of §5.2.2 P2 and P3. Admitting a device whose blob has no signing
+  // key would put a row in the table that `openOp` can only ever throw on.
+  const full = {
+    memberId: MAMA, deviceId: D[MAMA].id, deviceShort: D[MAMA].short,
+    sigPubRaw: 'AAAA', kexPubRaw: 'BBBB', createdAt: '2026-08-25',
+  };
+  const blobOf = (att) => `${b64u(canonicalBytes(att))}.${b64u(utf8(`sig:${MAMA}:${D[MAMA].id}`))}`;
+  const without = (k) => { const a = { ...full }; delete a[k]; return blobOf(a); };
+  assert.ok(parseAttestationBlob(blobOf(full)), 'the control: all six present parses');
+  assert.equal(parseAttestationBlob(without('sigPubRaw')), null, 'no sigPubRaw');
+  assert.equal(parseAttestationBlob(without('kexPubRaw')), null, 'no kexPubRaw');
+  assert.equal(parseAttestationBlob(without('createdAt')), null, 'no createdAt');
+  assert.equal(parseAttestationBlob(blobOf({ ...full, sigPubRaw: 'not base64url!' })), null);
+  assert.equal(parseAttestationBlob(blobOf({ ...full, sigPubRaw: '' })), null);
+  assert.equal(parseAttestationBlob(blobOf({ ...full, sigPubRaw: 65 })), null);
+  // A NEWER build's extra field is not a refusal — same version-skew discipline as the unshare
+  // patch. Refusing it would make a v2.1 device unable to author ops on a v2.0 client.
+  assert.ok(parseAttestationBlob(blobOf({ ...full, quantumPubRaw: 'CCCC' })), 'an unknown extra field is ignored');
+});
+
+test('F-10: attestationOf(deviceShort) is the table envelope.js is written against', () => {
+  const { ops } = family();
+  const r = foldAuthorized(ops, CTX());
+  const att = r.attestationOf(D[MAMA].short);
+  assert.equal(att.memberId, MAMA, 'check 5: att.memberId === op.act');
+  assert.equal(att.deviceId, D[MAMA].id, 'check 3: att.deviceId === op.dev');
+  assert.equal(att.deviceShort, D[MAMA].short);
+  assert.equal(att.sigPubRaw, b64u(utf8(`sigpub:${D[MAMA].id}`)), 'P2/P3: the verification key');
+  assert.equal(att.kexPubRaw, b64u(utf8(`kexpub:${D[MAMA].id}`)), '§4.2 wraps the space key to this');
+  // And it is a total function on peer-supplied input: `env.dv` arrives from the wire, so a
+  // lookup miss is `null`, never a throw (the door policy — external input is refused, not
+  // thrown on; a throw here would take the whole pull down on one malformed envelope).
+  assert.equal(r.attestationOf(short16('NOSUCH')), null);
+  for (const junk of [null, undefined, 42, {}, [], '', 'not-a-short']) {
+    assert.equal(r.attestationOf(junk), null, `attestationOf(${JSON.stringify(junk)}) must not throw`);
+  }
+});
+
+test('F-10 condition (1): a dev.* register on somebody else\'s record never enters the table', () => {
+  const forged = attestOp(MAMA, D[EVE], S(BASE, 0, D[EVE].short), { act: EVE, dev: D[EVE].id });
+  const r = foldAuthorized([forged], CTX());
+  assert.equal(reason(r, forged), REJECT_REASONS.NOT_SELF);
+  assert.equal(r.attestationOf(D[EVE].short), null);
+});
+
+test('F-10 condition (2): the register name and att.deviceShort must agree, or the key binds nothing', () => {
+  // If they may disagree, `dev.<short>` stops being a key and `attestationOf` stops being a
+  // function: the same payload could be filed under any name its author liked.
+  // `XTRA`, not `OTHER`: `O` and `U` are outside the Crockford alphabet, so a short built from
+  // `OTHER` never survives `parseAttestationBlob` and the test would pass with condition (2)
+  // deleted. A predicate is only tested by a value that reaches it.
+  const forged = attestOp(EVE, D[EVE], S(BASE, 0, D[EVE].short), { blobShort: short16('XTRA') });
+  const r = foldAuthorized([forged], CTX({ attestVerify: () => true }));
+  assert.equal(reason(r, forged), REJECT_REASONS.BAD_ATTESTATION);
+  assert.equal(r.attestationOf(short16('XTRA')), null);
+  assert.equal(r.attestationOf(D[EVE].short), null);
+});
+
+test('F-10 condition (3): copying a peer\'s attestation blob into my own record is rejected', () => {
+  // The blob travels inside the E2EE stream, so EVERY member can read Mama's verbatim. Eve files
+  // Mama's bytes, unaltered, under Mama's own short in EVE's member record. Condition (2) passes
+  // — the register name does equal `att.deviceShort`. Only (3) stands between that op and a
+  // table in which `attestationOf(mamaShort)` might resolve to a record Eve controls.
+  const { ops } = family();
+  const mamaBlob = attBlob({ memberId: MAMA, deviceId: D[MAMA].id, deviceShort: D[MAMA].short });
+  const copy = mk('member.set', memberKey(EVE), { [`dev.${D[MAMA].short}`]: mamaBlob },
+    { act: EVE, dev: D[EVE].id, ts: S(0, 0, '0000000000000000'), space: FSP });   // ms=0: minimal under ≺
+  // The verifier is made to accept EVERYTHING, so condition (4) cannot be what rejects this and
+  // the assertion is about (3) alone.
+  const r = foldAuthorized([...ops, copy], CTX({ attestVerify: () => true }));
+  assert.equal(reason(r, copy), REJECT_REASONS.BAD_ATTESTATION,
+    'a payload naming MAMA housed on EVE\'s record must not be admitted');
+  assert.equal(r.attestationOf(D[MAMA].short).memberId, MAMA, 'the short still resolves to Mama');
+  assert.deepEqual(r.shortCollisions, [], 'the copy never reached the table, so there is no contest');
+  assert.equal(r.attestedDevices.has(EVE), false);
+  assert.deepEqual(snapshot(foldAuthorized(shuffled(mulberry32(7), [...ops, copy]),
+    CTX({ attestVerify: () => true }))), snapshot(r));
+});
+
+test('F-10 condition (4): an attestation whose signature does not verify is rejected', () => {
+  // Eve rewrites the payload so it names her (condition (3) now passes) but signs it with — or
+  // rather, replays a signature belonging to — Mama. Only (4) is left.
+  //
+  // NOTE ON WHAT THIS CAN AND CANNOT PROVE. `attestationVerifies` is handed `subject`, the
+  // housing member, never `att.memberId`. That distinction is NOT falsifiable while condition
+  // (3) stands, because (3) has already forced the two to be equal — swapping the argument
+  // changes no outcome. It is kept as the second lock on the same door: if a future change ever
+  // relaxes (3) — which ADR 002 §5.2.1 warns against by name — this line is what still refuses
+  // a peer's blob, and it must not have been "simplified" to the payload's own claim by then.
+  const forged = mk('member.set', memberKey(EVE), {
+    [`dev.${D[EVE].short}`]: attBlob({
+      memberId: EVE, deviceId: D[EVE].id, deviceShort: D[EVE].short,
+      sigOver: `sig:${MAMA}:${D[MAMA].id}`,
+    }),
+  }, { act: EVE, dev: D[EVE].id, ts: S(BASE, 0, D[EVE].short), space: FSP });
+  const r = foldAuthorized([forged], CTX());
+  assert.equal(reason(r, forged), REJECT_REASONS.BAD_ATTESTATION);
+  assert.equal(r.attestationOf(D[EVE].short), null);
+});
+
+test('F-10: ctx.attestOpen is accepted, and its answer may not disagree with the register bytes', () => {
+  // ADR 001 §4.0 / ADR 002 §5.2.3 name the injection `attestOpen(memberId, blob) =>
+  // DeviceAttestation|null`. The payload the table publishes still comes from the register
+  // bytes; `attestOpen` decides only whether they verify. An opener that returns a DIFFERENT
+  // attestation is treated as a failed verification — otherwise the injected function would be
+  // a second, unlogged source of device identity, which is the key-injection hole §2.3 closes.
+  const { ops } = family({ members: [ME, MAMA] });
+  const honest = (memberId, blob) => (verifier(memberId, blob) ? parseAttestationBlob(blob) : null);
+  const viaOpen = foldAuthorized(ops, { me: ME, attestOpen: honest });
+  assert.deepEqual(snapshot(viaOpen), snapshot(foldAuthorized(ops, CTX())),
+    'attestOpen and attestVerify must fold to the same board');
+  assert.equal(viaOpen.attestationOf(D[MAMA].short).deviceId, D[MAMA].id);
+
+  const liar = (memberId, blob) => {
+    const att = parseAttestationBlob(blob);
+    return att ? { ...att, sigPubRaw: b64u(utf8('sigpub:ATTACKER')) } : null;
+  };
+  const lied = foldAuthorized(ops, { me: ME, attestOpen: liar });
+  assert.equal(lied.attestationOf(D[MAMA].short), null, 'a disagreeing opener verifies nothing');
+  assert.equal(lied.admitted.length, 0);
+
+  const refuses = foldAuthorized(ops, { me: ME, attestOpen: () => null });
+  assert.equal(refuses.admitted.length, 0, 'attestOpen fails closed exactly as attestVerify does');
+  assert.equal(foldAuthorized(ops, { me: ME }).admitted.length, 0, 'and neither injection is fail-open');
+});
+
+test('F-10 residual: two members claiming ONE deviceShort resolve deterministically and are reported', () => {
+  // §2.3 argues `deviceShort → DeviceAttestation` is a function because two members would need
+  // the same signing PRIVATE key. The four conditions do not enforce that: nothing in a pure,
+  // synchronous fold can check `crock32(SHA-256(sigPubRaw)[0..10]) === deviceShort` — that is
+  // §5.2.2's P2 and it lives in `openOp`. So a member CAN mint a well-formed attestation under a
+  // peer's short. What must not happen is two devices disagreeing about who won.
+  const { ops } = family({ members: [ME] });
+  const squat = (ms) => mk('member.set', memberKey(EVE), {
+    [`dev.${D[ME].short}`]: attBlob({ memberId: EVE, deviceId: devIdOf('EVEX'), deviceShort: D[ME].short }),
+  }, { act: EVE, dev: devIdOf('EVEX'), ts: S(ms, 0, short16('EVEX')), space: FSP, id: pad22('squat') });
+
+  const late = foldAuthorized([...ops, squat(BASE + 5000)], CTX());
+  assert.deepEqual(late.shortCollisions, [D[ME].short], 'the contest is REPORTED, not silently survived');
+  assert.equal(late.attestationOf(D[ME].short).memberId, ME, 'minimal under ≺ wins — the honest claim is older');
+
+  // Backdated, the squatter wins the lookup. That is the honest characterization of the residual
+  // and the reason `shortCollisions` exists: `openOp`'s P2 is what actually stops the envelope,
+  // because Eve's `sigPubRaw` does not hash to Mama's short. Recorded so WP-6 cannot miss it.
+  const early = foldAuthorized([...ops, squat(0)], CTX());
+  assert.deepEqual(early.shortCollisions, [D[ME].short]);
+  assert.equal(early.attestationOf(D[ME].short).memberId, EVE,
+    'characterizing: minimal-under-≺ hands a backdated squatter the lookup — openOp P2 is the defence');
+  // Stage 0b is untouched either way: the device gate is per-member, so ME's own ops still stand.
+  assert.equal(early.attestedDevices.get(ME).has(D[ME].id), true);
+  assert.equal(early.memberOfDevice(D[ME].id), ME);
+
+  // The only thing that would be fatal: two devices resolving the short differently.
+  for (const seed of [1, 2, 3, 4, 5]) {
+    assert.deepEqual(snapshot(foldAuthorized(shuffled(mulberry32(seed), [...ops, squat(0)]), CTX())),
+      snapshot(early), `shuffle ${seed} changed who owns the short`);
+  }
+});
+
+test('F-10: with no contest, shortCollisions is empty and every attested short resolves', () => {
+  const { ops } = family();
+  const r = foldAuthorized(ops, CTX());
+  assert.deepEqual(r.shortCollisions, []);
+  for (const m of [ME, MAMA, PAPA]) {
+    assert.equal(r.attestationOf(D[m].short).memberId, m);
+    assert.equal(r.memberOfDevice(r.attestationOf(D[m].short).deviceId), m,
+      'the retained accessors stay derivable from the new one');
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

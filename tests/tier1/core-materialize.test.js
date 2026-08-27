@@ -524,19 +524,30 @@ test('a tombstone retains its content registers, so an undo resurrects the NEWES
 });
 
 test('renderability is checked against explicit fields, never inferred from absence', () => {
+  // UPDATED FOR A3-H2 (`entities.js:renderableNote` / `renderableBar`). The rule this row asserts
+  // is unchanged for a FOREIGN entry and for the field that carries an own entry's CONTENT: a
+  // note with no `text` is a fragment or a withdrawal (ADR 004 §5.1) and is not on the board.
+  //
+  // What changed is the DATE. An own entry's date decides which day row draws it, not whether it
+  // exists — `state.notes` is v1's array, and v1 keeps a dateless note and a one-ended bar in
+  // its arrays and simply never places them. v2 refused them, and in solo mode `board.json` is
+  // the checkpoint, so the refusal was written back over the user's file on the first autosave.
   const regs = foldOps([
-    // own note, no text yet — a fragment, not an empty note
+    // own note, no text yet — a fragment, not an empty note. STILL not on the board.
     op(GENESIS(0), ME, 'note:frag', { _born: GENESIS(0), date: '2026-05-01', _alive: true }),
-    // own bar, one date only
+    // own bar, one date only — v1 draws this to the far edge of the window, so it is on the board
     op(GENESIS(1), ME, 'bar:half', { _born: GENESIS(1), startDate: '2026-05-01', label: 'x', _alive: true }),
     // own note whose text is an EMPTY STRING — that is a value, and v1 renders it as "…"
     op(GENESIS(2), ME, 'note:empty', { _born: GENESIS(2), date: '2026-05-02', text: '', _alive: true }),
     // own bar with label '' — exactly what interact.js:307 creates
     op(GENESIS(3), ME, 'bar:fresh', { _born: GENESIS(3), startDate: '2026-05-01', endDate: '2026-05-03', label: '', _alive: true }),
+    // own note with a TEXT and no date — v1's array holds it; no day row asks for it
+    op(GENESIS(4), ME, 'note:nodate', { _born: GENESIS(4), text: 'Zahnarzt', _alive: true }),
   ]);
   const out = materialize(regs, soloCtx());
-  assert.deepEqual(out.notes.map((n) => n.id), ['empty']);
-  assert.deepEqual(out.bars.map((b) => b.id), ['fresh']);
+  assert.deepEqual(out.notes.map((n) => n.id), ['empty', 'nodate']);
+  assert.deepEqual(out.bars.map((b) => b.id), ['half', 'fresh']);
+  assert.equal(out.notes.find((n) => n.id === 'nodate').date, undefined, 'and no date was invented');
 });
 
 test('a Geteilt foreign note whose pub.text has not arrived is INVISIBLE, not "Belegt"', () => {
@@ -1262,6 +1273,36 @@ test("a cleared pref takes v1's reading of null — the default, or false where 
   ]), soloCtx()).settings;
   assert.equal('density' in extra, false);
   assert.equal('hiddenMembers' in extra, false);
+});
+
+test('a pref NAME nested past the cap is dropped by the projection, whatever wrote it', () => {
+  // THE SECOND LOCK on `ops.js:PREF_MAX_DEPTH`, and the only test that can reach it: `flattenPref`
+  // refuses to MINT a name this deep, so neither door can produce one. A `checkpoint.json` is
+  // deserialised straight into the register map with no admissibility fold at all (F-5) and a
+  // peer's `pref.set` arrives already flattened — both bypass the mint-side cap entirely, which
+  // is why the cap alone is not the whole fix.
+  //
+  // The rebuild in `prefsFromRegisters` is iterative and survives ANY depth. What does not is
+  // `store._project`'s `structuredClone(this.state.settings)` one layer up: a name with a couple
+  // of thousand dots becomes a couple of thousand levels of object and the clone overflows the
+  // stack — outside every door, out of `init()`, with `ready === false`. So the name is dropped
+  // here, which is the same call the `mode`-and-`mode.x` comment in that function already makes:
+  // keep the board, lose one pref.
+  const deepName = `deepThing${'.k'.repeat(4000)}.leaf`;
+  const regs = foldOps([op(GENESIS(0), ME, PREF_ENTITY, { [deepName]: 1, rowHeight: 30 })]);
+  const s = materialize(regs, soloCtx()).settings;
+  assert.equal('deepThing' in s, false, 'the unrepresentable name is not in settings');
+  assert.equal(s.rowHeight, 30, 'and it costs one NAME, not the settings object');
+  assert.doesNotThrow(() => structuredClone(s),
+    'the whole point: what the projection hands out has to survive the clone the store does on it');
+
+  // The boundary, both sides of it, so the cap cannot drift without a red row.
+  const at = `a${'.b'.repeat(31)}`;                                   // 32 segments = depth 31
+  const past = `a${'.b'.repeat(32)}.c`;                               // 34 segments
+  const sAt = materialize(foldOps([op(GENESIS(0), ME, PREF_ENTITY, { [at]: 1 })]), soloCtx()).settings;
+  const sPast = materialize(foldOps([op(GENESIS(0), ME, PREF_ENTITY, { [past]: 1 })]), soloCtx()).settings;
+  assert.equal('a' in sAt, true, 'a name AT the cap is still a pref');
+  assert.equal('a' in sPast, false, 'a name past it is not');
 });
 
 test('settings key order is deterministic across arrival orders (board.json is byte-compared)', () => {

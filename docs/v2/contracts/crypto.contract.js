@@ -112,6 +112,21 @@ export async function attestDevice(att, recSigPriv) { throw new Error('not imple
 
 /**
  * MUST be called before accepting an op from that device AND before wrapping any space key to it.
+ *
+ * This is the async half of what `foldAuthorized` takes as the SYNCHRONOUS injection
+ * `ctx.attestOpen(memberId, blob) => DeviceAttestation|null` (ADR 001 §4.0, ADR 002 §5.2.3;
+ * `ctx.attestVerify`, the WP-1 boolean, is still accepted). The fold is pure and synchronous, so
+ * WP-6 must pre-resolve verification into a sync closure rather than hand it a Promise. Two
+ * obligations on that closure:
+ *   · it is called with the HOUSING member's id — the member whose record the register sits in,
+ *     never the payload's self-declared `att.memberId` (§2.3 condition (4)); and
+ *   · it SHOULD also check `deviceShortOf(att.sigPubRaw) === att.deviceShort` (§5.2.2 P2). The
+ *     fold cannot: the binding is a SHA-256 and nothing in `authz.js` may await. Enforcing it
+ *     here is what makes `deviceShort -> DeviceAttestation` a real function instead of an
+ *     argued one — see `AuthzResult.shortCollisions`.
+ * The fold publishes the payload decoded from the REGISTER BYTES, not the one this returns, and
+ * treats a disagreement between the two as a failed verification.
+ *
  * @param {string} blob @param {CryptoKey} recSigPub
  * @returns {Promise<DeviceAttestation|null>} null on any failure — never throw-and-branch on names
  */
@@ -217,8 +232,23 @@ export async function sealOp(op, keyring, sigPriv, hdr) { throw new Error('not i
  * 4 is new and not optional (it is what keeps ADR 001 §6.2's total order attributable).
  * Without these, `op.act` — which 17.6 renders as "von Mama" — is forgeable.
  *
+ * WHERE `attestationOf` COMES FROM. `AuthzResult.attestationOf` — `src/js/core/authz.js`,
+ * delivered 2026-08-27 (finding F-10). It is keyed by `deviceShort` ALONE because `op.act` is not
+ * knowable before decrypt, and that one-key form is sound only while ADR 002 §2.3's four
+ * acceptance conditions hold; all four are enforced at stage 0a and pinned individually by
+ * `tests/tier1/core-authz.test.js` §3b. §5.2.1 warns that relaxing (3) or (4) breaks this
+ * section — if either ever moves, THIS FUNCTION is what stops working.
+ *
+ * AND ONE THING `openOp` MUST NOT SKIP. P2 is not a formality: it is the ONLY place
+ * `att.deviceShort` is ever bound to `att.sigPubRaw`. The fold cannot check it — it is pure and
+ * synchronous, and the binding is a SHA-256 — so a member CAN file a well-formed attestation
+ * under a peer's short. `AuthzResult.shortCollisions` reports exactly that, and the fold resolves
+ * the contest minimal-under-`≺`, which hands a BACKDATED squatter the lookup. P2 is what refuses
+ * the envelope. WP-6's `attestOpen` implementation should enforce the same binding at fold time,
+ * which closes the residual at its root.
+ *
  * @param {Envelope} env @param {KeyRing} keyring
- * @param {(dv:string) => DeviceAttestation|null} attestationOf  from AuthzResult (OWED — F-10)
+ * @param {(dv:string) => DeviceAttestation|null} attestationOf  AuthzResult.attestationOf
  * @returns {Promise<Object>} the Op
  * @throws on bad signature, wrong key, or any identity mismatch. Missing epoch and a null
  *         attestation are NOT throws — they are parks, signalled to the caller.

@@ -258,19 +258,17 @@ test('T4 200 mixed real gestures, then a restart, then compare', async () => {
   diag('DOM before =', JSON.stringify(domBefore));
   diag('DOM after  =', JSON.stringify(domAfter));
   diag('warnings on reload =', JSON.stringify(store.warnings.slice(0, 5)));
-  // PINNED, see retrofit-probe6.dom.js for the minimal repro: the ONLY thing that moves
-  // across a restart is the KEY ORDER of `scratchpads` — `reconcileMap` never reorders a live
-  // object, so the sort in `core/entities.js:sortScratchpads` only bites on a board projected
-  // into a fresh one (init / replaceAll). No content moves and nothing on screen changes.
-  // IF THIS LIST EVER GROWS, a real divergence appeared — do not widen the filter.
-  const notPads = diffs.filter((d) => !d.startsWith('state.scratchpads: keys '));
-  diag('diffs that are NOT the known scratchpad key-order churn:',
-    notPads.length ? notPads.join(' | ') : 'none');
-  assert.deepEqual(notPads, [], 'the soaked board changed across a restart');
+  // INVERTED 2026-08-27 — F-1 IS CLOSED. This row used to carry an EXEMPTION: the scratchpad
+  // key order was allowed to move across a restart, because `reconcileMap` never reordered a
+  // live object and the sort in `core/entities.js:sortScratchpads` therefore only bit on a board
+  // projected into a fresh one (init / replaceAll). `reconcileMap` now rebuilds the map in
+  // projection key order, so the exemption is gone and NOTHING is allowed to move.
+  // IF THIS LIST IS EVER NON-EMPTY, a real divergence appeared — do not re-introduce the filter.
+  diag('diffs across the restart:', diffs.length ? diffs.join(' | ') : 'none');
+  assert.deepEqual(diffs, [], 'the soaked board changed across a restart');
   assert.deepEqual(domAfter, domBefore, 'the RENDERED board changed across a restart');
-  assert.equal(rawBefore, JSON.stringify(store.state, null, 2).replace(
-    /"scratchpads": \{[^}]*\}/, () => rawBefore.match(/"scratchpads": \{[^}]*\}/)[0]),
-    'board.json changed across the restart in something other than pad key order');
+  assert.equal(rawBefore, JSON.stringify(store.state, null, 2),
+    'board.json changed across the restart — it must be byte-identical, pad key order included');
 });
 
 test('T5 nothing left behind', () => {

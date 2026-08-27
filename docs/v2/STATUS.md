@@ -15,24 +15,35 @@ its state from an append-only op log**, all 22 mutate sites converted, and it be
 **Both owed judges have now run** (§4), the twelve ADR amendments they produced are **applied to
 the ADR text** (§6), and the **`deviceShort` contradiction is resolved** — ADR 002 §5.2 is
 rewritten and is the single normative answer. Every finding from every audit now lives in one
-register, `docs/v2/FINDINGS.md`. The next package is **WP-6, the crypto core**; its one concrete
-blocker is finding **F-10** (`attestationOf` on `AuthzResult`, ~10 lines in `authz.js`).
+register, `docs/v2/FINDINGS.md`. **A fix pass on 2026-08-27 closed seven of those rows** —
+A3-C1 (CRITICAL), A3-H1, A3-H2, A3-H3, F-1, F-3, F-10 — each of them mutation-tested. The next
+package is **WP-6, the crypto core**; **F-10 is no longer its blocker** (`attestationOf` is live
+and `openOp` has its credential), so the remaining WP-6 prerequisite is **A3-H4**, durable device
+identity (ADR 002 §2.2). Until that lands no fleet test means anything.
 
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-npm test              # tier 1, pure logic          → 1341 pass / 0 fail   (100 suites)
-npm run test:attack   # adversarial corpus          →  325 pass / 0 fail   (28 suites)
+npm test              # tier 1, pure logic          → 1360 pass / 0 fail   (100 suites)
+npm run test:attack   # adversarial corpus          →  340 pass / 0 fail   (29 suites)
 npm run test:property # property harness, 500 seeds →   51 pass / 0 fail
-npm run test:dom      # real headless WKWebView     →  271 pass / 14 files, tier 2 PASS
+npm run test:dom      # real headless WKWebView     →  278 pass / 15 files, tier 2 PASS
 ```
 
-Re-measured 2026-08-27, all four green. The counts moved for two independent reasons and neither
-is a code change: `judge:adversary3` added **43 rows in three files** under `tests/attack/`, and the
-**E1 pipeline agent** added `tests/tier1/platform-updater.test.js` and `tests/tier2/shell-updater.dom.js`
-in parallel — which is why tier 1 reads 1341 rather than 1308 and tier 2 reads 14 files rather
-than 12. Rows in `tests/attack/round3-*.test.js` tagged `SUCCEEDED (defect)` are green **because the
-defect is there**; if one goes red, invert it, do not repair it.
+Re-measured **after the fix pass of 2026-08-27** (A3-C1 / A3-H1 / A3-H2 / A3-H3 / F-1 / F-10
+closed), all four green. The counts move for three independent reasons and none of them is a
+regression: `judge:adversary3` added **43 rows in three files** under `tests/attack/`; the
+**E1 pipeline agent** added `platform-updater.test.js`, `shell-updater.dom.js`,
+`firstrun-unlock.dom.js` and `update-ui.dom.js` in parallel; and the fix pass **inverted** the rows
+that were green because a defect existed and added the rows that pin the fixes. Rows in
+`tests/attack/round3-*.test.js` tagged `SUCCEEDED (defect)` are green **because the defect is
+there**; if one goes red, invert it, do not repair it. Rows tagged `FAILED (held)` or `INVERTED`
+are the ones that have already been through that.
+
+**Green is not the gate; falsifiability is.** Every fix in that pass was mutation-tested: reverted
+in a scratch copy of the tree and required to redden a named row. The table is in
+`docs/v2/FINDINGS.md` §7. One "fix" survived its own mutant and was rewritten as a reachability
+characterization rather than left as a claim.
 
 The shadow-undo assertion (risk R5's mechanical guard) is **armed** in all three `node --test`
 scripts via `tests/helpers/dev-flag.mjs`, pinned by `suite-integrity.test.js` so an `--import` of
@@ -161,9 +172,25 @@ rather than papered over:
    four acceptance conditions make `deviceShort → DeviceAttestation` a function across the space;
    those conditions are now written down, with a warning that relaxing them breaks §5.2.
 
-**One thing is still owed in code:** `foldAuthorized` discards the decoded payload
+~~**One thing is still owed in code:** `foldAuthorized` discards the decoded payload
 (`authz.js:661`), so `openOp` has nothing to check against. That is finding **F-10**, ~10 lines,
-and it is **the** WP-6 blocker.
+and it is **the** WP-6 blocker.~~
+**CLOSED 2026-08-27.** `parseAttestationBlob` now returns the full ADR 002 §2.3 `DeviceAttestation`
+(all six fields, required — a blob missing one is rejected `badAttestation` rather than admitted as
+a credential `openOp` could only throw on), the register walk keeps the payload, and `AuthzResult`
+gains `attestationOf(deviceShort)` and `shortCollisions`. `ctx.attestOpen(memberId, blob)` is
+accepted per ADR 001 §4.0 / ADR 002 §5.2.3, and the payload **always** comes from the register
+bytes: an `attestOpen` whose answer disagrees counts as a failed verification, because otherwise
+the injected function is a second, unlogged source of device identity.
+
+**What §2.3 still does not close, and WP-6 must read:** §2.3 claims `deviceShort →
+DeviceAttestation` is a function because two members would need the same signing *private* key.
+Nothing pure and synchronous can check `crock32(SHA-256(sigPubRaw)[0..10]) === att.deviceShort` —
+that is §5.2.2's **P2**, and it lives in `openOp`. A member can mint a well-formed attestation
+under a peer's short and, **backdated**, take the lookup, because the contest resolves
+minimal-under-`≺`. Stage 0b is unaffected (the device gate is per-member) and P2 refuses the
+envelope, but the fold must not pretend the collision did not happen — hence `shortCollisions`.
+**WP-6's `attestOpen` should enforce the P2 binding at fold time.** Register row I-3.
 
 ### Owed, and not amendments
 

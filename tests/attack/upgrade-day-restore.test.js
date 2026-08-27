@@ -120,16 +120,22 @@ test('DEFECT · restoring a poisoned SNAPSHOT (11.5) takes the same door and the
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. THE ROPE THAT DOES NOT REACH — a pre-migration snapshot restores post-migration
+// 2. THE ROPE — INVERTED, A3-H2 CLOSED
 //
 // The upgrade is survivable only if the pre-upgrade board can be got back. It is still on disk:
 // v1 rolled today's snapshot before the upgrade and v2 does not overwrite it (`_lastSnapshotDay`
-// is seeded from `snapshots[0].day`). But `restoreSnapshot` goes through `replaceAll`, which goes
-// through the same migration — so restoring it re-applies every loss.
+// is seeded from `snapshots[0].day`). `restoreSnapshot` goes through `replaceAll`, which goes
+// through the same conversion — which is why the ROW BELOW USED TO SAY the rope gives back the
+// already-emptied board: the two doors lost the same entries, so pulling on the rope changed
+// nothing. It is also why fixing only one door would have been worthless.
+//
+// Both doors coerce now, so there is nothing to get back — and the restore proves it by landing
+// on exactly the board the migration built, entry for entry, from bytes that never went through
+// the migration door at all.
 // ─────────────────────────────────────────────────────────────────────────────
 
-test('DEFECT · the pre-migration snapshot survives on disk and restoring it gives back the LOSSY board', async () => {
-  const lossy = v1board({
+test('INVERTED · the pre-migration snapshot restores to the same board the migration built — nothing was lost either way', async () => {
+  const awkward = v1board({
     notes: [
       { id: 7, date: '2026-04-02', text: 'Zahnarzt', categoryId: 'cat-arbeit', repeatsYearly: false },
       note('n2', '2026-06-10', 'Geburtstag', { repeatsYearly: 'yes' }),
@@ -140,7 +146,7 @@ test('DEFECT · the pre-migration snapshot survives on disk and restoring it giv
 
   // Yesterday: v1 is still the app, and it rolls today's snapshot.
   LS.clear();
-  LS.setItem(LS_BOARD, J(lossy));
+  LS.setItem(LS_BOARD, J(awkward));
   await bootV1();
   await v1store.persistNow();
   const day = JSON.parse(LS.getItem(LS_SNAP))[0].day;
@@ -148,22 +154,27 @@ test('DEFECT · the pre-migration snapshot survives on disk and restoring it giv
   assert.equal(inSnapshot.notes.length, 2, 'the snapshot holds both notes');
   assert.equal(inSnapshot.bars.length, 1, 'and the bar');
 
-  // Today: the upgrade.
+  // Today: the upgrade. Every entry v1 had is still an entry.
   await bootV2();
-  assert.equal(v2store.state.notes.length, 1, 'the migration kept one note');
-  assert.equal(v2store.state.bars.length, 0, 'and no bar');
+  assert.equal(v2store.state.notes.length, 2, 'the migration kept BOTH notes');
+  assert.equal(v2store.state.bars.length, 1, 'and the id-less bar');
+  assert.equal(v2store.state.scratchpads['2026-04'], '12345', 'and the numeric scratchpad');
+  assert.equal(v2store.state.notes.find((n) => n.text === 'Geburtstag').repeatsYearly, true);
+  const migrated = structuredClone(v2store.state);
   assert.deepEqual(v2store.listSnapshots().map((s) => s.day), [day], 'the rope is right there');
 
-  // Pull on it.
+  // Pull on it. The IMPORT door converts the same v1 bytes; P13 says the two doors agree, and
+  // this is that property at the seam, on a real store, through the real restore path.
   assert.equal(v2store.restoreSnapshot(day), true);
-  assert.equal(v2store.state.notes.length, 1, 'and it gives back exactly what the migration left');
-  assert.equal(v2store.state.bars.length, 0);
-  assert.equal(Object.keys(v2store.state.scratchpads).length, 0);
-
-  // And the data really is still sitting in snapshots.json, unreachable through the app.
-  await v2store.persistNow();
-  assert.equal(JSON.parse(LS.getItem(LS_SNAP))[0].state.notes.length, 2,
-    'the user can read her notes in the file and cannot get them onto the board');
+  assert.equal(v2store.state.notes.length, 2);
+  assert.equal(v2store.state.bars.length, 1);
+  assert.equal(Object.keys(v2store.state.scratchpads).length, 1);
+  for (const key of ['notes', 'bars', 'categories', 'scratchpads']) {
+    const strip = (x) => JSON.stringify(x, ['id', 'date', 'text', 'categoryId', 'repeatsYearly',
+      'startDate', 'endDate', 'label', 'name', 'nameEn', 'paletteRef', 'visible']);
+    assert.equal(strip(v2store.state[key]), strip(migrated[key]),
+      `${key}: the restore landed on the board the migration built`);
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

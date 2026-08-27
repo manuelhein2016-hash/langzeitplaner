@@ -818,12 +818,14 @@ export function generateUglyBoard(seed, o) {
   for (const x of b.bars) if (chance(rnd, 0.08)) x.icon = 'star';
 
   // ── 6b. AN ENTRY THAT CANNOT BE DRAWN AT ALL ────────────────────────────────────────────────
-  // A missing or malformed DATE is the one incompleteness neither door may repair: `truncateToFit`
-  // and `coerceToV1Text` both refuse dates on purpose, because the longest accepted prefix of
-  // `'2026-01-01T09:00'` is a perfectly plausible `'2026-01-01'` and inventing a day the user
-  // never wrote is worse than dropping a value they cannot see. So the entry migrates, and then
-  // is not on the board (ADR 001 §5 step 3) — which the user is entitled to be TOLD, on both
-  // doors, before the file that held it stops being the board.
+  // A DATE that names no single day is the one incompleteness neither door may repair:
+  // `truncateToFit` refuses dates on purpose, because the longest accepted prefix of a mistyped
+  // date is a plausible date the user never wrote. So the entry keeps its date-less self, and it
+  // is TOLD — on both doors, before the file that held it stops being the board.
+  //
+  // A3-H2 changed what happens next and this generator with it: the ENTRY is no longer dropped
+  // (`entities.js:renderableNote` keeps an own note in the array the way v1's `state.notes` did),
+  // and a date that DOES name one day is read rather than discarded — see `ODD_DATES` below.
   //
   // Generated because nothing else in this corpus reaches that path: after the REG-5/REG-6
   // coercion a note's `text` is always present, so `renderable()` only ever fails on a date.
@@ -835,10 +837,85 @@ export function generateUglyBoard(seed, o) {
     if (chance(rnd, 0.05)) delete x.endDate;
   }
 
+  // ── 6c. A3-H2 — THE VALUE CLASSES BOTH DOORS NOW COERCE ─────────────────────────────────────
+  //
+  // Five entry shapes v1 opened, kept and wrote back were dropped by v2's type table, and in solo
+  // mode `board.json` IS the checkpoint, so the drop was committed to the user's file on the
+  // first autosave. Every class below is one of them, generated so that P13 (the two doors build
+  // the same board) and P15 (nothing is lost in silence) are asserted over the COERCIONS and not
+  // only over the drops they replaced. A coercion that exists on one door and not the other is
+  // the two-doors defect class in its purest form, and this is what makes P13 able to see it.
+  //
+  // Each shape is independent and none is common: a corpus where most dates are German exercises
+  // the parser and never the parser next to a good date.
+
+  // A date v1 kept in the file and never drew. Half of these name exactly one day (so both doors
+  // must READ them, identically) and half name none (so both doors must keep the ENTRY and drop
+  // only the field).
+  const ODD_DATES = ['4.3.2026', '2026-3-1', '2026/03/04', 20260304, '3/4/2026', '2026-13-45', ''];
+  for (const n of b.notes) {
+    if (typeof n.date === 'string' && n.date.length && chance(rnd, 0.10)) n.date = pick(rnd, ODD_DATES);
+  }
+  for (const x of b.bars) {
+    if (chance(rnd, 0.06)) x.startDate = pick(rnd, ODD_DATES);
+  }
+
+  // The two carried BOOLEANS, which v1 does not read alike: `repeatsYearly` is plain truthiness
+  // (`layout.js:71`) and `visible` is `!== false` (`layout.js:111`), so `0` is a category v1
+  // SHOWS and a note v1 does not repeat. `Boolean(v)` gets one of them wrong, which is why the
+  // corpus generates the disagreeing values and not only `'yes'`.
+  const TRUTHY = ['yes', 'ja', 'nein', 'true', 1, {}, 0, ''];
+  for (const n of b.notes) {
+    if (chance(rnd, 0.12)) n.repeatsYearly = pick(rnd, TRUTHY);
+  }
+  for (const c of b.categories) {
+    if (chance(rnd, 0.08)) c.visible = pick(rnd, TRUTHY);
+  }
+
+  // An id v2 cannot use. `7` NAMES an id and is carried as `'7'` — together with the
+  // `categoryId`s pointing at it, which is what keeps the entries in their category; the rest are
+  // minted a derived id. v1 keeps and paints all of them.
+  // JSON-able only: a `board.json` is parsed JSON, and the property harness clones every board
+  // with `structuredClone`, which refuses a function. An id carrying a `toString` belongs in a
+  // hand-written attack row (`upgrade-day-migration.test.js`), not in this corpus.
+  const BAD_IDS = [7, '', null, true, { nested: 'id' }, ['n1']];
+  for (const n of b.notes) {
+    if (chance(rnd, 0.06)) n.id = pick(rnd, BAD_IDS);
+    else if (chance(rnd, 0.04)) delete n.id;
+  }
+  for (const x of b.bars) {
+    if (chance(rnd, 0.05)) delete x.id;
+  }
+  if (b.categories.length && chance(rnd, 0.05)) {
+    const c = b.categories[int(rnd, b.categories.length)];
+    const numeric = 1 + int(rnd, 9);
+    for (const e of [...b.notes, ...b.bars]) if (e.categoryId === c.id) e.categoryId = numeric;
+    c.id = numeric;
+  }
+
+  // A bar with NO usable date at either end — the one entry no door can anchor, and therefore
+  // the one that tests "quarantine the field, never the entry" with nothing to fall back on.
+  // v1 keeps it and paints it as a stripe down every column.
+  if (b.bars.length && chance(rnd, 0.05)) {
+    const x = b.bars[int(rnd, b.bars.length)];
+    delete x.startDate;
+    delete x.endDate;
+  }
+
+  // A repeat with no anchor: the ONE shape v1 cannot draw at all (`layout.js:72` throws on
+  // `n.date.slice`), so both doors must turn the flag off rather than mint a board the renderer
+  // dies on. Rare, because a board of these is a board no oracle can be run against.
+  if (b.notes.length && chance(rnd, 0.03)) {
+    const n = b.notes[int(rnd, b.notes.length)];
+    delete n.date;
+    n.repeatsYearly = pick(rnd, ['yes', true, 1]);
+  }
+
   // ── 7. A scratchpad shape neither door had a test for ───────────────────────────────────────
   if (chance(rnd, 0.12)) b.scratchpads['2026-06'] = '';          // the REG-23 shape
   if (chance(rnd, 0.06)) b.scratchpads['nicht-ein-monat'] = 'x'; // not YYYY-MM
   if (chance(rnd, 0.06)) b.scratchpads['2026-09'] = 12345;       // not a string
+  if (chance(rnd, 0.05)) b.scratchpads['2026-11'] = null;        // v1 paints an empty textarea
 
   return b;
 }
@@ -882,6 +959,22 @@ export function uglyShapesIn(b) {
     'unrenderable startMonth': b.settings.startMonth === null,
     'undrawable entry': b.notes.some((n) => typeof n.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(n.date))
       || b.bars.some((x) => typeof x.endDate !== 'string'),
+    // ── A3-H2, the five classes both doors coerce ──────────────────────────────────────────────
+    'a date that names one day but is not ISO': [...b.notes, ...b.bars].some(
+      (e) => [e.date, e.startDate, e.endDate].some(
+        (d) => (typeof d === 'string' && d !== '' && !/^\d{4}-\d{2}-\d{2}$/.test(d)) || typeof d === 'number',
+      ),
+    ),
+    'a truthy non-boolean flag': b.notes.some((n) => 'repeatsYearly' in n && typeof n.repeatsYearly !== 'boolean')
+      || b.categories.some((c) => 'visible' in c && typeof c.visible !== 'boolean'),
+    'an id v2 cannot use': [...b.notes, ...b.bars, ...b.categories].some(
+      (e) => !(typeof e.id === 'string' && e.id.length > 0 && /^[A-Za-z0-9._-]{1,128}$/.test(e.id)),
+    ),
+    'a bar with one end': b.bars.some(
+      (x) => [x.startDate, x.endDate].filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)).length === 1,
+    ),
+    'a bar with no dates at all': b.bars.some((x) => x.startDate === undefined && x.endDate === undefined),
+    'a non-string scratchpad': Object.values(b.scratchpads).some((v) => typeof v !== 'string'),
   };
 }
 
