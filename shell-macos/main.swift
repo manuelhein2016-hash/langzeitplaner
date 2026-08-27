@@ -12,6 +12,7 @@
 import Cocoa
 import WebKit
 import ServiceManagement
+import CryptoKit
 
 let APP_SCHEME = "app"
 let APP_HOST = "localhost"
@@ -42,7 +43,13 @@ private func argValue(_ flag: String) -> String? {
 let isSmokeRun = CommandLine.arguments.contains("--smoke")
 let testFilePath: String? = CommandLine.arguments.contains("--test") ? argValue("--test") : nil
 let isTestRun = testFilePath != nil
-let isHeadless = isSmokeRun || isTestRun
+// --updater-selftest <dir>  exercises the LZP-102 signature + apply path against a
+// scratch directory and exits. It is headless for the same reason the other two
+// are: it must never resolve a path inside the user's real board directory.
+let selftestDir: String? = CommandLine.arguments.contains("--updater-selftest")
+    ? argValue("--updater-selftest") : nil
+let isSelftestRun = selftestDir != nil
+let isHeadless = isSmokeRun || isTestRun || isSelftestRun
 
 // ── paths ────────────────────────────────────────────────────────────────────
 
@@ -169,6 +176,494 @@ func jsonlLines(_ txt: String) -> [String] {
     return out
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// F22 · UPDATES — LZP-102 (auto-updater) + LZP-104 (minimum version)
+// Stories 22.3, 22.5, 22.6, 22.7.  Amendment A11 (Ferien data rides this channel).
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// DIVISION OF LABOUR. Every *decision* — is a check due, is this manifest
+// well-formed, is the offered build newer, is this client below the declared
+// minimum — lives in `src/js/platform/updater.js`, which is DOM-free and covered
+// by `tests/tier1/platform-updater.test.js`. This file does only what JavaScript
+// cannot: one HTTPS GET from OUTSIDE the WebView, an Ed25519 signature check
+// over the downloaded bytes, and the bundle swap. Four commands, no cleverness.
+//
+// 21.5 — WHY THE REQUEST IS MADE HERE AND NOT IN THE PAGE. Story 21.5 says the
+// app makes zero network requests in solo mode; 22.3 says it checks for updates
+// daily. The reading implemented across these two files: the BOARD still makes
+// zero requests — its CSP stays `default-src 'self'`, the navigation gate below
+// still cancels every non-`app:` scheme, and no `fetch` exists in the web layer.
+// The SHELL makes exactly one: an unauthenticated GET of one static manifest on
+// one pinned host, with no cookies, no query string, no identifiers and no board
+// content. And it does not happen at all until `disclosed` is true — set once by
+// LZP-106's first-run screen, which is the one screen every unsigned install
+// must pass through anyway. This is flagged to the PO in the ticket report; it
+// is a spec tension, not an engineering preference.
+//
+// 22.6 — VERIFY BEFORE INSTALL, TWICE. The signature is checked when the bytes
+// arrive AND again at apply time, immediately before the swap, because a
+// verifier that ran days ago on a file that has been sitting on disk since is
+// not a verifier. An artifact that fails either check is deleted and NOTHING is
+// installed.
+
+/// 22.5 — one channel for every device. Mirrors `CHANNEL` in updater.js.
+let UPDATE_CHANNEL = "stable"
+/// Mirrors `TARGET` in updater.js and Tauri's target triple naming, so ONE
+/// manifest file serves both shells.
+let UPDATE_TARGET = "darwin-universal"
+
+/// PLACEHOLDER — there is no GitHub repository yet (PLAN.md §4: "the project is
+/// not yet a git repo; D3's GitHub repo is a separate, PO-owned step"). LZP-101
+/// owns the real slug. The placeholder marker below is checked at runtime and
+/// the fetch REFUSES rather than resolving some unrelated host.
+let UPDATE_MANIFEST_URL =
+    "https://github.com/OWNER-PLACEHOLDER/langzeitplaner/releases/latest/download/latest.json"
+
+/// PLACEHOLDER — the updater key does not exist yet either. Empty means the
+/// updater refuses to download anything at all, which is the correct failure
+/// mode: no key, no installs. Replace with the base64 of the 32-byte Ed25519
+/// public key (a minisign `.pub` line is also accepted).
+let UPDATER_PUBLIC_KEY_B64 = ""
+
+let UPDATER_PREFS_FILE = "updater.json"
+let UPDATER_STAGED_FILE = "staged-update.tar.gz"
+
+/// A manifest is a few hundred bytes. Anything larger is a mistake or a denial
+/// of service, and either way we are not reading it.
+let UPDATE_MANIFEST_MAX_BYTES = 256 * 1024
+/// 22.1 puts the DMG at ~15 MB. 200 MB is generous headroom and still a bound.
+let UPDATE_ARTIFACT_MAX_BYTES = 200 * 1024 * 1024
+
+/// Headless-only overrides, gated exactly like `--scratch`: they exist so the
+/// selftest can drive a real key and a real artifact, and they are unreachable
+/// in a normal launch. A production build that honoured an `--updater-pubkey`
+/// flag would have a trivially hijackable update path, which is the one thing
+/// 22.6 exists to prevent.
+func updaterPublicKeyB64() -> String {
+    if isHeadless, let k = argValue("--updater-pubkey") { return k }
+    return UPDATER_PUBLIC_KEY_B64
+}
+func updateManifestURLString() -> String {
+    if isHeadless, let u = argValue("--updater-manifest-url") { return u }
+    return UPDATE_MANIFEST_URL
+}
+
+// ── the updater's own tiny preference file ───────────────────────────────────
+//
+// Deliberately NOT in board.json: 22.7 says updates never touch user data, and
+// the cheapest way to keep that true is for the updater to have no reason to
+// open the user's files at all. `dataFile()` routes this through the same
+// headless scratch guard as everything else.
+
+struct UpdaterPrefs {
+    /// The settings switch (22.4's quiet family — the user can always turn it off).
+    var enabled = true
+    /// 21.5 — has the first-run screen told the user this happens? No check of
+    /// any kind runs until this is true. Defaults to FALSE: a fresh install is
+    /// silent until someone has been told.
+    var disclosed = false
+    /// Epoch milliseconds, to match JavaScript's clock without conversion.
+    var lastCheckAt: Double = 0
+    var stagedVersion: String?
+    var stagedSignature: String?
+
+    static func load() -> UpdaterPrefs {
+        var p = UpdaterPrefs()
+        guard let txt = readIfExists(dataFile(UPDATER_PREFS_FILE)),
+              let d = txt.data(using: .utf8),
+              let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        else { return p }
+        if let v = o["enabled"] as? Bool { p.enabled = v }
+        if let v = o["disclosed"] as? Bool { p.disclosed = v }
+        if let v = o["lastCheckAt"] as? Double { p.lastCheckAt = v }
+        p.stagedVersion = o["stagedVersion"] as? String
+        p.stagedSignature = o["stagedSignature"] as? String
+        return p
+    }
+
+    func save() {
+        var o: [String: Any] = [
+            "enabled": enabled, "disclosed": disclosed, "lastCheckAt": lastCheckAt,
+        ]
+        o["stagedVersion"] = stagedVersion ?? NSNull()
+        o["stagedSignature"] = stagedSignature ?? NSNull()
+        if let d = try? JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted]),
+           let s = String(data: d, encoding: .utf8) {
+            try? writeAtomic(dataFile(UPDATER_PREFS_FILE), s)
+        }
+    }
+}
+
+/// `CFBundleShortVersionString`. If it is missing the updater reports null and
+/// the JS side lands in its error state — which is right: a build that does not
+/// know its own version must not be comparing itself to anything.
+func installedVersion() -> String? {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+}
+
+// ── 22.6 · Ed25519 verification ──────────────────────────────────────────────
+
+enum UpdaterError: String, Error {
+    case noKey = "no-updater-key"
+    case noReleaseHost = "no-release-host"
+    case badKey = "bad-updater-key"
+    case badSignatureFormat = "signature-format"
+    case prehashedUnsupported = "signature-format-prehashed"
+    case signature = "signature"
+    case tooLarge = "too-large"
+    case sizeMismatch = "size-mismatch"
+    case badURL = "bad-url"
+    case http = "http"
+    case io = "io"
+    case extractFailed = "extract-failed"
+    case notAnApp = "not-an-app"
+    case nothingStaged = "nothing-staged"
+}
+
+/// Accepts either the base64 of a raw 32-byte Ed25519 public key, or a minisign
+/// `.pub` (2-byte algorithm + 8-byte key id + 32-byte key), with or without its
+/// `untrusted comment:` line.
+func parseUpdaterPublicKey(_ raw: String) -> Curve25519.Signing.PublicKey? {
+    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !text.isEmpty else { return nil }
+    var candidates: [String] = []
+    for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        let l = line.trimmingCharacters(in: .whitespaces)
+        if l.isEmpty || l.lowercased().hasPrefix("untrusted comment:") { continue }
+        candidates.append(l)
+    }
+    for c in candidates {
+        guard let d = Data(base64Encoded: c) else { continue }
+        if d.count == 32, let k = try? Curve25519.Signing.PublicKey(rawRepresentation: d) { return k }
+        if d.count == 42, d.prefix(2) == Data("Ed".utf8),
+           let k = try? Curve25519.Signing.PublicKey(rawRepresentation: d.suffix(32)) {
+            return k
+        }
+    }
+    return nil
+}
+
+/// Pull the 64 raw signature bytes out of whatever the manifest carried.
+///
+/// Three shapes are accepted, in this order:
+///   1. base64 of exactly 64 bytes — the plain Ed25519 signature (our own shape),
+///   2. base64 of a minisign `.sig` FILE (that is what Tauri's manifests carry),
+///   3. the minisign `.sig` file text, unwrapped.
+///
+/// A minisign signature whose algorithm is `ED` is PREHASHED (BLAKE2b-512 of the
+/// file, then Ed25519 over the digest). CryptoKit has no BLAKE2b, so that shape
+/// is REFUSED with its own error rather than mis-verified. See the ticket report:
+/// the release job (LZP-101) must be pinned to a shape this can verify, and that
+/// pinning is an open item because no release job exists yet.
+func extractEd25519Signature(_ raw: String) -> Result<Data, UpdaterError> {
+    let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !text.isEmpty else { return .failure(.badSignatureFormat) }
+
+    func fromMinisignText(_ t: String) -> Result<Data, UpdaterError>? {
+        for line in t.split(separator: "\n", omittingEmptySubsequences: true) {
+            let l = line.trimmingCharacters(in: .whitespaces)
+            if l.isEmpty || l.lowercased().hasPrefix("untrusted comment:") { continue }
+            if l.lowercased().hasPrefix("trusted comment:") { continue }
+            guard let d = Data(base64Encoded: l), d.count == 74 else { continue }
+            let alg = d.prefix(2)
+            if alg == Data("ED".utf8) { return .failure(.prehashedUnsupported) }
+            if alg == Data("Ed".utf8) { return .success(d.suffix(64)) }
+            return .failure(.badSignatureFormat)
+        }
+        return nil
+    }
+
+    if text.lowercased().contains("untrusted comment:") {
+        if let r = fromMinisignText(text) { return r }
+        return .failure(.badSignatureFormat)
+    }
+    guard let outer = Data(base64Encoded: text) else { return .failure(.badSignatureFormat) }
+    if outer.count == 64 { return .success(outer) }
+    if let inner = String(data: outer, encoding: .utf8), let r = fromMinisignText(inner) { return r }
+    return .failure(.badSignatureFormat)
+}
+
+/// The whole of 22.6 in one function: these bytes, this signature, this key.
+/// Nothing else in this file is allowed to decide that an artifact is authentic.
+func verifyArtifact(_ bytes: Data, signature raw: String, publicKey pubB64: String)
+    -> Result<Void, UpdaterError>
+{
+    guard !pubB64.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return .failure(.noKey)
+    }
+    guard let key = parseUpdaterPublicKey(pubB64) else { return .failure(.badKey) }
+    let sig: Data
+    switch extractEd25519Signature(raw) {
+    case .success(let s): sig = s
+    case .failure(let e): return .failure(e)
+    }
+    return key.isValidSignature(sig, for: bytes) ? .success(()) : .failure(.signature)
+}
+
+// ── the swap ─────────────────────────────────────────────────────────────────
+
+/// Replace `installedApp` with the verified contents of `artifact`.
+///
+/// The signature is re-checked HERE, over the bytes as they are on disk right
+/// now, immediately before anything is unpacked. The artifact may have been
+/// sitting in Application Support since yesterday; whatever we proved about it
+/// then says nothing about it now.
+///
+/// Written as a free function taking both paths so the selftest can drive the
+/// real code against a scratch bundle instead of against `/Applications`.
+@discardableResult
+func applyStagedUpdate(artifact: URL, signature: String, publicKey: String, installedApp: URL)
+    -> Result<String, UpdaterError>
+{
+    guard let bytes = try? Data(contentsOf: artifact) else { return .failure(.io) }
+    if case .failure(let e) = verifyArtifact(bytes, signature: signature, publicKey: publicKey) {
+        // Verification failed at apply time. Delete the artifact — a build that
+        // cannot be proven authentic is never retried, it is thrown away — and
+        // install NOTHING.
+        try? FileManager.default.removeItem(at: artifact)
+        return .failure(e)
+    }
+
+    let work = FileManager.default.temporaryDirectory
+        .appendingPathComponent("LangzeitPlaner-apply-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: work) }
+    do { try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true) }
+    catch { return .failure(.io) }
+
+    // /usr/bin/tar rather than a Swift archive library: zero dependencies is a
+    // project-wide rule, and this is the same tar every macOS ships.
+    let tar = Process()
+    tar.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+    tar.arguments = ["-xzf", artifact.path, "-C", work.path]
+    tar.standardOutput = FileHandle.nullDevice
+    tar.standardError = FileHandle.nullDevice
+    do {
+        try tar.run()
+        tar.waitUntilExit()
+    } catch {
+        return .failure(.extractFailed)
+    }
+    guard tar.terminationStatus == 0 else { return .failure(.extractFailed) }
+
+    // Exactly one .app at the top level, and it must actually contain an
+    // executable. An archive that unpacks to something else is not a build.
+    let entries = (try? FileManager.default.contentsOfDirectory(
+        at: work, includingPropertiesForKeys: nil)) ?? []
+    guard let newApp = entries.first(where: { $0.pathExtension == "app" }) else {
+        return .failure(.notAnApp)
+    }
+    let macos = newApp.appendingPathComponent("Contents/MacOS", isDirectory: true)
+    let execs = (try? FileManager.default.contentsOfDirectory(atPath: macos.path)) ?? []
+    guard !execs.isEmpty else { return .failure(.notAnApp) }
+
+    // replaceItemAt is the atomic swap: the old bundle is moved aside and the new
+    // one put in its place, or nothing happens at all.
+    do {
+        if FileManager.default.fileExists(atPath: installedApp.path) {
+            _ = try FileManager.default.replaceItemAt(installedApp, withItemAt: newApp)
+        } else {
+            try FileManager.default.moveItem(at: newApp, to: installedApp)
+        }
+    } catch {
+        return .failure(.io)
+    }
+    return .success(installedApp.path)
+}
+
+/// Quit and come back. `open -n` starts the (possibly just-replaced) bundle and
+/// this process exits, so the two never overlap. Guarded because both the flush
+/// callback and its 2 s watchdog can reach it, and two `open -n` calls would
+/// leave two LangzeitPlaners on screen.
+private var relaunchStarted = false
+func relaunchSelf() {
+    if relaunchStarted { return }
+    relaunchStarted = true
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    p.arguments = ["-n", Bundle.main.bundleURL.path]
+    try? p.run()
+    exit(0)
+}
+
+/// 22.3 — "applies on the next start". Called once at launch, before the window
+/// exists, so the user never sees a half-swapped app. Never in a headless run.
+func applyStagedUpdateAtLaunch() {
+    guard !isHeadless else { return }
+    var prefs = UpdaterPrefs.load()
+    guard let version = prefs.stagedVersion, let sig = prefs.stagedSignature else { return }
+    let artifact = dataFile(UPDATER_STAGED_FILE)
+    guard FileManager.default.fileExists(atPath: artifact.path) else {
+        prefs.stagedVersion = nil; prefs.stagedSignature = nil; prefs.save()
+        return
+    }
+    let result = applyStagedUpdate(
+        artifact: artifact, signature: sig,
+        publicKey: updaterPublicKeyB64(), installedApp: Bundle.main.bundleURL)
+
+    // The staged slot is cleared either way: on success it has been consumed, on
+    // failure it is poison. 22.7 — nothing in this path reads or writes
+    // board.json, ops.jsonl, checkpoint.json or snapshots.json. Schema
+    // migrations (11.6) run at the next boot of the NEW binary, after the swap,
+    // exactly as they do for any other version change.
+    prefs.stagedVersion = nil
+    prefs.stagedSignature = nil
+    prefs.save()
+    try? FileManager.default.removeItem(at: artifact)
+
+    switch result {
+    case .success:
+        relaunchSelf()
+    case .failure(let e):
+        FileHandle.standardError.write(Data(
+            "LZP updater: staged \(version) NOT installed (\(e.rawValue)); the running build is unchanged.\n".utf8))
+    }
+}
+
+// ── the four bridge commands ─────────────────────────────────────────────────
+
+/// Serialise a reply for the web layer. The JS side parses with `JSON.parse`, so
+/// everything crossing this boundary is a JSON string, never a dictionary — one
+/// shape for both shells.
+func updaterJSON(_ o: [String: Any]) -> String {
+    guard let d = try? JSONSerialization.data(withJSONObject: o), let s = String(data: d, encoding: .utf8)
+    else { return "{\"ok\":false,\"error\":\"encode\"}" }
+    return s
+}
+
+func updaterStatusJSON() -> String {
+    let p = UpdaterPrefs.load()
+    return updaterJSON([
+        "currentVersion": installedVersion() ?? NSNull(),
+        "channel": UPDATE_CHANNEL,
+        "target": UPDATE_TARGET,
+        "enabled": p.enabled,
+        "disclosed": p.disclosed,
+        "lastCheckAt": p.lastCheckAt,
+        "stagedVersion": p.stagedVersion ?? NSNull(),
+    ])
+}
+
+/// The one network request in the whole product's solo mode, and the reason the
+/// 21.5 flag exists. Both gates are re-checked HERE — not only in JavaScript —
+/// because a bridge command is reachable from any page script and the guarantee
+/// must not depend on the caller being polite.
+func updaterFetchManifest(_ done: @escaping (String) -> Void) {
+    let prefs = UpdaterPrefs.load()
+    guard prefs.disclosed, prefs.enabled else {
+        done(updaterJSON(["ok": false, "error": "disabled"]))
+        return
+    }
+    let urlString = updateManifestURLString()
+    guard !urlString.contains("OWNER-PLACEHOLDER") else {
+        // No repository exists yet (PLAN.md §4). Refusing beats resolving some
+        // unrelated host that happens to answer.
+        done(updaterJSON(["ok": false, "error": UpdaterError.noReleaseHost.rawValue]))
+        return
+    }
+    guard let url = URL(string: urlString), url.scheme == "https", url.host != nil else {
+        done(updaterJSON(["ok": false, "error": UpdaterError.badURL.rawValue]))
+        return
+    }
+
+    var req = URLRequest(url: url)
+    req.httpMethod = "GET"
+    req.timeoutInterval = 20
+    // No cookies, no credentials, no cache identity, no custom headers: the
+    // request carries nothing about this machine or this family beyond the fact
+    // that someone asked for a public file.
+    req.httpShouldHandleCookies = false
+    req.cachePolicy = .reloadIgnoringLocalCacheData
+    let cfg = URLSessionConfiguration.ephemeral
+    cfg.httpCookieAcceptPolicy = .never
+    cfg.httpShouldSetCookies = false
+    let session = URLSession(configuration: cfg)
+    session.dataTask(with: req) { data, response, error in
+        let reply: String
+        if let error = error {
+            reply = updaterJSON(["ok": false, "error": "network", "detail": error.localizedDescription])
+        } else if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            reply = updaterJSON(["ok": false, "error": UpdaterError.http.rawValue, "status": http.statusCode])
+        } else if let data = data, data.count > UPDATE_MANIFEST_MAX_BYTES {
+            reply = updaterJSON(["ok": false, "error": UpdaterError.tooLarge.rawValue])
+        } else if let data = data, let text = String(data: data, encoding: .utf8) {
+            // The RAW text goes to JavaScript. This side has no opinion about
+            // what a manifest means — `parseManifest` in updater.js does, and it
+            // is the tested one.
+            reply = updaterJSON(["ok": true, "manifest": text])
+        } else {
+            reply = updaterJSON(["ok": false, "error": UpdaterError.io.rawValue])
+        }
+        DispatchQueue.main.async { done(reply) }
+    }.resume()
+}
+
+/// Download, VERIFY, stage. In that order, and the staging never happens without
+/// the verifying. Nothing is installed here — 22.3 says the update applies at the
+/// next start, which is `applyStagedUpdateAtLaunch()` above.
+func updaterDownload(version: String, urlString: String, signature: String, expectedSize: Int,
+                     _ done: @escaping (String) -> Void)
+{
+    let prefs = UpdaterPrefs.load()
+    guard prefs.disclosed, prefs.enabled else {
+        done(updaterJSON(["ok": false, "error": "disabled"]))
+        return
+    }
+    let pub = updaterPublicKeyB64()
+    guard !pub.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        // No key, no installs. The correct behaviour for an unsigned build with
+        // no updater key is to be un-updatable, not to be updatable by anyone.
+        done(updaterJSON(["ok": false, "error": UpdaterError.noKey.rawValue]))
+        return
+    }
+    guard let url = URL(string: urlString), url.scheme == "https", url.host != nil else {
+        done(updaterJSON(["ok": false, "error": UpdaterError.badURL.rawValue]))
+        return
+    }
+
+    var req = URLRequest(url: url)
+    req.timeoutInterval = 300
+    req.httpShouldHandleCookies = false
+    let cfg = URLSessionConfiguration.ephemeral
+    cfg.httpCookieAcceptPolicy = .never
+    let session = URLSession(configuration: cfg)
+    session.downloadTask(with: req) { tmp, response, error in
+        func reply(_ o: [String: Any]) { DispatchQueue.main.async { done(updaterJSON(o)) } }
+        if let error = error {
+            reply(["ok": false, "error": "network", "detail": error.localizedDescription]); return
+        }
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            reply(["ok": false, "error": UpdaterError.http.rawValue, "status": http.statusCode]); return
+        }
+        guard let tmp = tmp, let bytes = try? Data(contentsOf: tmp) else {
+            reply(["ok": false, "error": UpdaterError.io.rawValue]); return
+        }
+        if bytes.count > UPDATE_ARTIFACT_MAX_BYTES {
+            reply(["ok": false, "error": UpdaterError.tooLarge.rawValue]); return
+        }
+        if expectedSize > 0 && bytes.count != expectedSize {
+            reply(["ok": false, "error": UpdaterError.sizeMismatch.rawValue]); return
+        }
+        if case .failure(let e) = verifyArtifact(bytes, signature: signature, publicKey: pub) {
+            // 22.6. The bytes arrived and were refused. Nothing is written to the
+            // staging slot, nothing is installed, and the running app is
+            // untouched. updater.js turns this into the visible error state.
+            reply(["ok": false, "error": e.rawValue]); return
+        }
+        let dest = dataFile(UPDATER_STAGED_FILE)
+        do {
+            try? FileManager.default.removeItem(at: dest)
+            try bytes.write(to: dest, options: [.atomic])
+        } catch {
+            reply(["ok": false, "error": UpdaterError.io.rawValue]); return
+        }
+        var p = UpdaterPrefs.load()
+        p.stagedVersion = version
+        p.stagedSignature = signature
+        p.save()
+        reply(["ok": true, "staged": true, "version": version, "bytes": bytes.count])
+    }.resume()
+}
+
 // ── serving the web bundle over a custom scheme ──────────────────────────────
 // A custom scheme (rather than file://) gives the page a real origin, so ES
 // modules load normally — the same reason the browser build needs a dev server.
@@ -250,6 +745,13 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
     weak var window: NSWindow?
     var printAction: (() -> Void)?
     var relabelMenu: ((String) -> Void)?
+    /// 22.4 (LZP-103) — the quiet hint's App-menu half. `nil` removes the item;
+    /// a version string adds it. The web layer decides *whether* there is a
+    /// hint (one predicate, in update-ui.js); the shell only draws it.
+    var setUpdateHint: ((String?) -> Void)?
+    /// 22.4 — "one click restarts into the new version". Quit and relaunch; the
+    /// staged build is swapped in by `applyStagedUpdateAtLaunch()` on the way up.
+    var restartForUpdate: (() -> Void)?
 
     func userContentController(_ ucc: WKUserContentController,
                                didReceive message: WKScriptMessage,
@@ -343,6 +845,93 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
                     replyHandler(NSNull(), nil)
                 }
 
+            // ── F22 · the updater port (LZP-102 / LZP-104) ───────────────────
+            //
+            // Exactly the four commands `bridgePort()` in src/js/platform/updater.js
+            // sends, plus the two switches LZP-103's settings panel and LZP-106's
+            // first-run screen need. Every reply is a JSON STRING, so the Tauri
+            // shell can answer identically without a shared serde type.
+            //
+            // Nothing in this group can read or write board.json, ops.jsonl,
+            // checkpoint.json or snapshots.json. That is 22.7 ("updates never
+            // touch user data") enforced by the size of the surface rather than
+            // by discipline.
+
+            case "update_status":
+                replyHandler(updaterStatusJSON(), nil)
+
+            case "update_set_disclosed":
+                // 21.5 — set ONCE by the first-run screen, after it has said in
+                // one line that the app asks about updates. Nothing checks
+                // anything before this is true.
+                var p1 = UpdaterPrefs.load()
+                p1.disclosed = args["value"] as? Bool ?? true
+                p1.save()
+                replyHandler(updaterStatusJSON(), nil)
+
+            case "update_set_enabled":
+                var p2 = UpdaterPrefs.load()
+                p2.enabled = args["value"] as? Bool ?? true
+                p2.save()
+                replyHandler(updaterStatusJSON(), nil)
+
+            case "update_note_check":
+                // Written BEFORE the request goes out (updater.js does it in that
+                // order), so a host that hangs cannot leave the device retrying
+                // on every launch forever.
+                var p3 = UpdaterPrefs.load()
+                p3.lastCheckAt = (args["at"] as? Double)
+                    ?? ((args["at"] as? NSNumber)?.doubleValue ?? 0)
+                p3.save()
+                replyHandler(NSNull(), nil)
+
+            case "update_fetch_manifest":
+                updaterFetchManifest { replyHandler($0, nil) }
+
+            case "update_download":
+                let size = (args["size"] as? Int) ?? ((args["size"] as? NSNumber)?.intValue ?? 0)
+                updaterDownload(
+                    version: args["version"] as? String ?? "",
+                    urlString: args["url"] as? String ?? "",
+                    signature: args["signature"] as? String ?? "",
+                    expectedSize: size
+                ) { replyHandler($0, nil) }
+
+            case "update_clear_staged":
+                var p4 = UpdaterPrefs.load()
+                p4.stagedVersion = nil
+                p4.stagedSignature = nil
+                p4.save()
+                try? FileManager.default.removeItem(at: dataFile(UPDATER_STAGED_FILE))
+                replyHandler(updaterStatusJSON(), nil)
+
+            case "update_menu_hint":
+                // 22.4 — the App-menu half of the quiet hint. The web layer owns
+                // the predicate (one function, in update-ui.js); the shell only
+                // draws it. An empty string means "no hint": JSON `null` and an
+                // absent argument are not distinguishable across both bridges.
+                let hint = args["version"] as? String ?? ""
+                setUpdateHint?(hint.isEmpty ? nil : hint)
+                replyHandler(NSNull(), nil)
+
+            case "update_restart":
+                // 22.4 — the ONE click. Refuses unless a verified build is
+                // actually staged: restarting into the same version would be a
+                // rude no-op, and it is the kind of no-op a user reads as "the
+                // button is broken". Refuses in a headless run too, so a tier-2
+                // test that exercises this path cannot terminate its own runner.
+                let sp = UpdaterPrefs.load()
+                if isHeadless {
+                    replyHandler(updaterJSON(["ok": false, "error": "headless"]), nil)
+                } else if sp.stagedVersion == nil {
+                    replyHandler(updaterJSON(["ok": false, "error": "nothing-staged"]), nil)
+                } else {
+                    // Reply BEFORE relaunching; the web layer never sees it, but
+                    // an unanswered reply handler is a WebKit assertion failure.
+                    replyHandler(updaterJSON(["ok": true, "restarting": true]), nil)
+                    restartForUpdate?()
+                }
+
             case "print_board":
                 printAction?()
                 replyHandler(NSNull(), nil)
@@ -368,6 +957,8 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
                 case "language":
                     relabelMenu?(args["value"] as? String ?? "de")
                     replyHandler(NSNull(), nil)
+                // (`update_menu_hint` is its own command, below — `set_shell_pref`
+                //  carries booleans and a version string is not one.)
                 default:
                     replyHandler(nil, "unknown shell pref")
                 }
@@ -419,6 +1010,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     let bridge = Bridge()
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // 22.3 — "applies on the next start". Before the window, before the web
+        // view, before anything can be half-swapped under a running board. If a
+        // verified build is staged this call does not return: it swaps the
+        // bundle and relaunches into it.
+        applyStagedUpdateAtLaunch()
+
         let webRoot = Bundle.main.resourceURL!.appendingPathComponent("web", isDirectory: true)
 
         let cfg = WKWebViewConfiguration()
@@ -499,6 +1096,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
             self.menuLang = lang
             NSApp.mainMenu = self.buildMenu()
         }
+        // 22.4 — the hint appears and disappears by rebuilding the menu, the
+        // same mechanism 13.7's language switch already uses.
+        bridge.setUpdateHint = { [weak self] version in
+            guard let self, self.updateHintVersion != version else { return }
+            self.updateHintVersion = version
+            NSApp.mainMenu = self.buildMenu()
+        }
+        bridge.restartForUpdate = { [weak self] in
+            guard let self else { return }
+            // 11.1 — never quit over an unflushed 700 ms save debounce, not even
+            // for an update. Ask the page to persist, then relaunch; the staged
+            // build is swapped in by applyStagedUpdateAtLaunch() on the way up.
+            // 22.7 is unaffected either way: the swap touches no board file.
+            self.webView.callAsyncJavaScript(
+                "if (window.__lzpFlush) { await window.__lzpFlush(); } return true;",
+                in: nil, in: .page) { _ in relaunchSelf() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { relaunchSelf() }
+        }
         StatusItemController.shared.window = window
         // 13.2 — visibility follows the stored preference, which the web layer
         // pushes through set_shell_pref right after boot; no icon until then.
@@ -546,10 +1161,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
           tauriDetected: document.body.classList.contains('in-tauri'),
           title: document.title, errors: window.__lzpErrors || [] });
         """
-        webView.callAsyncJavaScript(probe, in: nil, in: .page) { result in
+        webView.callAsyncJavaScript(probe, in: nil, in: .page) { [weak self] result in
             switch result {
             case .success(let v): print("SMOKE \(v)")
             case .failure(let e): print("SMOKE FAILED \(e)")
+            }
+            // 22.4 (LZP-103) — the App menu is the quiet hint's other half, and
+            // an NSMenu cannot be read from JavaScript. Dumping it here is the
+            // only way to verify without a screen that the hint item appears
+            // only when something is staged, that it is absent otherwise, and
+            // that both it and „Auf Updates prüfen …“ follow 13.7's language
+            // switch. Diagnostic output on a `--smoke` run only.
+            if let self {
+                let dump = { (NSApp.mainMenu?.items.first?.submenu?.items ?? []).map { $0.title } }
+                for lang in ["de", "en"] {
+                    self.menuLang = lang
+                    self.updateHintVersion = nil
+                    NSApp.mainMenu = self.buildMenu()
+                    print("SMOKE MENU \(lang) quiet \(dump())")
+                    self.updateHintVersion = "1.1.0"
+                    NSApp.mainMenu = self.buildMenu()
+                    print("SMOKE MENU \(lang) staged \(dump())")
+                }
             }
             NSApp.terminate(nil)
         }
@@ -789,6 +1422,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
     var menuLang = "de"
     private func L(_ de: String, _ en: String) -> String { menuLang == "en" ? en : de }
 
+    /// 22.4 — the staged version, or nil. `nil` is the normal state and the item
+    /// simply does not exist then: no greyed-out row, no "no updates available"
+    /// to click. The menu shows the update or shows nothing about updates.
+    var updateHintVersion: String?
+
     @objc func emitMenu(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         let escaped = id.replacingOccurrences(of: "'", with: "\\'")
@@ -836,6 +1474,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: L("Über LangzeitPlaner", "About LangzeitPlaner"),
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        // ── 22.4 · the quiet hint, half one ──────────────────────────────────
+        // The hint item exists ONLY while a verified build is staged, and it is
+        // the whole announcement: no modal, no toast, no dock badge, no red
+        // anything. If the user never opens this menu they still get the update
+        // — quitting applies it. Placed where macOS users look for it (directly
+        // under About), and above „Auf Updates prüfen …“ so the answer sits
+        // above the question.
+        if let v = updateHintVersion {
+            appMenu.addItem(item(L("Update verfügbar (\(v)) — neu starten",
+                                   "Update available (\(v)) — Restart"), "update-restart", ""))
+        }
+        appMenu.addItem(item(L("Auf Updates prüfen …", "Check for Updates …"), "check-updates", ""))
         appMenu.addItem(.separator())
         appMenu.addItem(item(L("Einstellungen …", "Settings …"), "settings", ","))
         appMenu.addItem(.separator())
@@ -907,6 +1558,276 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         return root
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// --updater-selftest <dir> — the LZP-102 evidence run
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Tier 1 covers the updater's decisions; tier 2 drives the board in WebKit.
+// Neither can prove the two things that only exist in Swift: that a bad
+// signature installs NOTHING, and that a good one really does swap a bundle.
+// This mode does, against a scratch directory, using the shipping code paths —
+// `verifyArtifact` and `applyStagedUpdate` are the same functions the bridge
+// commands call.
+//
+// It is not wired into `tests/run-dom-tests.sh` on purpose: that runner builds
+// the app and launches it once per `tests/tier2/*.dom.js` file with no extra
+// flags, and this mode needs a key on the command line. Run it with
+// `./shell-macos/updater-selftest.sh`, which also generates cross-implementation
+// vectors (signed by Node's `crypto`, verified here) so the format check is not
+// CryptoKit marking its own homework.
+
+func runUpdaterSelftest(_ dirPath: String) -> Never {
+    let fm = FileManager.default
+    let work = URL(fileURLWithPath: (dirPath as NSString).expandingTildeInPath, isDirectory: true)
+    try? fm.createDirectory(at: work, withIntermediateDirectories: true)
+
+    var n = 0
+    var failed = 0
+    var lines: [String] = []
+    func ok(_ cond: Bool, _ name: String, _ detail: String = "") {
+        n += 1
+        if cond {
+            lines.append("ok \(n) - \(name)")
+        } else {
+            failed += 1
+            lines.append("not ok \(n) - \(name)")
+            if !detail.isEmpty { lines.append("  ---\n  message: \(detail)\n  ...") }
+        }
+    }
+
+    // ── fixtures ─────────────────────────────────────────────────────────────
+    let priv = Curve25519.Signing.PrivateKey()
+    let pubB64 = priv.publicKey.rawRepresentation.base64EncodedString()
+    let otherPubB64 = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.base64EncodedString()
+
+    /// A minimal but structurally real .app: the apply path insists on
+    /// `Contents/MacOS/<something>`, so a tarball of anything else must fail.
+    func makeBundle(at parent: URL, marker: String) -> URL {
+        let appURL = parent.appendingPathComponent("LangzeitPlaner.app", isDirectory: true)
+        let macos = appURL.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        try? fm.createDirectory(at: macos, withIntermediateDirectories: true)
+        try? marker.write(to: macos.appendingPathComponent("LangzeitPlaner"),
+                          atomically: true, encoding: .utf8)
+        try? "<plist/>".write(to: appURL.appendingPathComponent("Contents/Info.plist"),
+                              atomically: true, encoding: .utf8)
+        return appURL
+    }
+    func markerOf(_ appURL: URL) -> String {
+        (try? String(contentsOf: appURL.appendingPathComponent("Contents/MacOS/LangzeitPlaner"),
+                     encoding: .utf8)) ?? "<missing>"
+    }
+    func tar(_ dir: URL, _ member: String, to out: URL) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        p.arguments = ["-czf", out.path, "-C", dir.path, member]
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
+        return p.terminationStatus == 0
+    }
+
+    let newDir = work.appendingPathComponent("new", isDirectory: true)
+    try? fm.createDirectory(at: newDir, withIntermediateDirectories: true)
+    _ = makeBundle(at: newDir, marker: "NEW-BUILD")
+    let artifact = work.appendingPathComponent("artifact.tar.gz")
+    guard tar(newDir, "LangzeitPlaner.app", to: artifact),
+          let artifactBytes = try? Data(contentsOf: artifact) else {
+        print("Bail out! could not build the test artifact")
+        exit(2)
+    }
+    let goodSig = ((try? priv.signature(for: artifactBytes)) ?? Data()).base64EncodedString()
+
+    // ── 1 · verification ─────────────────────────────────────────────────────
+    if case .success = verifyArtifact(artifactBytes, signature: goodSig, publicKey: pubB64) {
+        ok(true, "a genuine artifact verifies against the updater key")
+    } else {
+        ok(false, "a genuine artifact verifies against the updater key")
+    }
+
+    var tampered = artifactBytes
+    tampered[tampered.count / 2] ^= 0xFF
+    ok({ if case .failure(.signature) = verifyArtifact(tampered, signature: goodSig, publicKey: pubB64) { return true }; return false }(),
+       "one flipped byte in the artifact fails verification")
+
+    var sigBytes = Data(base64Encoded: goodSig)!
+    sigBytes[10] ^= 0x01
+    ok({ if case .failure(.signature) = verifyArtifact(artifactBytes, signature: sigBytes.base64EncodedString(), publicKey: pubB64) { return true }; return false }(),
+       "one flipped byte in the signature fails verification")
+
+    ok({ if case .failure(.signature) = verifyArtifact(artifactBytes, signature: goodSig, publicKey: otherPubB64) { return true }; return false }(),
+       "a signature from a DIFFERENT key is refused")
+
+    ok({ if case .failure(.noKey) = verifyArtifact(artifactBytes, signature: goodSig, publicKey: "") { return true }; return false }(),
+       "no updater key configured means no install is possible at all")
+
+    ok({ if case .failure(.badSignatureFormat) = verifyArtifact(artifactBytes, signature: "not base64 at all !!", publicKey: pubB64) { return true }; return false }(),
+       "a signature that is not a signature is refused as a format error")
+
+    // minisign container: 2-byte algorithm + 8-byte key id + 64-byte signature,
+    // wrapped in the .sig text file, base64'd — the shape a Tauri manifest carries.
+    var mini = Data("Ed".utf8)
+    mini.append(Data(repeating: 0x11, count: 8))
+    mini.append(Data(base64Encoded: goodSig)!)
+    let miniFile = "untrusted comment: signature from LangzeitPlaner\n\(mini.base64EncodedString())\ntrusted comment: x\n"
+    let miniWrapped = Data(miniFile.utf8).base64EncodedString()
+    if case .success = verifyArtifact(artifactBytes, signature: miniWrapped, publicKey: pubB64) {
+        ok(true, "a base64-wrapped minisign container (algorithm Ed) verifies")
+    } else {
+        ok(false, "a base64-wrapped minisign container (algorithm Ed) verifies")
+    }
+    if case .success = verifyArtifact(artifactBytes, signature: miniFile, publicKey: pubB64) {
+        ok(true, "an unwrapped minisign .sig text also verifies")
+    } else {
+        ok(false, "an unwrapped minisign .sig text also verifies")
+    }
+
+    var pre = Data("ED".utf8)
+    pre.append(Data(repeating: 0x11, count: 8))
+    pre.append(Data(base64Encoded: goodSig)!)
+    let preFile = "untrusted comment: x\n\(pre.base64EncodedString())\n"
+    ok({ if case .failure(.prehashedUnsupported) = verifyArtifact(artifactBytes, signature: Data(preFile.utf8).base64EncodedString(), publicKey: pubB64) { return true }; return false }(),
+       "a PREHASHED minisign signature is refused loudly, not mis-verified")
+
+    // a minisign public key line (2 + 8 + 32 bytes) is accepted as well as a raw one
+    var miniPub = Data("Ed".utf8)
+    miniPub.append(Data(repeating: 0x11, count: 8))
+    miniPub.append(priv.publicKey.rawRepresentation)
+    if case .success = verifyArtifact(artifactBytes, signature: goodSig,
+                                      publicKey: "untrusted comment: minisign public key\n\(miniPub.base64EncodedString())\n") {
+        ok(true, "a minisign public-key line is accepted as the updater key")
+    } else {
+        ok(false, "a minisign public-key line is accepted as the updater key")
+    }
+
+    // ── 2 · cross-implementation vectors (Node signed these, not CryptoKit) ──
+    let xPub = work.appendingPathComponent("crosscheck-pubkey.txt")
+    let xPay = work.appendingPathComponent("crosscheck-payload.bin")
+    let xSig = work.appendingPathComponent("crosscheck-sig.txt")
+    if let pk = try? String(contentsOf: xPub, encoding: .utf8),
+       let payload = try? Data(contentsOf: xPay),
+       let sg = try? String(contentsOf: xSig, encoding: .utf8) {
+        if case .success = verifyArtifact(payload, signature: sg, publicKey: pk) {
+            ok(true, "a signature produced by node:crypto verifies here (cross-implementation)")
+        } else {
+            ok(false, "a signature produced by node:crypto verifies here (cross-implementation)")
+        }
+        var badPayload = payload
+        badPayload[0] ^= 0xFF
+        ok({ if case .failure(.signature) = verifyArtifact(badPayload, signature: sg, publicKey: pk) { return true }; return false }(),
+           "the node:crypto vector fails once the payload is edited")
+    } else {
+        lines.append("# no cross-check vectors in \(work.path) — run via shell-macos/updater-selftest.sh")
+    }
+
+    // ── 3 · apply: the part that must install NOTHING when verification fails ─
+    let installedDir = work.appendingPathComponent("installed", isDirectory: true)
+    try? fm.createDirectory(at: installedDir, withIntermediateDirectories: true)
+    let installed = makeBundle(at: installedDir, marker: "OLD-BUILD")
+
+    let poison = work.appendingPathComponent("poison.tar.gz")
+    try? fm.removeItem(at: poison)
+    try? tampered.write(to: poison)
+    let badApply = applyStagedUpdate(artifact: poison, signature: goodSig,
+                                     publicKey: pubB64, installedApp: installed)
+    ok({ if case .failure = badApply { return true }; return false }(),
+       "apply refuses an artifact whose signature does not verify")
+    ok(markerOf(installed) == "OLD-BUILD",
+       "AN UPDATE THAT FAILS VERIFICATION INSTALLS NOTHING — the bundle is untouched",
+       "marker is now \(markerOf(installed))")
+    ok(!fm.fileExists(atPath: poison.path),
+       "the rejected artifact is deleted rather than retried")
+
+    // a tarball that unpacks to something that is not an app is refused too
+    let junkDir = work.appendingPathComponent("junk", isDirectory: true)
+    try? fm.createDirectory(at: junkDir, withIntermediateDirectories: true)
+    try? "hello".write(to: junkDir.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
+    let junkTar = work.appendingPathComponent("junk.tar.gz")
+    _ = tar(junkDir, "README.txt", to: junkTar)
+    if let junkBytes = try? Data(contentsOf: junkTar) {
+        let junkSig = ((try? priv.signature(for: junkBytes)) ?? Data()).base64EncodedString()
+        let r = applyStagedUpdate(artifact: junkTar, signature: junkSig,
+                                  publicKey: pubB64, installedApp: installed)
+        ok({ if case .failure(.notAnApp) = r { return true }; return false }(),
+           "a correctly signed archive that is not an .app is still refused")
+        ok(markerOf(installed) == "OLD-BUILD", "…and it too installs nothing")
+    }
+
+    let goodApply = applyStagedUpdate(artifact: artifact, signature: goodSig,
+                                      publicKey: pubB64, installedApp: installed)
+    ok({ if case .success = goodApply { return true }; return false }(),
+       "apply swaps the bundle when the signature verifies",
+       "\(goodApply)")
+    ok(markerOf(installed) == "NEW-BUILD",
+       "the installed bundle really is the new build after the swap",
+       "marker is \(markerOf(installed))")
+
+    // ── 4 · the 21.5 gate, at the Swift layer ────────────────────────────────
+    // updater.js refuses to reach the network before disclosure; so does this
+    // side, because a bridge command is reachable from any page script and the
+    // guarantee must not depend on the caller being polite.
+    var prefs = UpdaterPrefs()
+    prefs.disclosed = false
+    prefs.enabled = true
+    prefs.save()
+    let sem = DispatchSemaphore(value: 0)
+    var fetchReply = ""
+    DispatchQueue.global().async {
+        updaterFetchManifest { r in fetchReply = r; sem.signal() }
+    }
+    _ = sem.wait(timeout: .now() + 5)
+    ok(fetchReply.contains("\"disabled\""),
+       "the shell refuses to fetch a manifest before the first-run screen has disclosed it",
+       fetchReply)
+
+    prefs.disclosed = true
+    prefs.enabled = false
+    prefs.save()
+    var reply2 = ""
+    let sem2 = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async { updaterFetchManifest { r in reply2 = r; sem2.signal() } }
+    _ = sem2.wait(timeout: .now() + 5)
+    ok(reply2.contains("\"disabled\""), "…and refuses when the settings switch is off", reply2)
+
+    prefs.enabled = true
+    prefs.save()
+    var reply3 = ""
+    let sem3 = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async { updaterFetchManifest { r in reply3 = r; sem3.signal() } }
+    _ = sem3.wait(timeout: .now() + 5)
+    // Both gates open, but the release host is still a placeholder: it must
+    // refuse rather than resolve some unrelated host that happens to answer.
+    ok(reply3.contains("no-release-host"),
+       "with both gates open it still refuses while the release host is a placeholder",
+       reply3)
+
+    // ── 5 · status JSON is the shape src/js/platform/updater.js expects ───────
+    let status = updaterStatusJSON()
+    if let d = status.data(using: .utf8),
+       let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
+        ok(o["enabled"] as? Bool == true && o["disclosed"] as? Bool == true,
+           "update_status reports the two 21.5 gates", status)
+        ok(o["channel"] as? String == UPDATE_CHANNEL && o["target"] as? String == UPDATE_TARGET,
+           "update_status reports the single stable channel (22.5)", status)
+        ok(o.keys.contains("currentVersion") && o.keys.contains("lastCheckAt")
+            && o.keys.contains("stagedVersion"),
+           "update_status carries every member the JS port reads", status)
+    } else {
+        ok(false, "update_status is valid JSON", status)
+    }
+
+    print("TAP version 13")
+    print("# updater selftest, scratch: \(work.path)")
+    print("# bridge scratch: \(appSupportDir().path)")
+    print("1..\(n)")
+    for l in lines { print(l) }
+    print("# pass \(n - failed)")
+    print("# fail \(failed)")
+    fflush(stdout)
+    exit(failed == 0 ? 0 : 1)
+}
+
+if let dir = selftestDir { runUpdaterSelftest(dir) }
 
 let app = NSApplication.shared
 let delegate = AppDelegate()

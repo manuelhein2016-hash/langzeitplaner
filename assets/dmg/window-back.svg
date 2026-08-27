@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 520" width="740" height="520">
+  <!--
+    LZP-108 illustration, layer 1 of 2: the Finder window behind the DMG background.
+    Composited by scripts/build-release-assets.sh in this order:
+      fill  ->  window-back.svg  ->  background.svg (inset 40,58)  ->  app icon
+            ->  Programme folder icon  ->  window-front.svg
+    Body fill is background.svg's own bottom colour (#e8eef7) so the rounded-corner
+    clip on the background leaves no visible sliver.
+  -->
+  <defs>
+    <filter id="sh" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#26364f" flood-opacity="0.20"/>
+    </filter>
+    <linearGradient id="tb" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8f8f8"/>
+      <stop offset="1" stop-color="#eaeaea"/>
+    </linearGradient>
+  </defs>
+
+  <g filter="url(#sh)">
+    <rect x="40" y="30" width="660" height="448" rx="11" fill="#e8eef7"/>
+  </g>
+
+  <path d="M40 58 V41 a11 11 0 0 1 11 -11 h638 a11 11 0 0 1 11 11 V58 Z" fill="url(#tb)"/>
+  <rect x="40" y="57" width="660" height="1" fill="#d7dade"/>
+
+  <circle cx="58" cy="44" r="6" fill="#ff5f57"/>
+  <circle cx="78" cy="44" r="6" fill="#febc2e"/>
+  <circle cx="98" cy="44" r="6" fill="#28c840"/>
+
+  <text x="370" y="48" text-anchor="middle" font-size="13" font-weight="600" fill="#5b6270"
+        font-family="Helvetica Neue, Helvetica, Arial, sans-serif">LangzeitPlaner</text>
+</svg>

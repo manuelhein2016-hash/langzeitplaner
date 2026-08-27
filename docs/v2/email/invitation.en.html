@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invitation — LangzeitPlaner (Subject: Here’s the calendar for your Mac)</title>
+<!--
+  LZP-108 · English invitation e-mail, HTML version.
+
+  How to use it: open this file in a browser, Cmd-A, Cmd-C, paste into a new mail.
+  Mail.app turns the image into a real inline attachment on paste. Then set the
+  subject line (it is in <title> and repeated in the first comment below), attach
+  LangzeitPlaner.dmg, and replace the four {{PLACEHOLDERS}}.
+
+  Rules this file follows on purpose, checked by .github/scripts/check-email-copy.mjs:
+    · every style is inline — mail clients drop <style> blocks unpredictably
+    · exactly one image, referenced by relative filename; no remote URL of any kind,
+      so there is no tracking pixel and nothing that phones home when she opens it
+    · no <script>, no web font, no CSS background-image
+    · layout is tables, because Mail.app, Gmail and Outlook still disagree about flexbox
+
+  Subject: Here’s the calendar for your Mac
+-->
+</head>
+<body style="margin:0;padding:0;background:#eef1f6;">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="background:#eef1f6;">
+<tr><td align="center" style="padding:28px 12px;">
+
+<table width="600" cellpadding="0" cellspacing="0" border="0" role="presentation" style="width:600px;max-width:100%;background:#ffffff;border-radius:14px;">
+<tr><td style="padding:36px 38px 34px 38px;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1d2330;">
+
+  <p style="margin:0 0 16px 0;">Hi {{NAME}},</p>
+
+  <p style="margin:0 0 16px 0;">here’s the calendar I told you about. A whole year on one surface, one column per month. You click on a day and write on it, the way you would on a whiteboard in the kitchen.</p>
+
+  <p style="margin:0 0 26px 0;">Attached is a file called <strong>LangzeitPlaner.dmg</strong>. Installing takes two minutes.</p>
+
+  <!-- ── Step 1 ─────────────────────────────────────────────────────── -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 8px 0;">
+  <tr>
+    <td width="34" valign="top" style="width:34px;padding:0 12px 0 0;">
+      <div style="width:26px;height:26px;line-height:26px;border-radius:13px;background:#2f77dd;color:#ffffff;text-align:center;font-size:14px;font-weight:700;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">1</div>
+    </td>
+    <td valign="top" style="font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1d2330;">
+      <p style="margin:1px 0 6px 0;font-weight:700;">Double-click the attachment</p>
+      <p style="margin:0 0 18px 0;">A window opens: the calendar icon on the left, a blue folder on the right, an arrow in between. It looks like this:</p>
+    </td>
+  </tr>
+  </table>
+
+  <p style="margin:0 0 24px 0;">
+    <img src="LangzeitPlaner-Installation.png" width="524" alt="The window that opens: the calendar icon on the left, the Applications folder on the right, an arrow pointing from one to the other." style="display:block;width:524px;max-width:100%;height:auto;border:1px solid #dde3ec;border-radius:8px;">
+  </p>
+
+  <!-- ── Step 2 ─────────────────────────────────────────────────────── -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
+  <tr>
+    <td width="34" valign="top" style="width:34px;padding:0 12px 0 0;">
+      <div style="width:26px;height:26px;line-height:26px;border-radius:13px;background:#2f77dd;color:#ffffff;text-align:center;font-size:14px;font-weight:700;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">2</div>
+    </td>
+    <td valign="top" style="font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1d2330;">
+      <p style="margin:1px 0 6px 0;font-weight:700;">Drag the calendar icon onto the blue folder</p>
+      <p style="margin:0 0 22px 0;">The folder is called <strong>Applications</strong> (on a Mac set to German it is called <strong>Programme</strong>). Drag the icon across with the mouse and let go — that was the installation. You can close the window afterwards.</p>
+    </td>
+  </tr>
+  </table>
+
+  <!-- ── Step 3 ─────────────────────────────────────────────────────── -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
+  <tr>
+    <td width="34" valign="top" style="width:34px;padding:0 12px 0 0;">
+      <div style="width:26px;height:26px;line-height:26px;border-radius:13px;background:#2f77dd;color:#ffffff;text-align:center;font-size:14px;font-weight:700;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">3</div>
+    </td>
+    <td valign="top" style="font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1d2330;">
+      <p style="margin:1px 0 6px 0;font-weight:700;">Launch it — and dismiss one security warning</p>
+    </td>
+  </tr>
+  </table>
+
+  <!-- The panel that decides whether step 3 reads as "this is broken" or as "step 3". -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 22px 0;background:#fff8e8;border-radius:10px;">
+  <tr>
+    <td width="4" style="width:4px;background:#f0b429;border-radius:10px 0 0 10px;">&nbsp;</td>
+    <td style="padding:16px 18px;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#3d3320;">
+      <p style="margin:0 0 12px 0;">I’m writing this down in advance so it doesn’t startle you: <strong>the very first time you open it, your Mac will say: “Apple could not verify that ‘LangzeitPlaner’ is free of malware.”</strong> And it refuses to start the app.</p>
+      <p style="margin:0 0 12px 0;">That is not an error message, and nothing is broken. Your Mac simply doesn’t know this app, because I haven’t officially registered it with Apple. You have to tell it once that the app is fine:</p>
+      <p style="margin:0 0 8px 0;"><strong>a)</strong> Double-click LangzeitPlaner. The message appears. Click <strong>“Done”</strong> — <em>not</em> “Move to Trash”.</p>
+      <p style="margin:0 0 8px 0;"><strong>b)</strong> Apple menu (the apple at the very top left) → <strong>System Settings</strong> → <strong>Privacy &amp; Security</strong>. Scroll all the way down to “Security”. It now says “LangzeitPlaner was blocked to protect your Mac.” with a button next to it, <strong>“Open Anyway”</strong>. Click that.</p>
+      <p style="margin:0 0 12px 0;"><strong>c)</strong> The message comes back once more — this time with an <strong>“Open”</strong> button. Click it. Then your Mac asks for your password or your fingerprint.</p>
+      <p style="margin:0;">Done. From now on the calendar starts like any other app, and that message never comes back.</p>
+    </td>
+  </tr>
+  </table>
+
+  <hr style="border:0;border-top:1px solid #e6eaf1;margin:28px 0;">
+
+  <p style="margin:0 0 6px 0;font-weight:700;">If the attachment isn’t there</p>
+  <p style="margin:0 0 26px 0;">Some mail providers strip .dmg files out. If there is no file attached above, download it here instead — it is exactly the same one:<br>
+  <a href="{{RELEASE_URL}}" style="color:#1c5cc4;">{{RELEASE_URL}}</a></p>
+
+  <p style="margin:0 0 10px 0;font-weight:700;">Your invitation code</p>
+
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 16px 0;">
+  <tr><td align="center" style="padding:16px;background:#f4f7fb;border:1px dashed #a8c0e6;border-radius:10px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:20px;letter-spacing:2px;color:#16233d;">{{EINLADUNGSCODE}}</td></tr>
+  </table>
+
+  <p style="margin:0 0 16px 0;">In the app: <strong>Settings → “Join family circle”</strong>, paste the code, pick a name and a colour. That’s it, you’re in.</p>
+
+  <!-- D9: membership is instant, content is not. Said plainly, framed as normal,
+       and never as something Mum has to chase somebody else about. -->
+  <p style="margin:0 0 16px 0;">One more thing, so you’re not sitting there waiting: <strong>the shared entries won’t be there the moment you join.</strong> They arrive on their own, as soon as another Mac in the family next checks in — usually within a day. You don’t have to do anything for that, and you don’t have to remind anyone. Your own calendar works completely normally from the first minute; you can start writing in it straight away.</p>
+
+  <p style="margin:0 0 26px 0;">And if you’d rather keep it to yourself for now: just leave the code out. Then it runs entirely on its own, with no internet at all.</p>
+
+  <hr style="border:0;border-top:1px solid #e6eaf1;margin:0 0 22px 0;">
+
+  <p style="margin:0 0 8px 0;font-weight:700;font-size:14px;">Two sentences you might care about</p>
+  <p style="margin:0 0 22px 0;font-size:14px;color:#5a6478;">What you write down for yourself stays on your Mac — the calendar itself doesn’t go online with it. The only things exchanged are the entries we explicitly share with each other, and those travel encrypted. Once a day the app also quietly asks whether there’s a newer version, and installs it the next time you start it — so you’ll never get another e-mail about this and never have to download anything again.</p>
+
+  <p style="margin:0 0 4px 0;">If anything gets stuck: just call.</p>
+  <p style="margin:0;">{{ABSENDER}}</p>
+
+</td></tr>
+</table>
+
+</td></tr>
+</table>
+</body>
+</html>

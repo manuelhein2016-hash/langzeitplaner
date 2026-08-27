@@ -27,7 +27,7 @@ the Xcode Command Line Tools (`swiftc`), which macOS already has:
 ```
 
 That compiles `shell-macos/main.swift` (a ~230-line WKWebView shell), builds the
-`.icns` from `assets/icon-1024.png`, copies the web layer into
+`.icns` from `assets/icon.svg`, copies the web layer into
 `Contents/Resources/web/`, validates the plist and registers the bundle with
 LaunchServices. Output: `/Applications/LangzeitPlaner.app`. Pass
 `--dest ~/Desktop` to put it elsewhere.
@@ -46,10 +46,14 @@ Verify it without a screen:
 which loads the board headlessly and prints what it rendered plus a bridge
 round-trip check.
 
-**Swapping the icon.** `build.sh` reads exactly one source image,
-`assets/icon-1024.png` (1024×1024). Drop a different PNG there and re-run the
-script — iconset, `.icns` and bundle are regenerated. `assets/icon.svg` is the
-vector source for the current one.
+**Swapping the icon.** `build.sh` renders every icon size from
+`assets/icon.svg` (via `scripts/render-svg.swift`, which uses the SVG rasteriser
+macOS 13+ exposes through `NSImage`). Edit the SVG and re-run the script —
+iconset, `.icns` and bundle are regenerated.
+
+`assets/icon-1024.png` is the old source and is now only a fallback for macOS 12.
+It is **flattened onto opaque white**, so any icon derived from it renders as a
+white square rather than a rounded app icon; that is why the SVG is the source now.
 
 **Dock tile.** Pinned via the `com.apple.dock` preference domain
 (`persistent-apps` → a `file-tile` pointing at the bundle) plus `killall Dock`.

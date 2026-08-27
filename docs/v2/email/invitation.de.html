@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Einladung — LangzeitPlaner (Betreff: Hier ist der Kalender für deinen Mac)</title>
+<!--
+  LZP-108 · German invitation e-mail, HTML version.
+
+  How to use it: open this file in a browser, Cmd-A, Cmd-C, paste into a new mail.
+  Mail.app turns the image into a real inline attachment on paste. Then set the
+  subject line (it is in <title> and repeated in the first comment below), attach
+  LangzeitPlaner.dmg, and replace the four {{PLACEHOLDERS}}.
+
+  Rules this file follows on purpose, checked by .github/scripts/check-email-copy.mjs:
+    · every style is inline — mail clients drop <style> blocks unpredictably
+    · exactly one image, referenced by relative filename; no remote URL of any kind,
+      so there is no tracking pixel and nothing that phones home when Mum opens it
+    · no <script>, no web font, no CSS background-image
+    · layout is tables, because Mail.app, Gmail and Outlook still disagree about flexbox
+
+  Subject: Hier ist der Kalender für deinen Mac
+-->
+</head>
+<body style="margin:0;padding:0;background:#eef1f6;">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="background:#eef1f6;">
+<tr><td align="center" style="padding:28px 12px;">
+
+<table width="600" cellpadding="0" cellspacing="0" border="0" role="presentation" style="width:600px;max-width:100%;background:#ffffff;border-radius:14px;">
+<tr><td style="padding:36px 38px 34px 38px;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1d2330;">
+
+  <p style="margin:0 0 16px 0;">Hallo {{NAME}},</p>
+
+  <p style="margin:0 0 16px 0;">hier ist der Kalender, von dem ich erzählt habe. Ein ganzes Jahr auf einer Fläche, jeder Monat eine Spalte. Man klickt auf einen Tag und schreibt drauf, so wie auf einem Whiteboard in der Küche.</p>
+
+  <p style="margin:0 0 26px 0;">Im Anhang liegt eine Datei namens <strong>LangzeitPlaner.dmg</strong>. Das Installieren dauert zwei Minuten.</p>
+
+  <!-- ── Schritt 1 ─────────────────────────────────────────────────────── -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 8px 0;">
+  <tr>
+    <td width="34" valign="top" style="width:34px;padding:0 12px 0 0;">
+      <div style="width:26px;height:26px;line-height:26px;border-radius:13px;background:#2f77dd;color:#ffffff;text-align:center;font-size:14px;font-weight:700;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">1</div>
+    </td>
+    <td valign="top" style="font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1d2330;">
+      <p style="margin:1px 0 6px 0;font-weight:700;">Die Datei im Anhang doppelklicken</p>
+      <p style="margin:0 0 18px 0;">Es geht ein Fenster auf: links das Kalender-Symbol, rechts ein blauer Ordner, dazwischen ein Pfeil. Es sieht so aus:</p>
+    </td>
+  </tr>
+  </table>
+
+  <p style="margin:0 0 24px 0;">
+    <img src="LangzeitPlaner-Installation.png" width="524" alt="Das Fenster, das sich öffnet: links das Kalender-Symbol, rechts der Ordner „Programme“, dazwischen ein Pfeil von links nach rechts." style="display:block;width:524px;max-width:100%;height:auto;border:1px solid #dde3ec;border-radius:8px;">
+  </p>
+
+  <!-- ── Schritt 2 ─────────────────────────────────────────────────────── -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
+  <tr>
+    <td width="34" valign="top" style="width:34px;padding:0 12px 0 0;">
+      <div style="width:26px;height:26px;line-height:26px;border-radius:13px;background:#2f77dd;color:#ffffff;text-align:center;font-size:14px;font-weight:700;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">2</div>
+    </td>
+    <td valign="top" style="font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1d2330;">
+      <p style="margin:1px 0 6px 0;font-weight:700;">Das Kalender-Symbol auf den blauen Ordner ziehen</p>
+      <p style="margin:0 0 22px 0;">Der Ordner heißt <strong>„Programme“</strong> (falls dein Mac auf Englisch eingestellt ist: <strong>„Applications“</strong>). Symbol mit der Maus rüberziehen, loslassen — das war die Installation. Das Fenster kannst du danach zumachen.</p>
+    </td>
+  </tr>
+  </table>
+
+  <!-- ── Schritt 3 ─────────────────────────────────────────────────────── -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation">
+  <tr>
+    <td width="34" valign="top" style="width:34px;padding:0 12px 0 0;">
+      <div style="width:26px;height:26px;line-height:26px;border-radius:13px;background:#2f77dd;color:#ffffff;text-align:center;font-size:14px;font-weight:700;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">3</div>
+    </td>
+    <td valign="top" style="font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1d2330;">
+      <p style="margin:1px 0 6px 0;font-weight:700;">Starten — und einmal eine Sicherheitsmeldung wegklicken</p>
+    </td>
+  </tr>
+  </table>
+
+  <!-- The panel that decides whether step 3 reads as "this is broken" or as "step 3". -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 22px 0;background:#fff8e8;border-radius:10px;">
+  <tr>
+    <td width="4" style="width:4px;background:#f0b429;border-radius:10px 0 0 10px;">&nbsp;</td>
+    <td style="padding:16px 18px;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#3d3320;">
+      <p style="margin:0 0 12px 0;">Das schreibe ich dir vorher auf, damit du nicht erschrickst: <strong>Beim allerersten Start sagt der Mac: „Apple konnte nicht überprüfen, ob ‚LangzeitPlaner‘ frei von Schadsoftware ist.“</strong> Und er lässt die App zunächst nicht starten.</p>
+      <p style="margin:0 0 12px 0;">Das ist keine Fehlermeldung, und kaputt ist auch nichts. Der Mac kennt die App nur nicht, weil ich sie nicht offiziell bei Apple angemeldet habe. Du musst ihm einmal sagen, dass sie in Ordnung ist:</p>
+      <p style="margin:0 0 8px 0;"><strong>a)</strong> Doppelklick auf LangzeitPlaner. Die Meldung kommt. Auf <strong>„Fertig“</strong> klicken — <em>nicht</em> auf „In den Papierkorb“.</p>
+      <p style="margin:0 0 8px 0;"><strong>b)</strong> Apple-Menü (das Apfel-Symbol ganz oben links) → <strong>Systemeinstellungen</strong> → <strong>Datenschutz &amp; Sicherheit</strong>. Dort ganz nach unten scrollen, bis „Sicherheit“ kommt. Da steht jetzt „LangzeitPlaner wurde blockiert, um deinen Mac zu schützen.“ und daneben ein Knopf <strong>„Dennoch öffnen“</strong>. Draufklicken.</p>
+      <p style="margin:0 0 12px 0;"><strong>c)</strong> Die Meldung kommt noch einmal — diesmal mit einem Knopf <strong>„Öffnen“</strong>. Draufklicken. Dann fragt der Mac nach deinem Passwort oder dem Fingerabdruck.</p>
+      <p style="margin:0;">Fertig. Ab jetzt startet der Kalender wie jedes andere Programm, und diese Meldung kommt nie wieder.</p>
+    </td>
+  </tr>
+  </table>
+
+  <hr style="border:0;border-top:1px solid #e6eaf1;margin:28px 0;">
+
+  <p style="margin:0 0 6px 0;font-weight:700;">Falls der Anhang fehlt</p>
+  <p style="margin:0 0 26px 0;">Manche Mail-Anbieter filtern .dmg-Dateien heraus. Wenn oben also gar keine Datei hängt, lade sie hier herunter — es ist genau dieselbe:<br>
+  <a href="{{RELEASE_URL}}" style="color:#1c5cc4;">{{RELEASE_URL}}</a></p>
+
+  <p style="margin:0 0 10px 0;font-weight:700;">Dein Einladungscode</p>
+
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 16px 0;">
+  <tr><td align="center" style="padding:16px;background:#f4f7fb;border:1px dashed #a8c0e6;border-radius:10px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:20px;letter-spacing:2px;color:#16233d;">{{EINLADUNGSCODE}}</td></tr>
+  </table>
+
+  <p style="margin:0 0 16px 0;">In der App: <strong>Einstellungen → „Familienkreis beitreten“</strong>, den Code einsetzen, Namen und eine Farbe aussuchen. Das war's, du bist dabei.</p>
+
+  <!-- D9: membership is instant, content is not. Said plainly, framed as normal,
+       and never as something Mum has to chase somebody else about. -->
+  <p style="margin:0 0 16px 0;">Eine Sache noch, damit du nicht wartend davorsitzt: <strong>Die gemeinsamen Termine sind direkt nach dem Beitreten noch nicht da.</strong> Sie kommen von allein, sobald sich ein anderer Mac aus der Familie das nächste Mal meldet — meistens innerhalb eines Tages. Du musst dafür nichts tun und niemanden erinnern. Dein eigener Kalender läuft von der ersten Minute an ganz normal; du kannst sofort alles eintragen, was du willst.</p>
+
+  <p style="margin:0 0 26px 0;">Und wenn du ihn erst einmal lieber nur für dich nutzen möchtest: Code einfach weglassen. Dann läuft er komplett für sich allein, ohne Internet.</p>
+
+  <hr style="border:0;border-top:1px solid #e6eaf1;margin:0 0 22px 0;">
+
+  <p style="margin:0 0 8px 0;font-weight:700;font-size:14px;">Zwei Sätze, die dich vielleicht interessieren</p>
+  <p style="margin:0 0 22px 0;font-size:14px;color:#5a6478;">Was du für dich einträgst, bleibt auf deinem Mac — der Kalender selbst geht damit nicht ins Internet. Ausgetauscht werden nur die Termine, die wir ausdrücklich miteinander teilen, und die sind verschlüsselt unterwegs. Einmal am Tag fragt die App außerdem kurz nach, ob es eine neuere Version gibt, und installiert sie beim nächsten Start von selbst — du bekommst deswegen nie wieder eine E-Mail und musst nie wieder etwas herunterladen.</p>
+
+  <p style="margin:0 0 4px 0;">Wenn irgendwas klemmt: ruf einfach an.</p>
+  <p style="margin:0;">{{ABSENDER}}</p>
+
+</td></tr>
+</table>
+
+</td></tr>
+</table>
+</body>
+</html>

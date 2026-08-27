@@ -9,3 +9,15 @@ dist/
 .env
 .env.local
 *.log
+
+# Updater signing keys — the private half must never be committed (docs/v2/RELEASE.md §5)
+*.key
+*.p12
+*.p8
+
+# Generated release artwork (LZP-107). The SOURCES are committed —
+# assets/icon.svg and assets/dmg/*.svg — and scripts/build-release-assets.sh
+# regenerates every one of these. No image is ever committed without its source.
+src-tauri/icons/
+src-tauri/dmg/
+build/

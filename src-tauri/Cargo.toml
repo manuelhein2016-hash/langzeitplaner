@@ -16,6 +16,11 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
+# LZP-102 (22.3, 22.6). The plugin owns the HTTPS GET, the minisign verification
+# and the bundle swap — all in Rust, none of it inside the WebView, which is what
+# lets the page keep `default-src 'self'` and 21.5 keep meaning something.
+# UNVERIFIED: no cargo on the machine this was written on (PLAN.md risk R8).
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -1,0 +1,174 @@
+name: Sync server
+
+# LZP-109 — stories 22.8, addendum §3, decision D2 (Frankfurt).
+#
+# WHAT THIS FILE DOES *NOT* DO, ON PURPOSE: it does not deploy.
+#
+# Vercel's own GitHub integration is the deployer — push to `main` becomes the
+# production deployment, every branch and pull request gets a preview, and the
+# Prisma migration runs inside the Vercel build (server/vercel.json's
+# buildCommand). That is decision D3's reading of "GitHub sync", it is the
+# standard Vercel workflow, and re-implementing it here with a deploy token
+# would add a long-lived credential to this repository for no gain.
+#
+# So this workflow is the guard rail either side of that deploy:
+#   before  — the config and the server suite must be green, and a migration
+#             that already ran must not have been rewritten
+#   after   — the deployment Vercel just made must actually answer, from the
+#             right region, speaking a protocol the shipped clients know
+#
+# The `smoke` job listens for the deployment_status event that the Vercel
+# integration emits. It costs nothing until the integration is connected.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'server/**'
+      - '.github/workflows/server.yml'
+      - '.github/scripts/check-server-config.mjs'
+  pull_request:
+    paths:
+      - 'server/**'
+      - '.github/workflows/server.yml'
+      - '.github/scripts/check-server-config.mjs'
+  deployment_status:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: read
+
+concurrency:
+  group: server-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Before the deploy ─────────────────────────────────────────────────────
+  checks:
+    name: Config and suite
+    if: github.event_name != 'deployment_status'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Deploy pre-flight
+        run: node .github/scripts/check-server-config.mjs
+
+      # An applied migration is history. Editing one means the database in
+      # Frankfurt and the migration folder disagree for ever after, and Prisma
+      # discovers it at the worst possible moment — mid-deploy, in the build,
+      # with the previous version already torn down. New migrations only.
+      - name: No already-applied migration was rewritten
+        if: github.event_name == 'pull_request'
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          CHANGED=$(git diff --diff-filter=MDR --name-only "$BASE" "$HEAD" -- server/prisma/migrations || true)
+          if [ -n "$CHANGED" ]; then
+            echo "::error title=A migration was edited or deleted::$CHANGED — an applied migration cannot be changed. Add a new migration that corrects the old one instead. See docs/v2/RELEASE.md section 'Rolling back a schema change'."
+            exit 1
+          fi
+          echo "migrations are append-only in this change"
+
+      # E2/WP-7 owes tests/server. Until it exists this is a no-op that says so
+      # rather than a green check that means nothing.
+      - name: Server suite
+        run: |
+          if [ -d tests/server ]; then
+            npm run test:server --if-present || node --test "tests/server/*.test.js"
+          else
+            echo "::notice title=No server suite yet::tests/server/ does not exist. WP-7 (LZP-201..207) owes it; this gate turns binding the moment the directory appears."
+          fi
+
+  # ── After the deploy ──────────────────────────────────────────────────────
+  # Vercel's GitHub integration posts a deployment_status when a deployment
+  # finishes. `environment_url` is the URL it just published, production or
+  # preview, so the same job smoke-tests both.
+  smoke:
+    name: Smoke test the deployment
+    if: github.event_name == 'deployment_status' && github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: /api/v1/meta answers, from Frankfurt, at a protocol clients know
+        env:
+          BASE: ${{ github.event.deployment_status.environment_url }}
+          ENVIRONMENT: ${{ github.event.deployment_status.environment }}
+        run: |
+          if [ -z "$BASE" ]; then
+            echo "::notice title=No environment_url::deployment_status carried no URL; nothing to smoke test."
+            exit 0
+          fi
+          echo "smoke testing $ENVIRONMENT at $BASE"
+
+          CODE=$(curl -s -o "$RUNNER_TEMP/meta.json" -w '%{http_code}' --max-time 30 "$BASE/api/v1/meta" || echo 000)
+          if [ "$CODE" = "404" ]; then
+            echo "::notice title=No /api/v1/meta yet::The server (WP-7) is not deployed at this URL yet. This gate turns binding once LZP-205 lands."
+            exit 0
+          fi
+          if [ "$CODE" != "200" ]; then
+            echo "::error title=Deployment does not answer::GET $BASE/api/v1/meta returned $CODE. Every device polls this server; a deploy that does not answer is an outage."
+            cat "$RUNNER_TEMP/meta.json" || true
+            exit 1
+          fi
+
+          node -e '
+            const fs = require("fs");
+            const m = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const problems = [];
+
+            // Decision D2 / addendum §9. The Datenschutz text (21.3) tells the
+            // family their data is in Frankfurt. This is the check that keeps
+            // that sentence true.
+            if (!/^(fra1|eu-central-1)$/.test(String(m.region))) {
+              problems.push(`region is "${m.region}", expected fra1/eu-central-1 (Frankfurt, decision D2)`);
+            }
+
+            // ADR 003 §4: the server always speaks the current and the previous
+            // protocol. A deploy that narrows the window strands every client
+            // that has not updated yet.
+            if (!Number.isInteger(m.minProto) || !Number.isInteger(m.maxProto)) {
+              problems.push("minProto/maxProto missing or not integers");
+            } else if (m.maxProto - m.minProto < 1 && m.maxProto > 1) {
+              problems.push(`server accepts only protocol ${m.maxProto}; the N-1 rule requires ${m.maxProto - 1} too (addendum §9)`);
+            }
+
+            // The relay is blind (addendum §3). /meta is unauthenticated, so
+            // anything family-shaped in it is a leak by definition.
+            const body = JSON.stringify(m).toLowerCase();
+            for (const word of ["email", "displayname", "member", "invite", "space", "ciphertext"]) {
+              if (body.includes(word)) problems.push(`/meta response mentions "${word}" — it is unauthenticated and must carry no space or member data`);
+            }
+
+            if (problems.length) {
+              for (const p of problems) console.error(`::error title=Deployment smoke test::${p}`);
+              process.exit(1);
+            }
+            console.log(`OK  region ${m.region}, protocol ${m.minProto}..${m.maxProto}, serverTime ${m.serverTime}`);
+          ' "$RUNNER_TEMP/meta.json"
+
+      - name: The relay refuses unauthenticated reads
+        env:
+          BASE: ${{ github.event.deployment_status.environment_url }}
+        run: |
+          if [ -z "$BASE" ]; then exit 0; fi
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$BASE/api/v1/ops?space=00000000-0000-0000-0000-000000000000&since=0" || echo 000)
+          case "$CODE" in
+            401|403) echo "unauthenticated read refused with $CODE — correct" ;;
+            404) echo "::notice::/api/v1/ops not deployed yet (WP-7)" ;;
+            200) echo "::error title=Unauthenticated read succeeded::GET /api/v1/ops returned 200 without a device signature. Story 21.1: the relay authenticates every read."; exit 1 ;;
+            *)   echo "::warning::unexpected status $CODE from an unauthenticated /api/v1/ops read" ;;
+          esac

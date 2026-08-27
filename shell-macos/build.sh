@@ -12,10 +12,27 @@ APP="$DEST/LangzeitPlaner.app"
 C="$APP/Contents"
 
 echo "▸ building icon"
+# Rendered from assets/icon.svg, NOT from assets/icon-1024.png: that PNG was flattened
+# onto an opaque white background, so every size derived from it gives the app a white
+# square in the Dock, in Finder and in the DMG window. The SVG keeps its alpha channel.
+# Falls back to the old path if this macOS has no SVG rasteriser (needs 13+).
 ICONSET="$(mktemp -d)/LangzeitPlaner.iconset"
 mkdir -p "$ICONSET"
+RENDER="$(mktemp -d)/render-svg"
+if swiftc -O -o "$RENDER" "$REPO/scripts/render-svg.swift" -framework AppKit 2>/dev/null \
+   && "$RENDER" "$ICONSET/probe.png" 16 16 --svg "$REPO/assets/icon.svg" 0 0 16 16 0 0 >/dev/null 2>&1; then
+  rm -f "$ICONSET/probe.png"
+  ICON_SRC="svg"
+else
+  echo "  (no SVG rasteriser — falling back to assets/icon-1024.png, icon will be a white square)"
+  ICON_SRC="png"
+fi
 while read -r name size; do
-  sips -z "$size" "$size" "$REPO/assets/icon-1024.png" --out "$ICONSET/$name" >/dev/null
+  if [ "$ICON_SRC" = svg ]; then
+    "$RENDER" "$ICONSET/$name" "$size" "$size" --svg "$REPO/assets/icon.svg" 0 0 "$size" "$size" 0 0 >/dev/null
+  else
+    sips -z "$size" "$size" "$REPO/assets/icon-1024.png" --out "$ICONSET/$name" >/dev/null
+  fi
 done <<'EOF'
 icon_16x16.png 16
 icon_16x16@2x.png 32

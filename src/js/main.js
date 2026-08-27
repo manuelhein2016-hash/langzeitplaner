@@ -10,13 +10,20 @@ import {
 } from './interact.js';
 import { initLegend, renderLegend } from './legend.js';
 import { initFind, focusFind, exitFind, refreshFind, findActive } from './find.js';
-import { openSettings, initSettings, applySettingsToBody } from './settings.js';
+import { openSettings, initSettings, applySettingsToBody, rebuildSettings } from './settings.js';
 import { initPrint, printBoard, applyPageRule } from './print.js';
 import { exportBoard, importBoard } from './backup.js';
 import { closePopover, popoverOpen } from './popover.js';
+import { createUpdater, bridgePort } from './platform/updater.js';
+import {
+  initUpdateUI, shellPort, refreshUpdateChrome, runLaunchCheck,
+  startDailyTimer, checkNow as checkUpdatesNow, restartToUpdate,
+  updatesSupported, discloseUpdateCheck,
+} from './update-ui.js';
 import { closeTopSheet, anySheetOpen, el, toast } from './ui.js';
 import { todayISO, monthKeyOf, addMonths, parseISO, MONTH_DE, MONTH_EN } from './dates.js';
 import { isTauri } from './storage.js';
+import { maybeShowUnlock } from './firstrun.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -58,6 +65,7 @@ export async function boot() {
   });
   initPrint();
   initInteractions(boardEl, wrapEl, { onChange });
+  wireUpdates();
 
   wireToolbar();
   wireKeyboard();
@@ -75,6 +83,56 @@ export async function boot() {
   redraw();
   scrollToToday(false);
   maybeFirstRun();
+
+  // LZP-106 / 22.2 — the unlock screen. It asks the native host whether macOS
+  // actually refused this bundle, and shows nothing at all unless the answer is
+  // yes, so a healthy launch never meets a security screen. Not awaited: the
+  // board is already drawn and must not wait on a bridge round trip.
+  maybeShowUnlock().catch((e) => console.warn('[firstrun] unlock probe failed', e));
+
+  // 22.3 — the launch check. Deliberately the LAST thing boot does, deliberately
+  // not awaited, and deliberately silent: the board is on screen and usable
+  // before a single byte of update traffic is considered, and a release host
+  // that is unreachable produces nothing the user can see. It also stops at the
+  // 21.5 gate on its own if the first-run screen has not disclosed the check.
+  runLaunchCheck();
+  startDailyTimer();
+}
+
+// ── F22 · updates (LZP-103 wiring) ───────────────────────────────────────────
+//
+// One updater, built here, from the native bridge. `update-ui.js` receives it
+// as a parameter — like every other collaborator this app initialises — which
+// is also the only way a test can drive the UI states, since there is no real
+// release server yet. There is no test hook of any kind in the shipped page:
+// no `window.__lzp*` updater, no query parameter, no build flag.
+
+function wireUpdates() {
+  const invoke = window.__TAURI__?.core?.invoke;
+  initUpdateUI({
+    // No bridge (browser preview) ⇒ no updater at all, and the settings section
+    // says so in one line rather than offering a button that cannot work.
+    updater: invoke
+      ? createUpdater({ port: bridgePort(invoke), now: () => Date.now() })
+      : null,
+    shell: invoke ? shellPort(invoke) : null,
+    // 22.7 is a *server* protocol statement, so it can only be true where a
+    // server exists. E3/WP-7 owns the family-space flag; until it lands this
+    // reads false and the minimum-version bar is unreachable — which is the
+    // correct behaviour for a solo install, not a stub.
+    familyMode: () => {
+      const s = store.state.settings;
+      return !!(s.familySpaceId || s.familyMode);
+    },
+    // A check that finishes in the background must not leave an open settings
+    // sheet showing a stale answer. `rebuildSettings()` is a no-op when the
+    // sheet is closed, which is the overwhelmingly common case.
+    onChange: () => { syncToolbar(); rebuildSettings(); },
+    // 11.1 — the same flush ⌘Q performs. The Swift shell asks the page for it
+    // too; Tauri's restart does not, so the guarantee lives here where both
+    // shells share it.
+    flush: () => store.persistNow(),
+  });
 }
 
 // ── rendering ────────────────────────────────────────────────────────────────
@@ -85,6 +143,10 @@ function redraw() {
   renderLegend();
   syncToolbar();
   refreshFind();
+  // 22.4 / 22.7 — the ⚙ dot, the native menu item and the minimum-version bar,
+  // reconciled on every redraw. All three are derived from one predicate in
+  // update-ui.js, so they cannot disagree with each other.
+  refreshUpdateChrome();
   if (pendingRollAnim) {
     pendingRollAnim = false;
     // 8.6 — one short slide so the leftmost column leaving reads as motion,
@@ -305,6 +367,13 @@ function wireNativeMenu() {
     today: () => jumpToToday(),
     'layer-feiertage': () => toggleLayer('feiertage'),
     'layer-ferien': () => toggleLayer('schulferien'),
+    // 22.4 — the glossary's „Auf Updates prüfen …“. The ellipsis is honest: it
+    // opens the settings sheet, where the answer will appear, and starts the
+    // check. A menu item that ran a check and reported the result nowhere would
+    // be the one place a quiet feature is allowed to be rude — the user asked.
+    'check-updates': () => { openSettings(); checkUpdatesNow(); },
+    // The hint item, which the shell only shows while a build is staged.
+    'update-restart': () => restartToUpdate(),
     'mode-toggle': () => {
       const next = store.state.settings.mode === 'rolling' ? 'pinned' : 'rolling';
       store.setSettings({ mode: next, pageYears: 0 });
@@ -345,6 +414,19 @@ function maybeFirstRun() {
   if (!store.state.settings.bundesland) {
     body.appendChild(el('p', null, t('firstRunState')));
   }
+  // 21.5 / 22.3 — the disclosure, and the only place a FRESH install meets it.
+  //
+  // The daily update check is the one request this app makes, and both shells
+  // refuse to make it until a human has been told. LZP-106's unlock screen
+  // cannot carry that sentence: it appears only on a launch macOS actually
+  // blocked, so on every healthy install the check would stay switched off
+  // forever and 22.3 would be a promise the product never keeps.
+  //
+  // The same string the settings sheet shows, deliberately — one sentence, one
+  // source, no chance of the two disagreeing. Shown only inside a real shell:
+  // the browser preview has nothing to update and would be lying.
+  const discloses = updatesSupported();
+  if (discloses) body.appendChild(el('p', 'hint', t('updateCheckHint')));
   const acts = el('div', 'acts');
   if (!store.state.settings.bundesland) {
     const pick = el('button', 'btn-primary', t('pickBundesland'));
@@ -361,6 +443,10 @@ function maybeFirstRun() {
   function dismiss() {
     card.remove();
     store.setSettings({ seenFirstRun: true });
+    // Dismissing the card is the act that follows having read it. Not awaited:
+    // a shell that cannot record consent simply keeps refusing to check, which
+    // is the safe direction.
+    if (discloses) discloseUpdateCheck().catch(() => {});
   }
 }
 

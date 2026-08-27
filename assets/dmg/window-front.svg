@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 520" width="740" height="520">
+  <!--
+    LZP-108 illustration, layer 2 of 2: drawn last, over the icons.
+    The two labels sit where Finder puts them: icon centres (210, 228) and (530, 228)
+    on this canvas, 128pt icons, so the baseline is 308.
+    The folder label reads "Programme" because that is what a German macOS shows for
+    /Applications. Whether Finder localises a SYMLINK to it is unverified here; the
+    e-mail names both words, and background.svg paints the German one regardless.
+  -->
+  <rect x="40.5" y="30.5" width="659" height="447" rx="11" fill="none" stroke="#c9d0da" stroke-width="1"/>
+  <g text-anchor="middle" font-size="12.5" fill="#1d2330"
+     font-family="Helvetica Neue, Helvetica, Arial, sans-serif">
+    <text x="210" y="308">LangzeitPlaner</text>
+    <text x="530" y="308">Programme</text>
+  </g>
+</svg>

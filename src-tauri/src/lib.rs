@@ -9,7 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
@@ -156,6 +156,381 @@ fn save_checkpoint(app: AppHandle, contents: String) -> Result<(), String> {
     write_atomic(&data_dir(&app)?.join(CHECKPOINT_FILE), &contents)
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// F22 · UPDATES — LZP-102 (auto-updater) + LZP-104 (minimum version)
+// Stories 22.3, 22.5, 22.6, 22.7.  Amendment A11.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ⚠ UNVERIFIED — EVERY LINE OF THIS SECTION (risk R8, PLAN.md §4).
+//
+// There is no Rust toolchain on the machine this was written on, so nothing
+// below has been compiled, let alone run. It is written to mirror
+// `shell-macos/main.swift`, which IS built and covered by
+// `tests/tier2/shell-updater.dom.js` and `shell-macos/updater-selftest.sh`.
+// The API calls into `tauri-plugin-updater` in particular are written from its
+// documented v2 surface and MUST be checked against the crate on a machine with
+// cargo before any Tauri build ships. The specific things to re-check:
+//
+//   · `UpdaterExt::updater_builder()`, `version_comparator`, `check()`
+//   · that `Update` really exposes `raw_json`, `version`, `download()` and
+//     `install()` with these signatures
+//   · that `download()` is the call that performs the minisign verification
+//
+// WHAT THE DECISION LOGIC IS, AND WHERE IT LIVES. Nothing here decides anything.
+// Whether a check is due, whether a manifest is well-formed, whether the offered
+// build is newer, whether this client is below `minimum_version` — all of that
+// is `src/js/platform/updater.js`, tested under `node --test`. These commands are
+// the same four the Swift shell implements, with the same names, the same
+// arguments and the same JSON replies, so ONE tested brain drives both shells.
+//
+// 21.5 — WHY THE CSP IN tauri.conf.json DOES NOT GAIN A HOST. The updater's
+// HTTPS GET is made by the plugin, in Rust, outside the WebView. The page's
+// `connect-src` therefore stays `'self' ipc: http://ipc.localhost` and the board
+// still cannot reach the network at all. The two consent gates (`disclosed`,
+// `enabled`) are re-checked here as well as in JavaScript, because a bridge
+// command is reachable from any page script.
+//
+// 22.3 — "APPLIES ON THE NEXT START", AND HOW IT DIFFERS FROM THE SWIFT SHELL.
+// This is the one place the two shells are not identical, and the difference is
+// deliberate rather than accidental:
+//
+//   Swift : download → verify → stage the bytes on disk → at the NEXT LAUNCH
+//           re-verify the signature and swap the bundle.
+//   Tauri : download (the plugin verifies the minisign signature as it goes) →
+//           install immediately. On macOS `install()` replaces the bundle on
+//           disk while the running process keeps executing from the image it
+//           already opened, so the user sees nothing until they next launch —
+//           which is exactly what 22.3 asks for.
+//
+// The Tauri path is arguably the safer of the two: there is no window in which
+// downloaded bytes wait on disk between verification and use. The Swift path
+// closes that window by verifying a second time at apply. Neither ever installs
+// anything it has not just verified, which is the whole of 22.6.
+
+const UPDATER_PREFS_FILE: &str = "updater.json";
+
+/// 22.5 — one channel for every device. Mirrors `CHANNEL` in updater.js.
+const UPDATE_CHANNEL: &str = "stable";
+/// Mirrors `TARGET` in updater.js. Tauri resolves the platform key itself, but
+/// the JS side needs to know which one to read out of the manifest.
+const UPDATE_TARGET: &str = "darwin-universal";
+
+/// The updater's own tiny preference file — deliberately NOT part of
+/// `board.json`. 22.7 says updates never touch user data, and the cheapest way
+/// to keep that true is for the updater to have no reason to open the user's
+/// files at all.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct UpdaterPrefs {
+    /// The settings switch (22.4 — the user can always turn it off).
+    enabled: bool,
+    /// 21.5 — has the first-run screen said this happens? No check of any kind
+    /// runs until this is true. FALSE on a fresh install: silence until someone
+    /// has been told.
+    disclosed: bool,
+    /// Epoch milliseconds, to match JavaScript's clock without conversion.
+    last_check_at: f64,
+    /// The version that has been installed but is not running yet.
+    staged_version: Option<String>,
+}
+
+impl Default for UpdaterPrefs {
+    fn default() -> Self {
+        Self { enabled: true, disclosed: false, last_check_at: 0.0, staged_version: None }
+    }
+}
+
+impl UpdaterPrefs {
+    fn load(app: &AppHandle) -> Self {
+        let path = match data_dir(app) {
+            Ok(d) => d.join(UPDATER_PREFS_FILE),
+            Err(_) => return Self::default(),
+        };
+        read_opt(&path)
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, app: &AppHandle) {
+        if let Ok(dir) = data_dir(app) {
+            if let Ok(txt) = serde_json::to_string_pretty(self) {
+                let _ = write_atomic(&dir.join(UPDATER_PREFS_FILE), &txt);
+            }
+        }
+    }
+}
+
+fn current_version(app: &AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+fn status_json(app: &AppHandle) -> String {
+    let p = UpdaterPrefs::load(app);
+    serde_json::json!({
+        "currentVersion": current_version(app),
+        "channel": UPDATE_CHANNEL,
+        "target": UPDATE_TARGET,
+        "enabled": p.enabled,
+        "disclosed": p.disclosed,
+        "lastCheckAt": p.last_check_at,
+        "stagedVersion": p.staged_version,
+    })
+    .to_string()
+}
+
+#[tauri::command]
+fn update_status(app: AppHandle) -> String {
+    status_json(&app)
+}
+
+/// 21.5 — set ONCE by LZP-106's first-run screen, after it has said in one line
+/// that the app asks about updates. Nothing checks anything before this is true.
+#[tauri::command]
+fn update_set_disclosed(app: AppHandle, value: Option<bool>) -> String {
+    let mut p = UpdaterPrefs::load(&app);
+    p.disclosed = value.unwrap_or(true);
+    p.save(&app);
+    status_json(&app)
+}
+
+#[tauri::command]
+fn update_set_enabled(app: AppHandle, value: Option<bool>) -> String {
+    let mut p = UpdaterPrefs::load(&app);
+    p.enabled = value.unwrap_or(true);
+    p.save(&app);
+    status_json(&app)
+}
+
+/// Written BEFORE the request goes out (updater.js calls it in that order), so a
+/// host that hangs cannot leave the device retrying on every single launch.
+#[tauri::command]
+fn update_note_check(app: AppHandle, at: Option<f64>) {
+    let mut p = UpdaterPrefs::load(&app);
+    p.last_check_at = at.unwrap_or(0.0);
+    p.save(&app);
+}
+
+// ── 22.4 · the quiet hint and the one click (LZP-103) ────────────────────────
+//
+// ⚠ UNVERIFIED — written on a machine with no Rust toolchain. Nothing below has
+// ever been compiled. `shell-macos/main.swift` is the reference implementation
+// of the same two commands and IS built and tested (`--smoke` prints the App
+// menu in both languages and both states); this is its Tauri twin. Re-check on
+// a machine with cargo, specifically: `IsMenuItem` being in `tauri::menu`,
+// `Submenu::with_items` accepting a `&[&dyn IsMenuItem<R>]` slice, and
+// `AppHandle::restart()` existing with this signature.
+
+/// The staged version the App menu is currently advertising, or `None`.
+/// A `Mutex` rather than managed state so `build_menu` — which is called from
+/// `setup` before any state could be managed — can read it without a signature
+/// change.
+static UPDATE_HINT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn update_hint_value() -> Option<String> {
+    UPDATE_HINT.lock().ok().and_then(|g| g.clone())
+}
+
+/// 22.4 — the App-menu half of the quiet hint. The web layer owns the predicate
+/// (one function, in update-ui.js); this only draws it. An empty string means
+/// "no hint": JSON `null` and an absent argument are not distinguishable across
+/// both bridges, so the wire value is `""`.
+#[tauri::command]
+fn update_menu_hint(app: AppHandle, version: Option<String>) -> Result<(), String> {
+    let v = version.filter(|s| !s.trim().is_empty());
+    if let Ok(mut g) = UPDATE_HINT.lock() {
+        if *g == v {
+            return Ok(()); // no change — do not rebuild the menu on every redraw
+        }
+        *g = v;
+    }
+    let menu = build_menu(&app).map_err(|e| e.to_string())?;
+    app.set_menu(menu).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 22.4 — "one click restarts into the new version". Refuses when nothing is
+/// staged, because restarting into the same build is a no-op a user reads as a
+/// broken button.
+///
+/// The two shells differ here, deliberately, and both are honest: the Swift
+/// shell stages verified bytes and swaps the bundle at the next launch, so its
+/// restart is what performs the update. Tauri's plugin has already installed
+/// the new bundle by this point — macOS keeps executing the already-open image,
+/// which is why the user still sees nothing until a restart — so this restart
+/// only ends the old process. Neither installs anything it has not verified.
+#[tauri::command]
+fn update_restart(app: AppHandle) -> String {
+    let p = UpdaterPrefs::load(&app);
+    if p.staged_version.is_none() {
+        return serde_json::json!({ "ok": false, "error": "nothing-staged" }).to_string();
+    }
+    // Reply first, restart a beat later: the reply handler must complete, and
+    // update-ui.js has already flushed the board before calling this.
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let inner = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            inner.restart();
+        });
+    });
+    serde_json::json!({ "ok": true, "restarting": true }).to_string()
+}
+
+#[tauri::command]
+fn update_clear_staged(app: AppHandle) -> String {
+    let mut p = UpdaterPrefs::load(&app);
+    p.staged_version = None;
+    p.save(&app);
+    status_json(&app)
+}
+
+/// The one network request solo mode makes, and the reason the 21.5 gates exist.
+///
+/// The RAW manifest text goes back to JavaScript. This side has no opinion about
+/// what a manifest means: `parseManifest` in updater.js does, and it is the one
+/// with tests. `version_comparator` is pinned to `true` so that the plugin hands
+/// us the manifest even when its own comparison would have said "nothing newer"
+/// — otherwise a manifest that carries only a `minimum_version` bump (22.7,
+/// LZP-104) would never reach the client that needs to read it.
+#[tauri::command]
+async fn update_fetch_manifest(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let p = UpdaterPrefs::load(&app);
+    if !p.disclosed || !p.enabled {
+        return Ok(serde_json::json!({ "ok": false, "error": "disabled" }).to_string());
+    }
+
+    let updater = app
+        .updater_builder()
+        .version_comparator(|_current, _update| true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match updater.check().await {
+        Ok(Some(update)) => Ok(serde_json::json!({
+            "ok": true,
+            "manifest": update.raw_json.to_string(),
+        })
+        .to_string()),
+        // No `Update` at all means the endpoint answered but there is nothing to
+        // describe — for our always-true comparator that is effectively an empty
+        // manifest, and the JS side treats it as a malformed one.
+        Ok(None) => Ok(serde_json::json!({ "ok": false, "error": "empty" }).to_string()),
+        Err(e) => Ok(serde_json::json!({
+            "ok": false, "error": "network", "detail": e.to_string()
+        })
+        .to_string()),
+    }
+}
+
+/// Download, VERIFY, install. 22.6: the plugin checks the minisign signature
+/// against `plugins.updater.pubkey` from tauri.conf.json as the bytes arrive, and
+/// `install` is unreachable without a `Vec<u8>` that came out of `download`.
+/// An artifact that fails verification returns an error here and NOTHING is
+/// written to the application bundle.
+///
+/// `version` is passed in by the caller and re-checked against what the endpoint
+/// offers: the JS side already decided which build it wants (and refused any
+/// downgrade), so a mismatch means the manifest moved between the check and the
+/// download, and the safe answer is to do nothing.
+#[tauri::command]
+async fn update_download(
+    app: AppHandle,
+    version: String,
+    url: Option<String>,
+    signature: Option<String>,
+    size: Option<u64>,
+) -> Result<String, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    // `url`, `signature` and `size` are part of the shared port shape (the Swift
+    // shell fetches and verifies them itself). Tauri re-derives all three from
+    // the manifest it just parsed, so they are accepted and deliberately unused
+    // rather than trusted — a URL chosen by the caller is exactly the hijackable
+    // update path 22.6 exists to prevent.
+    let _ = (url, signature, size);
+
+    let p = UpdaterPrefs::load(&app);
+    if !p.disclosed || !p.enabled {
+        return Ok(serde_json::json!({ "ok": false, "error": "disabled" }).to_string());
+    }
+
+    let updater = app
+        .updater_builder()
+        .version_comparator(|_current, _update| true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            return Ok(serde_json::json!({ "ok": false, "error": "empty" }).to_string())
+        }
+        Err(e) => {
+            return Ok(serde_json::json!({
+                "ok": false, "error": "network", "detail": e.to_string()
+            })
+            .to_string())
+        }
+    };
+
+    if update.version != version {
+        return Ok(serde_json::json!({
+            "ok": false, "error": "version-moved",
+            "detail": format!("asked for {version}, endpoint now offers {}", update.version)
+        })
+        .to_string());
+    }
+
+    // THE VERIFICATION IS IN HERE. `download` fails if the minisign signature
+    // does not check out against the configured public key, and nothing is
+    // installed because `install` needs the bytes it returns.
+    let bytes = match update.download(|_chunk, _total| {}, || {}).await {
+        Ok(b) => b,
+        Err(e) => {
+            let msg = e.to_string();
+            // Distinguish "the signature is wrong" from "the wifi dropped": the
+            // first wants a human, the second wants tomorrow.
+            let kind = if msg.to_lowercase().contains("signature") { "signature" } else { "network" };
+            return Ok(serde_json::json!({ "ok": false, "error": kind, "detail": msg }).to_string());
+        }
+    };
+
+    if let Err(e) = update.install(bytes) {
+        return Ok(serde_json::json!({
+            "ok": false, "error": "install", "detail": e.to_string()
+        })
+        .to_string());
+    }
+
+    // The bundle on disk is now the new build; this process keeps running from
+    // the image it already opened. 22.3's "applies on the next start" is
+    // therefore simply what happens, with no restart prompt and no modal (22.4).
+    let mut prefs = UpdaterPrefs::load(&app);
+    prefs.staged_version = Some(version.clone());
+    prefs.save(&app);
+
+    Ok(serde_json::json!({ "ok": true, "staged": true, "version": version }).to_string())
+}
+
+/// Called once at startup. If the staged version is the version now running, the
+/// swap took effect and the marker is stale — clear it so the quiet "Update
+/// verfügbar" hint (22.4) does not linger after the update it referred to.
+///
+/// 22.7 — nothing in this path reads or writes board.json, ops.jsonl,
+/// checkpoint.json or snapshots.json. Schema migrations (11.6) run at the next
+/// boot of the NEW binary, after the swap, exactly as for any other version
+/// change.
+fn clear_staged_marker_if_applied(app: &AppHandle) {
+    let mut p = UpdaterPrefs::load(app);
+    if p.staged_version.as_deref() == Some(current_version(app).as_str()) {
+        p.staged_version = None;
+        p.save(app);
+    }
+}
+
 /// 11.2 / 11.7 — native save dialog, dated default name.
 #[tauri::command]
 fn export_board(app: AppHandle, contents: String, suggested_name: String) -> Result<bool, String> {
@@ -220,19 +595,42 @@ fn set_shell_pref(app: AppHandle, key: String, value: bool) -> Result<(), String
 /// event the web layer already handles, so there is exactly one implementation
 /// of each command.
 fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let app_menu = Submenu::with_items(
-        app,
-        "LangzeitPlaner",
-        true,
-        &[
-            &PredefinedMenuItem::about(app, Some("Über LangzeitPlaner"), Some(AboutMetadata::default()))?,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "settings", "Einstellungen …", true, Some("CmdOrCtrl+,"))?,
-            &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::hide(app, Some("LangzeitPlaner ausblenden"))?,
-            &PredefinedMenuItem::quit(app, Some("Beenden"))?,
-        ],
-    )?;
+    // ── 22.4 · the App menu carries the quiet hint (LZP-103) ─────────────────
+    // The hint item exists ONLY while a verified build is staged: no greyed-out
+    // row, no "no updates available" to click. Directly under About, above
+    // „Auf Updates prüfen …“, so the answer sits above the question. Built as a
+    // Vec rather than a literal slice because one of the items is conditional.
+    let about = PredefinedMenuItem::about(app, Some("Über LangzeitPlaner"), Some(AboutMetadata::default()))?;
+    let sep_a = PredefinedMenuItem::separator(app)?;
+    let hint_item = match update_hint_value() {
+        Some(v) => Some(MenuItem::with_id(
+            app,
+            "update-restart",
+            format!("Update verfügbar ({v}) — neu starten"),
+            true,
+            None::<&str>,
+        )?),
+        None => None,
+    };
+    let check_item = MenuItem::with_id(app, "check-updates", "Auf Updates prüfen …", true, None::<&str>)?;
+    let sep_b = PredefinedMenuItem::separator(app)?;
+    let settings_item = MenuItem::with_id(app, "settings", "Einstellungen …", true, Some("CmdOrCtrl+,"))?;
+    let sep_c = PredefinedMenuItem::separator(app)?;
+    let hide_item = PredefinedMenuItem::hide(app, Some("LangzeitPlaner ausblenden"))?;
+    let quit_item = PredefinedMenuItem::quit(app, Some("Beenden"))?;
+
+    let mut app_items: Vec<&dyn IsMenuItem<R>> = vec![&about, &sep_a];
+    if let Some(h) = hint_item.as_ref() {
+        app_items.push(h);
+    }
+    app_items.push(&check_item);
+    app_items.push(&sep_b);
+    app_items.push(&settings_item);
+    app_items.push(&sep_c);
+    app_items.push(&hide_item);
+    app_items.push(&quit_item);
+
+    let app_menu = Submenu::with_items(app, "LangzeitPlaner", true, &app_items)?;
 
     let file_menu = Submenu::with_items(
         app,
@@ -297,6 +695,11 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // LZP-102. UNVERIFIED — see the F22 section above. The plugin refuses to
+        // initialise without `plugins.updater.pubkey` in tauri.conf.json, which
+        // is the right failure mode: no updater key, no update path at all
+        // (22.6 — "a device installs authentic builds or nothing").
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -313,10 +716,30 @@ pub fn run() {
             save_checkpoint,
             export_board,
             import_board,
-            set_shell_pref
+            set_shell_pref,
+            // F22 · the updater port (LZP-102 / LZP-104). Exactly the command
+            // names `bridgePort()` in src/js/platform/updater.js sends, plus the
+            // two switches LZP-103's settings panel and LZP-106's first-run
+            // screen need. None of them can reach board.json, ops.jsonl,
+            // checkpoint.json or snapshots.json — 22.7 enforced by the size of
+            // the surface rather than by discipline.
+            update_status,
+            update_set_disclosed,
+            update_set_enabled,
+            update_note_check,
+            update_fetch_manifest,
+            update_download,
+            update_clear_staged,
+            // LZP-103 · 22.4 — the quiet hint's App-menu half and the one click.
+            update_menu_hint,
+            update_restart
         ])
         .setup(|app| {
             let handle = app.handle().clone();
+            // 22.3/22.4 — if the bundle was replaced during the last session, the
+            // running binary IS the staged version now; drop the stale marker so
+            // the quiet "Update verfügbar" hint does not outlive the update.
+            clear_staged_marker_if_applied(&handle);
             app.set_menu(build_menu(&handle)?)?;
 
             // 13.2 — monochrome template glyph, light/dark aware, one click

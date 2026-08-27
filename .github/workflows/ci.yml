@@ -1,0 +1,138 @@
+name: CI
+
+# The suite gate. Runs on every branch and every pull request, and is called by
+# release.yml so that a `git tag` can never publish a build whose tests are red
+# (story 22.8 — one tag moves the whole family forward; it had better be green).
+#
+# No `npm ci` anywhere in this file. The app has zero runtime dependencies and
+# the test runner is `node --test` from the standard library, so there is
+# nothing to install. If a step here ever needs an install, that is the signal
+# that something slipped in — see PLAN.md §7, Gate 5+.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suites:
+    name: Suites — tier 1, property, attack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: No dependencies were installed
+        run: |
+          if [ -d node_modules ]; then
+            echo "::error::node_modules exists on a clean checkout — a dependency was committed"
+            exit 1
+          fi
+          echo "clean checkout, nothing installed"
+
+      - name: tier 1
+        run: npm test
+      - name: property
+        run: npm run test:property
+      - name: attack
+        run: npm run test:attack
+
+  dom:
+    name: Tier 2 — real WKWebView
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Builds shell-macos/ with swiftc and drives it headless. If a hosted
+      # runner turns out not to give WKWebView a usable window server, the
+      # honest fix is one line — `continue-on-error: true` here, plus a note in
+      # docs/v2/RELEASE.md § "Known unknowns" — not deleting the job.
+      - name: tier 2
+        run: npm run test:dom
+
+  release-config:
+    name: Release config pre-flight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Non-strict: the placeholders that only a real release must resolve are
+      # reported as notes here, so everyday CI stays green before the PO has a
+      # GitHub remote and an updater key.
+      - name: Versions agree, updater configured, still zero dependencies
+        run: node .github/scripts/check-release-config.mjs
+
+      - name: Signature verifier self-test
+        run: node .github/scripts/minisign.selftest.mjs
+
+      # Both are pure text/JSON checks with no Rust, no Swift and no image toolchain,
+      # so they belong on the cheap ubuntu runner and run on every push -- not only
+      # when a tag is cut. Catching a moved icon or a lost sentence at release time
+      # means catching it after the artefact everyone is waiting for is already built.
+      - name: DMG artwork and geometry agree (LZP-107)
+        run: node .github/scripts/check-dmg-geometry.mjs
+
+      - name: Invitation e-mail says what it must (LZP-108)
+        run: node .github/scripts/check-email-copy.mjs
+
+  release-artwork:
+    name: Release artwork builds from source
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # No image is committed to this repository -- only SVG sources and this script.
+      # That is only true for as long as the script keeps working, and it depends on a
+      # macOS-13+ system SVG rasteriser reached through NSImage, which is exactly the
+      # kind of undocumented convenience that disappears in a major release. If this
+      # job goes red, the DMG background and the app icon cannot be rebuilt, and every
+      # release after that point would ship whatever a developer happened to have in
+      # their working tree.
+      - name: Build every release image from its SVG source
+        run: ./scripts/build-release-assets.sh --verbose
+
+      - name: The files the bundler needs actually exist
+        run: |
+          set -e
+          for f in src-tauri/icons/icon.icns \
+                   src-tauri/dmg/background.tiff \
+                   build/email/LangzeitPlaner-Installation.png; do
+            [ -s "$f" ] || { echo "::error title=Missing release artwork::$f was not produced."; exit 1; }
+          done
+          # The icon must have an alpha channel. Deriving it from a flattened PNG
+          # silently produces a white square -- and a white square looks exactly like
+          # a build that worked.
+          if ! sips -g hasAlpha src-tauri/icons/512x512.png | grep -q "hasAlpha: yes"; then
+            echo "::error title=App icon has no transparency::The icon was rendered without an alpha channel, so it will show as a white square in the Dock, in Finder and in the DMG window. Check that assets/icon.svg is the source, not assets/icon-1024.png."
+            exit 1
+          fi
+          # The hidpi TIFF must carry BOTH representations. With only the 1x rep the
+          # background is soft on every Retina Mac; with only the 2x rep Finder draws
+          # it at twice the window size and the layout is destroyed.
+          DIRS=$(tiffutil -info src-tauri/dmg/background.tiff 2>/dev/null | grep -c "^Directory at" || true)
+          if [ "$DIRS" != "2" ]; then
+            echo "::error title=DMG background is not hidpi::background.tiff holds $DIRS image(s), expected 2 (660x420 and 1320x840). Check the tiffutil -cathidpicheck step in scripts/build-release-assets.sh."
+            exit 1
+          fi
+          tiffutil -info src-tauri/dmg/background.tiff 2>/dev/null | grep -E "^Directory at|Image Width"
+          echo "release artwork: ok"

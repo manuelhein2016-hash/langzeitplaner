@@ -7,8 +7,10 @@ import { t, getLang, setLang } from './i18n.js';
 import { BUNDESLAENDER, stateName } from './holidays.js';
 import { FERIEN_META } from './ferien.js';
 import { el, openSheet, field, switchBox, confirmSheet, toast } from './ui.js';
+import { openUnlockHelp } from './firstrun.js';
 import { storagePath, isTauri } from './storage.js';
 import { exportBoard, importBoard } from './backup.js';
+import { buildUpdateSection } from './update-ui.js';
 import { MONTH_DE, MONTH_EN, todayISO, parseISO } from './dates.js';
 
 let notify = () => {};
@@ -22,13 +24,30 @@ export function applySettingsToBody() {
   document.documentElement.lang = s.language || 'de';
 }
 
+// The open sheet's api, so a background event that changes what settings SHOWS
+// can redraw it in place. Today the only such event is the update check
+// finishing while the user is looking at the Updates section (22.4) — without
+// this, "Jetzt suchen" would leave the sheet frozen on „Wird geprüft …".
+let openApi = null;
+
 export function openSettings() {
-  openSheet({
+  const api = openSheet({
     title: t('settings'),
-    build: (body, api) => build(body, api),
-    actions: [{ label: t('done'), kind: 'primary', run: (api) => api.close() }],
+    build: (body, a) => build(body, a),
+    actions: [{ label: t('done'), kind: 'primary', run: (a) => a.close() }],
+    onClose: () => { openApi = null; },
   });
+  openApi = api;
+  return api;
 }
+
+/** No-op unless the settings sheet is on screen. */
+export function rebuildSettings() {
+  if (openApi) openApi.rebuild();
+}
+
+/** Whether the settings sheet is currently open. */
+export const settingsOpen = () => !!openApi;
 
 function build(body, api) {
   const s = store.state.settings;
@@ -204,6 +223,13 @@ function build(body, api) {
         : 'Beides erledigt die native Hülle; in der Browser-Vorschau werden sie gespeichert, wirken aber nicht.'));
   }
 
+  // ── updates (22.4 — the second, and only other, home of the quiet hint) ────
+  // Deliberately placed with the app-shell settings and not with the data
+  // section: an update is a fact about the *program*, and 22.7 guarantees it
+  // never touches the board. Putting it next to Export/Import/Sicherungen would
+  // suggest otherwise to exactly the reader least able to check.
+  buildUpdateSection(body, api);
+
   // ── data ───────────────────────────────────────────────────────────────────
   body.appendChild(el('div', 'section-title', t('data')));
 
@@ -254,7 +280,15 @@ function build(body, api) {
   }
 
   body.appendChild(el('p', 'hint', t('shortcutHint')));
-  if (!isTauri()) body.appendChild(el('p', 'hint', t('gatekeeper')));
+  // LZP-106 — the unlock walkthrough, reachable forever and on every platform.
+  // Under D1 (unsigned) this is the screen the PO points at over the phone, and
+  // the one a second Mac needs; it must not be a one-shot that a dismissed
+  // first run puts out of reach. The v1 note that used to sit here taught the
+  // Control-click bypass macOS 15 removed (A12).
+  const help = el('button', 'btn-ghost', t('gatekeeper'));
+  help.style.cssText = 'height:24px;padding:0 10px;margin-left:178px';
+  help.addEventListener('click', () => { api.close(); openUnlockHelp(); });
+  body.appendChild(help);
 }
 
 function rangeField(label, value, min, max, onInput, unit) {

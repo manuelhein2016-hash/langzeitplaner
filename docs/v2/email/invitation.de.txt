@@ -1,0 +1,100 @@
+Betreff: Hier ist der Kalender für deinen Mac
+
+
+Hallo {{NAME}},
+
+hier ist der Kalender, von dem ich erzählt habe. Ein ganzes Jahr auf
+einer Fläche, jeder Monat eine Spalte. Man klickt auf einen Tag und
+schreibt drauf, so wie auf einem Whiteboard in der Küche.
+
+Im Anhang liegt eine Datei namens LangzeitPlaner.dmg. Das Installieren dauert
+zwei Minuten.
+
+
+-------------------------------------------------------------------------
+ 1   Die Datei im Anhang doppelklicken
+-------------------------------------------------------------------------
+
+     Es geht ein Fenster auf: links das Kalender-Symbol, rechts ein blauer
+     Ordner, dazwischen ein Pfeil.
+
+
+-------------------------------------------------------------------------
+ 2   Das Kalender-Symbol auf den blauen Ordner ziehen
+-------------------------------------------------------------------------
+
+     Der Ordner heißt „Programme" (falls dein Mac auf Englisch
+     eingestellt ist: „Applications"). Symbol mit der Maus rüberziehen,
+     loslassen — das war die Installation. Das Fenster kannst du danach
+     zumachen.
+
+
+-------------------------------------------------------------------------
+ 3   Starten — und einmal eine Sicherheitsmeldung wegklicken
+-------------------------------------------------------------------------
+
+     Das hier schreibe ich dir vorher auf, damit du nicht erschrickst:
+
+     Beim allerersten Start sagt der Mac: „Apple konnte nicht überprüfen,
+     ob ‚LangzeitPlaner' frei von Schadsoftware ist." Und er lässt die App
+     zunächst nicht starten.
+
+     Das ist keine Fehlermeldung, und kaputt ist auch nichts. Der Mac kennt
+     die App nur nicht, weil ich sie nicht offiziell bei Apple angemeldet
+     habe. Du musst ihm einmal sagen, dass sie in Ordnung ist:
+
+     a)  Doppelklick auf LangzeitPlaner. Die Meldung kommt.
+         Auf „Fertig" klicken — NICHT auf „In den Papierkorb".
+
+     b)  Apple-Menü (das Apfel-Symbol ganz oben links)
+         -> Systemeinstellungen -> Datenschutz & Sicherheit.
+         Dort ganz nach unten scrollen, bis „Sicherheit" kommt. Da steht
+         jetzt „LangzeitPlaner wurde blockiert, um deinen Mac zu schützen."
+         und daneben ein Knopf „Dennoch öffnen". Draufklicken.
+
+     c)  Die Meldung kommt noch einmal — diesmal mit einem Knopf
+         „Öffnen". Draufklicken. Dann fragt der Mac nach deinem Passwort
+         oder dem Fingerabdruck.
+
+     Fertig. Ab jetzt startet der Kalender wie jedes andere Programm, und
+     diese Meldung kommt nie wieder.
+
+
+FALLS DER ANHANG FEHLT
+
+Manche Mail-Anbieter filtern .dmg-Dateien heraus. Wenn oben also gar keine
+Datei hängt, lade sie hier herunter — es ist genau dieselbe:
+
+    {{RELEASE_URL}}
+
+
+DEIN EINLADUNGSCODE
+
+    {{EINLADUNGSCODE}}
+
+In der App: Einstellungen -> „Familienkreis beitreten", den Code einsetzen,
+Namen und eine Farbe aussuchen. Das war's, du bist dabei.
+
+Eine Sache noch, damit du nicht wartend davorsitzt: Die gemeinsamen
+Termine sind direkt nach dem Beitreten noch nicht da. Sie kommen von
+allein, sobald sich ein anderer Mac aus der Familie das nächste Mal
+meldet — meistens innerhalb eines Tages. Du musst dafür nichts tun und
+niemanden erinnern. Dein eigener Kalender läuft von der ersten Minute an
+ganz normal; du kannst sofort alles eintragen, was du willst.
+
+Und wenn du ihn erst einmal lieber nur für dich nutzen möchtest: Code
+einfach weglassen. Dann läuft er komplett für sich allein, ohne Internet.
+
+
+ZWEI SÄTZE, DIE DICH VIELLEICHT INTERESSIEREN
+
+Was du für dich einträgst, bleibt auf deinem Mac — der Kalender selbst
+geht damit nicht ins Internet. Ausgetauscht werden nur die Termine, die
+wir ausdrücklich miteinander teilen, und die sind verschlüsselt unterwegs.
+Einmal am Tag fragt die App außerdem kurz nach, ob es eine neuere Version
+gibt, und installiert sie beim nächsten Start von selbst — du bekommst
+deswegen nie wieder eine E-Mail und musst nie wieder etwas herunterladen.
+
+Wenn irgendwas klemmt: ruf einfach an.
+
+{{ABSENDER}}

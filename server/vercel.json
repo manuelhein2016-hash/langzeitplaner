@@ -1,0 +1,25 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["fra1"],
+  "framework": null,
+  "installCommand": "npm ci",
+  "buildCommand": "npx prisma generate && if [ \"$VERCEL_ENV\" = \"production\" ] || [ \"$LZP_PREVIEW_DB_IS_ISOLATED\" = \"true\" ]; then npx prisma migrate deploy; else echo 'SKIPPING prisma migrate deploy: this is a preview and LZP_PREVIEW_DB_IS_ISOLATED is not true. See docs/v2/RELEASE.md.'; fi",
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- .",
+  "functions": {
+    "api/**": {
+      "maxDuration": 10,
+      "memory": 1024
+    }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store" },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "no-referrer" },
+        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains" }
+      ]
+    }
+  ]
+}

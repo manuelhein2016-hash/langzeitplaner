@@ -1,0 +1,523 @@
+name: Release
+
+# LZP-101 — stories 22.1, 22.5, 22.6, 22.8.
+#
+# One `git tag v2.0.1` produces: a universal macOS DMG small enough to email,
+# a signed update archive, and a signed update manifest, published together to
+# GitHub Releases. Every device on the single "stable" channel then converges
+# on it by itself (22.5).
+#
+# THREE THINGS IN HERE ARE LOAD-BEARING AND SHOULD NOT BE "SIMPLIFIED":
+#
+#  1. The updater key is REQUIRED. The very first step fails if the secret is
+#     missing, and the manifest generator has no code path that produces an
+#     entry without a verified signature. An app that reaches Mom as an email
+#     attachment must not grow a hijackable update path (22.6).
+#
+#  2. Apple signing is a FLAG THAT IS OFF (PO decision D1 — ship unsigned).
+#     Every signing step is `if: vars.ENABLE_APPLE_SIGNING == 'true'`. Turning
+#     it on later is a repository variable plus secrets — no edit to this file,
+#     no edit to tauri.conf.json. See docs/v2/RELEASE.md § "Turning signing on".
+#
+#  3. The DMG size gate. Story 22.1's "≈15 MB" is not an aesthetic; it is the
+#     German mail-provider attachment ceiling once base64 encoding is applied.
+#     See the budget step for the arithmetic.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+    inputs:
+      rehearse:
+        description: 'Build and run every gate, publish nothing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  suites:
+    name: Suites
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Universal build, gates, publish
+    needs: suites
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    env:
+      # ── DMG budget, story 22.1 ────────────────────────────────────────────
+      # Mail providers cap the ENCODED attachment. base64 inflates by 4/3 plus
+      # line breaks — call it x1.36 — so a raw DMG budget is the provider cap
+      # divided by 1.36:
+      #
+      #   GMX / Web.de / T-Online   20 MB cap  ->  ~14.7 MB of DMG
+      #   Gmail / iCloud / Outlook  25 MB cap  ->  ~18.4 MB of DMG
+      #
+      # WARN at the 20 MB-provider budget: still shippable, but the invitation
+      # email (deliverable 28) must lead with the GitHub Releases link rather
+      # than the attachment.
+      # FAIL at 20 MiB: past this the DMG does not fit any consumer mailbox and
+      # 22.1's "one email attachment and one drag" is simply untrue.
+      DMG_WARN_BYTES: '14700000'
+      DMG_FAIL_BYTES: '20971520'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # ── 1. Refuse to start without the updater key (22.6) ─────────────────
+      # First step on purpose: fails in seconds, before a 20-minute build, with
+      # an error that says exactly what to do.
+      - name: The updater key must exist
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          KEY_PW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error title=No updater signing key::Repository secret TAURI_SIGNING_PRIVATE_KEY is not set. Generate a key with 'cargo tauri signer generate -w ~/.langzeitplaner-updater.key', store the PRIVATE half as that secret and its password as TAURI_SIGNING_PRIVATE_KEY_PASSWORD, and paste the PUBLIC half into src-tauri/tauri.conf.json -> plugins.updater.pubkey. Full instructions: docs/v2/RELEASE.md section 'The updater key'. Refusing to build an app that would ship without a verifiable update path (story 22.6)."
+            exit 1
+          fi
+          if [ -z "$KEY_PW" ]; then
+            echo "::warning title=Updater key has no password::TAURI_SIGNING_PRIVATE_KEY_PASSWORD is empty. That works, but a passwordless key in a secret store is one leak away from being usable. Prefer a password."
+          fi
+          echo "updater signing key present"
+
+      # ── 2. Version resolution ─────────────────────────────────────────────
+      - name: Resolve version and tag
+        id: v
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="v$VERSION"
+          fi
+          PRERELEASE=false
+          case "$TAG" in *-*) PRERELEASE=true ;; esac
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "version $VERSION, tag $TAG, prerelease $PRERELEASE"
+
+      # ── 3. Point the updater at this repository ───────────────────────────
+      # tauri.conf.json ships with an OWNER/REPO placeholder because the repo
+      # did not exist when it was written, and because a hard-coded slug is a
+      # thing that silently rots after a rename or a transfer. Deriving it from
+      # github.repository means the shipped app can only ever check the
+      # repository it was actually built from.
+      - name: Point the updater endpoint at this repository
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "src-tauri/tauri.conf.json";
+            const c = JSON.parse(fs.readFileSync(p, "utf8"));
+            const repo = process.env.GITHUB_REPOSITORY;
+            c.plugins.updater.endpoints = c.plugins.updater.endpoints.map((u) => u.replace("OWNER/REPO", repo));
+            fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
+            console.log("updater endpoint ->", c.plugins.updater.endpoints.join(", "));
+          '
+
+      # ── 4. Strict pre-flight ──────────────────────────────────────────────
+      # Version agreement across package.json / Cargo.toml / tauri.conf.json /
+      # the tag; a real (non-placeholder) updater public key; a resolved https
+      # endpoint; still zero runtime npm dependencies; the release-critical
+      # shape of tauri.conf.json intact, including "no signing identity in the
+      # file" so that D1 stays reversible without a code change.
+      - name: Release pre-flight (strict)
+        run: node .github/scripts/check-release-config.mjs --tag "${{ steps.v.outputs.tag }}" --strict
+
+      # ── 5. Toolchain ──────────────────────────────────────────────────────
+      - name: Rust targets for the universal binary
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Cache cargo and the build directory
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: cargo-macos14-${{ hashFiles('src-tauri/Cargo.toml') }}-v1
+          restore-keys: |
+            cargo-macos14-
+
+      # Installed through cargo rather than npm, so the release path stays free
+      # of a node_modules tree the project deliberately does not have.
+      # Cold cost ~6 min; warm it comes out of the cache above.
+      - name: Tauri CLI
+        run: |
+          if ! command -v cargo-tauri >/dev/null 2>&1; then
+            cargo install tauri-cli --version "^2" --locked
+          fi
+          cargo tauri --version
+
+      # ── 6. Apple signing — THE FLAG, AND IT IS OFF (decision D1) ──────────
+      #
+      # Nothing below runs today. To turn signing and notarization on:
+      #   1. buy a Developer ID (99 EUR/yr) and export the certificate as .p12
+      #   2. create an App Store Connect API key (Developer -> Integrations)
+      #   3. add the secrets and variables listed in docs/v2/RELEASE.md
+      #   4. set repository variable ENABLE_APPLE_SIGNING = true
+      # No file in this repository changes. That is the whole point: D1 said
+      # "no" to a 99 EUR/yr fee, not to signing, and reversing it must not cost
+      # an engineering day.
+      - name: Import Apple signing certificate
+        if: vars.ENABLE_APPLE_SIGNING == 'true'
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Enable signing and notarization
+        if: vars.ENABLE_APPLE_SIGNING == 'true'
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          printf '%s' "$API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          {
+            echo "APPLE_SIGNING_IDENTITY=${{ vars.APPLE_SIGNING_IDENTITY }}"
+            echo "APPLE_API_ISSUER=${{ vars.APPLE_API_ISSUER }}"
+            echo "APPLE_API_KEY=${{ vars.APPLE_API_KEY_ID }}"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8"
+          } >> "$GITHUB_ENV"
+          echo "::notice title=Apple signing enabled::Building signed and notarized. The guided unlock screen (LZP-106) is no longer the only path onto a family Mac — but leave it in the product; it costs nothing and it is the fallback."
+
+      # Ad-hoc signature when Apple signing is off. NOT cosmetic:
+      # `lipo` strips the code signature while fusing the two slices, and
+      # macOS on Apple silicon refuses to execute an arm64 binary that carries
+      # no signature at all — the app would be killed on launch, on the exact
+      # machines this release most needs to reach. "-" is the ad-hoc identity.
+      # The verification step below proves it took.
+      - name: Ad-hoc sign (Apple signing is off — decision D1)
+        if: vars.ENABLE_APPLE_SIGNING != 'true'
+        run: |
+          echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+          echo "::notice title=Unsigned build (D1)::No Developer ID. The bundle gets an ad-hoc signature so it will launch on Apple silicon; Gatekeeper will still quarantine it, which is what LZP-106's guided Systemeinstellungen unlock screen exists for."
+
+      # ── 6b. Release artwork (LZP-107) ─────────────────────────────────────
+      # Every image in the release is generated here from committed SVG sources:
+      # the app icon (.icns), the DMG window background, and the illustration the
+      # invitation e-mail carries. Nothing image-shaped is committed to the repo,
+      # so nothing image-shaped can be stale or unreproducible.
+      #
+      # This MUST run before `tauri build`: bundle.icon points at
+      # src-tauri/icons/icon.icns and bundle.macOS.dmg.background at
+      # src-tauri/dmg/background.tiff, and neither file exists until this step.
+      - name: Build release artwork
+        run: ./scripts/build-release-assets.sh
+
+      # The artwork and the icon positions live in different files and drift in
+      # silence: widen the window, and the arrow now points past the folder. The
+      # only way to see it otherwise is to cut a release and look at it.
+      - name: DMG geometry agrees with the artwork
+        run: node .github/scripts/check-dmg-geometry.mjs
+
+      # ── 7. Build ──────────────────────────────────────────────────────────
+      # --target universal-apple-darwin builds both slices and lipos them, so
+      # one DMG serves Intel and Apple silicon alike (22.1: Mom's Mac may be
+      # either, and nobody is going to ask her which).
+      #
+      # The bundled Schulferien datasets ride along inside the app bundle as
+      # part of the frontend (src/js/ferien.js) — amendment A11: story 7.4's
+      # "refresh" IS this release channel. There is no separate data download
+      # and no code here to fetch one.
+      - name: Build universal bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          RUST_BACKTRACE: '1'
+        run: cargo tauri build --target universal-apple-darwin
+
+      # ── 8. Locate the artifacts ───────────────────────────────────────────
+      # Globbed, not hard-coded: Tauri's filenames carry the version and have
+      # changed shape between minor releases. Exactly one match, or stop.
+      - name: Locate build output
+        id: art
+        run: |
+          BUNDLE="src-tauri/target/universal-apple-darwin/release/bundle"
+          one() {
+            local pattern="$1" label="$2"
+            local matches count
+            # -d matters: without it `ls` on a .app lists the bundle's contents
+            # instead of naming the bundle.
+            matches=$(ls -1d $pattern 2>/dev/null || true)
+            count=$(printf '%s' "$matches" | grep -c . || true)
+            if [ "$count" != "1" ]; then
+              echo "::error title=Cannot find $label::expected exactly one match for '$pattern', found $count"
+              echo "--- tree of $BUNDLE ---"
+              find "$BUNDLE" -maxdepth 3 -print || true
+              exit 1
+            fi
+            printf '%s' "$matches"
+          }
+          DMG="$(one "$BUNDLE/dmg/*.dmg" "the DMG")"
+          APP="$(one "$BUNDLE/macos/*.app" "the .app")"
+          ARCHIVE="$(one "$BUNDLE/macos/*.app.tar.gz" "the updater archive")"
+          {
+            echo "dmg=$DMG"
+            echo "app=$APP"
+            echo "archive=$ARCHIVE"
+          } >> "$GITHUB_OUTPUT"
+          ls -l "$DMG" "$ARCHIVE" "$ARCHIVE.sig" 2>&1 || true
+
+      # ── 9. Gate: the bundle is actually signed with something ─────────────
+      - name: The .app carries a code signature
+        run: |
+          APP='${{ steps.art.outputs.app }}'
+          if ! codesign --verify --verbose=2 "$APP" 2>&1; then
+            echo "::error title=Unsigned bundle::$APP has no valid code signature. On Apple silicon macOS kills unsigned binaries at launch, so this build would not start on a modern Mac. If Apple signing is off, the ad-hoc identity ('-') did not take: check that Tauri honoured APPLE_SIGNING_IDENTITY, and see docs/v2/RELEASE.md section 'Known unknowns'."
+            exit 1
+          fi
+          codesign -dv --verbose=2 "$APP" 2>&1 | sed 's/^/  /'
+
+      # ── 10. Gate: the DMG mounts, and what is inside is the app ───────────
+      # A DMG that will not mount is a total failure that no unit test can see
+      # and that the PO would discover by watching Mom double-click it.
+      - name: The DMG mounts and contains the app
+        run: |
+          DMG='${{ steps.art.outputs.dmg }}'
+          MNT="$RUNNER_TEMP/dmgcheck"
+          mkdir -p "$MNT"
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MNT"
+          trap 'hdiutil detach "$MNT" -force >/dev/null 2>&1 || true' EXIT
+          ls -la "$MNT"
+          INNER="$MNT/LangzeitPlaner.app"
+          if [ ! -d "$INNER" ]; then
+            echo "::error title=DMG has no app::LangzeitPlaner.app is not at the root of the mounted DMG. 22.1's 'open, drag to Programme' does not work."
+            exit 1
+          fi
+          if [ ! -L "$MNT/Applications" ]; then
+            echo "::warning title=No Applications shortcut::The DMG has no /Applications symlink, so 'drag to Programme' has nowhere to drop. Check bundle.macOS.dmg settings."
+          fi
+
+          # ── the window is actually styled (LZP-107) ─────────────────────────
+          # Tauri lays the DMG out by sending Apple events to Finder. On a runner
+          # with no usable Finder session that is refused with `-1743 Not authorized
+          # to send Apple events to Finder`, and the bundler goes on to emit a DMG
+          # that is valid, installable, and completely unstyled: no background, no
+          # arrow, icons wherever Finder feels like putting them. Nothing in the
+          # build fails. Story 22.1's designed window would simply be gone, and the
+          # first person to find out would be Mom.
+          #
+          # Two fingerprints, checked separately because they fail separately:
+          #   .background/background.tiff  the art was copied in
+          #   .DS_Store                    Finder wrote the view settings back
+          if [ ! -f "$MNT/.background/background.tiff" ]; then
+            echo "::error title=DMG has no background::.background/background.tiff is missing from the mounted image. Either the 'Build release artwork' step did not run, or bundle.macOS.dmg.background does not point at src-tauri/dmg/background.tiff."
+            exit 1
+          fi
+          if [ ! -f "$MNT/.DS_Store" ]; then
+            echo "::error title=DMG window was never laid out::The image has no .DS_Store, so Finder never applied the icon positions or the background — the DMG will open as a plain unstyled folder. This is the Apple-events failure (-1743): the bundler cannot drive Finder on this runner. Check the 'Build universal bundle' log for osascript errors."
+            exit 1
+          fi
+          echo "  DMG window: background present, view settings written."
+          codesign --verify --verbose=2 "$INNER" 2>&1 | sed 's/^/  /'
+          # Diagnostic only. Unsigned, this WILL say "rejected" — that is the
+          # expected state under D1 and exactly the wall LZP-106 walks Mom past.
+          echo "Gatekeeper assessment (informational):"
+          spctl --assess --type execute --verbose=4 "$INNER" 2>&1 | sed 's/^/  /' || true
+
+      # ── 11. Gate: the size budget (22.1) ──────────────────────────────────
+      - name: DMG size budget
+        run: |
+          DMG='${{ steps.art.outputs.dmg }}'
+          BYTES=$(stat -f%z "$DMG")
+          MIB=$(node -p "($BYTES/1048576).toFixed(2)")
+          ENCODED=$(node -p "Math.round($BYTES*1.36)")
+          ENC_MB=$(node -p "($ENCODED/1000000).toFixed(2)")
+          {
+            echo "### DMG size"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| file | \`$(basename "$DMG")\` |"
+            echo "| on disk | **$MIB MiB** ($BYTES bytes) |"
+            echo "| as a mail attachment (base64) | ~$ENC_MB MB |"
+            echo "| fits GMX / Web.de / T-Online (20 MB) | $([ "$ENCODED" -le 20000000 ] && echo yes || echo '**no**') |"
+            echo "| fits Gmail / iCloud (25 MB) | $([ "$ENCODED" -le 25000000 ] && echo yes || echo '**no**') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "DMG $MIB MiB, ~$ENC_MB MB encoded"
+          if [ "$BYTES" -gt "$DMG_FAIL_BYTES" ]; then
+            echo "::error title=DMG too large to email::$MIB MiB exceeds the $(node -p "($DMG_FAIL_BYTES/1048576).toFixed(0)") MiB ceiling. Encoded that is ~$ENC_MB MB, past every consumer mailbox, and story 22.1's 'one email attachment and one drag' stops being true. Find the weight before shipping: 'du -sh' inside the .app, and check assets/ and the icon set first."
+            exit 1
+          fi
+          if [ "$BYTES" -gt "$DMG_WARN_BYTES" ]; then
+            echo "::warning title=DMG over the 20 MB-provider budget::$MIB MiB is ~$ENC_MB MB once base64-encoded, which GMX, Web.de and T-Online will reject. It still fits Gmail and iCloud. The invitation email (deliverable 28) must lead with the GitHub Releases link rather than the attachment."
+          fi
+
+      # ── 12. Stage artifacts under names the manifest can point at ─────────
+      - name: Stage release artifacts
+        id: dist
+        run: |
+          V='${{ steps.v.outputs.version }}'
+          mkdir -p dist
+          DMG_NAME="LangzeitPlaner-$V-universal.dmg"
+          ARCHIVE_NAME="LangzeitPlaner-$V-universal.app.tar.gz"
+          cp '${{ steps.art.outputs.dmg }}' "dist/$DMG_NAME"
+          cp '${{ steps.art.outputs.archive }}' "dist/$ARCHIVE_NAME"
+          cp '${{ steps.art.outputs.archive }}.sig' "dist/$ARCHIVE_NAME.sig"
+          {
+            echo "dmg_name=$DMG_NAME"
+            echo "archive_name=$ARCHIVE_NAME"
+          } >> "$GITHUB_OUTPUT"
+          shasum -a 256 dist/* | tee dist/SHA256SUMS.txt
+
+      # ── 13. The update manifest — signed, or it does not exist (22.6) ────
+      # The generator verifies the .sig against the public key embedded in the
+      # app it just built, and only then does it have a value for the
+      # `signature` field. There is no path through it that emits an unsigned
+      # entry. A key mismatch here means the build would ship an app that
+      # rejects every future update — caught now instead of in six months.
+      #
+      # LZP_MIN_CLIENT_VERSION is a repository variable so that story 22.7's
+      # minimum-client gate can be raised without touching any file. Leave it
+      # unset for a normal release.
+      - name: Generate and verify latest.json
+        env:
+          # Set ONLY for a key-rotation release, and unset again straight after.
+          # See docs/v2/RELEASE.md § "Rotating the updater key".
+          ROTATION_PUBKEY: ${{ vars.LZP_ROTATION_VERIFY_PUBKEY }}
+        run: |
+          EXTRA=()
+          if [ -n "$ROTATION_PUBKEY" ]; then
+            EXTRA+=(--pubkey "$ROTATION_PUBKEY")
+            echo "::warning title=Key-rotation release::Repository variable LZP_ROTATION_VERIFY_PUBKEY is set, so the update artifact is verified against the PREVIOUS key. Delete that variable immediately after this release or the guard stays weakened."
+          fi
+          node .github/scripts/make-update-manifest.mjs \
+            --version '${{ steps.v.outputs.version }}' \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag '${{ steps.v.outputs.tag }}' \
+            --archive '${{ steps.art.outputs.archive }}' \
+            --asset-name '${{ steps.dist.outputs.archive_name }}' \
+            --min-client-version "${{ vars.LZP_MIN_CLIENT_VERSION || '0.0.0' }}" \
+            --notes "LangzeitPlaner ${{ steps.v.outputs.version }}" \
+            --out dist/latest.json \
+            "${EXTRA[@]}"
+          echo '### Update manifest' >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          node -e '
+            const m = require("./dist/latest.json");
+            for (const k of Object.keys(m.platforms)) m.platforms[k].signature = m.platforms[k].signature.slice(0, 24) + "… (verified)";
+            console.log(JSON.stringify(m, null, 2));
+          ' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 14. Keep the build even when nothing is published ────────────────
+      - name: Upload build output to the workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: langzeitplaner-${{ steps.v.outputs.version }}-macos-universal
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+      # ── 15. Publish (tag pushes only) ─────────────────────────────────────
+      # A prerelease tag (v2.0.0-rc.1) publishes as a prerelease, which means
+      # `releases/latest/download/latest.json` does NOT resolve to it and the
+      # family fleet stays where it is. That is how a release is rehearsed on
+      # one Mac before it reaches Mom's.
+      - name: Publish the GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.v.outputs.tag }}
+          VERSION: ${{ steps.v.outputs.version }}
+          PRERELEASE: ${{ steps.v.outputs.prerelease }}
+        run: |
+          NOTES="$RUNNER_TEMP/notes.md"
+          {
+            echo "**LangzeitPlaner $VERSION** — macOS 12 or newer, Intel and Apple silicon."
+            echo ""
+            echo "Installieren: DMG öffnen, App nach *Programme* ziehen, starten."
+            echo "Beim ersten Start führt die App durch die Freigabe in den Systemeinstellungen."
+            echo ""
+            echo "Install: open the DMG, drag the app to *Applications*, launch it."
+            echo "On first launch the app walks you through the Systemeinstellungen unlock."
+            echo ""
+            echo "Bereits installiert? Nichts tun — die App aktualisiert sich selbst."
+            echo "Already installed? Do nothing — the app updates itself."
+            echo ""
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } > "$NOTES"
+
+          ARGS=(--title "LangzeitPlaner $VERSION" --notes-file "$NOTES")
+          if [ "$PRERELEASE" = "true" ]; then
+            ARGS+=(--prerelease)
+            echo "::notice title=Prerelease::$TAG is a prerelease. releases/latest/download/latest.json will NOT point at it, so no device updates to it automatically."
+          fi
+
+          gh release create "$TAG" \
+            "dist/${{ steps.dist.outputs.dmg_name }}" \
+            "dist/${{ steps.dist.outputs.archive_name }}" \
+            "dist/${{ steps.dist.outputs.archive_name }}.sig" \
+            dist/latest.json \
+            dist/SHA256SUMS.txt \
+            "${ARGS[@]}"
+
+      # ── 16. Prove the published manifest is reachable ─────────────────────
+      # The updater endpoint is `releases/latest/download/latest.json`. That URL
+      # resolves only for the newest NON-prerelease release, and a release with
+      # a missing or misnamed asset is a fleet that silently stops updating.
+      # One curl closes that gap.
+      - name: The published manifest resolves
+        if: github.ref_type == 'tag' && steps.v.outputs.prerelease != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          URL="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$URL" -o "$RUNNER_TEMP/published.json"; then break; fi
+            echo "attempt $attempt: not there yet"
+            sleep 10
+          done
+          if [ ! -s "$RUNNER_TEMP/published.json" ]; then
+            echo "::error title=Manifest not reachable::$URL did not resolve. Every installed app polls this URL; if it 404s the fleet is stranded on its current version."
+            exit 1
+          fi
+          node -e '
+            const fs = require("fs");
+            const published = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const local = JSON.parse(fs.readFileSync("dist/latest.json", "utf8"));
+            if (published.version !== local.version) {
+              console.error(`::error::published manifest says ${published.version}, this build is ${local.version}`);
+              process.exit(1);
+            }
+            for (const [k, v] of Object.entries(published.platforms)) {
+              if (!v.signature) { console.error(`::error::published manifest: ${k} has no signature`); process.exit(1); }
+            }
+            if (!published.platforms["darwin-universal"]) {
+              console.error("::error::published manifest has no darwin-universal entry — that is the key every client looks up, so the fleet would see no update at all");
+              process.exit(1);
+            }
+            console.log(`published manifest OK: ${published.version}, minimum_version ${published.minimum_version}, platforms ${Object.keys(published.platforms).join(", ")}`);
+          ' "$RUNNER_TEMP/published.json"

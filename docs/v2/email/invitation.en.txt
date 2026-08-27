@@ -1,0 +1,98 @@
+Subject: Here's the calendar for your Mac
+
+
+Hi {{NAME}},
+
+here's the calendar I told you about. A whole year on one surface, one
+column per month. You click on a day and write on it, the way you would
+on a whiteboard in the kitchen.
+
+Attached is a file called LangzeitPlaner.dmg. Installing takes two minutes.
+
+
+-------------------------------------------------------------------------
+ 1   Double-click the attachment
+-------------------------------------------------------------------------
+
+     A window opens: the calendar icon on the left, a blue folder on the
+     right, an arrow in between.
+
+
+-------------------------------------------------------------------------
+ 2   Drag the calendar icon onto the blue folder
+-------------------------------------------------------------------------
+
+     The folder is called "Applications" (on a Mac set to German it is
+     called "Programme"). Drag the icon across with the mouse and let go
+     — that was the installation. You can close the window afterwards.
+
+
+-------------------------------------------------------------------------
+ 3   Launch it — and dismiss one security warning
+-------------------------------------------------------------------------
+
+     I'm writing this down in advance so it doesn't startle you:
+
+     The very first time you open it, your Mac will say: "Apple could not
+     verify that 'LangzeitPlaner' is free of malware." And it refuses to
+     start the app.
+
+     That is not an error message, and nothing is broken. Your Mac simply
+     doesn't know this app, because I haven't officially registered it
+     with Apple. You have to tell it once that the app is fine:
+
+     a)  Double-click LangzeitPlaner. The message appears.
+         Click "Done" — NOT "Move to Trash".
+
+     b)  Apple menu (the apple at the very top left)
+         -> System Settings -> Privacy & Security.
+         Scroll all the way down to "Security". It now says
+         "LangzeitPlaner was blocked to protect your Mac." with a button
+         next to it, "Open Anyway". Click that.
+
+     c)  The message comes back once more — this time with an "Open"
+         button. Click it. Then your Mac asks for your password or your
+         fingerprint.
+
+     Done. From now on the calendar starts like any other app, and that
+     message never comes back.
+
+
+IF THE ATTACHMENT ISN'T THERE
+
+Some mail providers strip .dmg files out. If there is no file attached
+above, download it here instead — it is exactly the same one:
+
+    {{RELEASE_URL}}
+
+
+YOUR INVITATION CODE
+
+    {{EINLADUNGSCODE}}
+
+In the app: Settings -> "Join family circle", paste the code, pick a name
+and a colour. That's it, you're in.
+
+One more thing, so you're not sitting there waiting: the shared entries
+won't be there the moment you join. They arrive on their own, as soon as
+another Mac in the family next checks in — usually within a day. You don't
+have to do anything for that, and you don't have to remind anyone. Your own
+calendar works completely normally from the first minute; you can start
+writing in it straight away.
+
+And if you'd rather keep it to yourself for now: just leave the code out.
+Then it runs entirely on its own, with no internet at all.
+
+
+TWO SENTENCES YOU MIGHT CARE ABOUT
+
+What you write down for yourself stays on your Mac — the calendar itself
+doesn't go online with it. The only things exchanged are the entries we
+explicitly share with each other, and those travel encrypted. Once a day
+the app also quietly asks whether there's a newer version, and installs it
+the next time you start it — so you'll never get another e-mail about this
+and never have to download anything again.
+
+If anything gets stuck: just call.
+
+{{ABSENDER}}

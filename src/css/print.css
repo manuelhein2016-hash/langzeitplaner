@@ -14,8 +14,10 @@
     print-color-adjust: exact;
   }
 
-  /* 12.2 — all UI leaves; only the board and its legend print. */
-  .titlebar, .toolbar, .scrim, .popover, .coach, .toast,
+  /* 12.2 — all UI leaves; only the board and its legend print.
+     `.update-bar` is on this list for the obvious reason: a printed year
+     planner that says "this version is too old" would still say it in 2031. */
+  .titlebar, .toolbar, .scrim, .popover, .coach, .toast, .update-bar,
   .inline-edit, .drag-ghost, .bar-preview, .drop-row,
   .bar-handle { display: none !important; }
 

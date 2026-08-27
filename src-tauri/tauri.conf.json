@@ -1,12 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "LangzeitPlaner",
-  "version": "1.0.0",
+  "version": "../package.json",
   "identifier": "org.langzeitplaner.app",
   "build": {
-    "frontendDist": "../",
+    "frontendDist": "../dist",
     "devUrl": "http://localhost:4173",
-    "beforeDevCommand": "node dev-server.mjs"
+    "beforeDevCommand": "node dev-server.mjs",
+    "beforeBuildCommand": "node scripts/build-frontend.mjs"
   },
   "app": {
     "windows": [
@@ -29,11 +30,40 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
-    "icon": ["icons/icon.icns"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/icon.icns"
+    ],
+    "resources": [],
     "macOS": {
-      "minimumSystemVersion": "12.0"
+      "minimumSystemVersion": "12.0",
+      "dmg": {
+        "background": "dmg/background.tiff",
+        "windowSize": {
+          "width": 660,
+          "height": 420
+        },
+        "appPosition": {
+          "x": 170,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 490,
+          "y": 170
+        }
+      }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/OWNER/REPO/releases/latest/download/latest.json"
+      ],
+      "pubkey": "REPLACE_ME__run_cargo_tauri_signer_generate__see_docs_v2_RELEASE.md"
+    }
+  }
 }
