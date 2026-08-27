@@ -23,6 +23,13 @@ tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# LZP-302 · ADR 002 §2.2 — the Keychain backstop (keychain_set/get/delete).
+# A binding to the system Security framework; no network, no new runtime.
+# UNVERIFIED: no cargo on the machine this was written on (PLAN.md risk R8).
+# See the header above `keychain_set` in src/lib.rs — in particular, the
+# accessibility class (`WhenUnlockedThisDeviceOnly`) that shell-macos/main.swift
+# sets explicitly and this crate's convenience API does not expose.
+security-framework = "3"
 
 [profile.release]
 codegen-units = 1

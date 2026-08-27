@@ -207,6 +207,85 @@ fn save_checkpoint(app: AppHandle, contents: String) -> Result<(), String> {
 // closes that window by verifying a second time at apply. Neither ever installs
 // anything it has not just verified, which is the whole of 22.6.
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LZP-302 · the Keychain backstop (ADR 002 §2.2)
+//
+// ⚠ UNVERIFIED — NOT COMPILED, NOT RUN, NOT ONCE.
+// There is no Rust toolchain on the machine this was written on (PLAN.md risk
+// R8), so this file cannot be built here at all. `shell-macos/main.swift` is the
+// REFERENCE IMPLEMENTATION for v2 and it is the one that has been exercised
+// against a real Keychain by `tests/tier2/crypto-keystore-phase1.dom.js`. What
+// follows is written to match it command-for-command so the two shells present
+// one bridge protocol to `src/js/platform/keystore.js` — and whoever first gets
+// `cargo` running must check it rather than trust it.
+//
+// WHAT THESE THREE COMMANDS HOLD, AND WHAT THEY MUST NEVER HOLD.
+// Between them: the recovery identity only — a 32-byte DEK plus RK_sig/RK_kex
+// as AES-GCM-wrapped PKCS#8 under that DEK. The DEVICE keys (IK_sig / IK_kex)
+// never come near here: they are generated `extractable: false` and live as
+// non-extractable CryptoKeys in IndexedDB, so no code path can turn them into
+// the bytes these commands take.
+//
+// TWO THINGS TO VERIFY WHEN A TOOLCHAIN EXISTS, both of which the Swift side
+// gets right and neither of which this simple binding guarantees:
+//
+//   1. ACCESSIBILITY. The Swift reference sets
+//      `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`:
+//        · WhenUnlocked   — unreadable while the Mac is locked;
+//        · ThisDeviceOnly — NEVER synced to iCloud Keychain. ADR 002 §8.12
+//          records that the recovery key has no revocation and no leak
+//          detection, so syncing it would widen that residual from one Mac to
+//          every device on the Apple ID.
+//      `security_framework::passwords`' convenience functions do not take an
+//      accessibility argument. If they do not default to
+//      `WhenUnlockedThisDeviceOnly`, this must be rewritten against
+//      `security_framework::item::ItemAddOptions` (or raw `SecItemAdd`) with
+//      the attribute set explicitly. THAT IS A SECURITY DIFFERENCE, not a
+//      style one, and it is the first thing to check.
+//   2. ISOLATION. The Swift shell uses a SEPARATE service name for headless
+//      runs so a test can never touch production items. Tauri has no headless
+//      test mode today; if one is added, mirror `keychainService()`.
+//
+// The service name and the two account names are fixed by ADR 002 §2.2 and are
+// mirrored in `src/js/platform/keystore.js` as `KEYCHAIN_SERVICE` /
+// `KEYCHAIN_ACCOUNTS`.
+const KEYCHAIN_SERVICE: &str = "org.langzeitplaner.keys";
+
+#[tauri::command]
+fn keychain_set(key: String, value: String) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("keychain_set: key is required".into());
+    }
+    // Idempotent, like the Swift side: a re-pair rewrites the DEK in place
+    // rather than failing with a duplicate-item error.
+    security_framework::passwords::set_generic_password(KEYCHAIN_SERVICE, &key, value.as_bytes())
+        .map_err(|e| format!("keychain_set: {e}"))
+}
+
+#[tauri::command]
+fn keychain_get(key: String) -> Result<Option<String>, String> {
+    if key.is_empty() {
+        return Err("keychain_get: key is required".into());
+    }
+    // `None` for absent AND for unreadable — the web layer cannot act on the
+    // difference, and both lead to the same place: mint a new one, or re-pair.
+    match security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, &key) {
+        Ok(bytes) => Ok(String::from_utf8(bytes).ok()),
+        Err(_) => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn keychain_delete(key: String) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("keychain_delete: key is required".into());
+    }
+    // Deleting something absent is success — otherwise every clean-up path
+    // needs a probe first.
+    let _ = security_framework::passwords::delete_generic_password(KEYCHAIN_SERVICE, &key);
+    Ok(())
+}
+
 const UPDATER_PREFS_FILE: &str = "updater.json";
 
 /// 22.5 — one channel for every device. Mirrors `CHANNEL` in updater.js.
@@ -717,6 +796,11 @@ pub fn run() {
             export_board,
             import_board,
             set_shell_pref,
+            // LZP-302 · ADR 002 §2.2 — the Keychain backstop. UNVERIFIED (no
+            // Rust toolchain here); shell-macos/main.swift is the reference.
+            keychain_set,
+            keychain_get,
+            keychain_delete,
             // F22 · the updater port (LZP-102 / LZP-104). Exactly the command
             // names `bridgePort()` in src/js/platform/updater.js sends, plus the
             // two switches LZP-103's settings panel and LZP-106's first-run

@@ -13,6 +13,7 @@ import Cocoa
 import WebKit
 import ServiceManagement
 import CryptoKit
+import Security
 
 let APP_SCHEME = "app"
 let APP_HOST = "localhost"
@@ -739,6 +740,75 @@ final class BoardWebView: WKWebView {
     }
 }
 
+// ── Keychain (LZP-302 · ADR 002 §2.2) ────────────────────────────────────────
+//
+// Three functions, one generic-password item per key. `src-tauri/src/lib.rs`
+// mirrors them for parity and is UNVERIFIED — there is no Rust toolchain on the
+// machine this was written on, so THIS is the reference implementation.
+//
+// ISOLATION, and it is not optional. A headless run (`--test`, `--smoke`,
+// `--updater-selftest`) uses a DIFFERENT service name, exactly as
+// `resolveScratchDir()` redirects the data directory. tests/run-dom-tests.sh
+// fingerprints the user's real board directory before and after a run; it
+// cannot fingerprint the login Keychain, so the separation has to be structural
+// rather than checked afterwards. A test run can therefore add, read and delete
+// its own items all day and the production service is untouched.
+
+private let KEYCHAIN_SERVICE_PROD = "org.langzeitplaner.keys"
+private let KEYCHAIN_SERVICE_TEST = "org.langzeitplaner.keys.headless-test"
+
+/// The service a run is allowed to touch. Headless ⇒ never the production one.
+func keychainService() -> String {
+    isHeadless ? KEYCHAIN_SERVICE_TEST : KEYCHAIN_SERVICE_PROD
+}
+
+private func keychainQuery(_ key: String) -> [String: Any] {
+    [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: keychainService(),
+        kSecAttrAccount as String: key,
+    ]
+}
+
+/// `nil` on success, the OSStatus on failure.
+func keychainSet(key: String, value: String) -> OSStatus? {
+    let data = Data(value.utf8)
+    var query = keychainQuery(key)
+
+    // Update first: SecItemAdd on an existing account returns errSecDuplicateItem,
+    // and "set" must be idempotent — a re-pair rewrites the DEK in place.
+    let update = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+    if update == errSecSuccess { return nil }
+    if update != errSecItemNotFound { return update }
+
+    query[kSecValueData as String] = data
+    // WhenUnlocked: unreadable while the Mac is locked.
+    // ThisDeviceOnly: never synced to iCloud Keychain — ADR 002 §8.12.
+    query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+    let add = SecItemAdd(query as CFDictionary, nil)
+    return add == errSecSuccess ? nil : add
+}
+
+/// The stored string, or `nil` when absent — and `nil` for any failure too. The
+/// web layer cannot act on an OSStatus for a read, and "absent" and "unreadable"
+/// lead to the same place: mint a new one, or ask the user to re-pair.
+func keychainGet(key: String) -> String? {
+    var query = keychainQuery(key)
+    query[kSecReturnData as String] = true
+    query[kSecMatchLimit as String] = kSecMatchLimitOne
+    var out: CFTypeRef?
+    guard SecItemCopyMatching(query as CFDictionary, &out) == errSecSuccess,
+          let data = out as? Data else { return nil }
+    return String(data: data, encoding: .utf8)
+}
+
+/// `nil` on success. Deleting something absent is success.
+func keychainDelete(key: String) -> OSStatus? {
+    let status = SecItemDelete(keychainQuery(key) as CFDictionary)
+    if status == errSecSuccess || status == errSecItemNotFound { return nil }
+    return status
+}
+
 // ── the __TAURI__ bridge ─────────────────────────────────────────────────────
 
 final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
@@ -935,6 +1005,68 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
             case "print_board":
                 printAction?()
                 replyHandler(NSNull(), nil)
+
+            // ── LZP-302 · the Keychain backstop (ADR 002 §2.2) ───────────────
+            //
+            // These three commands hold ONE thing between them: the recovery
+            // identity — a 32-byte DEK, plus RK_sig/RK_kex as AES-GCM-wrapped
+            // PKCS#8 under that DEK. The DEVICE keys (IK_sig/IK_kex) never come
+            // anywhere near here: they are generated `extractable: false`, live
+            // as non-extractable CryptoKeys in IndexedDB, and there is no code
+            // path that could turn them into bytes to store.
+            //
+            // Why the backstop exists at all: IndexedDB under a custom `app://`
+            // scheme can be evicted by the OS, and an eviction looks exactly
+            // like "this device was never paired". The device then has to
+            // re-pair — but the MEMBER identity survives, so the user is never
+            // locked out of their own Familienkreis.
+            //
+            // kSecAttrAccessibleWhenUnlockedThisDeviceOnly, deliberately:
+            //   · WhenUnlocked  — unreadable while the Mac is locked;
+            //   · ThisDeviceOnly — NOT synced to iCloud Keychain. ADR 002 §8.12
+            //     records that the recovery key has no revocation and no leak
+            //     detection, so syncing it would silently widen that residual
+            //     from one Mac to every device on the Apple ID.
+            //
+            // Values are strings (the web layer sends base64url), so the whole
+            // surface is three string operations and there is nothing here that
+            // parses attacker-shaped data.
+            //
+            // Solo mode never calls any of these — no key of any kind exists
+            // until the family opt-in moment (ADR 002 §2.4).
+
+            case "keychain_set":
+                guard let key = args["key"] as? String, !key.isEmpty,
+                      let value = args["value"] as? String else {
+                    replyHandler(nil, "keychain_set: key and value are required"); break
+                }
+                if let status = keychainSet(key: key, value: value) {
+                    replyHandler(nil, "keychain_set: OSStatus \(status)")
+                } else {
+                    replyHandler(NSNull(), nil)
+                }
+
+            case "keychain_get":
+                guard let key = args["key"] as? String, !key.isEmpty else {
+                    replyHandler(nil, "keychain_get: key is required"); break
+                }
+                // NSNull for "absent" — the same shape load_board uses, and
+                // distinguishable in JS from the empty string, which is a
+                // legitimate stored value.
+                replyHandler(keychainGet(key: key) ?? NSNull(), nil)
+
+            case "keychain_delete":
+                guard let key = args["key"] as? String, !key.isEmpty else {
+                    replyHandler(nil, "keychain_delete: key is required"); break
+                }
+                // Deleting something absent is success. A delete that reported
+                // an error for "already gone" would make every clean-up path
+                // need a probe first.
+                if let status = keychainDelete(key: key) {
+                    replyHandler(nil, "keychain_delete: OSStatus \(status)")
+                } else {
+                    replyHandler(NSNull(), nil)
+                }
 
             case "set_shell_pref":
                 switch args["key"] as? String {

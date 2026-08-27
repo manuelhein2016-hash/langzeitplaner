@@ -20,10 +20,13 @@ its state from an append-only op log**, all 22 mutate sites converted, and it be
 the ADR text** (§6), and the **`deviceShort` contradiction is resolved** — ADR 002 §5.2 is
 rewritten and is the single normative answer. Every finding from every audit now lives in one
 register, `docs/v2/FINDINGS.md`. **A fix pass on 2026-08-27 closed seven of those rows** —
-A3-C1 (CRITICAL), A3-H1, A3-H2, A3-H3, F-1, F-3, F-10 — each of them mutation-tested. The next
-package is **WP-6, the crypto core**; **F-10 is no longer its blocker** (`attestationOf` is live
-and `openOp` has its credential), so the remaining WP-6 prerequisite is **A3-H4**, durable device
-identity (ADR 002 §2.2). Until that lands no fleet test means anything.
+A3-C1 (CRITICAL), A3-H1, A3-H2, A3-H3, F-1, F-3, F-10 — each of them mutation-tested. **E3 — identity and crypto — is now built and proved in the real WKWebView** (LZP-302…306): seven
+modules under `src/js/crypto/`, one stateful key store under `src/js/platform/`, both shells'
+Keychain bridge, and **383 new test rows across the two tiers**. **A3-H4 is closed** — a
+non-extractable `CryptoKey` in IndexedDB *does* survive an app relaunch, proved across two separate
+launches of the real shell — **but it closed with a condition that is now the only row in the
+register blocking a family-mode release: finding E3-1**, and it is an input to **D1**. Read
+`docs/v2/E3-VERIFICATION.md` before starting WP-8.
 
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
@@ -31,13 +34,15 @@ identity (ADR 002 §2.2). Until that lands no fleet test means anything.
 npm test              # tier 1, pure logic          → 1665 pass / 0 fail   (101 suites)
 npm run test:attack   # adversarial corpus          →  566 pass / 0 fail   ( 74 suites)
 npm run test:property # property harness + domains  →   62 pass / 0 fail
-npm run test:dom      # real headless WKWebView     →   22 files, tier 2 PASS
+npm run test:dom      # real headless WKWebView     →   22 files, 375 pass, tier 2 PASS
 ```
 
-**Re-measured 2026-08-27 at the close of the round-7 integration pass — all four fully green.**
-The tier-1 count includes the **parallel WP-6 crypto workflow**'s untracked files, which is why it
-moves between runs; that workflow owns `src/js/crypto/`, `src/js/platform/keystore.js` and the
-shells' Keychain bridge, and nothing in the round-6/7 fix pass touched any of them.
+**Re-measured 2026-08-27 at the close of the E3 integration pass — all four fully green.**
+The tier-1 count now includes **E3's 286 rows** (`crypto-identity` 62 · `-spacekeys` 38 ·
+`-envelope` 52 · `-pairing` 57 · `-backup` 69 · `-guarantees` 8); tier 2 includes **E3's 97**.
+E3 owns `src/js/crypto/`, `src/js/platform/keystore.js` and the shells' Keychain bridge, and
+nothing in the round-6/7 fix pass touched any of them — nor did E3 touch `store.js`,
+`storage.js`, `core/oplog.js`, `core/migrate1to2.js` or `core/replace.js`.
 
 **`npm run test:property` now includes `tests/property/domains.test.js`** — 11 properties that walk
 all **310 enumerated inputs**. If you change anything in `src/js/store.js`'s boot path,
@@ -599,3 +604,98 @@ work**, and this pass landed all of it — ADR 006 §5.5's outcome enumeration, 
 - **A WP-8 cross-device invariant on the interpolated `_born`** (item 16).
 - **I-6** — `quarantineLogAside` on the native path still cannot move anything. Less pressing
   again: neither a failed boot nor a failed recovery sequesters.
+
+---
+
+# Session 6 addendum — 2026-08-27 · **E3, identity and crypto** (LZP-302…306)
+
+**Full evidence: `docs/v2/E3-VERIFICATION.md`. New findings: `docs/v2/FINDINGS.md` §2e.**
+
+## What landed
+
+Seven DOM-free, I/O-free modules under `src/js/crypto/` — `suite`, `probe`, `identity`,
+`spacekeys`, `envelope`, `pairing`, `backup` — plus the one stateful module,
+`src/js/platform/keystore.js`, and the Keychain bridge in both shells. **Zero npm dependencies**;
+WebCrypto is built into both engines. `core-purity` is green over all of it, and the gate
+**discovers files by reading the directory**, so the next module is covered the day it lands.
+
+**All four suites green: 1665 · 62 · 566 · 22 files / 375.**
+
+## The one thing to read if you read nothing else — **E3-1**
+
+**A rebuilt or re-signed bundle makes every persisted device key read back as `null`.** WebKit
+encrypts persisted `CryptoKey`s under a per-application "WebCrypto master key" it keeps as a
+Keychain generic password **whose ACL is bound to the code signature of the binary that created
+it**. `shell-macos/build.sh` ad-hoc signs, **D1 says ship unsigned**, and LZP-102's updater
+replaces the bundle — so on that path a user would have to **re-pair after every update**, and the
+symptom is built to be missed: the error goes to the process's *stderr* where the page cannot see
+it, and plain values in the same database survive untouched.
+
+A stable Developer-ID signature makes the ACL survive. **That turns code signing from a packaging
+preference into a hard requirement of the custody design**, and it is the first argument that puts
+a cost on *not* reversing D1 (which is explicitly reversible: a cert and two GitHub secrets, no
+code change).
+
+It also produced a real fix to `tests/run-dom-tests.sh`: the tier-2 build is re-identified as
+`org.langzeitplaner.domtest` before launch, so WebKit's website data store — localStorage **and**
+IndexedDB — is genuinely isolated from the installed app. **It was shared before**, and clearing
+the production master-key item would have orphaned a real installation's device keys.
+
+## The guarantee suite
+
+`tests/tier1/crypto-guarantees.test.js` — **one test per numbered product promise** (21.1 ·
+21.2/20.5 · 20.2 · 16.7 · 19.4 · 19.5 · A2/D8 · 15.1), each end to end through the real public API,
+because a guarantee is a claim about a **composition** and a composition can be false while every
+module in it is green. All eight pass and **each was mutation-tested**.
+
+Two of them are worth knowing about by name:
+
+- **20.2 asserts the honest limit in the same test as the guarantee.** Removal is forward-only: the
+  removed member keeps `FSK_1` and every envelope she already synced. **UI copy that says „sieht
+  deine Einträge nicht mehr" without „ab jetzt" is false**, and that row is what keeps the sentence
+  honest.
+- **15.1 is asserted in the two forms it can actually be false**, because breaking it produces no
+  error, no delay and no wrong answer: nothing under `src/js/crypto/` is *reachable* from
+  `boot.js`/`firstrun.js`/`main.js` (an `import` is evaluated whether or not anyone calls the
+  function), **and** importing the whole crypto layer draws **zero** CSPRNG bytes and makes **zero**
+  `generateKey`/`deriveBits` calls. Both halves are proved non-vacuous.
+
+## What to build next, and what blocks it
+
+1. **WP-8 (the outbox/inbox)** is unblocked for crypto, with three obligations it must not skip:
+   add **`PARK_REASONS.ATTESTATION`** to `core/ops.js` (finding **E3-3** / F-6 — `authz.js:671`
+   rejects and `store.js:699-703` drops without appending, so a parked op is never re-evaluated);
+   pass **`ctx.attestation`** to `sealOp`; and be able to hold a **sealed, never-decrypted
+   envelope** for both park reasons.
+2. **WP-10 (`core/project.js`)** — `PROJECT_CONTRACT` in `envelope.js` is the spec, executable, and
+   `crypto-envelope.test.js` runs a conforming miniature projection against it. **Until it lands,
+   no family `pub.set` can be sealed at all** — deliberately.
+3. **WP-7** owes an attested **`RK_kex`** (E3-2), the four `/api/v1/pair/*` endpoints, one
+   reconciled rate-limit policy (E3-5), and **invites** — noting that `sealInviteKeys` /
+   `openInviteKeys` are **retired by D9 and must not be built**, enforced in code by
+   `RETIRED_INFO` and by `buildRotation` refusing an invite that carries key material.
+4. **WP-9** owes the `dev.*` register writes and **unpairing** — which does not exist, because
+   `dev.*` is write-once and there is **no revocation anywhere**. A „Gerät entfernen" button can
+   only stop future key distribution, and the UI string must say the smaller true thing.
+
+## Two things E3 did not close, on purpose
+
+- **I-3 / R5-7 is still open**, and FINDINGS §4.5 predicted exactly this: E3 shipped **P2** as a
+  MUST, and **P2 buys self-consistency, not identity**. `sigPubRaw` is a public key travelling in
+  the victim's own register; the squatter copies it, tells the truth about it, and passes. Option
+  (a) — first-claim on `(sigPubRaw, deviceShort)` in `core/authz.js` — is still the only answer.
+  `openOp` is built to survive the gap: it treats `attestationOf` as a **partial function** and
+  **parks**. Characterization rows named *"I-3 / R5-7 IS STILL OPEN"* exist in **both tiers**.
+- **The Tauri shell is WRITTEN-UNVERIFIED and cannot be otherwise here** — there is no Rust
+  toolchain on this machine, so `src-tauri/` cannot be compiled at all. `E3-VERIFICATION.md` §6 is
+  the checklist for the first machine with `cargo`; the first item on it is a **security**
+  difference, not a style one (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`).
+
+## One decision owed from the PO
+
+**E3-6 — should the backup's board block be authenticated?** It is not, today. With a passphrase a
+board digest could be bound into the AAD, but **the board-only export path has no key at all**, so
+the guarantee would hold on one of two paths — worse than one stated plainly. Stated instead, in
+German and English, as `LIMITS.boardNotAuthenticated`, and pinned by a characterization row. The
+keys are unaffected: a modified file will not open at all. **Say the word and it is a small change
+plus a re-derivation of the AAD.**

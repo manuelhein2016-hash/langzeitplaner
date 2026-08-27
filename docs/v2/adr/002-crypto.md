@@ -168,6 +168,26 @@ explicit in the LZP-1005 harness contract.
 > `app://localhost` scheme. If it does not, fall back to `identity.enc` in Application Support,
 > AES-GCM-wrapped under the Keychain `DEK`, with `extractable: true` device keys — and record the
 > downgrade in `DESIGN-DECISIONS.md`, because it is a real reduction in T3 resistance.
+>
+> **ANSWERED 2026-08-27 — YES. No downgrade; nothing to record in `DESIGN-DECISIONS.md`.**
+> Proved by **two separate launches of the real shell**, not by one process writing and reading
+> its own memory: `tests/tier2/crypto-keystore-phase1.dom.js` performs a full
+> `ensureDeviceIdentity` and its process exits; `-phase2.dom.js` is a **new process** that reads
+> it back. The restored key has `extractable === false`, `exportKey('pkcs8'|'jwk')` still
+> **rejects**, a signature it makes verifies under the public point the *previous* process
+> recorded, `deviceShort` is unchanged, and `ensureDeviceIdentity` **adopts** rather than mints.
+>
+> **⚠ One condition this ADR did not know about, and it is load-bearing.** WebKit cannot
+> structured-clone a `CryptoKey` without the login Keychain: the persisted key is encrypted under
+> a per-application "WebCrypto master key" WebKit keeps as a Keychain generic password **whose
+> ACL is bound to the code signature of the binary that created it**. Re-sign or rebuild the app
+> and WebKit can no longer read it — it logs `Cannot store WebCrypto master key, error -25299` to
+> the process's *stderr* where the page cannot see it, `put()` then rejects with `DataCloneError`,
+> and **previously stored keys read back as `null`** while plain values in the same database are
+> untouched. So §2.2's framing that IndexedDB custody *avoids* depending on the Keychain is only
+> half true: on WebKit the Keychain is a **prerequisite** of the primary store. Combined with
+> **D1 (ship unsigned)** and LZP-102's bundle-replacing updater, every device key would become
+> unreadable after an update. → **finding E3-1**, `docs/v2/FINDINGS.md`; owner WP-8 / LZP-102.
 
 ### 2.3 Device attestation — the anti-key-injection measure
 
@@ -460,7 +480,7 @@ unparks it, and because merge is set-based, unparking late is harmless.
 ```jsonc
 {
   "v":   1,
-  "sp":  "fsp_9xQ2mR7bL0aZ4tV8wK",       // spaceId
+  "sp":  "fsp_6PcRpKuaml6yt5QfS5v8Aw",   // spaceId — 'fsp_'/'psp_' + 22 b64url, per core/entities.js
   "ep":  3,                              // key epoch
   "dv":  "7QAR2MZ9XKPNC0GV",             // deviceShort of the author
   "oid": "8Kx2Qm7bR0aZ4tV9wLpNcg",       // opId — random, NO time component
@@ -470,6 +490,12 @@ unparks it, and because merge is set-based, unparking late is harmless.
   "sig": "MEUCIQ…"                       // ECDSA P-256/SHA-256 over aad ‖ iv ‖ ct
 }
 ```
+
+> **CORRECTED 2026-08-27, E3 integration.** The `sp` above previously read
+> `"fsp_9xQ2mR7bL0aZ4tV8wK"` — 18 characters after the prefix, where `core/entities.js`'s
+> `SPACE_ID_RE` requires 22, so the ADR's own example did not satisfy the ADR's own regex. It
+> was copied into a fixture at least once. `oid`, `dv` and the rest are valid as written; only
+> the space id was wrong. The regexes are normative, the examples are illustrations.
 
 ```js
 // src/js/crypto/envelope.js — DOM-free

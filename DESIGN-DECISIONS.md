@@ -225,7 +225,12 @@ answered. This section is WP-0's exit criterion.
 | D6 | Path A or Path B | **A** — forced by reality; v1 exists as working code |
 | D7 | LZP-901's impossible server-side ownership check | Client-side + structural ownership |
 | D8 | Identity keys in the backup file | **Passphrase-encrypted** |
-| D9 | Invite carries wrapped family keys | **No — admin's device must be online** |
+| D9 | Invite carries wrapped family keys | **No — an existing member device must be online** ¹ |
+
+¹ Corrected 2026-08-27 (E3 integration). This row read "the admin's device must be online"; ADR 002
+§7.1 step 4 says **any existing member device, not only the admin's**, and it is later and gives the
+reason — a two-person family would otherwise depend on one sleeping laptop. The decision itself is
+unchanged; only the assumption about *whose* Mac is. See the corrected paragraph under D9 below.
 
 ## D1 — unsigned, with the guided unlock screen
 
@@ -267,8 +272,18 @@ loses the backup** — there is no reset, by design (Section 3's Option-B trade)
 ## D9 — invites do NOT carry wrapped keys
 
 The tighter of the two options, chosen deliberately. A leaked invite email is **never**
-sufficient to read family content; the admin's device must be online to wrap the family keys
-to the joiner's device key.
+sufficient to read family content; **an existing member's device** must be online to wrap the
+family keys to the joiner's device key.
+
+> **CORRECTED 2026-08-27, E3 integration.** The sentence above originally said *"the admin's
+> device must be online"*. ADR 002 §7.1 step 4 says **any existing member device — not only the
+> admin's**, and it is the later document and the one that gives the reason: a two-person family
+> would otherwise be blocked whenever one particular laptop was asleep, which is the failure this
+> decision's own cost paragraph is trying to bound. The delivered code enforces the ADR
+> **structurally rather than by convention**: nothing in `src/js/crypto/spacekeys.js` takes a
+> role, an `isAdmin` flag or an admin id, and `tests/tier1/crypto-spacekeys.test.js` asserts that
+> no export names one. Steps 1–4 below are unchanged except that step 3's "the admin's device"
+> is likewise **any member device**; nothing else about D9 moves.
 
 The cost is real and lands on the flow the addendum cared most about. Story 15.3 promises a
 non-technical family member "gets in within a minute". With D9 that is now conditional on the
@@ -277,13 +292,13 @@ admin's Mac being awake, so the join flow **must not hang or lie**. Required beh
 1. Mom pastes the code, picks name and colour, and is **immediately a member** — the code
    redeems against the server, her device key is published, the member list shows her.
 2. Her board then enters an explicit, calm **waiting state**: she is in the circle, and the
-   family entries appear as soon as the admin's Mac next syncs. German-first copy, one line,
+   family entries appear as soon as ANY member's Mac next syncs. German-first copy, one line,
    no spinner on the board (19.3's "silence is the design" still governs).
-3. The admin's device wraps the keys on its next sync — no action required from the admin, no
-   notification demanded of them. It must not need the admin to *notice* anything.
+3. The next member device to sync wraps the keys — no action required from anyone, and no
+   notification demanded of them. It must not need any particular person to *notice* anything.
 4. Only then do shared entries decrypt and appear.
 
-This turns a 60-second flow into a two-step one whenever the admin is asleep. It is the price
+This turns a 60-second flow into a two-step one whenever every other Mac is asleep. It is the price
 of the guarantee, and the UI states it rather than hiding it. Deliverable 25 (empty states)
 gains this waiting state; deliverable 15 (the join flow) must show it as a designed screen.
 
