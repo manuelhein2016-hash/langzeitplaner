@@ -1,9 +1,11 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-27 · **Stopped at:** rounds 4 and 5 fixed, integrated and verified; the
-register is caught up with them
-**Resume by reading:** this file (start at the **session 4 addendum** at the bottom), then
-`docs/v2/FINDINGS.md` §1 and §4, then `docs/v2/adr/006-board-log-authority.md`, then `PLAN.md`.
+**Last session:** 2026-08-27 · **Stopped at:** **E3 — identity and crypto — is built, proved in the
+real WKWebView, and integrated** (LZP-302…306); round 6 fixed, integrated and verified against an
+**enumerated input domain**; the register is caught up with rounds 6 and 7
+**Resume by reading:** this file (start at the **E3 addendum** at the bottom), then
+**`docs/v2/E3-VERIFICATION.md`**, then `docs/v2/FINDINGS.md` **§2e**, §1, §4 and §7d, then
+`tests/helpers/domains.js`, then `docs/v2/adr/006-board-log-authority.md`, then `PLAN.md`.
 
 ---
 
@@ -26,11 +28,22 @@ identity (ADR 002 §2.2). Until that lands no fleet test means anything.
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-npm test              # tier 1, pure logic          → 1374 pass / 0 fail   (101 suites)
-npm run test:attack   # adversarial corpus          →  512 pass / 0 fail   ( 63 suites)
-npm run test:property # property harness, 500 seeds →   51 pass / 0 fail
-npm run test:dom      # real headless WKWebView     → 15 files, tier 2 PASS
+npm test              # tier 1, pure logic          → 1665 pass / 0 fail   (101 suites)
+npm run test:attack   # adversarial corpus          →  566 pass / 0 fail   ( 74 suites)
+npm run test:property # property harness + domains  →   62 pass / 0 fail
+npm run test:dom      # real headless WKWebView     →   22 files, tier 2 PASS
 ```
+
+**Re-measured 2026-08-27 at the close of the round-7 integration pass — all four fully green.**
+The tier-1 count includes the **parallel WP-6 crypto workflow**'s untracked files, which is why it
+moves between runs; that workflow owns `src/js/crypto/`, `src/js/platform/keystore.js` and the
+shells' Keychain bridge, and nothing in the round-6/7 fix pass touched any of them.
+
+**`npm run test:property` now includes `tests/property/domains.test.js`** — 11 properties that walk
+all **310 enumerated inputs**. If you change anything in `src/js/store.js`'s boot path,
+`src/js/storage.js`, `core/oplog.js`'s indexes or `core/migrate1to2.js`'s coercion, **run that file
+first**: it is the artifact that says what the *required* behaviour is, and it reports a
+regression as `UNEXPECTED` and a stale work order as `STALE`.
 
 **Re-measured 2026-08-27 after the round-5 integration pass** — these are the current numbers.
 (The 1360 / 340 / 51 / 278 figures below are the *first fix pass*'s and are kept because the
@@ -445,3 +458,144 @@ and the two new quarantine reasons.
 - **I-6** — `quarantineLogAside` on the native path still cannot move anything. Much less pressing:
   a failed boot never sequesters at all now.
 - **F-5 / R5-5b** — folding an adopted checkpoint through `applyRemote`'s gate. WP-8.
+
+---
+
+# Session 5 addendum — 2026-08-27 · round 6, and the method that finally closed it
+
+**Read this first, and read it before you read the fixes.** Round 6 ran against the op-log core and
+the retrofit. Its findings were closed by three parallel fixers and one integration pass, and all
+four suites are green: **`npm test` 1665/0 · `test:attack` 566/0 · `test:property` 62/0 ·
+`test:dom` 22 files, tier 2 PASS.**
+
+**Per-domain, every enumerated input gets its required behaviour:** D1 94 + D1_RECOVERY 8 · D2 44 ·
+D3 5 · D4 14 · D5 4 · D6 141 = **310 entries, 0 UNEXPECTED, 0 STALE, 0 `openFinding` remaining.**
+
+## THE PROCESS CHANGE — this is the part that matters, and it is now a rule
+
+**`tests/helpers/domains.js` is the required method for ADR 006 §5/§7/§9.** Not a suggestion, not
+a nice-to-have: **the required method.** It is recorded in FINDINGS **§7d** and in ADR 006 **§10**.
+
+Five consecutive rounds each **relocated** the same failure rather than closing it, and round 6's
+closing verdict named why:
+
+> The fixes are still being chosen a branch at a time, and the branch is chosen before the input
+> domain is written down. R6-5a is the sharpest instance: round 5 replaced "is raw null?" with a
+> careful five-way classifier and wrote out four of the five kinds in a docblock — and `''` still
+> went to the wrong one, because the enumeration was of **branches** (ok/absent/unparseable/
+> not-a-board/read-failed) rather than of **bytes**.
+
+**So: enumerate the INPUT DOMAIN first, exhaustively, as data. Then choose behaviour per input.
+Then property-test over the domain.** `tests/helpers/domains.js` holds **310 entries** across six
+domains (D1 bytes × sources, D2 stamps × authorship, D3 provenance, D4 checkpoint growth, D5 array
+order, D6 date strings by sort position), each `{id, value, label, expect, openFinding}` where
+`expect` is the **required** behaviour. `tests/property/domains.test.js` walks every entry and
+never stops at the first failure: it splits deviations into **UNEXPECTED** (a regression),
+**STALE** (a finding is named but the entry now holds — *the work order is lying*), and the work
+order itself.
+
+**It worked, measurably.** The enumeration opened with a **51-entry work order** and 0 unexpected,
+0 stale. All 51 are closed; `openFinding` is `null` on all 310 entries; every property is green.
+
+**And it found two things six adversary rounds did not:**
+
+1. **Round 6's closing "content is safe" is wrong.** `D1-b18` — `{"_v2":{lineageId:<the victim's>,
+   gen:N}}`, an object that is nothing but ADR 006's envelope — classified `ok`, matched
+   `same-lineage`, **adopted the log**, and made `_reconcileOntoBoard` mint **nine well-formed
+   `{_alive:false}` retractions**, both committed. Every other row in the register costs *history*.
+   That one costs **the calendar** — and at WP-8 what propagates is not a corrupt file but deletes
+   this app minted itself. **`Array.isArray` was the entire guard.** → FINDINGS **R6-5**, CRITICAL.
+2. **A premise correction in the *permissive* direction**, which is the one that proves the method
+   is not just a ratchet. FINDINGS §4.6's open decision — *a bar edge with no faithful v2 value* —
+   turned out to be **misstated**: the collision with finding 6 is a question about *which field*,
+   not about which fidelity. **§4.6 is closed and no PO ruling is owed.**
+
+## What was closed
+
+| row | severity | one line |
+|---|---|---|
+| **R6-5** | CRITICAL | ADR 006's precondition had a hole on **both** sides: a **zero-byte** `board.json` was `absent` (so a truncated write took the one branch that may adopt a log), and **any** JSON object was a board (so the envelope-only object emptied the calendar and minted the deletes) |
+| **R6-4** | HIGH | One op parked for a bad clock quarantined **the entire history**, on every launch until the stamp passed — with `_opsPersisted = false`, so the device recorded nothing meanwhile. And the park was decided **before** authorisation, so a stranger could trigger it with a date |
+| **R6-3** | HIGH | The bound on `ops.jsonl` was purchased with an **unbounded `checkpoint.json`**: `bodies` was the one index `pruneSeqIndex` stepped over, and it is serialized into the file rewritten on every debounced save |
+| **R6-10 / R6-11** | HIGH / MEDIUM | A bar edge sorting **inside** the rendered range was dropped; **2 414 of 9 104** measured cases painted the wrong columns. Closed by one rule over the whole alphabet instead of a three-way split |
+| **R6-7** | MEDIUM | The reconciler could not mint a **position**, so restoring an older `board.json` put a deleted entry back at the **end** of the list instead of where the user had it |
+| **R6-6** | MEDIUM | The inverse of R5-3's caution: a recovery that **failed** fell out as an empty, **writable** board — while `snapshots.json` sat loaded and unread |
+| **R6-2** | LOW | ADR 001 §7.2's 2 MB-at-launch compaction trigger was never implemented (≈3 MB in ≈260 lines, nowhere near the line cap) |
+| **R6-7e** | LOW | ADR 006 §9.3's W2 contradicted §7's own table. §7 is right; W2 conflated the local binding with the stamps on a re-derivation. **Amended** |
+
+## The headline checks, measured at integration
+
+- **(a)** A **foreign** op stamped +48 h becomes **0 lines**, reaches `checkpoint().parked` **0**
+  times, and the next launch has `quarantine === null` with the history adopted and `reconciled 0`.
+  The refusal is reported **by name** (`notMyAct`), and no warning names this Mac's clock. The
+  user's **own** device at +48 h is still **parked** — the park survives the re-read, the future
+  value never reaches the screen, and it still costs that op and nothing else.
+- **(b)** `checkpoint.json` over **10 sessions × 400 edits** on a one-note board: 5 996 B → **75 000
+  B at the first compaction that fills `bodies`, then flat to within 1 byte** while ops-ever goes
+  2 000 → 4 000. The control — the same 4 000 ops on 1/5/25/100/400-note boards — holds `bodies` at
+  the cap in every row, so all the variation is the register, i.e. the board. **Honest statement of
+  the bound: `O(board) + O(min(ops-ever-compacted, 1500))`** — bounded and flat, *not* proportional
+  to board size, with a ≈75 KB constant a small board pays once it has been edited 1 500 times.
+  That constant is pinned by D4 and by a tier-1 row on `BODY_FINGERPRINT_CAP`, so drift is red.
+- **(c)** A **zero-byte** `board.json` beside a stranger's *legitimate* log: `bootFailure` is
+  `board-unparseable`, `_adopted` is **null**, the stranger's note is **not** on screen, the
+  snapshot stands in, the log is quarantined `board-unreadable` and **not** renamed, and a persist
+  **moves not one byte**.
+- **(d)** Delete the middle of three notes, then restore the older `board.json`: `quarantine` null,
+  **exactly 1 op** reconciles the difference, the note is **back** and the order is `a, b, c` — and
+  the **second** launch reconciles **0**, so it converged rather than re-minting every launch.
+
+## Mutation testing
+
+**Twelve mutants**, applied to a fresh scratch copy at the round-7 head, reset between rows, all
+three node suites re-run each time. **Every one is lethal and every one names the row it kills** —
+the table is FINDINGS **§7a-round7**. The seven the brief names by letter (F1 bodies-pruning, F2
+`_clockSkew` liveOnly, F3 `''` unparseable, F4 object shape gate, F5 empty-projection fallback,
+F6 order clause, F7 bar-edge floor) are all included, along with five near-misses that distinguish
+a real fix from one that merely passes.
+
+**Three mutants initially killed nothing**, which is the part worth remembering: the rows had to be
+rewritten against the input that *distinguishes* — a **superseded** op, and a spliced id that still
+holds a line at eviction time. And a fourth (`_standIn`'s snapshot set to `null`) reddens **eleven**
+attack rows, so story 11.5 is now genuinely load-bearing on the disaster path rather than merely
+claimed to be.
+
+## What this pass found itself
+
+**R7-1, open, LOW.** R6-6's fix added a **fourth** boot outcome to a **three**-valued
+`diagnostics().source`, and it reports `'board.json'` — documented as *"solo mode, or the log was
+quarantined"* — about a boot where there is **no `board.json` at all**. Its twin (§5.6's read-only
+boot over a zero-byte board) reports `'recovery'` for the same picture. Two rules are implemented
+at once, and the comment justifying the second is verbatim the argument that condemns the first.
+**Diagnostics only** — `bootFailure.reason` and `recoveredFrom` carry the whole truth. **Filed, not
+patched**: widening a documented contract field belongs to `store.contract.js`'s owner, and jamming
+a fourth outcome into whichever of three values fits least badly is the exact move §7d exists to
+stop.
+
+## Process, again — and it is the same item as last session
+
+**`src/js/store.js` had three concurrent editors this round.** All three used surgical
+unique-anchor edits, all three landed cleanly, and each proved its own changes green in isolation —
+but that is care, not process, and it is the second round running. `store.js` is 2 400 lines and is
+the file every round's fixes land in. **It needs splitting, or one owner per round with the other
+fixers handing it patches.** → FINDINGS §8 item 11.
+
+The other standing lesson held: **a fixer reporting "left for another agent" is reporting unowned
+work**, and this pass landed all of it — ADR 006 §5.5's outcome enumeration, §5.6's table,
+§9.3's W2, INV-20, §10's method note, ADR 001 §7.2's two halves, and the register itself, which had
+**no `R6-*` rows at all** before this pass.
+
+## Still owed (full list in FINDINGS §8)
+
+- **R7-1** — the fourth `source` value (item 12).
+- **A `clock-skew` residual with no escape hatch**: a local clock set a *year* forward and then
+  corrected leaves live register stamps a year ahead, so the log is deferred-quarantined **for a
+  year** with no user action that helps. Content is whole throughout. **It needs a domain of its
+  own before it needs a fix** (item 13).
+- **`seen` is unbounded in-session** — ≈150 KB RAM at 6 400 ops, bounded across restarts by
+  `bodies`' cap (item 14).
+- **A settings pane for `recovery-unusable`'s copy**, which is written and unrendered — the same
+  owed surface as F-8's consumer (items 1 and 15).
+- **A WP-8 cross-device invariant on the interpolated `_born`** (item 16).
+- **I-6** — `quarantineLogAside` on the native path still cannot move anything. Less pressing
+  again: neither a failed boot nor a failed recovery sequesters.

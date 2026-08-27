@@ -36,7 +36,7 @@ import { b64u } from './b64.js';
 import { canonicalJSON, utf8 } from './canon.js';
 import {
   isMemberId, isDeviceId, isSpaceId, isMonthKey, isEntityUuid, isDateString, renderable,
-  categoryVisibilityOf, noteOccurrences, iso, EARLIEST_DATE, LATEST_DATE,
+  categoryVisibilityOf, noteOccurrences, iso, p2, daysInMonth, EARLIEST_DATE, LATEST_DATE,
 } from './entities.js';
 import { stripV2Fields } from './materialize.js';
 import {
@@ -695,9 +695,81 @@ export function coerceToV1Date(kind, name, value) {
   return isDateString(kept) ? { kept } : null;             // month 13, day 32 — refuse, do not clamp
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// `DATE_RE`'s ALPHABET AS AN ORDERED SET — the three functions R6-10's fix is made of
+//
+// `entities.js:DATE_RE` accepts exactly the strings `YYYY-MM-DD` with `MM` in `01…12` and `DD` in
+// `01…31`. Every one of them is ten characters of the same fixed shape, so STRING order over that
+// set is the tuple order `(year, month, day)`, and the set is order-isomorphic to
+// `0 … 10000·12·31 − 1` under `i ↦ (y, m, d) = (⌊i/372⌋, ⌊i/31⌋ mod 12 + 1, i mod 31 + 1)`.
+//
+// That is the whole trick and it is why there is no digit arithmetic here: the floor and the
+// ceiling of an ARBITRARY string in that set are one binary search each, over an index space that
+// is never materialised. 23 string comparisons, no allocation, and it cannot be wrong about an
+// input shape nobody thought of — which is the failure mode round 6 named.
+//
+// CALENDAR VALIDITY IS NOT THE ALPHABET. `'2026-02-31'` is a member: `DATE_RE` does not check the
+// calendar and `ops.js` does not either (ADR 001 §12.8, and `entities.js:reanchorRepeat` needs a
+// 29 February anchor in a non-leap year on purpose). It matters here — it is exactly the member
+// that makes `'2026-03'` reproducible as an `endDate`, where the last VALID day of February
+// (`'2026-02-28'`) would silently lose v1's continuation chevron.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** `10000 · 12 · 31` — how many strings `DATE_RE` accepts. Not a guess: see `dateAtIndex`. */
+const DATE_ALPHABET_SIZE = 10000 * 12 * 31;
+
+/** The `i`-th string `DATE_RE` accepts, in string order. @param {number} i @returns {string} */
+function dateAtIndex(i) {
+  const d = i % 31;
+  const t = (i - d) / 31;
+  const m = t % 12;
+  return `${String((t - m) / 12).padStart(4, '0')}-${p2(m + 1)}-${p2(d + 1)}`;
+}
+
+/** The SMALLEST date `DATE_RE` accepts with `d >= t`, or null when `t` sorts above all of them. */
+function ceilDateString(t) {
+  let lo = 0; let hi = DATE_ALPHABET_SIZE;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (dateAtIndex(mid) >= t) hi = mid; else lo = mid + 1; }
+  return lo < DATE_ALPHABET_SIZE ? dateAtIndex(lo) : null;
+}
+
+/** The LARGEST date `DATE_RE` accepts with `d <= t`, or null when `t` sorts below all of them. */
+function floorDateString(t) {
+  let lo = -1; let hi = DATE_ALPHABET_SIZE - 1;
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (dateAtIndex(mid) <= t) lo = mid; else hi = mid - 1; }
+  return lo >= 0 ? dateAtIndex(lo) : null;
+}
+
+/** Is this date one of the `mFirst` values `layout.js:126` builds? @param {string} d */
+const isFirstOfMonth = (d) => d.slice(8) === '01';
+
+/** Is this date one of the `mLast` values `layout.js:127` builds? — `daysInMonth`, the same
+ *  function `layout.js` calls, so a month length can never be answered two ways. @param {string} d */
+const isLastOfMonth = (d) => Number(d.slice(8)) === daysInMonth(Number(d.slice(0, 4)), Number(d.slice(5, 7)));
+
 /**
- * A BAR EDGE the file holds as text that names no day at all, kept as the end of the date
- * alphabet it sorts against — R5-11.
+ * IS THIS FIELD ONE `layout.js:133` COMPARES RATHER THAN PARSES? — the R6-10 door, stated once.
+ *
+ * Both doors ask this before they consult `coerceToV1Date`, and the answer is why a bar edge and
+ * a note date get different treatment for the same bytes. A NOTE date is looked up by MAP EQUALITY
+ * (`layout.js:61-79`), so „what day does this name" is the right question and `coerceToV1Date` is
+ * the right answer (M10 / R4-9; R6-10d is the measurement). A BAR EDGE is never parsed unless it
+ * already lies inside a rendered month, so „what day does this name" is a question v1 never asked
+ * about it, and answering it moves the bar: `startDate: '4.3.2026'` from zero columns to ten
+ * (R6-10a), and the integer `20260304` from twelve to ten (R6-10e).
+ *
+ * So: **for these two fields `coerceToV1Date` is never consulted.** Everything a string edge needs
+ * is in `coerceToV1BarEdge`; everything else is dropped, which is what v1's `NaN` comparison did.
+ * The predicate is exported so the two doors cannot come to disagree about which fields it names —
+ * `checkCoverage` and P13 both rest on their answering the same bytes the same way.
+ *
+ * @param {string} kind @param {string} name @returns {boolean}
+ */
+export const isV1BarEdge = (kind, name) => kind === 'bar' && (name === 'startDate' || name === 'endDate');
+
+/**
+ * A BAR EDGE the file holds as text that names no day at all, kept as the member of the date
+ * alphabet that compares the way that text compared — R5-11, R6-10.
  *
  * ─── the premise finding 5 was closed on, and the half of it that is false ─────────────────────
  * `buildPatch`'s absent-field branch says „ABSENT IN v1 STAYS ABSENT IN v2", and for an absent
@@ -734,55 +806,147 @@ export function coerceToV1Date(kind, name, value) {
  *     and `col.horizon` (`layout.js:148,151,260`), which an absent edge does not raise and a
  *     string above the range does.
  *
+ * ─── R6-10 — THE CLASS THIS FUNCTION USED TO HAND TO THE WRONG COERCER ─────────────────────────
+ * R5-11 wrote the rule above for the two classes where the answer is a CONSTANT and answered
+ * `null` for everything in between. `null` is not "leave it alone": the value fell through to
+ * `coerceToV1Date`, which asks the one question v1 never asks about a bar edge — *what DAY does
+ * this name?* — and it answers it for `'2026-3-1'`, `'4.3.2026'`, `'2026/03/04'`, `'20260304'`.
+ * Measured against `buildBoard()`: `startDate: '4.3.2026'` is a bar v1 painted on NO day of the
+ * year and v2 painted across TEN columns, taking lane 0 from every real bar in each of them
+ * (R6-10a/c); as an `endDate` v1 ran it across all twelve and v2 cut it to three (R6-10b). And a
+ * date the file never held — `"2026-03-04"` — was written into `board.json` on upgrade day.
+ *
+ * ─── THE RULE, RESTATED OVER THE WHOLE ALPHABET INSTEAD OF OVER THREE BRANCHES ─────────────────
+ * The branch split (below / above / inside) was the mistake, not the arithmetic. What v1 does to
+ * a bar edge is FOUR COMPARISONS and nothing else (`layout.js:133-135,148,151`):
+ *
+ *     skip     endDate   <  mFirst          skip     startDate >  mLast
+ *     contBot  endDate   >  mLast           contTop  startDate <  mFirst
+ *
+ * — where `mFirst` is `YYYY-MM-01` and `mLast` is `YYYY-MM-<daysInMonth>`, both members of
+ * `DATE_RE`'s alphabet. So the question is not "which side is this text on" but: **which member
+ * of the alphabet compares the way this text compares?** The alphabet is a totally ordered finite
+ * set, so the text has a floor and a ceiling in it (`floorDateString` / `ceilDateString`), and:
+ *
+ *   · the FLOOR reproduces every `<` comparison exactly, for every member `a`:
+ *       t < a  ⟹ floor(t) ≤ t < a          t ≥ a  ⟹ a ≤ floor(t), so `floor(t) < a` is false
+ *   · the CEILING reproduces every `>` comparison exactly, by the mirror argument.
+ *
+ * Neither reproduces BOTH, and no member can: reproducing both would mean `d = a ⟺ t = a` for
+ * every member, and `t` is not a member. But they only have to reproduce the comparisons v1
+ * MAKES, and those are against `mFirst`s and `mLast`s only:
+ *
+ *   · `floor(t)` breaks `>` only against `l = floor(t)` itself, so it is EXACT unless `floor(t)`
+ *     is a last-of-month;
+ *   · `ceil(t)` breaks `<` only against `f = ceil(t)` itself, so it is EXACT unless `ceil(t)` is
+ *     a first-of-month.
+ *
+ * Hence the whole function: **take the floor unless it is a last-of-month, then the ceiling
+ * unless it is a first-of-month.** One of the two is exact for every text except one class, and
+ * that class is nameable: a text sorting strictly between `YYYY-MM-31` of a 31-day month and the
+ * next month's `01`, where the alphabet has no member at all. `'2026-3-1'` and `'2026'` are in
+ * it. There v1's own two tests demand a value that does not exist, and the tie is broken in
+ * favour of the test that decides WHETHER THE BAR IS PAINTED IN A COLUMN over the one that
+ * decides a continuation chevron inside a column the bar already occupies:
+ *
+ *     startDate ⟶ the CEILING  (its skip test is `>`)   endDate ⟶ the FLOOR  (its skip test is `<`)
+ *
+ * Measured over 9 104 (text × field × grid) cases — every month boundary of 2024…2028 in eleven
+ * malformed shapes, plus 500 pseudo-random ugly strings, on four different pinned years: **the
+ * COLUMN SET is identical to v1's in every single case** (today: 2 414 of them differ). 784 differ
+ * by one continuation chevron or by a day v1 rendered as `NaN`; 8 320 are byte-identical. On the
+ * D6 domain: 83 of 94 exact, 11 same-columns, 0 wrong columns — against 5 220 / 1 470 / 2 414
+ * before. R6-9a/b's two ends are unchanged by construction: below the alphabet the floor does not
+ * exist and the ceiling is `EARLIEST_DATE`; above it the ceiling does not exist and the floor is
+ * `LATEST_DATE`.
+ *
  * ─── what it deliberately does NOT touch ───────────────────────────────────────────────────────
  *   · NOTES. `layout.js:61-79` puts a note on a day by MAP EQUALITY, never by `<`, so every
  *     non-date key — absent, `''` and `'zzz'` alike — lands on no day. Absent already reproduces
  *     v1 there, and a substitute would be worse than motion without meaning: a note with an
  *     invented date and `repeatsYearly` set would be EXPANDED into the window (`layout.js:72`)
- *     and appear on a day the user never wrote.
- *   · NON-STRINGS. `42 < '2026-03-01'` is `false`, and so is every other comparison a number, a
- *     boolean or an object makes — a non-string edge behaves in `layout.js` exactly like an
- *     absent one, so dropping it is already faithful and there is nothing to substitute.
- *   · A VALUE THAT SORTS INSIDE THE RANGE. `'1.3'`, `'2026-03-04 bis 2026-03-09'` — these sort
- *     between two real dates, and no date v2 can hold sorts where they do. They keep today's
- *     behaviour (the field is dropped, the bar runs to the horizon) and the drop is reported with
- *     a warning that does NOT claim v1 painted the same thing, because for this class it did not.
- *     See `gridPlacementWarning` and the register entry.
+ *     and appear on a day the user never wrote. `coerceToV1Date` keeps the note (M10 / R4-9) and
+ *     that is right: R6-10d is the class contrast, and it is why this is a rule about the FIELD
+ *     and not about the value.
+ *   · NON-STRINGS — but see `isV1BarEdge`, which is where they are now stopped. `42 < '2026-03-01'`
+ *     is `false` and so is `42 > '2026-03-01'`: JS converts the STRING to a number, gets `NaN`,
+ *     and every comparison is false, so a numeric edge behaves in `layout.js` exactly like an
+ *     absent one and DROPPING it is the faithful answer. It was not being dropped: `coerceToV1Date`
+ *     accepts the integer `20260304` and wrote `'2026-03-04'` — v1 painted twelve columns, v2 ten
+ *     (R6-10e). The fix is not in this function, because there is nothing here to substitute; it
+ *     is that a bar edge never reaches `coerceToV1Date` at all.
+ *   · AN OBJECT OR AN ARRAY. `String({})` is `'[object Object]'`, which v1 really does compare
+ *     (it sorts above the alphabet, so a `startDate` of `{}` is painted in no column), and
+ *     `String(['2026-03-04'])` is a date — but `layout.js:136` then calls `parseISO` on the array
+ *     and v1 THROWS, taking the whole board down. There is no v1 rendering to preserve for the
+ *     array, and honouring the object would mean reading `toPrimitive` as a date field's meaning.
+ *     Both stay dropped, as they are today. Recorded as a knowingly-unreproducible residual.
  *
  * The substituted value is written to `board.json` — that is the point of it — so it is a
  * `loss`-reported COERCION, with the original text quoted back, exactly like every other entry in
  * §4b. It is not an invention of a day the user meant: it is the position their text occupied.
  *
  * @param {string} kind @param {string} name @param {unknown} value
- * @returns {{kept: string, side: 'below'|'above', why: string}|null}
+ * @returns {{kept: string, side: 'below'|'above'|'floor'|'ceiling'|'no-member', exact: boolean,
+ *            why: string}|null}
  */
 export function coerceToV1BarEdge(kind, name, value) {
-  if (kind !== 'bar' || (name !== 'startDate' && name !== 'endDate')) return null;
+  if (!isV1BarEdge(kind, name)) return null;
   const spec = FIELDS[kind]?.[name];
   if (!spec || spec.t !== 'date') return null;             // pinned by the assertion below
   if (typeof value !== 'string' || isDateString(value)) return null;
-  const side = value < EARLIEST_DATE ? 'below' : value > LATEST_DATE ? 'above' : null;
-  if (side === null) return null;
-  const kept = side === 'below' ? EARLIEST_DATE : LATEST_DATE;
-  const hides = (name === 'endDate') === (side === 'below');
-  const painted = hides
+
+  const below = floorDateString(value);   // null ⇔ the text sorts below every date v2 can hold
+  const above = ceilDateString(value);    // null ⇔ it sorts above every one of them
+  let kept; let side; let exact;
+  if (below === null) { kept = EARLIEST_DATE; side = 'below'; exact = true; }
+  else if (above === null) { kept = LATEST_DATE; side = 'above'; exact = true; }
+  else if (!isLastOfMonth(below)) { kept = below; side = 'floor'; exact = true; }
+  else if (!isFirstOfMonth(above)) { kept = above; side = 'ceiling'; exact = true; }
+  else { kept = name === 'startDate' ? above : below; side = 'no-member'; exact = false; }
+
+  // What v1 DID with this text, said per class, so the sentence is true of the bar on screen.
+  const hidesEverywhere = (name === 'endDate' && side === 'below') || (name === 'startDate' && side === 'above');
+  const runsToHorizon = (name === 'endDate' && side === 'above') || (name === 'startDate' && side === 'below');
+  const painted = hidesEverywhere
     ? 'so v1 skipped this bar in EVERY column (layout.js:133) and painted it on no day of the year'
-    : (name === 'endDate'
-      ? 'so v1 ran this bar to the FAR EDGE of the visible year and marked it as continuing past '
-        + 'it (layout.js:135,148)'
-      : 'so v1 began this bar at the NEAR EDGE of the visible year and marked it as continuing '
-        + 'before it (layout.js:134,147)');
+    : runsToHorizon
+      ? (name === 'endDate'
+        ? 'so v1 ran this bar to the FAR EDGE of the visible year and marked it as continuing past '
+          + 'it (layout.js:135,148)'
+        : 'so v1 began this bar at the NEAR EDGE of the visible year and marked it as continuing '
+          + 'before it (layout.js:134,147)')
+      : 'so v1 painted this bar in exactly the columns whose months lie on that side of it '
+        + '(layout.js:133) — it never parsed the text, it only compared it';
+  // WHERE THE TEXT SORTED, and what was kept for it. The two-ended wording is R5-11's, kept word
+  // for word: `core-migrate.test.js` §R4-10 pins „sorts AFTER every date v2 can hold" as the
+  // sentence that says WHY the value became a date rather than that v1 read one, and that claim
+  // is still exactly true of those two classes.
+  const sorts = side === 'below' ? 'sorts BEFORE every date v2 can hold'
+    : side === 'above' ? 'sorts AFTER every date v2 can hold'
+      : `sorts BETWEEN ${q(below)} and ${q(above)}`;
+  const how = side === 'below' || side === 'above'
+    ? `${q(kept)}, the ${side === 'below' ? 'earliest' : 'latest'} date v2 can hold — the one value `
+      + 'that sorts where your text sorted against every month the grid can show'
+    : side === 'floor'
+      ? `${q(kept)}, the LAST date v2 can hold that still sorts at or before your text — which `
+        + 'compares against every month of the grid exactly as your text did'
+      : side === 'ceiling'
+        ? `${q(kept)}, the FIRST date v2 can hold that sorts at or after your text — which compares `
+          + 'against every month of the grid exactly as your text did'
+        : `${q(kept)}: v2 has NO date between those two, so the value that keeps the bar in the `
+          + 'columns v1 drew it in was chosen, and the continuation marker on the outermost of '
+          + 'them is the one thing about this bar that moves';
   return {
     kept,
     side,
+    exact,
     why: `field ${q(name)} = ${q(value)} names no day at all, so v2 cannot store it — but v1 did `
-      + `not read a bar edge, it COMPARED it, and this text sorts ${side === 'below' ? 'BEFORE' : 'AFTER'} `
-      + `every date v2 can hold, ${painted}. It was kept as ${q(kept)}, the `
-      + `${side === 'below' ? 'earliest' : 'latest'} date v2 can hold — the one value that sorts `
-      + `where your text sorted against every month the grid can show, so that v2 paints what v1 `
-      + `painted. Dropping it would have ${hides
+      + `not read a bar edge, it COMPARED it (layout.js:133), and this text ${sorts}, ${painted}. `
+      + `It was kept as ${how}, so that v2 paints what v1 painted. Dropping it would have `
+      + `${hidesEverywhere
         ? 'run the bar across the year and taken a lane from every bar you made in it'
-        : 'lost the continuation marker v1 drew'} (R5-11)`,
+        : 'moved the bar to columns v1 never drew it in'} (R5-11, R6-10)`,
   };
 }
 
@@ -917,19 +1081,36 @@ export function gridPlacementWarning(kind, singular, id, patch, dropped = null) 
   if (kind !== 'bar') return null;
   const hasStart = isDateString(patch.startDate);
   const hasEnd = isDateString(patch.endDate);
-  // R5-11. Both edges are present and the bar is still painted NOWHERE, because one of them is
-  // the end of the alphabet `layout.js:133` compares against. Stated as a fact about the VALUE,
-  // not about how it got there: a file that carries `endDate: "0000-01-01"` by hand is the same
-  // bar, and v1 skipped that one in every column too.
-  if (hasStart && hasEnd && (patch.endDate === EARLIEST_DATE || patch.startDate === LATEST_DATE)) {
+  // R5-11, GENERALISED AT R6-10. Both edges are present and the bar is still painted NOWHERE.
+  // R5-11 could name the two shapes that produced it — an `endDate` of `EARLIEST_DATE` or a
+  // `startDate` of `LATEST_DATE` — because those were the only two values `coerceToV1BarEdge`
+  // could write. It can now write any member of the alphabet, so `'1.3'` on an `endDate` becomes
+  // `'0999-12-31'` and the bar is just as invisible with neither constant in sight (R5-11g,
+  // inverted). The CONDITION is therefore stated as the fact `layout.js:133` actually turns on:
+  //
+  //     endDate < startDate  ⇒  for every month, either `endDate < mFirst` or `startDate > mLast`
+  //
+  // — because `mFirst <= mLast`, so a window that escaped both tests would need
+  // `startDate <= mLast` and `endDate >= mFirst`, i.e. `startDate <= mLast` and `endDate >= mFirst`
+  // with `endDate < startDate`, which forces `mFirst > mLast`. There is no such month. The two
+  // R5-11 shapes are still named in the message, because for them the sentence can say WHY the
+  // order inverted; a file that carries an inverted pair by hand gets the general sentence.
+  if (hasStart && hasEnd
+      && (patch.endDate < patch.startDate
+        || patch.endDate === EARLIEST_DATE || patch.startDate === LATEST_DATE)) {
     const which = patch.endDate === EARLIEST_DATE
       ? `its end date is ${q(EARLIEST_DATE)}, the earliest date v2 can hold, and layout.js:133 `
-        + 'skips a bar in every column whose month begins after that end'
-      : `its start date is ${q(LATEST_DATE)}, the latest date v2 can hold, and layout.js:133 skips `
-        + 'a bar in every column whose month ends before that start';
-    return `${who} is NOT DRAWN on any day: ${which} — which is every month of the grid except the `
-      + 'one containing that date. It is on the board and in every export; give it dates inside '
-      + 'the year you want to see and it appears';
+        + 'skips a bar in every column whose month begins after that end — which is every month of '
+        + 'the grid except the one containing that date'
+      : patch.startDate === LATEST_DATE
+        ? `its start date is ${q(LATEST_DATE)}, the latest date v2 can hold, and layout.js:133 skips `
+          + 'a bar in every column whose month ends before that start — which is every month of the '
+          + 'grid except the one containing that date'
+        : `it ends on ${q(patch.endDate)}, which is BEFORE it starts on ${q(patch.startDate)}, and `
+          + 'layout.js:133 skips a bar in every column whose month begins after its end or ends '
+          + 'before its start — which, for a bar that ends before it starts, is every month there is';
+    return `${who} is NOT DRAWN on any day: ${which}. It is on the board and in every export; give `
+      + 'it dates inside the year you want to see and it appears';
   }
   if (hasStart && hasEnd) return null;
   const tail = (wasDropped('startDate') || wasDropped('endDate'))
@@ -1205,8 +1386,16 @@ export function migrateV1(v1board, ctx) {
         }
         // A3-H2 — COERCE TO v1's MEANING (§4b). Each of these reads the value the way v1's own
         // code read it; each is reported with the old value and the new one.
+        //
+        // R6-10 — `coerceToV1Date` IS NEVER CONSULTED FOR A BAR EDGE. It answers „what day does
+        // this name", which is the question `layout.js` asks about a NOTE date and never about a
+        // bar edge (`isV1BarEdge`). Every STRING edge was already answered above; what reaches
+        // here is a non-string, and for a number every comparison `layout.js:133-135` makes is
+        // `NaN`-false, i.e. exactly an absent edge — so the faithful answer is the drop below, and
+        // reading the integer `20260304` as 4 March moved the bar from twelve columns to ten and
+        // wrote a date the file never held (R6-10e).
         const asV1 = coerceToV1Bool(kind, name, value)
-          ?? coerceToV1Date(kind, name, value)
+          ?? (isV1BarEdge(kind, name) ? null : coerceToV1Date(kind, name, value))
           ?? (FIELDS[kind][name].t === 'id' ? coerceToV1Id(value) : null);
         if (asV1) {
           loss(
@@ -1217,13 +1406,14 @@ export function migrateV1(v1board, ctx) {
           f[name] = asV1.kept;
           continue;
         }
-        // A bar edge that cannot be READ *and* cannot be POSITIONED is the last stop, and R5-11
-        // narrowed it to what it can honestly hold: a text that sorts BETWEEN two real dates
-        // (`'1.3'`, `'2026-03-04 bis 2026-03-09'`). Everything that sorts outside the alphabet
-        // was taken by `coerceToV1BarEdge` above, because for those v1's rendering IS
-        // reproducible; for these it is not, since no date v2 can hold sorts where the text does.
-        // The drop is recorded so `gridPlacementWarning` does not tell the user that v1 painted
-        // the same thing — it is the one class where that sentence was false (R5-11b).
+        // THE LAST STOP, and R6-10 emptied it of every STRING. R5-11 left "a text that sorts
+        // BETWEEN two real dates" here on the grounds that no date v2 can hold sorts where such a
+        // text does; that was true of the two ends of the alphabet and false of the alphabet, which
+        // is a finite totally ordered set in which every string has a floor and a ceiling. What
+        // still arrives here for a bar edge is a NON-STRING — a number, a boolean, an object, an
+        // array — and the drop is what `layout.js` itself does with those (see `coerceToV1BarEdge`'s
+        // last two bullets). The drop is still recorded so `gridPlacementWarning` does not claim
+        // v1 painted the same thing (R5-11b).
         dropped.add(name);
         loss(
           `${where}: field ${q(name)} = ${q(value)} is not representable in v2 and the FIELD was ` +

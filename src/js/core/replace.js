@@ -144,7 +144,7 @@ import { ZERO_DEVICE_SHORT, opId as defaultOpId, groupId as defaultGroupId } fro
 // import door is the one where the file being replaced is gone the moment the transaction lands.
 import {
   truncateToFit, coerceToV1Text, coerceToV1Bool, coerceToV1Date, coerceToV1Id, coerceToV1BarEdge,
-  mintedId, gridPlacementWarning,
+  isV1BarEdge, mintedId, gridPlacementWarning,
   defaultCategories, rekeyed, V1_BOARD_KEYS,
 } from './migrate1to2.js';
 
@@ -899,8 +899,14 @@ function buildPatch(kind, entry, regs, key, where, warn, asked, dropped = new Se
         patch[name] = asEdge.kept;
         continue;
       }
+      // R6-10, ON THIS DOOR TOO, and for the list's reason: `coerceToV1Date` answers „what day
+      // does this name", which `layout.js` asks about a NOTE date and never about a bar edge
+      // (`isV1BarEdge`). Every STRING edge was answered by `coerceToV1BarEdge` above; a non-string
+      // edge makes only `NaN` comparisons in `layout.js:133-135`, exactly like an absent one, so
+      // the faithful answer is the drop below. Two doors that disagreed here would build two
+      // different boards from the integer `20260304` (R6-10e).
       const asV1 = coerceToV1Bool(kind, name, value)
-        ?? coerceToV1Date(kind, name, value)
+        ?? (isV1BarEdge(kind, name) ? null : coerceToV1Date(kind, name, value))
         ?? (fieldTypeOf(kind, name) === 'id' ? coerceToV1Id(value) : null);
       if (asV1) {
         warn(
@@ -911,9 +917,9 @@ function buildPatch(kind, entry, regs, key, where, warn, asked, dropped = new Se
         patch[name] = asV1.kept;
         continue;
       }
-      // R5-11. What is left here is the class with no faithful v2 value: a text that sorts
-      // BETWEEN two real dates. Recorded so `gridPlacementWarning` can tell it from an edge the
-      // file never carried — see the migration door's twin.
+      // R6-10 emptied this of every STRING — see the migration door's twin. A bar edge that gets
+      // here is a NON-STRING, and the drop is what `layout.js` does with one. Still recorded so
+      // `gridPlacementWarning` can tell it from an edge the file never carried.
       dropped.add(name);
       warn(
         `${where}: field ${q(name)} = ${q(value)} is not representable in v2 and the FIELD was `

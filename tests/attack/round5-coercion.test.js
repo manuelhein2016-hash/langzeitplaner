@@ -255,23 +255,25 @@ describe('R5-11 · a bar v1 drew NOWHERE is drawn nowhere by v2 as well', () => 
     assert.equal(o.core.bars.length, 3, 'nothing was dropped to tidy the picture');
   });
 
-  test('R5-11g SUCCEEDED (defect, NARROWED) · a value that sorts INSIDE the range still has no faithful date', async () => {
-    // THE RESIDUAL, MEASURED AND NAMED. `coerceToV1BarEdge` can only reproduce v1's comparison
-    // where a date v2 can hold sorts on the same side of every month — i.e. outside the alphabet.
-    // `'1.3'` sorts between year 0999 and year 1000: v1 skipped the bar in every 2026 column, and
-    // no `YYYY-MM-DD` occupies that position, so the field is still dropped and v2 still runs the
-    // bar to the far edge. What changed is that the warning no longer claims v1 did the same.
+  test('R5-11g INVERTED (R6-10) · a value that sorts INSIDE the range has a faithful date after all', async () => {
+    // THIS ROW USED TO PIN THE RESIDUAL: "`coerceToV1BarEdge` can only reproduce v1's comparison
+    // where a date v2 can hold sorts on the same side of every month — i.e. outside the alphabet."
+    // The word that was wrong is *outside*. `DATE_RE`'s alphabet is a finite TOTALLY ORDERED set,
+    // so `'1.3'` has a floor in it (`'0999-12-31'`) and a ceiling (`'1000-01-01'`) with no member
+    // between — and the floor compares against every `mFirst` exactly as `'1.3'` did. v1 skipped
+    // this bar in every 2026 column; so does `'0999-12-31'`. Nothing here is a new decision about
+    // what to invent: it is the same R5-11 sentence, applied to the whole alphabet instead of to
+    // its two ends. See `coerceToV1BarEdge` and R6-10.
     const { o, v1, v2 } = await both(withBar(B({ startDate: '2026-03-01', endDate: '1.3' })));
     assert.deepEqual(v1.marks, [], "v1 drew nothing: '1' sorts below '2'");
-    assert.equal(v2.marks.length, 10, '… and v2 still runs it to the far edge (the residual)');
-    assert.equal('endDate' in o.core.bars[0], false, 'the field is dropped, as before');
-    // The half that IS closed: the fidelity claim is gone from this class too.
+    assert.deepEqual(v2.marks, v1.marks, '… and now v2 draws nothing either');
+    assert.equal(o.core.bars[0].endDate, '0999-12-31',
+      'the field is KEPT, at the last date v2 can hold that still sorts at or before "1.3"');
+    // The half R5-11 already closed stays closed: no false v1-fidelity claim on a coerced edge.
     const w = drawnWarn(o);
     assert.equal(w.length, 1);
-    assert.doesNotMatch(w[0], /That is exactly what v1 painted for it/,
-      'R5-11b: the false sentence is not printed for a DROPPED edge, only for an absent one');
-    assert.match(w[0], /it COMPARED it against the first and last day of each month/);
-    assert.match(w[0], /where the bar lands is no longer decided by it/);
+    assert.match(w[0], /is NOT DRAWN on any day/,
+      'and the warning describes the bar the user will see, which is no bar at all');
   });
 
   test('R5-11h INVERTED · an ABSENT edge is still absent — R4-10 is untouched by the fix', async () => {
@@ -319,14 +321,18 @@ describe('R5-12 · the ISO tail, measured against the renderer rather than again
     });
   }
 
-  test('R5-12b FAILED (held) · a bar edge takes the same tightened tail, and loses nothing v1 had', async () => {
+  test('R5-12b INVERTED (R6-10) · a bar edge takes the same tightened tail and now lands where v1 put it', async () => {
+    // This row pinned the COST of the tightened tail on a bar edge: v1 painted the bar in one
+    // column, the tail was refused, the edge was dropped, and v2 ran the bar across ten. The tail
+    // is still refused as a DAY (that is finding 6, and `R5-12a` above still holds it for notes),
+    // and the edge is no longer dropped for it: `coerceToV1BarEdge` answers every string now, so
+    // the value keeps the POSITION it had even though v2 refuses to read it as a date.
     for (const given of ['2026-04-01T09:00Z', '2026-03-04 bis 2026-03-09']) {
-      const { v1, v2 } = await both(withBar(B({ startDate: '2026-03-01', endDate: given })));
-      // `'2026-…'` sorts INSIDE the range, so v1 skipped nothing and ran the bar to that value.
+      const { o, v1, v2 } = await both(withBar(B({ startDate: '2026-03-01', endDate: given })));
       assert.ok(v1.marks.length > 0, `${given}: v1 drew something`);
-      assert.notDeepEqual(v2.marks, v1.marks,
-        `${given}: v2 does not — it drops the edge and runs to the horizon instead`);
-      assert.ok(v2.marks.length > v1.marks.length, 'and it draws MORE, never less');
+      assert.equal(v2.marks.length, v1.marks.length,
+        `${given}: v2 draws it in the same number of columns — the drop no longer happens`);
+      assert.ok(o.core.bars[0].endDate !== undefined, `${given}: the edge is kept, not dropped`);
     }
   });
 
@@ -361,12 +367,19 @@ describe('R5-12 · the ISO tail, measured against the renderer rather than again
       '… with a NaN end day of its own, because parseISO splits on "-" and Number("04T25:00") is NaN');
     assert.equal(v2.marks.length, 1, 'and v2 paints it in that one column too');
     assert.equal(o.core.bars[0].endDate, '2026-03-04', 'the tail is discarded, the day is not');
-    // What a refusal costs, measured on a tail that IS refused (finding 6 tightened this one):
-    // the same shape of value, dropped instead of read, and the bar crosses the whole year.
+    // WHAT A REFUSAL USED TO COST, and no longer does — R6-10. This half of the row measured a
+    // tail that IS refused (finding 6 tightened this one): the same shape of value, dropped
+    // instead of read, and the bar crossing the whole year. The refusal is unchanged — v2 still
+    // will not read `'2026-03-04 bis 2026-03-09'` as a DAY — but a refused bar edge is no longer
+    // a dropped one, so the price it used to carry is zero. The argument for reading `25:00` as a
+    // day therefore no longer rests on this measurement; it rests on the first half of this row,
+    // which is untouched: a tail that cannot move the day must not lose it.
     const refused = await both(withBar(B({ startDate: '2026-03-01', endDate: '2026-03-04 bis 2026-03-09' })));
     assert.equal(refused.v1.marks.length, 1, 'v1 painted THAT bar in one column as well …');
-    assert.equal(refused.v2.marks.length, 10,
-      '… and the drop runs it across ten. That is the price of tightening a tail that cannot move a day');
+    assert.equal(refused.v2.marks.length, 1,
+      '… and so does v2 now: the refusal costs the position no longer, only the day name');
+    assert.equal(refused.o.core.bars[0].endDate, '2026-03-04',
+      'kept at the floor of the alphabet, which is where the text sorted');
   });
 
   test('R5-12c FAILED (held) · the floating time, the German date and the numeric date all still read', async () => {

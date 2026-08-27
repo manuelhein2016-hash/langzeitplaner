@@ -25,7 +25,7 @@ async function tauriInvoke(cmd, args) {
  * The four things `board.json` can be. R5-3a/b/c: THREE OF THEM USED TO LOOK LIKE THE FOURTH.
  *
  *   'ok'           bytes were read and they parsed
- *   'absent'       the backing store was consulted and holds nothing — a fresh install
+ *   'absent'       NO BYTE STRING EXISTED IN EITHER STORE and nothing threw — a fresh install
  *   'unparseable'  bytes exist and `JSON.parse` threw — a truncated write, a bad sector, a
  *                  sync client's conflicted copy. THE USER'S DATA IS ON DISK AND UNREADABLE.
  *   'read-failed'  the READ ITSELF failed — a locked file, a permission prompt the user
@@ -35,6 +35,39 @@ async function tauriInvoke(cmd, args) {
  * ADR 006 makes `board.json` the sole authority over content, so the ONE precondition of the
  * whole rule is that it can be read. Collapsing these four into "is `raw` null?" is what let a
  * corrupted byte hand the board to any log lying beside it (`store._recoverFromLog`).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * R6-5a — THE STATUS IS A FUNCTION OF THE BYTES, AND `''` IS BYTES.
+ *
+ * Round 5 enumerated the four BRANCHES above and got `''` wrong anyway, because the enumeration
+ * was of branches and the input is bytes. `tests/helpers/domains.js` D1 is the enumeration of the
+ * input; this is the rule it states, and there is no fifth way to be absent:
+ *
+ *   THE BYTE AXIS — what a store can answer with, exhaustively:
+ *     a string          of ANY length, INCLUDING ZERO  ⇒ these are the file's bytes; they decide.
+ *     null / undefined  ⇒ this store holds nothing. Ask the next one.
+ *     a throw           ⇒ a FACT about the read, remembered, and never an absence.
+ *
+ *   THE SOURCE AXIS — where bytes can come from (`D1_SOURCES`), and it may change `fallback`
+ *   and nothing else:
+ *     the browser                     localStorage is the only store;
+ *     Tauri, native answers           the native bytes decide, `''` included;
+ *     Tauri, native throws            the localStorage copy `saveBoardText` leaves behind is
+ *                                     still consulted — otherwise the one board a failed save
+ *                                     rescued is unreachable — and IT decides if it holds bytes;
+ *     Tauri, native returns nothing   the same.
+ *
+ *   THE VERDICT:
+ *     some store answered with a string ⇒ `JSON.parse` decides: 'ok' or 'unparseable'.
+ *     no store answered with a string   ⇒ 'read-failed' if anything threw, else 'absent'.
+ *
+ * WHY THIS MATTERS MORE THAN ANY OTHER LINE IN THE FILE. `absent` is the ONE kind that may hand
+ * the board to an op log it cannot tie to that board (ADR 006 §5.5, `store._recoverFromLog` —
+ * the one branch with no lineage check), and the session that comes out of it is WRITABLE. A
+ * zero-byte `board.json` is the single most likely outcome of an interrupted write. Reporting it
+ * as `absent` is therefore A3-C1's whole outcome behind zero bytes instead of one bad byte:
+ * the stranger's board on screen, `quarantine === null`, and the first autosave committing it.
+ * → `tests/attack/round6-recovery.test.js` R6-5a, D1-b01 × all four sources.
  */
 export const BOARD_FILE_STATUS = Object.freeze(['ok', 'absent', 'unparseable', 'read-failed']);
 
@@ -65,30 +98,43 @@ export async function loadBoardFile() {
 
   if (isTauri()) {
     try {
-      txt = await tauriInvoke('load_board', {});
+      const native = await tauriInvoke('load_board', {});
+      // `typeof native === 'string'` — NOT `native ?? …` and NOT `if (native)`. An empty string
+      // is a file that holds nothing, which is a completely different fact from a store that
+      // holds no file, and every falsy test collapses the two (R6-5a).
+      if (typeof native === 'string') txt = native;
     } catch (e) {
       // NOT `txt = null`. A throw here is a fact about the read, and it survives to the caller.
       console.warn('[storage] Tauri load failed, falling back', e);
       failure = readError(e);
-      txt = null;
     }
   }
-  if (txt === null || txt === undefined) {
+  if (txt === null) {
     const nativeMiss = isTauri();
     try {
-      txt = localStorage.getItem(LS_BOARD);
-      fallback = nativeMiss && typeof txt === 'string' && txt !== '';
+      const ls = localStorage.getItem(LS_BOARD);
+      // Same test, same reason. `fallback` reports WHICH store answered and may never decide
+      // WHETHER one did: a zero-byte fallback copy has still answered.
+      if (typeof ls === 'string') { txt = ls; fallback = nativeMiss; }
     } catch (e) {
-      txt = null;
       failure = failure ?? readError(e);
     }
   }
 
-  if (typeof txt !== 'string' || txt === '') {
-    // A read that FAILED is not a board that is absent. The distinction is the whole point.
+  if (txt === null) {
+    // NO STORE ANSWERED WITH A STRING. Only here can the file be `absent` — and a read that
+    // FAILED is not a board that is absent. The distinction is the whole point.
     return failure
       ? { text: null, raw: null, status: 'read-failed', error: failure, where, fallback: false }
       : { text: null, raw: null, status: 'absent', error: null, where, fallback: false };
+  }
+  // Bytes reached us — from either store, of any length, ZERO INCLUDED. `JSON.parse('')` throws,
+  // so an empty file lands on `unparseable`, which is exactly what it is: bytes on disk that do
+  // not say what the board is. It goes to ADR 006 §5.6's read-only boot with the other two, and
+  // never to §5.5's recovery.
+  if (txt === '') {
+    return { text: '', raw: null, status: 'unparseable', where, fallback,
+      error: 'the file is EMPTY: zero bytes, which is what an interrupted write leaves behind' };
   }
   try {
     return { text: txt, raw: JSON.parse(txt), status: 'ok', error: null, where, fallback };

@@ -882,9 +882,31 @@ older than the horizon, which is compared against the checkpoint's retained stam
 loses by the identical rule. There is **no coordination requirement, no peer acknowledgement and
 no risk**. Property test P10 asserts exactly this, including out-of-order late ops.
 
-This alone bounds local storage to `O(entities × fields) + recent ops + O(dropped lines)`. Policy:
-compact when the tail exceeds 5 000 ops, or on launch when it exceeds 2 MB, keeping a 30-day tail
-for debuggability.
+This alone bounds local storage to `O(entities × fields) + recent ops + O(retained fingerprints)`.
+Policy: **compact when the tail exceeds `TAIL_COMPACT_AT` lines, or on launch when it exceeds
+2 MB — whichever is crossed first — and the compaction is TOTAL.**
+
+> **Amended 2026-08-27 (round 7) — the policy sentence named three things and the code implemented
+> one; both halves of the gap are closed here, in opposite directions.**
+>
+> **"or on launch when it exceeds 2 MB" — THE ADR WAS RIGHT AND THE CODE WAS MISSING IT. Now
+> implemented.** `store.js` bounded the tail in LINES only (`TAIL_COMPACT_AT`, `min(5000,
+> floor(LS_OPS_CAP × 0.75))` = 1 500), and a line is not a fixed size: one `pad.set` carrying a
+> pasted page is kilobytes, and ≈260 of them are ≈3 MB while nowhere near the line cap. On the
+> browser path `ops.jsonl` shares localStorage's whole-origin quota with `board.json`,
+> `checkpoint.json` and `snapshots.json`. `init()` now measures the tail it has just read and
+> parsed — the one moment the bytes are free — and arms `TAIL_COMPACT_BYTES`; the first
+> `_persistOps` of the session consumes it. The two triggers are independent and the first one
+> crossed wins. Pinned by R6-2b.
+>
+> **"keeping a 30-day tail for debuggability" — THE ADR WAS WRONG AND THE CLAUSE IS DROPPED.**
+> `storage.truncateOps(keepFromLine)` can only drop a PREFIX of the file, and the store tracks a
+> line COUNT rather than which line of the file each op is on, so a partial compaction has nothing
+> to trim against; implementing it means a per-line file-position index on the hot write path. What
+> it would buy is debuggability alone — this very section's losslessness result
+> (`fold(checkpoint ∪ tail) === fold(all ops)` for ANY partition) is exactly the statement that a
+> retained tail is worth nothing to STATE. Compaction is total, and `src/js/store.js`'s
+> `TAIL_COMPACT_AT` docblock says so at the code.
 
 > **The third term, added after the WP-1 round-2 hardening, and it is a real cost.** The bound used
 > to read `O(entities × fields) + recent ops`, and that was true only while a compaction was allowed
@@ -895,14 +917,46 @@ for debuggability.
 > it, and telling the two cases apart after the line is gone needs something kept.
 >
 > So `checkpoint().bodies` retains a 96-bit fingerprint per opId whose line has been dropped:
-> ~40 bytes each, ≈400 KB/year at the sizing below, alongside the ≈400 KB/year of registers. It is
-> pruned only for entities collected by the §7.3 tombstone GC. Stated here rather than left to be
-> rediscovered: it is the price of "a compaction may not decide state", and it is the right price,
-> but the bound in this section was wrong without it.
+> ~40 bytes each. Stated here rather than left to be rediscovered: it is the price of "a compaction
+> may not decide state", and it is the right price, but the bound in this section was wrong without
+> it.
 >
-> **Reviewed 2026-08-27 — no change owed.** `judge:conformance` B-10 re-read this block against the
-> implementation and found it current; recorded so it is not re-opened. `checkpoint().bodies` is
-> `src/js/core/oplog.js:323, 492`.
+> **Amended 2026-08-27 (round 7) — the third term was UNBOUNDED, and the prose above said so
+> without noticing.** "≈400 KB/year … pruned only for entities collected by the §7.3 tombstone GC"
+> is a growth rate with no ceiling attached to a file `saveCheckpoint` rewrites atomically and
+> whole on every debounced save. `compact()` called `rememberBody` for every line it dropped;
+> `pruneSeqIndex()` pruned `seqById`, `tsById` and `legacySeqByStamp` on the same call and stepped
+> over `bodies`; nothing else ever forgot one. Measured (`tests/attack/round6-record.test.js`
+> R6-3a/b): ~46 bytes per op EVER WRITTEN, 6 000 fingerprints and 282 KB for a board of ONE note,
+> durable across restarts, past localStorage's quota inside five years of ordinary use. It was the
+> `ops.jsonl` bound purchased with an unbounded `checkpoint.json`.
+>
+> `pruneSeqIndex()` now ends in `boundBodies()`: an **oldest-first eviction down to
+> `BODY_FINGERPRINT_CAP`** (`src/js/core/oplog.js`), which is `TAIL_COMPACT_AT` — the most lines
+> this log ever holds at once — and never evicts an opId that still holds a line. The third term is
+> therefore `O(TAIL_COMPACT_AT)`, ≈60 KB, flat in ops-ever and flat in board size.
+>
+> **What an evicted fingerprint costs, stated so the trade is not re-litigated from scratch.** It
+> is not state: `append()` answers an opId with no fingerprint by RE-FOLDING rather than by
+> guessing `duplicate`, and a re-fold is idempotent, so a device that evicted converges with one
+> that did not. It costs one re-folded line back in the tail (which the next compaction drops
+> again) and one missing entry in the `spliced` tamper report (§5.1 / REG-28). The eviction is
+> oldest-first for that second reason: a spliced envelope arrives near in time to the body whose
+> opId it re-uses. The full table, per state an opId can be in, is the docblock on
+> `BODY_FINGERPRINT_CAP`.
+>
+> **This is NOT the same trade as "prune `bodies` by `pruneSeqIndex`'s `keepIds`" (round 6's own
+> proposed one-liner), and the difference is measured, not asserted.** `keepIds` is "ids a
+> surviving register attributes, plus retained lines", so that prune keeps the WINNER of each
+> field and drops every absorbed op no register points at — which after a day's editing is nearly
+> all of them, chosen by what the board looks like now rather than by what arrived recently. A
+> second body under a SUPERSEDED opId then comes back `appended` with `splicedIds()` empty. Both
+> `tests/tier1/core-oplog.test.js` and R6-3c pin that case specifically; written against the
+> winner instead, they are green under that prune and prove nothing.
+>
+> **Reviewed 2026-08-27 — no change owed** (superseded by the amendment above).
+> `judge:conformance` B-10 re-read this block against the implementation and found it current.
+> `checkpoint().bodies` is `src/js/core/oplog.js`, `bodies` / `bodiesObject()` / `boundBodies()`.
 
 **Sizing, so nobody has to guess.** A heavy family — 8 members × 300 entries/year × ~4 ops each
 ≈ 10 000 ops/year. Plaintext ≈180 B, padded to 256 B (ADR 002 §5.3), envelope ≈380 B on the wire

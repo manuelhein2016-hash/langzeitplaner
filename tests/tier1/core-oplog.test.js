@@ -40,7 +40,9 @@ import assert from 'node:assert/strict';
 import {
   createOpLog, tombstoneCollectable, horizonBeforeMs,
   APPEND, OpLogError, TombstoneGuardError, TOMBSTONE_MIN_AGE_MS, ZERO_STAMP,
+  BODY_FINGERPRINT_CAP,
 } from '../../src/js/core/oplog.js';
+import { LS_OPS_CAP } from '../../src/js/storage.js';
 
 // The REAL join the log folds through (ADR 005 §1.1). Never a local re-implementation: a test
 // that folded through its own copy of the LWW rule would be green against itself.
@@ -1954,4 +1956,133 @@ test('every op kind the vocabulary defines can be logged and folded', () => {
   ];
   for (const op of ops) assert.equal(l.append(op).status, APPEND.APPENDED, `${op.k} was not admitted`);
   assert.equal(l.registers().size, 8);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `bodies` IS BOUNDED (R6-3 · ADR 001 §7.2 · domains D4-i5/D4-g5/D4-g6)
+//
+// `checkpoint().bodies` is the ADR 002 §5.1 splice guard: one 96-bit fingerprint per opId whose
+// LINE has been dropped, and it is what stops a compaction from deciding state (round 2's A1).
+// Nothing used to forget one, so the file `saveCheckpoint` rewrites atomically and whole on every
+// debounced save grew with the number of ops the user had EVER written.
+//
+// The bound is a CAP, not a purge, and these four rows are written so that BOTH failure
+// directions are red: an unbounded `bodies` (delete `boundBodies()`) and an emptied one (prune it
+// by `pruneSeqIndex`'s `keepIds`, round 6's mutant F1). See `BODY_FINGERPRINT_CAP` in
+// `src/js/core/oplog.js` for the per-opId-state table of what an evicted fingerprint costs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('`bodies` stops at the cap, however many ops have ever been written', () => {
+  const wall = makeWall();
+  const l = log(wall, { bodyCap: 40 });
+  const a = makeAuthor({ tag: 'cap', wall });
+  const counts = [];
+  for (let i = 0; i < 400; i++) {
+    wall.advance(1000);
+    l.append(a.note(U1, { text: `T${i}` }));
+    if (i % 20 === 19) { l.compact(); counts.push(Object.keys(l.checkpoint().bodies).length); }
+  }
+  for (const n of counts) assert.ok(n <= 40, `bodies exceeded the cap: ${n} > 40 (curve ${counts.join(',')})`);
+  // AND IT PLATEAUS. A cap that merely happens to exceed 400 would pass the line above.
+  const half = counts.slice(Math.floor(counts.length / 2));
+  assert.ok(Math.max(...half) - Math.min(...half) <= 1,
+    `the curve plateaus rather than climbing: ${half.join(', ')}`);
+  // The BOARD did not grow: one entity, one field, throughout.
+  assert.equal(l.registers().size, 1, 'one entity — the growth was never a function of the board');
+});
+
+test('the cap is a CAP and not a purge: a SUPERSEDED body inside it still tells a splice from a duplicate', () => {
+  // Round 6's mutant F1 — prune `bodies` by `keepIds` — passes the row above and fails this one,
+  // BUT ONLY IF THE OP IS ONE THAT LOST. `keepIds` is "ids a surviving register attributes, plus
+  // retained lines", so a purge by `keepIds` keeps the WINNER's fingerprint and drops every
+  // absorbed op no register points at any more — which after a day's editing is nearly all of
+  // them. Measured: with the purge, the splice below comes back `appended` and `splicedIds()` is
+  // empty. Written against the winner instead, this row is green under the mutant and proves
+  // nothing.
+  const wall = makeWall();
+  const l = log(wall);
+  const a = makeAuthor({ tag: 'spl', wall });
+  const loser = a.note(U1, { text: 'EINS' });
+  l.append(loser);
+  wall.advance(5000);
+  const winner = a.note(U1, { text: 'ZWEI' });
+  l.append(winner);
+  l.compact();
+  assert.equal(l.ops().length, 0, 'both lines are gone — only the fingerprints are left');
+  assert.deepEqual(Object.keys(l.checkpoint().bodies).sort(), [loser.id, winner.id].sort(),
+    'BOTH are carried, not just the one the surviving register names');
+  assert.equal(l.append(loser).status, APPEND.DUPLICATE,
+    'the superseded body is still a duplicate rather than a re-fold and a re-written line');
+  const second = { ...loser, f: { text: 'DREI' } };
+  assert.equal(l.append(second).status, APPEND.CONFLICT, 'a SECOND body under it is still caught as a splice');
+  assert.deepEqual(l.splicedIds(), [loser.id], 'and still reported (ADR 002 §5.1 tamper evidence, REG-28)');
+});
+
+test('an id that still holds a LINE is never evicted, even over the cap', () => {
+  // `bodiesObject()` already skips ids that are still lines on the way to disk, so this guard is
+  // invisible in the FILE. What it protects is the in-memory entry, which `append()` consults the
+  // moment that line IS compacted — and an opId can hold a fingerprint AND a line at the same
+  // time: that is exactly what a splice leaves behind (`append`'s `absorb(known.op)` remembers
+  // the loser's body, `place(op)` installs the winner's line under the same id).
+  //
+  // Evicting it there is not a data loss — `append` re-folds an unfingerprinted id and a re-fold
+  // is idempotent — but it costs a SPURIOUS SPLICE REPORT, and `spliced` is the one thing that
+  // cannot be re-derived from the tail (REG-28). So it is pinned rather than left to a comment.
+  const wall = makeWall();
+  const l = log(wall, { bodyCap: 1 });
+  const a = makeAuthor({ tag: 'gd', wall });
+
+  const early = a.note(U2, { text: 'FRUEH' });        // stamped BELOW the splice, so it can be
+  wall.advance(60_000);                                // folded on its own while X keeps its line
+  const bodyA = a.note(U1, { text: 'AAA' });
+  const bodyB = { ...bodyA, f: { text: 'ZZZ' } };     // same opId, canonically GREATER body
+  l.append(early);
+  assert.equal(l.append(bodyA).status, APPEND.APPENDED);
+  assert.equal(l.append(bodyB).status, APPEND.CONFLICT, 'setup: a splice — B takes the line, A is absorbed');
+  assert.equal(l.ops().some((o) => o.id === bodyA.id), true, 'setup: the spliced id still holds a LINE');
+  assert.deepEqual(Object.keys(l.checkpoint().bodies), [],
+    'setup: …so the FILE does not carry its fingerprint — only the in-memory map does');
+
+  // A compaction that folds `early` and nothing else. `bodies` is now {X, early} = 2, over the
+  // cap of 1, and the eviction has to choose. X still holds a line; `early` does not.
+  l.compact({ horizon: early.ts });
+  assert.equal(l.ops().some((o) => o.id === bodyA.id), true, 'the spliced line is still held');
+
+  // NOW fold it. Its own body is remembered here — on top of the loser's, if that survived.
+  l.compact();
+  assert.equal(l.ops().length, 0, 'every line is folded now');
+  assert.equal(l.append(bodyA).status, APPEND.DUPLICATE,
+    'the absorbed loser\'s fingerprint survived the eviction, so re-delivery is a duplicate');
+  assert.deepEqual(l.splicedIds(), [bodyA.id],
+    'and the splice report is the ONE real splice — not two, the second invented by an eviction');
+});
+
+test('forgetting a fingerprint costs a re-fold and never a difference in state', () => {
+  // The claim `BODY_FINGERPRINT_CAP`'s table rests on: rows 4/5/6 (no fingerprint) land on the
+  // same registers as row 3 (fingerprint kept). Two logs, identical op sets, opposite caps.
+  const runs = [0, 10000].map((bodyCap) => {
+    const wall = makeWall();
+    const l = log(wall, { bodyCap });
+    const a = makeAuthor({ tag: 'ref', wall });
+    const minted = [];
+    for (let i = 0; i < 30; i++) {
+      wall.advance(1000);
+      minted.push(a.note(i % 3 === 0 ? U1 : U2, { text: `T${i}` }));
+      l.append(minted[minted.length - 1]);
+    }
+    l.compact();
+    for (const op of minted) l.append(op);           // every one re-delivered after compaction
+    l.compact();
+    return snap(l);
+  });
+  assert.equal(runs[0], runs[1],
+    'a log that evicted every fingerprint converges with one that kept them all');
+});
+
+test('`BODY_FINGERPRINT_CAP` is the retained-line bound the store compacts at', () => {
+  // `core/` may not import `store.js` (ADR 005 §2), so the number is restated there. This row is
+  // what makes moving one and not the other a red test rather than a silent unbounding:
+  // `store.js`'s `TAIL_COMPACT_AT` is `min(5000, floor(LS_OPS_CAP × 0.75))`.
+  assert.equal(BODY_FINGERPRINT_CAP, Math.min(5000, Math.floor(LS_OPS_CAP * 0.75)),
+    'BODY_FINGERPRINT_CAP and store.js\'s TAIL_COMPACT_AT have drifted apart');
 });

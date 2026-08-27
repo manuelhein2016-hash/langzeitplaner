@@ -90,10 +90,16 @@ import {
   PERSONAL_PLACEHOLDER, FIELDS, flattenPref,
   noteSet, barSet, catSet, padSet, prefSet, buildMutation, mutation,
 } from './core/ops.js';
-import { isMonthKey } from './core/entities.js';
-import { opId as newOpId, groupId as newGid, memberId as mintMemberId, deviceId as mintDeviceId } from './core/ids.js';
+import { isMonthKey, noteKey, barKey, catKey } from './core/entities.js';
+import {
+  opId as newOpId, groupId as newGid, memberId as mintMemberId, deviceId as mintDeviceId,
+  ZERO_DEVICE_SHORT,
+} from './core/ids.js';
 import { crock32 } from './core/b64.js';
-import { createClock, isStamp, cmp, msOf, MAX_FUTURE_DRIFT_MS } from './core/stamp.js';
+import {
+  createClock, isStamp, cmp, msOf, ctrOf, fmt as fmtStamp,
+  MAX_FUTURE_DRIFT_MS, MAX_STAMP_CTR, MAX_STAMP_MS,
+} from './core/stamp.js';
 import { createOpLog } from './core/oplog.js';
 import { materialize, stripV2Fields, exportV1JSON } from './core/materialize.js';
 import { createUndoStacks, makeTx, captureImages, shadowContent } from './core/undo.js';
@@ -249,13 +255,147 @@ function fitValue(kind, name, value, warn) {
   return value;
 }
 
+const KEY_OF = { note: noteKey, bar: barKey, cat: catKey };
+
+/**
+ * THE `_born` A NEW ROW MUST CARRY — the whole of R6-7, and the reason it is a rule about the
+ * INPUT and not about a branch.
+ *
+ * `diffCollection` used to ask one question — *is this id in `before`?* — and answer `born: true`.
+ * `born: true` writes `_born = this op's own stamp` (`ops.js:makeOp`), which is FRESH, and
+ * `_born` is what `entities.js:cmpNotes/cmpBars/cmpCategories` sorts on. So a row the diff mints
+ * lands at the END of the array. When `after` is `board.json` and `board.json` is the truth, the
+ * END is the wrong place unless that is where `board.json` has it — and ADR 006 §5.4 names two
+ * ordinary events that put it somewhere else:
+ *
+ *   · a Time-Machine restore of a `board.json` from before a delete in the MIDDLE (R6-7a). The
+ *     ADR blesses this by name. The log tombstoned the middle entry; the board still has it.
+ *   · any loss of `ops.jsonl`'s head — the browser fallback's `slice(-LS_OPS_CAP)` drops the
+ *     OLDEST lines, i.e. exactly the entries that are not last (R6-7d).
+ *
+ * Both quarantined the ENTIRE history — every stamp, tombstone, parked op and cursor — with
+ * `reconcile-failed / DIFFERENT ORDER`, and the post-condition was right to refuse: the log on
+ * screen really did disagree with the board about a user-visible order (ADR 001 §5 step 5).
+ * D5's four cells name the trap exactly: relaxing the post-condition is cell (c) and is unsound.
+ * The cell the build has to be in is (d) — the reconciler REPAIRS the order and the check still
+ * guards the repair — and that means the diff has to be able to choose a `_born`.
+ *
+ * ─── THE INPUT DOMAIN, ENUMERATED, AND THE ANSWER PER INPUT ────────────────────────────────────
+ * For one id, three facts decide everything. `L` is the log's register map (`ctx.regs`), which is
+ * the *reconciled* log during `_reconcileOntoBoard` and the live one during `mutate`.
+ *
+ *   in `before` | `L` has a `_born` | where `after` puts it | what must be written
+ *   ------------+-------------------+-----------------------+---------------------------------
+ *      yes      |   (yes)           |      anywhere         | the field diff only; `_born` is
+ *               |                   |                       | NOT touched — an entry alive in
+ *               |                   |                       | both keeps the position the log
+ *               |                   |                       | gave it, and a disagreement here
+ *               |                   |                       | is R5-5a's sabotage, which MUST
+ *               |                   |                       | still be refused
+ *      no       |   YES             |      anywhere         | a RESTORE, not a birth. `_alive:
+ *               |                   |                       | true` + the fields, and no `_born`
+ *               |                   |                       | at all: the log still carries the
+ *               |                   |                       | original (a tombstone clears
+ *               |                   |                       | `_alive`, never `_born`), and that
+ *               |                   |                       | original IS the position
+ *               |                   |                       | `board.json` has it in
+ *      no       |   no              |      LAST             | `born: true` — a fresh stamp sorts
+ *               |                   |                       | above everything, which is where
+ *               |                   |                       | `after` wants it. Unchanged; this
+ *               |                   |                       | is `mutate()`'s ordinary path and
+ *               |                   |                       | R4-4a's "board is ahead" note
+ *      no       |   no              |    INTERIOR           | an explicit `_born` strictly
+ *               |                   |                       | between its neighbours' — computed
+ *               |                   |                       | by `bornBetween` below
+ *     absent from `after`, present in `before`  ⇒ `{_alive:false}`; no `_born` either way
+ *
+ * ─── WHAT THIS IS NOT ──────────────────────────────────────────────────────────────────────────
+ *   · It is not a licence to move an entry the log and the board BOTH have. Those are anchors and
+ *     are never re-stamped, so R5-5a's swapped-`_born` attack still ends in `reconcile-failed`.
+ *     D5's `see` probe is that control and it is in the property suite.
+ *   · It is not a new stamp AUTHORITY. The op's own `ts` is still a fresh `ctx.mint()`, above the
+ *     log's horizon, so LWW is unchanged and R4-4a still holds. Only the VALUE of the `_born`
+ *     register is chosen, and `_born` is a POSITION, not a time — ADR 001 §8.1's `GENESIS(i)`
+ *     already encodes a v1 array index into that field for exactly this reason.
+ *   · It cannot fail unsafely. Every branch that cannot find a value falls back to `born: true`,
+ *     which is today's behaviour, and the post-condition then refuses exactly as it does now.
+ *
+ * @param {Object} regs `ctx.regs` — a read-only RegisterMap view, or anything without `.get`
+ * @param {string} kind @param {string} id
+ * @returns {?string} the `_born` VALUE the log already holds for this entity, or null
+ */
+const NO_CELLS = { get: () => undefined };
+
+function cellsInLog(regs, kind, id) {
+  const key = KEY_OF[kind];
+  if (!key || !regs || typeof regs.get !== 'function') return NO_CELLS;
+  const cells = regs.get(key(id));
+  return cells && typeof cells.get === 'function' ? cells : NO_CELLS;
+}
+
+/** @param {{get:Function}} cells @returns {?string} */
+function bornOfCells(cells) {
+  const cell = cells.get('_born');
+  return cell && isStamp(cell.value) ? cell.value : null;
+}
+
+/**
+ * `n` stamps strictly between `lo` and `hi`, ascending — or null when there is no room.
+ *
+ * The stamp is `pad13(ms).pad6(ctr).dev16` and is compared as a plain string, so `ctr` outranks
+ * `dev` outright: `X.(c+1).<anything>` is greater than `X.c.<anything>`, whatever the two device
+ * shorts are. That is why the device component here is `ZERO_DEVICE_SHORT` and not a fabricated
+ * one — it is the same all-zeros marker `GENESIS(i)` uses to say *this position was derived, not
+ * observed on a device*, and it never has to be compared to make the arithmetic work.
+ *
+ * `hi === null` never reaches this function: a run with no fixed successor takes `ctx.mint()`
+ * instead, which is the ordinary append and must stay byte-identical to today.
+ *
+ * @param {?string} lo exclusive lower bound, or null for "no fixed predecessor"
+ * @param {string} hi  exclusive upper bound @param {number} n
+ * @returns {?string[]}
+ */
+function bornBetween(lo, hi, n) {
+  const step = (s) => {
+    const ms = msOf(s); const ctr = ctrOf(s);
+    if (ctr < MAX_STAMP_CTR) return fmtStamp(ms, ctr + 1, ZERO_DEVICE_SHORT);
+    return ms < MAX_STAMP_MS ? fmtStamp(ms + 1, 0, ZERO_DEVICE_SHORT) : null;
+  };
+  const back = (s) => {
+    const ms = msOf(s); const ctr = ctrOf(s);
+    if (ctr > 0) return fmtStamp(ms, ctr - 1, ZERO_DEVICE_SHORT);
+    return ms > 0 ? fmtStamp(ms - 1, MAX_STAMP_CTR, ZERO_DEVICE_SHORT) : null;
+  };
+  const out = [];
+  if (lo !== null) {
+    let cur = lo;
+    for (let i = 0; i < n; i += 1) {
+      cur = step(cur);
+      if (cur === null || cur >= hi) return null;
+      out.push(cur);
+    }
+    return out;
+  }
+  // No fixed predecessor: build downwards from `hi` so the run still ends just below it.
+  let cur = hi;
+  for (let i = 0; i < n; i += 1) {
+    cur = back(cur);
+    if (cur === null) return null;
+    out.unshift(cur);
+  }
+  return out;
+}
+
 /** One collection, before vs after, into `ops`. Entries are matched by `id`, never by index. */
 function diffCollection(spec, before, after, ctx, ops, warn) {
   const prev = new Map();
   for (const e of Array.isArray(before) ? before : []) {
     if (e && e.id !== undefined && e.id !== null) prev.set(String(e.id), e);
   }
+  // PASS 1 — decide, per id, what has to be written. Nothing is minted yet, because the `_born`
+  // a new row needs depends on the rows AROUND it in `after`, which is the whole of R6-7.
   const seen = new Set();
+  const rows = [];
   for (const e of Array.isArray(after) ? after : []) {
     if (!e || e.id === undefined || e.id === null) continue;
     const id = String(e.id);
@@ -270,9 +410,58 @@ function diffCollection(spec, before, after, ctx, ops, warn) {
       const v = fitValue(spec.kind, name, b, warn);
       if (v !== undefined) f[name] = v;
     }
-    if (!old) {
-      Object.assign(f, spec.born, { _alive: true });
-      ops.push(SETTER[spec.kind](ctx, id, f, { born: true }));
+    const cells = cellsInLog(ctx?.regs, spec.kind, id);
+    const held = bornOfCells(cells);
+    // A RESTORE is an entity the log KNOWS (it has a `_born`) and does not currently hold as
+    // alive. `_alive` is the discriminator and not `before`, because on the `mutate()` door
+    // `before` is a clone taken at the top of a transaction and a NESTED `mutate()` can commit an
+    // entity into the log inside it — R3-11's shape, where the outer diff re-describes an entity
+    // that is very much alive. That is a different (open, latent, someone else's) defect, and it
+    // keeps the behaviour it had. On the reconciler's door `before` IS the log's live projection,
+    // so the two readings coincide and this is exactly "the log tombstoned it, the board did not".
+    const restore = !old && held !== null && cells.get('_alive')?.value !== true;
+    rows.push({ id, old, f, held, restore, needsBorn: !old && !restore, born: null });
+  }
+  // PASS 2 — a row whose position is already decided is an ANCHOR: an entry alive in both, or a
+  // restore, sits at the `_born` the log holds and this diff must not move it. Runs of rows that
+  // are NOT anchored get a `_born` between the anchors that bracket them; a run with no anchor
+  // after it is an append and takes a fresh mint — `mutate()`'s ordinary path, unchanged.
+  const anchorOf = (r) => (r.needsBorn ? r.born : r.held);
+  for (let i = 0; i < rows.length; i += 1) {
+    if (!rows[i].needsBorn) continue;
+    let j = i;
+    while (j < rows.length && rows[j].needsBorn) j += 1;
+    const lo = i > 0 ? anchorOf(rows[i - 1]) : null;
+    const hi = j < rows.length ? anchorOf(rows[j]) : null;
+    // An anchor whose `_born` the log does not carry constrains nothing this code can compute
+    // (`entities.js` sorts a missing `_born` LAST), so the run falls back to a fresh mint and the
+    // post-condition judges the result — today's behaviour, reached deliberately.
+    if (hi !== null && !(i > 0 && lo === null)) {
+      const between = bornBetween(lo, hi, j - i);
+      if (between) for (let k = i; k < j; k += 1) rows[k].born = between[k - i];
+    }
+    i = j - 1;
+  }
+  // PASS 3 — emit, in `after`'s order, so the fresh mints of an append are still ascending.
+  for (const r of rows) {
+    const { id, old, f } = r;
+    if (r.restore) {
+      // A RESTORE. The log kept this entity's `_born` through its tombstone (a delete writes
+      // `_alive: false` and nothing else), so writing a fresh one would MOVE an entry that
+      // `board.json` has exactly where the log had it. `spec.born`'s defaults are filled in only
+      // where the log has no cell for them: re-asserting `visibility` at a fresh stamp would
+      // clobber a value the log legitimately holds, and omitting it from an entity that somehow
+      // never had one would leave a fragment `materialize` cannot render.
+      const patch = { ...f, _alive: true };
+      const cells = cellsInLog(ctx?.regs, spec.kind, id);
+      for (const [name, value] of Object.entries(spec.born)) {
+        if (cells.get(name) === undefined) patch[name] = value;
+      }
+      ops.push(SETTER[spec.kind](ctx, id, patch));
+    } else if (!old && r.born !== null) {
+      ops.push(SETTER[spec.kind](ctx, id, { ...f, ...spec.born, _alive: true, _born: r.born }));
+    } else if (!old) {
+      ops.push(SETTER[spec.kind](ctx, id, { ...f, ...spec.born, _alive: true }, { born: true }));
     } else if (Object.keys(f).length) {
       ops.push(SETTER[spec.kind](ctx, id, f));
     }
@@ -510,13 +699,52 @@ function boardHash(text) {
  * than a per-backend branch: a branch only one backend ever exercises is a branch that is never
  * tested, and this one may not be wrong.
  *
- * Two things §7.2 asks for that this does NOT do, recorded so they are not mistaken for done:
- * the compaction is total rather than "keeping a 30-day tail for debuggability" (`truncateOps`
- * can only drop a PREFIX of the file, and the store does not track which line of the file each op
- * is on, so a partial compaction could not trim anything at all), and nothing compacts on the
- * 2 MB-at-launch trigger.
+ * ONE thing §7.2 asks for that this deliberately does not do, recorded so it is not mistaken for
+ * done: the compaction is TOTAL rather than "keeping a 30-day tail for debuggability".
+ * `truncateOps` can only drop a PREFIX of the file and the store does not track which line of the
+ * file each op is on, so a partial compaction could not trim anything at all — and §7.2's own
+ * losslessness proof (`fold(checkpoint ∪ tail) === fold(all ops)` for ANY partition) says the
+ * retained tail buys debuggability and nothing else. ADR 001 §7.2 was amended on 2026-08-27 to
+ * drop the clause rather than leave it owed; see the amendment note there.
  */
 const TAIL_COMPACT_AT = Math.min(5000, Math.floor(storage.LS_OPS_CAP * 0.75));
+
+/**
+ * §7.2's OTHER trigger, which was owed and is now paid: "…or on launch when it exceeds 2 MB".
+ *
+ * `TAIL_COMPACT_AT` bounds the tail in LINES, and a line is not a fixed size. One `note.set`
+ * carrying a pasted year of text is tens of kilobytes; 1 499 of them are under the line cap and
+ * over any byte budget worth having, and on the browser path `ops.jsonl` shares localStorage's
+ * whole-origin quota with `board.json`, `checkpoint.json` and `snapshots.json`. So the byte
+ * bound is a SECOND, independent trigger and not a replacement: whichever is crossed first
+ * compacts.
+ *
+ * WHY AT LAUNCH RATHER THAN ON EVERY SAVE. Measuring the tail's bytes means serializing it, which
+ * is the one thing the debounced save path may not do on a keystroke. At launch it is free: the
+ * bytes were just read off disk and parsed, so the measurement is the same order as the work that
+ * has already happened, and it happens once.
+ */
+const TAIL_COMPACT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * How many bytes the tail `init()` just read occupies as JSONL — the quantity §7.2's 2 MB is a
+ * bound on. Measured from the PARSED lines rather than re-read from disk, because `loadOps()` is
+ * the only reader and it does not hand back the raw text, and because the two backends store the
+ * same lines under different bytes (a native file, a localStorage string) and the bound is about
+ * the lines.
+ *
+ * `+ 1` per line is the newline `toJSONL` joins them with. A line that cannot be serialized at
+ * all counts as zero rather than throwing: a compaction is an optimisation, and refusing to boot
+ * over one is not a trade this function is allowed to make.
+ */
+function tailBytes(tail) {
+  if (!Array.isArray(tail)) return 0;
+  let n = 0;
+  for (const line of tail) {
+    try { n += JSON.stringify(line).length + 1; } catch { /* unserializable: it costs no bound */ }
+  }
+  return n;
+}
 
 /**
  * The identity of ONE LINE of `ops.jsonl`: its opId and its body. Used only to answer "have I
@@ -576,26 +804,100 @@ function serializeBoard(state, binding) {
 }
 
 /**
- * WHICH OF THE FIVE THINGS IS `board.json`? (R5-3a/b/c — the precondition nothing defended.)
+ * THE FIVE COLLECTIONS A BOARD IS MADE OF, AND THE TYPE EACH ONE HAS TO HAVE. (R6-5c/d)
+ *
+ * This is the whole of "is this object one of ours". It is deliberately NOT a validator: a board
+ * that is merely damaged is still a board and `migrate()` repairs it (`bars: 'x'` becomes `[]`,
+ * a dangling `categoryId` is re-pointed, a missing collection is defaulted). The question here is
+ * the one ADR 006 §4.1 actually needs answered — *did this app write this file?* — and the
+ * evidence for it is that at least one of these keys is present AND has the shape this app has
+ * always written it in.
+ *
+ * `schemaVersion` is NOT in this list, and neither is `_v2`. Neither is content: a version number
+ * is a claim any file can make, and `_v2` is an ADDITIVE key (§4.1) that says which log is bound
+ * to a board — it is not itself a board. `{"_v2":{lineageId:…}}` is the sharpest input in the
+ * whole domain (D1-b18) precisely because it is nothing but the envelope.
+ */
+const BOARD_SHAPE = Object.freeze([
+  ['notes', Array.isArray],
+  ['bars', Array.isArray],
+  ['categories', Array.isArray],
+  ['scratchpads', (v) => !!v && typeof v === 'object' && !Array.isArray(v)],
+  ['settings', (v) => !!v && typeof v === 'object' && !Array.isArray(v)],
+]);
+
+/**
+ * Which of a board's own collections does this object carry, in the shape a board carries them?
+ * @returns {string[]} the key names, in `BOARD_SHAPE` order. EMPTY means "this is not a board".
+ */
+function boardKeysOf(board0) {
+  const out = [];
+  if (!board0 || typeof board0 !== 'object' || Array.isArray(board0)) return out;
+  for (const [key, wellTyped] of BOARD_SHAPE) {
+    if (Object.prototype.hasOwnProperty.call(board0, key) && wellTyped(board0[key])) out.push(key);
+  }
+  return out;
+}
+
+/** One human-readable phrase naming what a non-board actually is. */
+function describeNonBoard(raw, board0) {
+  if (Array.isArray(raw)) return 'an array';
+  if (raw === null) return 'null';
+  if (typeof raw !== 'object') return `a ${typeof raw}`;
+  const keys = Object.keys(board0 && typeof board0 === 'object' ? board0 : raw);
+  const present = keys.length
+    ? `it carries ${keys.slice(0, 6).map((k) => `\`${k}\``).join(', ')}`
+    : 'it is empty';
+  return 'an object with none of a board\'s collections (notes, bars, categories, scratchpads, '
+    + `settings) — ${present}`;
+}
+
+/**
+ * WHICH OF THE FIVE THINGS IS `board.json`? (R5-3a/b/c, R6-5a/c/d — the precondition nothing
+ * defended, and then the two inputs that fell off OPPOSITE sides of it.)
  *
  * ADR 006's rule has exactly one precondition: `board.json` must be READABLE. Before this
  * function the code asked one question — did `splitBoardEnvelope` hand back a board? — and five
  * different situations answered it identically:
  *
- *   'ok'           a board object was read.
+ *   'ok'           A BOARD was read: an object carrying at least one of a board's own
+ *                  collections, in a board's shape. `boardKeysOf()` is the whole test.
  *   'absent'       there is no board file. A fresh install, or R7's recovery when a log is
  *                  beside it. The ONLY one of these that may ever adopt a log (ADR 006 §5.5).
- *   'unparseable'  the bytes are there and `JSON.parse` threw. §5.5's defence — "reaching it
- *                  requires deleting board.json" — is not this precondition. One truncated
- *                  write reaches it, and the user's data is still on disk.
- *   'not-a-board'  the bytes parsed to `[]`, `"a string"`, `null`, `7`. Someone or something
- *                  wrote over the file with valid JSON that is not a board.
+ *   'unparseable'  the bytes are there and `JSON.parse` threw — INCLUDING ZERO BYTES, which are
+ *                  bytes (R6-5a). §5.5's defence — "reaching it requires deleting board.json" —
+ *                  is not this precondition. One truncated write reaches it, and the user's data
+ *                  is still on disk.
+ *   'not-a-board'  the bytes parsed to something that is not a board: `[]`, `"a string"`, `null`,
+ *                  `7` — AND ALSO `{}`, `{"schemaVersion":1}`, `{"hello":"welt"}`,
+ *                  `{"notes":"nicht ein array"}`, `{"_v2":{…}}` (R6-5c/d). Someone or something
+ *                  wrote over the file with valid JSON that is not this app's board.
  *   'read-failed'  the read threw: a locked file, a dismissed permission prompt, an EIO.
  *                  NOTHING is known — least of all that the file is gone.
  *
  * The last three mean THE BOARD EXISTS AND THIS APP CANNOT SEE IT. They are not recoveries and
  * they are not fresh installs; they are the one situation in which the app has genuinely lost
  * the user's data and has to say so (`_bootUnreadableBoard`).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * WHY `Array.isArray` WAS NOT ENOUGH, AND WHY `{}` IS THE WORST INPUT IN THE DOMAIN.
+ *
+ * Under ADR 006 `board.json` is the SOLE content authority, so classifying an unrecognised
+ * object as `ok` is not a shrug — it is an AUTHORITATIVE ASSERTION THAT THE BOARD IS EMPTY. Three
+ * things follow from that one word, measured (D1-b14/b18):
+ *
+ *   1. the user's calendar is empty on screen, and the session is WRITABLE;
+ *   2. this board's own log is quarantined `board-carries-no-lineage` — because `{}` carries no
+ *      `_v2` — and SEQUESTERED, renamed out of reach, on the strength of the empty object;
+ *   3. worst: with the victim's own lineage in the envelope (`{"_v2":{lineageId:…}}`) the verdict
+ *      is `same-lineage`, the log is ADOPTED, and `_reconcileOntoBoard` mints one
+ *      `{_alive:false}` retraction PER ENTITY — because "the log has a live entry the board
+ *      lacks" is an honoured deletion (§5.4) and this "board" lacks all of them. The empty board
+ *      and the tombstones are both committed and the next launch agrees. At WP-8 what propagates
+ *      to every paired device is not a corrupt file but well-formed deletes this app minted.
+ *
+ * Every other member of this domain costs HISTORY. That one costs the calendar. → D1-b14…b18,
+ * `tests/attack/round6-recovery.test.js` R6-5c/R6-5d.
  *
  * @returns {{kind: 'ok'|'absent'|'unparseable'|'not-a-board'|'read-failed', detail: string}}
  */
@@ -604,6 +906,7 @@ function classifyBoardFile(file, board0) {
     ? file
     : { status: 'read-failed', error: 'storage returned nothing at all' };
   const bytes = typeof f.text === 'string' ? f.text.length : 0;
+  const onDisk = `its ${bytes} byte${bytes === 1 ? '' : 's'} are still on disk, untouched`;
   switch (f.status) {
     case 'read-failed':
       return {
@@ -611,20 +914,23 @@ function classifyBoardFile(file, board0) {
         detail: `${f.where ?? 'the board file'} could not be read (${f.error || 'no reason given'})`,
       };
     case 'unparseable':
+      // ZERO BYTES ARE BYTES (R6-5a). The file exists; it just does not say what the board is.
+      // Saying so plainly matters — "0 bytes are still on disk" reads like a bug report.
       return {
         kind: 'unparseable',
-        detail: `${f.where ?? 'board.json'} is not valid JSON (${f.error || 'JSON.parse failed'}); `
-          + `its ${bytes} byte${bytes === 1 ? '' : 's'} are still on disk, untouched`,
+        detail: bytes === 0
+          ? `${f.where ?? 'board.json'} is EMPTY — zero bytes, which is what an interrupted write `
+            + 'leaves behind. The file is there and it does not say what the board is'
+          : `${f.where ?? 'board.json'} is not valid JSON (${f.error || 'JSON.parse failed'}); ${onDisk}`,
       };
     case 'absent':
       return { kind: 'absent', detail: 'there is no board file' };
     default:
-      if (board0 !== null) return { kind: 'ok', detail: '' };
+      if (boardKeysOf(board0).length > 0) return { kind: 'ok', detail: '' };
       return {
         kind: 'not-a-board',
         detail: `${f.where ?? 'board.json'} is valid JSON but not a board `
-          + `(${Array.isArray(f.raw) ? 'an array' : f.raw === null ? 'null' : typeof f.raw}); `
-          + `its ${bytes} byte${bytes === 1 ? '' : 's'} are still on disk, untouched`,
+          + `(${describeNonBoard(f.raw, board0)}); ${onDisk}`,
       };
   }
 }
@@ -632,10 +938,13 @@ function classifyBoardFile(file, board0) {
 /**
  * WHY IS THIS SESSION READ-ONLY? One sentence, keyed off `bootFailure.reason`.
  *
- * There are now two ways to reach a read-only session and they are not the same event:
+ * There are now THREE ways to reach a read-only session and they are not the same event:
  *   - `unprojectable` — board.json was READ fine and then refused to DRAW (`_projectSafe` step 4);
  *   - `board-unparseable` / `board-not-a-board` / `board-read-failed` — board.json was never read
- *     at all, so nothing is known about whether it draws (`_bootUnreadableBoard`).
+ *     at all, so nothing is known about whether it draws (`_bootUnreadableBoard`);
+ *   - `recovery-unusable` — board.json is not there AT ALL and the log beside it recovered
+ *     nothing (`_bootRecoveryFailed`, R6-6a/b). Nothing is wrong with a file here; the file is
+ *     missing, and saying anything about "the board on disk" would name a file that is gone.
  *
  * Before round 5's integration `persistNow` told every one of them "the board on disk could not
  * be drawn", which is false on three of the four and is the *worst* thing to say on them: it
@@ -653,6 +962,10 @@ function readOnlyBecause(bootFailure) {
     case 'board-not-a-board':
       return 'board.json could not be read, so the board on screen is a stand-in and may not be '
         + 'saved over the real file.' + tail;
+    case 'recovery-unusable':
+      return 'board.json is missing and the op log beside it could not rebuild the board, so the '
+        + 'board on screen is a stand-in and writing it would make an empty calendar permanent.'
+        + tail;
     default:
       return 'the board on disk could not be drawn.' + tail;
   }
@@ -899,6 +1212,9 @@ class Store {
     /** `tailLineKey(op)` for every line already committed — to the tail file, or to a checkpoint
      *  that folds it. Never appended twice. Reset by `init()` from the tail it just read. */
     this._opsCommitted = new Set();
+    /** Did the tail `init()` read exceed `TAIL_COMPACT_BYTES`? ADR 001 §7.2's second trigger.
+     *  One-shot: the first `_persistOps` of the session compacts and clears it. */
+    this._tailOverBytes = false;
     /**
      * Set when even a repaired projection could not be rendered. The app opens on whatever it
      * could build and REFUSES TO WRITE for the rest of the session — the one thing worse than a
@@ -967,6 +1283,13 @@ class Store {
     // pair or a `lines()` record, exactly as `oplog.load()` accepts them.
     this._tailLines = tail.length;
     this._opsCommitted = new Set(tail.map((l) => tailLineKey(l && typeof l === 'object' && l.op ? l.op : l)));
+    // ADR 001 §7.2's SECOND compaction trigger — "…or on launch when it exceeds 2 MB" — armed
+    // here and consumed by the first `_persistOps` of the session. See `TAIL_COMPACT_BYTES` for
+    // why the byte bound is independent of the line bound and why it is measured only here.
+    // A tail that cannot be measured (a cyclic line — impossible off disk, cheap to survive) is
+    // treated as not over the bound, because a compaction is an optimisation and a launch is not
+    // the place to throw for one.
+    this._tailOverBytes = tailBytes(tail) > TAIL_COMPACT_BYTES;
 
     // 11.5's safety net, loaded BEFORE the branch that needs it. `snaps` is re-used below rather
     // than read twice, so `migrateSnapshots`' warnings are still reported exactly once.
@@ -990,7 +1313,11 @@ class Store {
     } else if (boardFile.kind === 'absent' && hasLog) {
       // R7 — an absent board file is not a disagreement. §5.5. THE ONLY BRANCH THAT ADOPTS A LOG
       // IT CANNOT TIE TO A BOARD, and it is reachable only when the file is genuinely gone.
-      this._log = this._recoverFromLog(checkpoint, tail, board);
+      //
+      // `snaps.snapshots` is passed because R7 CAN FAIL, and §5.6's answer to a failed recovery
+      // is the same file as its answer to an unreadable board (R6-6a/b). This is the only line
+      // of `init()` this pass changed.
+      this._log = this._recoverFromLog(checkpoint, tail, snaps.snapshots);
     } else if (boardFile.kind === 'absent') {
       board.settings.seenFirstRun = false;      // a fresh install. Story 15.1, INV-12.
       this._log = this._buildSpine(board, { restamp: false });
@@ -1132,6 +1459,49 @@ class Store {
    * and the same log becomes adoptable again. So `_sequesterQuarantine` does not move it aside —
    * a refusal that is deferred must leave the files where the next launch will look for them.
    *
+   * ───────────────────────────────────────────────────────────────────────────────────────────
+   * THE INPUT DOMAIN — WHICH STAMPS MAY RAISE THIS CEILING (R6-4, tests/helpers/domains.js D2×D3)
+   *
+   * Round 5 wrote this function against a set of BRANCHES ("the registers, the horizon, the
+   * lines") and round 6 walked in through the one member of the input domain nobody had written
+   * down. So the domain is written down here, as a table over WHAT A STAMP DECIDES, and the code
+   * below is nothing but this table:
+   *
+   *   stamp carried by …            decides state?   may block a mint?   counted here?
+   *   ────────────────────────────  ──────────────   ─────────────────   ─────────────
+   *   a register cell (checkpoint    YES              YES — LWW compares  YES
+   *     or tail, it is one map)                       a mint against it
+   *   `checkpoint.horizon`           YES — it is the  YES — `compact()`   YES
+   *                                  fold boundary    and `append` both
+   *                                                   refuse below it
+   *   a LIVE line (`ops()`)          YES — it is in   YES                 YES
+   *                                  the fold
+   *   a PARKED line                  NO  — ADR 001    NO                  **NO**
+   *     (`future`, `epoch`,          §7.4: parked is
+   *      `unknownKind`, `version`,   retained AND NOT
+   *      `unknownSpace`,             APPLIED. It is in
+   *      `unknownField`)             no register at all.
+   *   a REJECTED op                  NO — never a line, never reachable from here.
+   *
+   * §12.6's precondition is "mint ABOVE every stamp the log carries", and round 5 read `carries`
+   * as `holds a line for`. It is not: it is a statement about the stamps a MINT WILL BE COMPARED
+   * AGAINST, and a parked op is compared against nothing. THERE IS NOTHING FOR A MINT TO BE
+   * "ABOVE" WHEN THE OP IS IN NO REGISTER. Counting a parked stamp here turned §7.4's shock
+   * absorber — the mechanism whose whole job is to make ONE peer's bad clock cost ONE op — into a
+   * whole-history quarantine that repeats every launch until the stamp passes (R6-4a/b), and,
+   * because the park is decided before the authorisation gate, one that a stranger could trigger
+   * remotely with a date (R6-4c; the ordering half of that is fixed in `applyRemote`).
+   *
+   * `liveOnly: true` is the explicit spelling of `ops()`' default and it is spelled explicitly
+   * BECAUSE the default is what was wrong: a reader who sees `ops()` cannot tell whether the
+   * author decided about parked lines or never thought about them.
+   *
+   * WHAT REMAINS REACHABLE, and it is the case this function was written for: a stamp that is in
+   * a register or is the horizon and is more than 24 h ahead can only have got there by being
+   * ADMITTED, i.e. by having been inside the window when it was written. So it means the local
+   * clock has moved BACKWARDS since — a corrected NTP step, a restored VM, a hand-set date. The
+   * detail below says that and no longer accuses the Mac of a fault it may not have.
+   *
    * @returns {?string} the detail for the quarantine, or null when the log is inside the window
    */
   _clockSkew(log, checkpoint) {
@@ -1141,24 +1511,40 @@ class Store {
       if (!cells || typeof cells.values !== 'function') continue;
       for (const cell of cells.values()) consider(cell?.stamp);
     }
-    for (const op of log.ops({ includeParked: true })) consider(op?.ts);
+    // LIVE LINES ONLY. See the table above: a parked line is in no register, so no mint has to
+    // be above it. Changing this to `{includeParked:true}` is round 6's mutant F2 in reverse and
+    // reddens R6-4a/R6-4b/R6-4c and D2-s12/s14/s16/s18 × {own,foreign}.
+    for (const op of log.ops({ liveOnly: true })) consider(op?.ts);
     if (max === null) return null;
     const now = Date.now();
     const ahead = msOf(max) - now;
     if (ahead <= MAX_FUTURE_DRIFT_MS) return null;
     const hours = Math.round(ahead / 3600000);
-    return 'THIS MACHINE\'S CLOCK is the problem, not the log: the log\'s newest stamp is dated '
-      + `${new Date(msOf(max)).toISOString()}, which is ${hours} hours ahead of this Mac's clock `
-      + `(${new Date(now).toISOString()}) — more than the ${MAX_FUTURE_DRIFT_MS / 3600000} hours `
-      + 'ADR 001 §1.3 allows, so no op minted now could be applied above it. The log is this '
-      + 'board\'s own and it is NOT being discarded: set this Mac\'s date and time correctly (or '
-      + 'wait until the date passes) and the history is adopted again on the next launch.';
+    return 'THE CLOCK ON THIS MAC IS BEHIND THIS BOARD\'S OWN HISTORY, and the history is not the '
+      + `problem: a value this board is showing was written at ${new Date(msOf(max)).toISOString()}, `
+      + `which is ${hours} hours ahead of this Mac's clock (${new Date(now).toISOString()}) — more `
+      + `than the ${MAX_FUTURE_DRIFT_MS / 3600000} hours ADR 001 §1.3 allows, so no op minted now `
+      + 'could be applied above it. A stamp only gets into a register by being inside that window '
+      + 'when it was written, so the clock has moved backwards since (a corrected time server, a '
+      + 'restored virtual machine, a hand-set date). The log is this board\'s own and it is NOT '
+      + 'being discarded: set this Mac\'s date and time correctly (or wait until the date passes) '
+      + 'and the history is adopted again on the next launch.';
   }
 
   /**
    * Every stamp in a loaded log, into the clock. See `_adoptHistory` step 2 — this is the whole
    * of ADR 006 §12 rule 6 and it is the reason `_reconcileOntoBoard` can be a plain diff.
    * Its precondition is `_clockSkew`, which has already answered null when this runs.
+   *
+   * IT WALKS A WIDER DOMAIN THAN `_clockSkew` ON PURPOSE, and the difference is not an oversight.
+   * `_clockSkew` asks "can a mint be placed above everything that decides state?", so a parked
+   * line — which decides none — must not be counted. This asks "is the clock at least as far
+   * along as everything the log has seen?", where a parked line is free to be counted because
+   * `clock.observe` DECLINES anything more than `MAX_FUTURE_DRIFT_MS` ahead on its own
+   * (`core/stamp.js:167`) and a parked line INSIDE the window (`unknownKind`, `version`,
+   * `unknownSpace`, `unknownField`, `epoch` — the five park reasons that are not `future`) is one
+   * this build may promote on the next launch after an update, at which point it does decide
+   * state. Observing it early costs nothing and keeps the clock monotone across that promotion.
    */
   _observeEveryStamp(log, checkpoint) {
     if (isStamp(checkpoint?.horizon)) this._clock.observe(checkpoint.horizon);
@@ -1219,6 +1605,30 @@ class Store {
    * disagreement to resolve (ADR 006 §5.5). The log is loaded as the truth and the boot is
    * REPORTED as a recovery. This is the one asymmetric branch in the design.
    *
+   * ─────────────────────────────────────────────────────────────────────────────────────────
+   * R6-6a/b — A RECOVERY CAN FAIL, AND FAILING IS NOT A FRESH INSTALL.
+   *
+   * The precondition above (`kind === 'absent'` and a log exists) is about the INPUT. It says
+   * nothing about the OUTCOME, and round 5 wrote the branch as though the two were the same
+   * thing. Enumerate the outcome instead — the input here is the pair `(checkpoint, tail)` and
+   * it has exactly three ends:
+   *
+   *   R-a  `log.load()` THROWS.                       Nothing was recovered. The log is refused.
+   *   R-b  it loads and asserts NO entity at all.     Nothing was recovered. The log is fine.
+   *   R-c  it loads and asserts at least one entity.  A recovery — R7, said out loud, below.
+   *
+   * Only R-c is a recovery. R-a and R-b used to fall out of this function as an EMPTY, WRITABLE
+   * board with `_recoveredFrom === null`, so no recovery was reported, nothing was read-only,
+   * and the first autosave wrote the empty board over the slot the missing file used to occupy
+   * — while `snapshots.json` sat in `store.snapshots`, loaded by `init()` and never consulted.
+   * That is the exact morning ADR 006 §5.6 spends three paragraphs on, reached through §5.5
+   * where none of §5.6's machinery exists. Both now go to `_bootRecoveryFailed`, which IS that
+   * machinery. → D1-r3, D1-r4, D1-r5; `tests/attack/round6-recovery.test.js` R6-6a/R6-6b.
+   *
+   * The controls that say this is a narrowing and not a ban: D1-r1 (no board, NO log) is still a
+   * fresh install, and D1-r2 / R6-6c (no board, a log with something in it) is still a recovery,
+   * still writable, still said out loud.
+   *
    * ITS PRECONDITION IS NOW THE ONE §5.5 ARGUES FOR. "Reaching it requires deleting board.json,
    * and anyone who can delete it can equally write it" was never the precondition the code had:
    * the precondition was that `JSON.parse` threw, and `[]`, `"a string"`, `null`, a truncated
@@ -1234,15 +1644,34 @@ class Store {
    * became the only copy of the board. Adopting its lineage is not a new trust decision: its
    * content is already on screen, which is a strictly larger concession than its name.
    */
-  _recoverFromLog(checkpoint, tail, fallbackBoard) {
+  _recoverFromLog(checkpoint, tail, snapshots) {
     const log = createOpLog({ now: () => Date.now() });
     try {
       log.load({ checkpoint, tail });
     } catch (e) {
-      this._quarantineLog('unreadable-log', `${e.name}: ${e.message}`, checkpoint, tail);
-      return this._buildSpine(fallbackBoard, { restamp: false });
+      // ── R-a. THE ONLY OTHER RECORD OF THE BOARD WILL NOT LOAD. ────────────────────────────
+      // Not a fresh install: a fresh install has no log. The board file is gone, the one thing
+      // that might have rebuilt it is unusable, and `snapshots.json` — §5.6's own stated answer
+      // — was already loaded two statements up in `init()`. It used to be dropped on the floor
+      // here in favour of an empty, WRITABLE board that the first autosave then committed.
+      this._quarantineLog('unreadable-log', `${e.name}: ${e.message}`, checkpoint, tail,
+        'board.json was MISSING, so there was nothing to load unchanged;');
+      return this._bootRecoveryFailed(
+        `the op log beside it could not be loaded (${e.name}: ${e.message})`,
+        checkpoint, tail, snapshots);
     }
     try { this._observeEveryStamp(log, checkpoint); } catch { /* a stamp the clock refuses is not fatal here */ }
+    if (this._logAssertsNothing(log)) {
+      // ── R-b. IT LOADED, AND IT ASSERTS NOTHING. ───────────────────────────────────────────
+      // No note, no bar, no category, no scratchpad. A recovery that recovers no entry is
+      // indistinguishable, on screen, from no recovery at all — and calling it one is how an
+      // empty board acquires the authority of the file that is missing. The log is NOT
+      // quarantined: nothing is wrong with it, it simply has nothing in it.
+      return this._bootRecoveryFailed(
+        'the op log beside it loaded cleanly and asserts no note, bar, category or scratchpad, '
+        + 'so there is nothing in it to recover the board from',
+        checkpoint, tail, snapshots);
+    }
     const lzp = checkpoint && typeof checkpoint === 'object' ? checkpoint.lzp : null;
     if (lzp && typeof lzp === 'object' && isLineageId(lzp.lineageId)) {
       this._lineageId = lzp.lineageId;
@@ -1255,6 +1684,124 @@ class Store {
       + '— so check the board is yours and complete BEFORE making a change. If it is not, quit without '
       + 'editing: the log is still on disk and so is snapshots.json.');
     return log;
+  }
+
+  /**
+   * DOES THIS LOG ASSERT ANY BOARD CONTENT AT ALL? (R6-6b — the second half of a failed recovery.)
+   *
+   * Measured on the PROJECTION, because the projection is what a user would see, and counted
+   * over the four things a v1 board can hold: notes, bars, categories, scratchpads. A log with
+   * nothing in all four projects to a blank calendar, which is the same picture a store with no
+   * files at all draws — and one of those two is a recovery and the other is a fresh install.
+   *
+   * THE `catch` IS NOT A SHRUG AND IT MUST STAY `false`. A projection that THROWS is a log with
+   * something in it that this build cannot draw yet — a poisoned `startMonth`, say — and
+   * `_projectSafe` repairs exactly that, one setting at a time, without discarding a single
+   * entry. Answering `true` here would send a recoverable board to a read-only boot. The control
+   * is `tests/attack/round4-failsafe-init.test.js` R4-8a: a bare `ops.jsonl` carrying one note
+   * AND a `pref.set` that makes `materialize` refuse, which must still recover the note and must
+   * still leave `bootFailure === null`.
+   */
+  _logAssertsNothing(log) {
+    let p;
+    try { p = this._projectionOf(log); } catch { return false; }
+    const n = (a) => (Array.isArray(a) ? a.length : 0);
+    const pads = p && p.scratchpads && typeof p.scratchpads === 'object'
+      ? Object.keys(p.scratchpads).length
+      : 0;
+    return n(p?.notes) + n(p?.bars) + n(p?.categories) + pads === 0;
+  }
+
+  /**
+   * WHAT A READ-ONLY BOOT PUTS ON SCREEN IN PLACE OF THE BOARD IT CANNOT SHOW.
+   *
+   * 11.5's snapshot ring is the safety net and this is the one place it is unwound, so that
+   * `_recoveredFrom` and `bootFailure.shownInstead` are written in the same statement and can
+   * never disagree about what the user is looking at. Both callers — the unreadable board file
+   * (§5.6) and the failed recovery (§5.5's R-a/R-b) — need exactly this, and having two copies of
+   * it is how one of them ends up not consulting `snapshots.json` at all, which is R6-6a.
+   *
+   * `bootFailure` MUST ALREADY BE SET when this is called: it writes `shownInstead` into it.
+   *
+   * @returns {{board: Object, snap: Object|null}}
+   */
+  _standIn(snapshots) {
+    const snap = newestUsableSnapshot(snapshots);
+    if (snap) {
+      this._recoveredFrom = { from: 'snapshot', day: snap.day, at: snap.at ?? null, lineageId: null };
+      this.bootFailure.shownInstead = { from: 'snapshot', day: snap.day, at: snap.at ?? null };
+      return { board: migrate(structuredClone(snap.state)), snap };
+    }
+    // `seenFirstRun` is LEFT AT v1's VALUE (false ⇒ the first-run tour shows) deliberately.
+    // Showing the tour over a disaster is wrong, but it is what v1 did with a corrupt
+    // board.json and `tests/tier1/store-persistence.test.js:240` characterizes it by name
+    // ("treated as a first run"). Re-baselining a v1 observable is the tier-1 owner's call,
+    // not this pass's; the read-only guard and the warning are what actually protect the file.
+    this._recoveredFrom = { from: 'none', day: null, at: null, lineageId: null };
+    this.bootFailure.shownInstead = { from: 'none', day: null, at: null };
+    return { board: migrate(defaultState()), snap: null };
+  }
+
+  /**
+   * §5.5's R-a AND R-b — `board.json` IS GONE AND THE LOG BESIDE IT RECOVERED NOTHING (R6-6a/b).
+   *
+   * The inverse of R5-3, and the more likely failure once R5-3's caution is in place: the caution
+   * refusing to recover is one bug, and the recovery quietly succeeding at nothing is the other.
+   * Both end here, and the three things this does are §5.6's three things, for §5.6's reasons:
+   *
+   *  1. **`bootFailure` FIRST**, so the session is read-only before anything can write. The board
+   *     file's slot is left exactly as it was found — which on this path means LEFT ABSENT, and
+   *     that is the whole point: an empty board committed over a missing file is a board that
+   *     was never recovered being made permanent, and every later launch agrees with it.
+   *  2. **`snapshots.json` is consulted.** It was loaded by `init()` before the branch was taken
+   *     and it is the only file left that has ever held this user's board. §8.2 names it as the
+   *     answer for exactly this morning; R6-6a's measurement was that it sat in `store.snapshots`
+   *     and no code path read it.
+   *  3. **It is said out loud**, and what is said is true: the board file is missing, THIS IS NOT
+   *     A FRESH INSTALL, and what is on screen is a snapshot (or nothing) rather than the board.
+   *
+   * The log is NOT quarantined here — R-a's caller has already quarantined it as `unreadable-log`
+   * before calling, and R-b's log is not defective at all. And because `bootFailure` is set, the
+   * `!this.bootFailure` gate at the end of `init()` means the refused log is NOT sequestered: a
+   * read-only session's promise is that every file is exactly as it was, and on this path the log
+   * may be the freshest record of the board that exists.
+   *
+   * HUMAN-FACING COPY (DE ships; EN twins), keyed off `bootFailure.reason === 'recovery-unusable'`:
+   *   DE  „Die Datei board.json ist nicht vorhanden. Daneben liegt ein Journal, aber es lässt
+   *       sich nicht dazu verwenden, den Kalender wiederherzustellen. Das ist KEINE Neu-
+   *       installation. Angezeigt wird der letzte Schnappschuss vom <Tag>; diese Sitzung
+   *       speichert nichts, damit nichts überschrieben wird."
+   *   EN  "board.json is not there. There is an op log beside it, but it cannot be used to
+   *       rebuild the calendar. This is NOT a fresh install. What you see is the snapshot from
+   *       <day>; nothing will be saved this session, so nothing can be overwritten."
+   *   …with no snapshot the second sentence becomes:
+   *   DE  „Es gibt keinen Schnappschuss." / EN  "There is no snapshot."
+   *
+   * @param {string} why one clause naming which of R-a / R-b happened
+   * @returns {Object} the spine to run on — built from a snapshot, or from nothing
+   */
+  _bootRecoveryFailed(why, checkpoint, tail, snapshots) {
+    this.bootFailure = {
+      at: new Date().toISOString(),
+      reason: 'recovery-unusable',
+      detail: `board.json is not there and ${why}`,
+      shownInstead: null,
+      logPresent: !!checkpoint || (Array.isArray(tail) && tail.length > 0),
+    };
+    const { board, snap } = this._standIn(snapshots);
+    // `_recovered` stays FALSE. `diagnostics().source` would otherwise say 'recovery' about a
+    // boot on which nothing was recovered — which is the very claim R6-6b was filed against.
+    this._warn(
+      `board.json IS NOT THERE and ${why}. THIS IS NOT A FRESH INSTALL: an op log was found `
+      + 'beside the missing board file, so this device has had a board. Nothing will be written '
+      + 'to board.json, ops.jsonl or checkpoint.json this session, so every file on disk is '
+      + `exactly as it was. ${snap
+        ? `What is on screen is the snapshot from ${snap.day} (Einstellungen › Schnappschüsse), `
+          + 'which may be up to a day older than the board you last saw.'
+        : 'There is no snapshot to fall back on either, so the calendar is empty — but it is empty '
+          + 'because nothing could be read, not because there is nothing to read.'}`,
+    );
+    return this._buildSpine(board, { restamp: false });
   }
 
   /**
@@ -1326,22 +1873,7 @@ class Store {
       );
     }
 
-    const snap = newestUsableSnapshot(snapshots);
-    let board;
-    if (snap) {
-      board = migrate(structuredClone(snap.state));
-      this._recoveredFrom = { from: 'snapshot', day: snap.day, at: snap.at ?? null, lineageId: null };
-      this.bootFailure.shownInstead = { from: 'snapshot', day: snap.day, at: snap.at ?? null };
-    } else {
-      board = migrate(defaultState());
-      // `seenFirstRun` is LEFT AT v1's VALUE (false ⇒ the first-run tour shows) deliberately.
-      // Showing the tour over a disaster is wrong, but it is what v1 did with a corrupt
-      // board.json and `tests/tier1/store-persistence.test.js:240` characterizes it by name
-      // ("treated as a first run"). Re-baselining a v1 observable is the tier-1 owner's call,
-      // not this pass's; the read-only guard and the warning are what actually protect the file.
-      this._recoveredFrom = { from: 'none', day: null, at: null, lineageId: null };
-      this.bootFailure.shownInstead = { from: 'none', day: null, at: null };
-    }
+    const { board, snap } = this._standIn(snapshots);
     this._recovered = true;
 
     this._warn(
@@ -1843,9 +2375,47 @@ class Store {
 
     let verdict;
     try {
+      // ── AUTHORISATION IS DECIDED FIRST, ON A CLOCK THAT PARKS NOTHING (R6-4c · D3-p5) ───────
+      //
+      // `ctx.nowMs` has exactly one consumer in the whole authorization fold: `classifyOp`'s
+      // 24 h future clamp (`core/ops.js:502`, and `nowMs` appears nowhere else in
+      // `core/authz.js`). Passing it here made `foldAuthorized` SHORT-CIRCUIT a future-stamped op
+      // straight into `parked` (`core/authz.js:751`) BEFORE any of the three authorisation stages
+      // ran — so the op never entered `verdict.rejected`, the loop below never skipped it, and
+      // `_log.append` parked it. The same author's op stamped NOW is refused outright. One date,
+      // and a stranger's write was kept, persisted into the victim's own `checkpoint().parked`
+      // and read back on the next launch.
+      //
+      // THE INPUT DOMAIN, so the next round cannot walk in through a cell nobody wrote down
+      // (tests/helpers/domains.js D3). `classifyOp` has three verdicts and six park reasons:
+      //
+      //   verdict   park reason      derived from        may authz judge the op?   who decides
+      //   ───────   ──────────────   ─────────────────   ───────────────────────   ───────────
+      //   reject    —                the op's SHAPE      no — it is not an op      classifyOp
+      //   park      `future`         THE WALL CLOCK      YES — every field authz    ← THE BUG:
+      //                                                  reads is present and       the clock
+      //                                                  well-formed                pre-empted
+      //                                                                             authz
+      //   park      `version`,       the op's SHAPE      no — the vocabulary is    classifyOp
+      //             `unknownKind`,   (`validateOp`)      unknown to this build, so
+      //             `unknownSpace`,                      authz cannot know what it
+      //             `unknownField`                       would be authorising
+      //   park      `epoch`          key material        no — the body is sealed   the caller
+      //   admit     —                —                   YES                       authz
+      //
+      // Only the `future` row is decided by a clock, and only that row is a park an authorisation
+      // question could have answered. So the clock is withheld from the GATE and left where it
+      // belongs — in `_log.append`, which classifies with `now()` and parks what is genuinely
+      // ahead. The five shape/key parks are unchanged: they still short-circuit, because for them
+      // "authorise first" is not a thing that can be done at all.
+      //
+      // NOTHING ELSE MOVES. This loop reads `verdict.rejected` and `verdict.rejectionOf` and
+      // nothing else — not `regs`, not `admitted`, not `parked` — so withholding `nowMs` changes
+      // exactly one thing: a future-stamped op is now judged by the same rules as the same op
+      // stamped now. Restoring `nowMs: Date.now()` here is the mutant, and it reddens R6-4c,
+      // D3-p5 and D2-s12/s14/s16/s18 × foreign.
       verdict = foldAuthorized([...this._log.ops({ includeParked: true }), ...wellFormed], {
         me: this._me,
-        nowMs: Date.now(),
       });
     } catch (e) {
       // The gate itself could not reach a verdict. Admitting the batch ungated would break the
@@ -2165,8 +2735,12 @@ class Store {
       this._tailLines += pending.length;
     }
 
-    // ② the compaction policy (ADR 001 §7.2)
-    if (this._tailLines >= TAIL_COMPACT_AT) {
+    // ② the compaction policy (ADR 001 §7.2) — BOTH of its triggers, whichever is crossed first:
+    //    `TAIL_COMPACT_AT` lines, or `TAIL_COMPACT_BYTES` measured once at launch. The byte
+    //    trigger is one-shot: this compaction is what makes it false, so it is consumed here
+    //    rather than re-measured on every debounced save.
+    if (this._tailLines >= TAIL_COMPACT_AT || this._tailOverBytes) {
+      this._tailOverBytes = false;
       try {
         this._log.compact();
       } catch (e) {

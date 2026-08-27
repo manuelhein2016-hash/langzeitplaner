@@ -293,9 +293,96 @@ function toSeq(v) {
 const result = (status, extra) => Object.freeze({ status, ...extra });
 
 /**
- * @param {{ now: () => number, storage?: any, registers?: Object }} ports
+ * HOW MANY ABSORBED BODY FINGERPRINTS THE CHECKPOINT MAY CARRY (R6-3 · ADR 001 §7.2).
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * WHY THERE HAS TO BE A NUMBER HERE AT ALL
+ *
+ * `bodies` is right to exist. Round 2's attack A1 was that a COMPACTION DECIDED STATE: once a
+ * body is folded into the checkpoint its line is gone, and answering a second, different body at
+ * that opId with `duplicate` made two devices converge to two different boards depending on when
+ * each happened to compact. One 96-bit fingerprint per absorbed opId is what tells the two cases
+ * apart afterwards, and it is the right price.
+ *
+ * What was missing is that NOTHING EVER FORGAVE ONE. `compact()` calls `rememberBody` for every
+ * line it drops; `pruneSeqIndex()` prunes `seqById`, `tsById` and `legacySeqByStamp` on the same
+ * call and stepped over `bodies`. So `checkpoint.json` — a file `storage.saveCheckpoint` rewrites
+ * ATOMICALLY AND WHOLE on every debounced save — grew with the number of ops the user had EVER
+ * written, on a board that never grew at all: measured at round 6, 6 000 fingerprints and 282 KB
+ * for a board of one note, ~46 bytes per op ever written, durable across restarts, and over
+ * localStorage's quota inside five years of ordinary use.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * THE INPUT DOMAIN — WHAT FORGETTING A FINGERPRINT ACTUALLY COSTS
+ *
+ * The fix is not "prune it like the others". `pruneSeqIndex`'s `keepIds` is "ids a surviving
+ * register attributes, plus retained lines", and `bodies` holds precisely the ids that are
+ * NEITHER — that is what it is for. Pruning by `keepIds` (round 6's own mutant F1) keeps exactly
+ * the WINNER of each field and drops every absorbed op no register points at any more, which
+ * after a day's editing is nearly all of them.
+ *
+ * BE PRECISE ABOUT WHAT THAT COSTS, because the loose version of this claim — "it puts A1 back"
+ * — is false and was measured false. `append()` answers an unfingerprinted opId by RE-FOLDING
+ * (`oplog.js:645`), which is idempotent, so a purge does not by itself change state. What it
+ * destroys is (a) the ADR 002 §5.1 tamper evidence: a second body arriving under a superseded
+ * opId comes back `appended` with `splicedIds()` empty, and `spliced` is the only report that an
+ * opId ever arrived under two bodies and cannot be re-derived from the tail (REG-28); and (b)
+ * the cross-restart dedupe index, since `load()` seeds `seen` from `bodies` alone — so after a
+ * restart every re-pulled op is re-folded and re-written to the tail. `tests/tier1/
+ * core-oplog.test.js` pins (a) ON A SUPERSEDED OP, which is the only shape of that test the
+ * mutant fails; written against the winner it is green under the mutant and proves nothing.
+ *
+ * So the question is not which branch to prune in; it is what each STATE an opId can be in costs
+ * when its fingerprint is gone. Enumerated, over `append()`'s own dispatch (`oplog.js:613-645`):
+ *
+ *  # state of opId X on re-delivery       fp?  SAME body again          A SECOND, DIFFERENT body
+ *  ─ ────────────────────────────────     ───  ───────────────────────  ────────────────────────
+ *  1 a live line is held                   —   `duplicate` (the `known` path — fp never consulted)
+ *  2 a parked line is held                 —   `duplicate` (ditto)
+ *  3 absorbed, fingerprint KEPT           yes  `duplicate`, cheap       `conflict`, `spliced`
+ *                                                                        records it, body folded
+ *  4 absorbed, fingerprint EVICTED,        no  RE-FOLDED — one line     RE-FOLDED — one line
+ *    id still in `seen` (same session)          back in the tail             back in the tail
+ *  5 absorbed, fingerprint evicted,        no  RE-FOLDED                RE-FOLDED
+ *    id not in `seen` (after a restart)
+ *  6 never seen                            no  folded                   folded
+ *
+ * ROWS 4, 5 AND 6 ARE THE SAME OUTCOME AS ROW 3 FOR STATE, and `append` already says so in as
+ * many words: "No fingerprint to compare against: re-fold rather than guess. Idempotent either
+ * way." Applying an op twice is idempotent by construction (ADR 001 §6); folding BOTH bodies of
+ * a splice is exactly what row 3 does too, because the register join — not the line — decides
+ * field by field. So a device that evicted converges with a device that did not.
+ *
+ * THE COST IS THEREFORE EXACTLY TWO THINGS, both bounded and neither of them state:
+ *   · one re-folded line back in the tail, which the next compaction drops again; and
+ *   · `spliced` — the ADR 002 §5.1 TAMPER EVIDENCE — not recording that particular splice.
+ *
+ * The second is why the eviction is OLDEST-FIRST rather than arbitrary, and why a CAP is not the
+ * same trade as the purge above even though both forget fingerprints. A spliced envelope is
+ * delivered near in time to the body it re-uses the opId of, so the cap keeps the whole window in
+ * which a splice is plausible; the purge keeps one fingerprint per live FIELD, which is a set
+ * chosen by what the board looks like now and has nothing to do with what arrived recently.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * WHY 1 500
+ *
+ * It is not a number picked here. It is `store.js`'s `TAIL_COMPACT_AT` — `min(5000,
+ * floor(LS_OPS_CAP × 0.75))` — the design's own name for "the most lines this log ever holds at
+ * once". Bounding `bodies` by the same number makes every index the checkpoint carries a
+ * function of the LIVE log, which is the rule `tests/helpers/domains.js` D4 states, and makes
+ * the whole file O(entities × fields) again. `tests/tier1/core-oplog.test.js` asserts the two
+ * constants agree, so moving one and not the other is a red test rather than a silent unbounding.
+ *
+ * `core/` may not import from `store.js` (ADR 005 §2), hence the restatement rather than an
+ * import; `createOpLog({ bodyCap })` overrides it for a test that wants a small number.
+ */
+export const BODY_FINGERPRINT_CAP = 1500;
+
+/**
+ * @param {{ now: () => number, storage?: any, registers?: Object, bodyCap?: number }} ports
  *        `now` is REQUIRED: core/ may not read the wall clock itself (ADR 005 §2), and the 24 h
  *        future clamp is a safety rule that must not be silently unarmed by an absent clock.
+ *        `bodyCap` overrides `BODY_FINGERPRINT_CAP` — see it for what the bound costs.
  */
 export function createOpLog(ports = {}) {
   const now = ports.now;
@@ -308,6 +395,8 @@ export function createOpLog(ports = {}) {
     if (typeof R[fn] !== 'function') throw new OpLogError(`createOpLog: ports.registers is missing ${fn}()`);
   }
   const storage = ports.storage ?? null;     // accepted, retained, never called — see the header
+  const bodyCap = Number.isInteger(ports.bodyCap) && ports.bodyCap >= 0
+    ? ports.bodyCap : BODY_FINGERPRINT_CAP;
 
   /** @type {Map<string, {op:Object, seq:bigint|null}>} admitted ops, in arrival order */
   let live = new Map();
@@ -523,7 +612,52 @@ export function createOpLog(ports = {}) {
     }
   }
 
-  /** Keep only the ops a surviving register attributes, plus the retained lines. */
+  /**
+   * FORGET THE OLDEST ABSORBED BODY FINGERPRINTS ONCE THERE ARE MORE THAN `bodyCap` (R6-3).
+   *
+   * See `BODY_FINGERPRINT_CAP` for the whole argument — what an evicted fingerprint costs, per
+   * state an opId can be in, and why the answer is "one re-folded line and one missing entry in
+   * the tamper report, and never a difference in state".
+   *
+   * TWO PROPERTIES THE LOOP HAS TO HAVE, and both are one line each:
+   *
+   *  · OLDEST FIRST. A `Map` iterates in insertion order, so `bodies.keys()` is already
+   *    absorption order and `delete` during a `for…of` over it is defined behaviour. (After a
+   *    RELOAD that order is `bodiesObject()`'s sorted order rather than absorption order, because
+   *    a JSON object is all `load()` gets. OpIds are random, so that degrades "oldest first" to
+   *    "arbitrary but stable" for the fingerprints that survived a restart — which costs nothing
+   *    the table above does not already price, and the CAP, which is the whole point, holds
+   *    either way.)
+   *
+   *  · NEVER EVICT AN ID THAT STILL HAS A LINE. `bodiesObject()` already skips those on the way
+   *    to disk, but the in-memory entry is what `append()` consults the moment that line is
+   *    compacted, and evicting it would throw away a fingerprint we are about to need. Skipping
+   *    them can leave `bodies.size` above the cap when every entry has a line — which is exactly
+   *    right: those are RETAINED LINES, they are bounded by `TAIL_COMPACT_AT` themselves, and
+   *    they cost the checkpoint nothing because they are not serialized.
+   *
+   * @returns {number} fingerprints forgotten
+   */
+  function boundBodies() {
+    let over = bodies.size - bodyCap;
+    if (over <= 0) return 0;
+    let evicted = 0;
+    for (const id of bodies.keys()) {
+      if (over <= 0) break;
+      if (live.has(id) || parked.has(id)) continue;
+      bodies.delete(id);
+      over--;
+      evicted++;
+    }
+    return evicted;
+  }
+
+  /**
+   * Keep only the ops a surviving register attributes, plus the retained lines — and, since
+   * round 7, bound `bodies` too. It was the one index this function stepped over (R6-3b), and
+   * `bodies` is the index the file's growth was made of. Deleting the `boundBodies()` call is
+   * the mutant; it reddens R6-3a, R6-3b and D4-i5/D4-g5/D4-g6.
+   */
   function pruneSeqIndex() {
     const keepIds = new Set();
     const keepStamps = new Set();
@@ -541,6 +675,7 @@ export function createOpLog(ports = {}) {
     for (const id of [...seqById.keys()]) if (!keepIds.has(id)) seqById.delete(id);
     for (const id of [...tsById.keys()]) if (!keepIds.has(id)) tsById.delete(id);
     for (const s of [...legacySeqByStamp.keys()]) if (!keepStamps.has(s)) legacySeqByStamp.delete(s);
+    boundBodies();
     rebuildStampIndex();
   }
 

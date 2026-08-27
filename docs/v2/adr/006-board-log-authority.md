@@ -417,6 +417,44 @@ as a fresh install when a log is present.
 > The other three kinds — `unparseable`, `not-a-board`, `read-failed` — go to §5.6, which is a
 > different event and must stay a different event.
 
+> **AMENDED AGAIN 2026-08-27 (round 7 / R6-6) — THE PRECONDITION IS ABOUT THE INPUT. IT SAYS
+> NOTHING ABOUT THE OUTCOME, AND ROUND 5 WROTE THIS BRANCH AS THOUGH THE TWO WERE THE SAME
+> THING.**
+>
+> `kind === 'absent' && hasLog` says a log is *there*. It does not say the log **loads**, and it
+> does not say the log **has anything in it**. Enumerate the outcome instead — the input is the
+> pair `(checkpoint, tail)`, and it has exactly three ends:
+>
+> | | what happened | what the boot must be | is the log at fault? |
+> |---|---|---|---|
+> | **R-a** | `log.load()` **throws** | **nothing was recovered** → §5.6 | yes → `unreadable-log` |
+> | **R-b** | it loads and asserts **no** note, bar, category or scratchpad | **nothing was recovered** → §5.6 | **no** → `quarantine` stays **null** |
+> | **R-c** | it loads and asserts **≥ 1** entity | R7, exactly as written below | no |
+>
+> **Only R-c is a recovery, and R-a and R-b go to §5.6's machinery** (`_bootRecoveryFailed`, a new
+> `bootFailure.reason` of `recovery-unusable`): `bootFailure` is set **first**, `snapshots.json`
+> is consulted through the same `_standIn` §5.6 uses, and the warning says *"THIS IS NOT A FRESH
+> INSTALL"* out loud, because a log beside a missing board file is proof that this device has had
+> a board. Because `bootFailure` is set, `_sequesterQuarantine`'s existing `!bootFailure` gate
+> means the refused log **keeps its own name** — on this path it may be the freshest record that
+> exists.
+>
+> Both used to fall out of this function as an **empty, WRITABLE** board with
+> `_recoveredFrom === null`, which the first autosave then committed — while `store.snapshots`
+> held §5.6's own stated answer, loaded two statements earlier in `init()` and never read. The
+> board file being gone does not make an unloadable log a fresh install, and **a recovery that
+> recovers no entry is indistinguishable on screen from no recovery at all.**
+>
+> **R-b's quarantine must stay `null`.** Nothing is wrong with an empty log; it is empty. And
+> `_logAssertsNothing`'s `catch { return false; }` is load-bearing in the other direction: a
+> projection that *throws* is a log with something in it this build cannot draw yet, and
+> `_projectSafe` repairs exactly that, one setting at a time, without discarding an entry.
+> Answering `true` there would send a recoverable board to a read-only boot (control: R6-6e).
+>
+> Rows: `round6-recovery.test.js` R6-6a/R6-6b/R6-6f (inverted), R6-6c/R6-6d/R6-6e (controls), and
+> `D1-r1 … D1-r8` in `tests/helpers/domains.js` — the axis, enumerated, that this branch is now
+> written against.
+
 ```js
 // init(): the branch is on the KIND, and only one kind reaches R7.
 const boardFile = classifyBoardFile(await storage.loadBoardFile(), board0);
@@ -456,13 +494,35 @@ _recoverFromLog(checkpoint, tail) {
 Not a recovery, not a fresh install. It is the one situation in which the app has genuinely lost
 sight of the user's data and has to say so. Four statuses come out of `storage.loadBoardFile()` and
 five kinds out of `classifyBoardFile()`; `ok` and `absent` are handled above, and these three are
-this section:
+this section — **plus, since round 7, §5.5's own R-a/R-b, which reach it through
+`_bootRecoveryFailed`**:
 
 | kind | what happened |
 |---|---|
-| `unparseable` | the bytes are there and are not JSON |
-| `not-a-board` | valid JSON that is `[]`, `"a string"`, `null`, `7` — the case `splitBoardEnvelope` silently folded into "absent" |
+| `unparseable` | the bytes are there and are not JSON — **including ZERO BYTES (R6-5a)**. An empty file is bytes on disk that do not say what the board is, and it is what an interrupted write leaves behind. `JSON.parse('')` throws, so this is not a special case in the classifier; it was a special case in *`loadBoardFile`*, where `txt === ''` was tested as "this store held nothing" and collapsed a truncated file into `absent` — i.e. into §5.5, the one branch that may adopt a log |
+| `not-a-board` | valid JSON that is not a board: `[]`, `"a string"`, `null`, `7` — the cases `splitBoardEnvelope` silently folded into "absent" — **and, since round 7, any OBJECT carrying none of a board's five collections in a board's shape (R6-5c/d)**: `{}`, `{"schemaVersion":1}`, `{"hallo":"welt"}`, `{"notes":"nicht ein array"}`, and `{"_v2":{lineageId,gen}}`. `Array.isArray` was the whole guard, and under an ADR that makes `board.json` the sole content authority, classifying an unrecognised object as `ok` is not a shrug — it is an **authoritative assertion that the board is empty**. See the box below for the member of that class that costs the calendar rather than the history |
 | `read-failed` | the read **threw**: a locked file, a dismissed permission prompt, an EIO. Previously `txt = null`, i.e. indistinguishable from *there is no board file*, so a transient error was a recovery |
+| `recovery-unusable` | not a kind but a **`bootFailure.reason`**: `board.json` is `absent`, a log is beside it, and §5.5's R-a/R-b ended with nothing recovered. Same machinery, same read-only promise, different sentence — the copy says **THIS IS NOT A FRESH INSTALL** |
+
+> **THE ENVELOPE-ONLY OBJECT — the sharpest input in the whole domain (`D1-b18`, R6-5g).**
+>
+> `{"_v2":{"lineageId":<the victim's own>,"gen":N}}` is nothing but ADR 006 §4.1's additive
+> binding. Measured against the pre-round-7 build: kind `ok`, `quarantine === null`, the verdict
+> `same-lineage`, the log **adopted** — and `_reconcileOntoBoard` then mints **one `{_alive:false}`
+> retraction per entity**, because §5.4's *"the log has a live entry the board lacks ⇒ an honoured
+> deletion"* is exactly right for a Time-Machine restore and exactly wrong for a "board" that
+> lacks all of them. The empty board and its tombstones are both committed, and the next launch
+> agrees.
+>
+> Every other member of this domain costs **history**. That one costs **the calendar** — and at
+> WP-8 what propagates to every paired device is not a corrupt file but well-formed deletes this
+> app minted itself. It is why `schemaVersion` and `_v2` are deliberately **not** evidence of
+> boardhood: a version number is a claim any file can make, and `_v2` says which log is bound to
+> a board, not that this *is* one.
+>
+> The shape test is presence **and** well-typedness, because presence alone passes
+> `{"notes":"nicht ein array"}` (mutant F4b). It is **not a validator**: a board that is merely
+> damaged is still a board and `migrate()` repairs it.
 
 **`_bootUnreadableBoard` does four things, and the order is the fix:**
 
@@ -568,7 +628,7 @@ Consequences and constraints:
 | `foreign-lineage` | both carry one and they differ — **another board's log** | **re-minted** (§9.3) |
 | `unreadable-log` | `load()` threw | preserved |
 | `board-unreadable` | **`board.json` exists and could not be read** (§5.6), so it has no `_v2.lineageId` and there is nothing to compare — a log is refused on the absence of a tie, never adopted on it (R5-3) | preserved, **and the files keep their own names**: this reason always travels with a `bootFailure`, and a failed boot never sequesters |
-| `clock-skew` | the log's newest stamp is more than `MAX_FUTURE_DRIFT_MS` ahead of this machine's wall clock, so §12.6 cannot be satisfied (§7.1) | preserved, **and the files keep their own names** |
+| `clock-skew` | a stamp that **decides state** — a register cell, the checkpoint horizon, or a LIVE line — is more than `MAX_FUTURE_DRIFT_MS` ahead of this machine's wall clock, so §12.6 cannot be satisfied (§7.1). **A PARKED line is not such a stamp and never raises this** (round 7 / R6-4) | preserved, **and the files keep their own names** |
 | `reconcile-failed` | R4's post-condition did not hold | preserved |
 
 **`lzp.v` is never a reason.** R4-3a's refusal-on-version-bump and its false message are both gone.
@@ -592,6 +652,34 @@ rules cannot both be obeyed.**
 > the ordinary path runs — a twelve-hour skew reconciles perfectly, and that is the non-vacuity
 > control. Beyond it, the log is quarantined as `clock-skew`, the detail **names the clock** and
 > the amount, and ADR 001 §1.3 is left alone, because it is the rule that is protecting something.
+
+> **Amended 2026-08-27 (round 7 / R6-4) — "every stamp the log carries" MEANT LIVE STAMPS, and
+> reading it as "every LINE" turned §7.4's shock absorber into a whole-history quarantine.**
+>
+> §12.6 is a statement about the stamps a MINT WILL BE COMPARED AGAINST. A parked op is compared
+> against nothing: ADR 001 §7.4 retains it and applies it to no register, which is the entire
+> point of parking. There is nothing for a mint to be "above" when the op is in no register, so a
+> parked stamp may not raise this ceiling. `store._clockSkew` walks `ops({liveOnly:true})`, plus
+> the register cells and the checkpoint horizon — the three things that decide state — and that
+> list, not a list of branches, is the definition.
+>
+> Round 6 measured the cost of the wider reading: one ordinary `note.set` stamped 48 h ahead was
+> parked exactly as designed, persisted into `checkpoint().parked` exactly as A2 round 2 requires,
+> and then read back as `clock-skew` on the next launch — **on every launch until the stamp
+> passed**, at +90 days for ninety days, with `_quarantineLog` setting `_opsPersisted = false` so
+> that under WP-8 the device recorded nothing for the duration (A3-M5, remotely). And because
+> `foldAuthorized` decided the park BEFORE the authorisation stages, a stranger whose write the
+> store refuses outright when stamped NOW could trigger all of it with a date (R6-4c). The
+> ordering half is fixed at `store.applyRemote`, which withholds `nowMs` from `foldAuthorized` —
+> the 24 h clamp is that parameter's only consumer anywhere in the fold, so withholding it stops
+> the clock pre-empting authorisation and does nothing else. **Authorisation is decided first; the
+> park classification is applied to ops that have already been authorised.**
+>
+> What remains reachable is what R5-2e described and nothing else: a stamp only reaches a register
+> by being INSIDE the window when it was written, so a register 48 h ahead means the local clock
+> has moved BACKWARDS since. The detail says that now, instead of accusing this Mac of a fault
+> that may belong to a peer. Rows: R6-4a/b/c (inverted), R6-4d and R6-4e (the two non-vacuity
+> controls), and the whole 44-cell `D2` × 5-cell `D3` matrix in `tests/helpers/domains.js`.
 
 `clock-skew` is the only reason that is **expected to stop being true** without anyone touching
 either file: the date is corrected, or it simply passes. So it is the only reason exempt from I-6's
@@ -676,10 +764,31 @@ survives intact — this is the main reason adoption exists at all, and it is wh
 R4-7b's real cost lands here: a quarantine discards every stamp and every tombstone, and a device
 that silently rejoins with GENESIS stamps loses every field contest and un-deletes on its peers.
 
-> **W2 (normative).** After a quarantine on a board that carried a lineage, the store mints a **new**
-> `lineageId` and treats the event as a **re-join**: it re-publishes its whole personal projection
-> under the new lineage, exactly as ADR 002 §7.3 already specifies for re-join on import. A
-> quarantine is a visible, reported, converging event, never a quiet one.
+> **W2 (normative).** After a quarantine on a board that carried a lineage, the store treats the
+> event as a **re-join**: it **re-derives at `now` (§9.4)** and re-publishes its whole personal
+> projection. A quarantine is a visible, reported, converging event, never a quiet one.
+
+> **AMENDED 2026-08-27 (round 7 / R6-7e) — the `lineageId` clause is STRUCK, and the substance it
+> was trying to protect is a DIFFERENT FIELD that was already normative and already implemented.**
+>
+> W2 used to open *"the store mints a **new** `lineageId`"*, and that contradicted §7's own table,
+> where four of the six reasons preserve the lineage and only `foreign-lineage` re-mints. §7 is
+> right and W2 was wrong. **`lineageId` is the LOCAL `board.json` ↔ log binding (§4.1/§4.2), not a
+> sync identity.** Re-minting it on every quarantine would orphan a log a later launch is meant to
+> adopt — `clock-skew` is expressly the reason *"expected to stop being true without anyone
+> touching either file"* (§7.1), so a Mac whose date was wrong for an afternoon would lose its
+> history permanently for having been quarantined once.
+>
+> W2's *substance* — **do not silently rejoin at the bottom of the order** — is about **stamps**,
+> and §9.4 already says it: `migrateV1`'s `stampBase: 'now'` on a re-derivation over a
+> lineage-bearing board (`store._buildSpine({restamp: !!binding})`). Two fields, two jobs, and W2
+> conflated them.
+>
+> **Measured, because the distinction is testable and the measurement sharpens the rule** (R6-7e,
+> `round6-authority.test.js`): on a quarantine over a lineage-bearing board the **register cell
+> stamps** are at `now` — so no field contest is lost — while the **`_born` values** stay at
+> `GENESIS(i)`. That is deliberate: `_born` is `board.json`'s array order (ADR 001 §8.1), not a
+> time, and reshuffling it would be a v1 regression on screen. See INV-20.
 
 ### 9.4 Stamps on a re-derivation — `GENESIS` is for upgrade day only
 
@@ -708,6 +817,23 @@ preserve.
 Every row must be **mutation-tested**: reverted in a scratch copy of the tree and required to redden
 the named row. A fix with no test that dies is not recorded as fixed (FINDINGS §7).
 
+> **AND, SINCE ROUND 7, THE INVARIANTS ARE NOT THE WHOLE GATE FOR THIS AREA.** Five consecutive
+> rounds each **relocated** the same failure rather than closing it, because each fix was chosen a
+> **branch** at a time and the branch was chosen before the input domain was written down. The
+> sharpest instance is R6-5a: round 5 replaced *"is the raw value null?"* with a careful five-way
+> classifier and wrote four of the five kinds out in a docblock — and `''` still went to the wrong
+> one, because the enumeration was of **branches** (ok / absent / unparseable / not-a-board /
+> read-failed) rather than of **bytes**.
+>
+> **The required method for anything in §5, §7 or §9 is now: enumerate the INPUT DOMAIN first,
+> exhaustively, as data; choose the behaviour per input; then property-test over the domain.**
+> The domains live in **`tests/helpers/domains.js`** — 310 entries over six domains, each
+> `{id, value, label, expect, openFinding}` where `expect` is the *required* behaviour and
+> `openFinding` names the row that predicts it fails today. `tests/property/domains.test.js` walks
+> every entry and splits deviations three ways: **UNEXPECTED** (a regression), **STALE** (a finding
+> is named but the entry now holds — the work order is lying) and the work order itself. A fix that
+> only names branches will be relocated by the next round.
+
 | # | invariant | the mutant that must redden it |
 |---|---|---|
 | **INV-1** | **The ADR in one assertion.** For any board `B` and any *non-adoptable* log `L`: `content(boot(B, L)) ≡ content(boot(B, ∅))`. Run as a **property** over the 500-seed ugly corpus × hostile logs (zero-overlap, one-key, all-keys, all-keys-plus-tombstones, a legitimate log of a different board). | make adoption change content |
@@ -727,8 +853,9 @@ the named row. A fix with no test that dies is not recorded as fixed (FINDINGS �
 | **INV-15** | **Promise 4.** The same board loads byte-identically with and without a quarantined log beside it. | let the quarantine path touch `state` |
 | **INV-16** | **W1 (WP-8).** The persisted cursor is never ahead of the board that was last written. | persist a cursor outside the checkpoint |
 | **INV-17** | **The log records (R5-4).** After any launch that loads a log, an op the user makes is on disk — in `ops.jsonl` when the checkpoint's horizon does not cover it — and the next launch reconciles **zero** changes, so a non-zero count is news. The tail is bounded: it compacts and is truncated, and nothing is lost across the compaction. | remove the `appendOps` call; fold the tail into the checkpoint and truncate it (`checkpoint({horizon: peek()})`); drop the "only what the checkpoint folds" guard; set the compaction threshold to `Infinity` |
-| **INV-18** | **§7.1.** A log stamped beyond `MAX_FUTURE_DRIFT_MS` is `clock-skew`, the detail names the CLOCK, the files keep their own names, and the same log is adopted once the skew is inside the window. A 12-hour skew reconciles perfectly (the non-vacuity control). | remove the precondition; move the files aside anyway |
+| **INV-18** | **§7.1.** A log whose LIVE stamps — register cells, horizon, live lines — are beyond `MAX_FUTURE_DRIFT_MS` is `clock-skew`, the detail names the CLOCK, the files keep their own names, and the same log is adopted once the skew is inside the window. A 12-hour skew reconciles perfectly (the non-vacuity control), and a PARKED line at any stamp costs that op and nothing else (round 7 / R6-4). | remove the precondition; move the files aside anyway; count parked stamps |
 | **INV-19** | **Order is content (R5-5a).** Two `_born` values swapped in an adopted checkpoint ⇒ `reconcile-failed`, `board.json`'s order on screen, content whole. | compare id→fields maps only |
+| **INV-20** | **Order SURVIVES a restore (round 7 / R6-7).** `board.json`'s array order survives a Time-Machine restore over this board's own log, and a lost tail. An entity the log tombstoned and the restored board still carries is written back as a **restore** — `_alive:true` and the fields, and **no `_born`**, because a delete writes `_alive:false` and nothing else, so the log still holds the position `board.json` has. An entity the log has never heard of that lands in the **interior** of the order gets a `_born` **strictly between its neighbours'** (a derived position, `ZERO_DEVICE_SHORT`), not a fresh stamp that would sort it last. And INV-19 is unweakened: a `_born` **swap** in an adopted checkpoint is still `reconcile-failed`. | mint `{born:true}` on the restore branch (F6); make `bornBetween` never find room; record `seq.length` instead of `seq` in the post-condition |
 
 **Rows to invert, not delete** (`tests/attack/`): `round4-quarantine.test.js` R4-1a, R4-1b, R4-1d,
 R4-2a, R4-3a, R4-4a; `round4-failsafe-init.test.js` R4-7b. **Rows that must stay green as they are:**
@@ -814,11 +941,16 @@ wholesale (A-1). Only `store.js` chooses between the two primitives.
    condition seems necessary, the reconciler is wrong, not the gate.
 5. **The reconciler is a diff, never a wholesale replace.** `planReplaceAll` at init resets every
    stamp on every launch.
-6. **The clock is advanced past every stamp in the loaded log before any op is minted.** Without it
-   the reconciliation silently loses to LWW and R4-4a is back with no warning anywhere. **Amended
-   2026-08-27 (R5-2e):** this is a *precondition for adoption*, not an instruction to try. A log
-   whose stamps are beyond `MAX_FUTURE_DRIFT_MS` cannot satisfy it and cannot be made to — ADR 001
-   §1.3 and §7.4 both refuse — so it is quarantined as `clock-skew` and deferred (§7.1). Minting
-   below the log's stamps and hoping is what this rule forbids, and that has not changed.
+6. **The clock is advanced past every LIVE stamp in the loaded log before any op is minted.**
+   Without it the reconciliation silently loses to LWW and R4-4a is back with no warning anywhere.
+   **Amended 2026-08-27 (R5-2e):** this is a *precondition for adoption*, not an instruction to
+   try. A log whose stamps are beyond `MAX_FUTURE_DRIFT_MS` cannot satisfy it and cannot be made
+   to — ADR 001 §1.3 and §7.4 both refuse — so it is quarantined as `clock-skew` and deferred
+   (§7.1). Minting below the log's stamps and hoping is what this rule forbids, and that has not
+   changed. **Amended 2026-08-27 again (round 7 / R6-4):** the word is **LIVE**. This rule is
+   about the stamps a mint is COMPARED AGAINST — register cells, the checkpoint horizon, and live
+   lines. A parked op is in no register and is compared against nothing, so it neither needs to be
+   minted above nor may block adoption; see §7.1's round-7 amendment for what reading it as "every
+   line" cost.
 7. **The post-condition (R4) may not be removed as redundant.** It is what makes every other failure
    in this file degrade to "history lost, content kept".
