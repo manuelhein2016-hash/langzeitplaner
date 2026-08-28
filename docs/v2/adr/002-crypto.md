@@ -7,7 +7,8 @@
 | **Tickets** | LZP-301, 302, 303, 304, 305, 306 · supports 502, 601/602, 608, 701, 1003, 1004 |
 | **Stories** | 15.2, 15.3, 15.5, 19.4, 19.5, 20.2, 20.3, 20.5, 21.1, 21.2, 21.3, 21.4, A2 |
 | **Amends** | LZP-301's "libsodium-based design" premise → `LZP-CRYPTO-1` (§1); LZP-302's "macOS Keychain via Tauri" → non-extractable IndexedDB keys + a Keychain *backstop* (§2.2) |
-| **Amended** | 2026-08-27 (round 4) — §2.3's stated guarantee was untrue in two places and is corrected in place: the four acceptance conditions bind **nothing to `deviceId`** ("A `deviceId` is a label, not an identity"), and `deviceShort → DeviceAttestation` is *argued* rather than enforced, so a contested short now resolves to `null` instead of to a winner ("Two shorts, no winner"). §2.3 also gains "Revocation — the gap, and who owns it" (WP-9) and §8 gains **8.2a**. §5.2.1 and §5.2.5 amended to match; §5.2.4's T5 row extended. |
+| **Amended** | 2026-08-28 (E3 fix pass) — §2.3's "Two shorts, no winner" is rewritten as **"One short, one signer"** and its claim that *"attestOpen (WP-6) MUST enforce P2, which closes this at the root and removes the stall"* is **struck as false**: P2 shipped and the squat still passes it, because `sigPubRaw` is public and the squat copies key and short together. I-3 / R5-7 is closed instead by a **possession proof at fold time** — a `dev.<S>` register is a credential only if the op that wrote it was stamped by the device it attests. §5.2.1's and §5.2.5's I-3 notes amended to match; §5.2.2 gains two obligations (check 4 is now load-bearing for the fold, and nothing may enter the log without passing `openOp`). |
+| | 2026-08-27 (round 4) — §2.3's stated guarantee was untrue in two places and is corrected in place: the four acceptance conditions bind **nothing to `deviceId`** ("A `deviceId` is a label, not an identity"), and `deviceShort → DeviceAttestation` is *argued* rather than enforced, so a contested short now resolves to `null` instead of to a winner ("Two shorts, no winner"). §2.3 also gains "Revocation — the gap, and who owns it" (WP-9) and §8 gains **8.2a**. §5.2.1 and §5.2.5 amended to match; §5.2.4's T5 row extended. |
 
 > This ADR is written threat-model-first. §0 names the adversaries; every later section
 > justifies itself against one of them. §8 is the honest list of what those adversaries can
@@ -233,10 +234,16 @@ device from `env.dv` alone, **before** it has decrypted anything and therefore b
 > guarantee in two places and the corrections are normative. **(a)** "a function" is what the four
 > conditions *argue*, not what they *enforce*: two members would need the same signing private key
 > to collide **honestly**, but a dishonest collision needs only a well-formed blob, because
-> nothing pure and synchronous can check §5.2.2's P2. The fold therefore does not resolve a
-> contested short at all — see "Two shorts, no winner" below. **(b)** the four conditions bind
+> nothing pure and synchronous can check §5.2.2's P2. **(b)** the four conditions bind
 > `memberId` and `deviceShort` and bind **nothing to `deviceId`** — see "A `deviceId` is a label"
 > below. Neither correction changes the wire form or the four conditions.
+>
+> **AMENDED AGAIN 2026-08-28 — I-3 CLOSED.** (a) above is still true of the FOUR conditions and
+> the amendment stands. What has changed is that a **fifth** rule now enforces what they only
+> argued, and it is not a fifth *acceptance* condition — the blob is still accepted — it is a
+> rule about which accepted register is a **credential**: the op that wrote it must have been
+> stamped by the device it attests. See "One short, one signer" below. The wire form and the four
+> conditions are again unchanged.
 
 #### A `deviceId` is a label, not an identity
 
@@ -280,31 +287,90 @@ per-member device panel must key on **`deviceShort`** — which the relay derive
 at registration (§5.2.0) — or on the pair. A purge keyed on `op.dev` would let a removed member
 name an honest peer's label and have that peer's ops deleted with her own.
 
-#### Two shorts, no winner
+#### One short, one signer  *(was "Two shorts, no winner" — rewritten 2026-08-28, I-3 CLOSED)*
 
 The mirror residual. Nothing pure and synchronous can check
 `crock32(SHA-256(sigPubRaw)[0..10]) === att.deviceShort` — that is §5.2.2's **P2**, it needs a
 SHA-256, and the authorization fold may not await — so a member **can** file a well-formed
-attestation under a peer's short (finding I-3). The fold used to resolve that contest
-minimal-under-`≺`, which handed a *backdated* squatter the lookup and therefore handed `openOp`
-the squatter's verification key.
+attestation under a peer's short (finding I-3). Two answers were tried before this one, and both
+are recorded because the second was shipped and was worse than it looked:
 
-**The contest is no longer resolved. `attestationOf` returns `null` for a contested short.** That
-is a defined outcome at the seam: §5.2.2 P1 **parks the sealed envelope**, unopened, and a park is
-re-evaluable (§5.2.5). A squatter can therefore stall a peer's envelopes and can never be handed
-the key that opens one — liveness for confidentiality, in the direction this ADR takes everywhere
-else. Stage 0b is untouched, so the victim's own plaintext ops keep folding.
+1. **resolve minimal-under-`≺`.** Handed a *backdated* squatter the lookup, and therefore handed
+   `openOp` the squatter's verification key.
+2. **refuse the contest** — `attestationOf` returns `null` for a contested short, which parks the
+   sealed envelope (P1) rather than opening it under the wrong key. Safe against impersonation,
+   and **catastrophic against denial of service**: the short is the last sixteen characters of
+   every stamp a device has ever written, a `dev.*` register is self-authorizing, `dev.*` is
+   write-once and there is no revocation — so **one op from any member permanently muted any named
+   Mac in the family**, and the user's symptom was "my calendar stopped syncing and nobody can say
+   why". Worse still, in the window before the victim's own register had been folded there was no
+   contest to see: the squat *resolved*, P2 passed, P3 passed, the AEAD passed, and §5.2.2's
+   **check 5 threw** — a rejection, which is final, so the victim's traffic was not parked but
+   **dropped**. Red-team rows M-I3b and M-I3c.
 
-Two things contest a short, both by equality alone, with no ordering and no stamp:
+> **THE SENTENCE THAT STOOD HERE IS STRUCK, AND IT WAS FALSIFIABLE AND FALSE.** It read:
+> *"`attestOpen` (WP-6) MUST enforce P2, which closes this at the root and removes the stall."*
+> P2 shipped as a MUST in `verifyAttestation`, and **the squat still passes**, because
+> `sigPubRaw` is a **public key travelling in the victim's own register**, inside the E2EE stream
+> every member can read. She copies the key *and* the short, tells the truth about the binding
+> between them, and satisfies P2 with room to spare. **A remedy that binds two fields cannot catch
+> an attacker who copies both.** P2 remains a MUST — it stops a member inventing a short unrelated
+> to any key, and it is what refuses the *other* spelling, a peer's `sigPubRaw` filed under one's
+> own short — but it is not what makes the lookup a function.
 
-1. one short claimed on two different member records; and
-2. one `sigPubRaw` under two different shorts — a **direct** contradiction of §1.2, visible
-   without hashing anything, and the case that catches a squat landing *before* its victim's own
-   attestation arrives.
+**What makes it a function** is FINDINGS §4.5 option (a) — first-claim binding on the pair
+`(sigPubRaw, deviceShort)` — with the strengthening the red team's own measurement forced. Option
+(a) was priced as *"the first writer wins a race"*. It is not a race, because the claim only counts
+when it is **proved**, and only one claimant can ever prove it:
 
-Both are reported on `AuthzResult.shortCollisions`, whose reader is now `attestationOf` itself.
-**`attestOpen` (WP-6) MUST enforce P2**, which closes this at the root and removes the stall; the
-contract line was raised from SHOULD to MUST.
+> **A `dev.<S>` register is a CREDENTIAL only if the op that wrote it was itself stamped by the
+> device it attests:** `devOf(op.ts) === att.deviceShort`.
+
+That one equality is a possession proof, and it is the only one a pure fold can read. Every op
+reaching the fold came through `openOp`, which binds three things to `env.dv`: **P2** (`env.dv` is
+the short of `att.sigPubRaw`), **P3** (the envelope signature verifies under `att.sigPubRaw`), and
+**check 4** (`devOf(op.ts) === env.dv`). So an op whose stamp ends in `S` was signed by the holder
+of the private key that hashes to `S`. The public fields are copyable — that is exactly why P2
+alone never closed this — but **the signature is not**, and the stamp is where the signature shows
+through into the plaintext the fold sees.
+
+This is what every honest flow already does and the only thing any of them do: §6.3 step 8, the
+new Mac **self-attests** and writes its own register (`pairing.js` `adoptPairedDevice`); §7.3 step
+4, the restoring Mac self-attests (`backup.js`, `ensureAttestedDevice`). **No flow has one device
+file another device's attestation, and none may be added.**
+
+The squatter's register is still **admitted** — refusing it would hand any member a way to
+un-attest an honest peer by naming their short, which is the same worse trade this ADR already
+refuses for the *label*, and it would cost her nothing since any op she can author under a peer's
+short she can author under an invented one. It is admitted, **reported on
+`AuthzResult.unprovenShorts`**, and never resolved.
+
+**`attestationOf` still returns `null`, and all three causes are parks:**
+
+1. no claim on the short at all;
+2. every claim on it **unproven** — including the pre-collision window, which is now a P1 park
+   instead of a resolve-then-throw. Check 5 in `envelope.js` is unchanged and stays a throw; it
+   simply never runs, because a blob nobody can back is no longer admitted as a credential;
+3. the short **proved on two different member records**. Two members cannot both hold one signing
+   private key, so this is a genuine 80-bit collision or a broken engine, and neither is a contest
+   a fold may pick a winner in. Reported on `AuthzResult.shortCollisions`, together with the one
+   `sigPubRaw` under two different shorts — a direct contradiction of §1.2 visible without hashing
+   anything, which `verifyAttestation`'s P2 already refuses at condition (4), so it is defence in
+   depth against a blob arriving some other way rather than the live check it looks like.
+
+**Two obligations this creates, and they are load-bearing.** The fold reads `op.ts` and trusts it
+*because* `openOp` checked it. So: **§5.2.2's check 4 may not be weakened, made optional, or moved
+after the decrypt**, and **nothing may append an op to the log without it having passed `openOp`**
+— or that door must refuse `member.set{dev.*}` outright. A v1 migration, an import, a local author
+or a future replay path that skips the envelope carries whatever stamp its author chose.
+Characterized as **M-I5b** in `tests/attack/crypto-member-impersonate.test.js`, which stays green
+because the door, not the fold, is where that would have to be fixed. Owner: **WP-8**.
+
+**What is not closed.** The bootstrap: a brand-new device's own attestation travels in an envelope
+sealed under its own short, so a peer who has never seen that device cannot open the op that would
+tell it the key. That is ADR 001 §4.0's regress at the envelope seam rather than the fold's, it
+predates this change and is untouched by it, and it is why §2.3's device panel and the pairing
+flow — not the fold — have to deliver a first attestation. Owner: **WP-9**.
 
 #### Revocation — the gap, and who owns it
 
@@ -336,8 +402,9 @@ notices an unknown name in the member list. **The member list is therefore a sec
 not just a roster** — deliverable 22 must treat it that way, and the panel shows a per-member
 **device count** so an extra device is at least visible. §8.5. The count is unaffected by the
 label forgery above (one register, one device, whatever the label says), and the panel SHOULD also
-render `shortCollisions` and `deviceIdCollisions`, which are the two contests the fold can see but
-cannot decide.
+render `deviceIdCollisions` and `shortCollisions`, the two contests the fold can see but cannot
+decide, **and `unprovenShorts`, which is the one it now decides** — a member trying to claim a
+peer's short costs the peer nothing, but the family should still be able to see that it happened.
 
 ### 2.4 Solo mode generates nothing
 
@@ -423,7 +490,24 @@ Derivation: `ECDH(mine, theirs) → HKDF-SHA-256(salt, info) → AES-256-GCM KEK
 | admin role transfer (20.1) | no | nobody's read access changes |
 | space rename, profile edit | no | |
 
-### 4.2 Who rotates, and the procedure
+### 4.2 Who rotates, and the procedure — **amended 2026-08-28: the check goes on BOTH sides**
+
+> **This section was wrong, and it was wrong by omission.** Step 2 below put the attestation check
+> on the **wrapping** side and there was no equivalent on the **receiving** side — and the
+> receiving side is the one that decides which key it will use. `admitWraps` therefore read the
+> sender's ECDH public key off `KeyWrapRow.senderKexPubRaw`, a field of the relay's own JSON, and
+> verified nothing: no member list, no attestation, no recipient check.
+>
+> One throwaway ECDH keypair and one extra row in `GET /api/v1/spaces/:id/keys` put a key of the
+> attacker's choosing into a victim's ring — **for the personal space as readily as the family
+> one** — and the victim then sealed its own Privat entries under it. That is a live break of
+> stories 20.5 and 21.2 that walks past all four of §3's barriers without touching any of them,
+> because the four barriers answer *which key opens which envelope* and this changes *which key
+> the victim uses*. Found independently by the T1/T2 and T5/T4 red teams (finding **S1**).
+>
+> **Step 6 below is the amendment.** It is written as a step of this procedure rather than as a
+> footnote in §4.4 because it is the same check as step 2, in the other direction, against the
+> same list.
 
 **The member whose action caused the rotation performs it** — the joiner on join, the admin on
 removal, the departing member's successor-admin on leave. This removes the "the admin's Mac must
@@ -441,6 +525,42 @@ within a minute") at the mercy of a sleeping laptop.
    — one transaction: insert the `KeyWrap` rows, set `Space.currentEpoch`, **delete every
    `KeyWrap` belonging to a removed or revoked device, for all epochs**, refresh invite blobs.
 5. Emit `space.set{epoch: e+1}` into the family log so honest clients switch immediately.
+6. **ON THE RECEIVING DEVICE — the mirror of step 2, and it is not optional.** Before a wrap row
+   from `GET /api/v1/spaces/:id/keys` is unwrapped, the receiver verifies **who sent it**, against
+   the same list and by the same rule step 2 uses: the row's `senderKexPubRaw` must be the
+   agreement key of a device that is **admissible for that space**, and that device's attestation
+   must verify under its housing member's `RK_sig` with `att.kexPubRaw` bound to the key itself
+   (§2.3). A row naming any other key is refused before a KEK is derived; it is **not** allowed to
+   fail on the AEAD instead, because an AEAD failure is a statement about arithmetic and not about
+   identity.
+
+   **The admissible sender set for a space is the same set as its recipient set:**
+
+   | space | admissible senders |
+   |---|---|
+   | personal `psp_…` | **my own** attested, non-revoked devices, and nothing else — never another member's device, however attested, however current |
+   | family `fsp_…` | every **non-removed** member's attested, non-revoked devices |
+
+   `src/js/crypto/spacekeys.js` implements this as a **required parameter, not a validation step**:
+   `admitWraps(ring, rows, ctx)` refuses to run without `ctx.senders`, and `ctx.senders` can only
+   be the branded `Recipient[]` that `personalRecipients()` / `familyRecipients()` produce —
+   §3 barrier 2's two constructors, whose scopes are hard-coded and whose brand is a
+   non-enumerable module-private `Symbol` a caller cannot forge. `admissibleSenders()` runs every
+   entry through the wrapping side's own `recipientProblem()` and indexes the public keys **it**
+   imported, so `senderKexPubRaw` selects a sender and can never supply one.
+
+   **The bootstrap residual, stated rather than hidden.** A device's first family sync (§7.1 step
+   6) holds no epoch key, so it cannot fold the family stream and its roster must come from relay
+   coordination data (`MemberRowDb.recoveryPubSig` plus the `dev.*` blobs). Every attestation in
+   that roster is verified, so a relay that wants an admission must invent a whole **member** —
+   recovery key, device, attestation — which surfaces in the member list (15.4). That is §8.5's
+   already-accepted, UI-surfaceable phantom member, not an anonymous key injection. The personal
+   space has no such bootstrap: its sender set comes from my own pairing record (§6), authenticated
+   out of band by the SAS.
+
+   An empty sender set is legal and means "I can authenticate nobody yet": every row is refused and
+   the ops stay parked (§4.4). That is the correct state between §7.1 steps 2 and 6, and it is the
+   reason this is a refusal rather than a throw.
 
 **Two server-enforced checks make rotation safe without the server reading anything:**
 
@@ -466,7 +586,10 @@ asymmetry.
 ### 4.4 Epoch skipping and parked ops
 
 A member offline across three rotations needs every epoch key spanning ops they have not read.
-`GET /api/v1/spaces/:id/keys` returns **every** wrap addressed to this device, all epochs.
+`GET /api/v1/spaces/:id/keys` returns **every** wrap addressed to this device, all epochs — and
+every one of those rows is relay data, so **§4.2 step 6 runs on each of them before it is
+unwrapped**. A row whose sender is not admissible for the space is refused, not parked: parking is
+for "I cannot resolve this yet", and "you are not one of us" is resolved.
 `openOp` looks the epoch up in the `KeyRing`; on a miss it triggers **one** key fetch and retries;
 on a second miss it **parks** the op (ADR 001 §7.4) rather than erroring. A key arriving later
 unparks it, and because merge is set-based, unparking late is harmless.
@@ -581,11 +704,15 @@ Both are stated loudly because getting either wrong makes `envelope.js` unimplem
    (`att.memberId === op.act`), not a second lookup. **If a future change relaxes §2.3 condition (3)
    or (4), this section breaks and must be revisited.**
 
-   > **AMENDED 2026-08-27 (I-3).** "the four conditions make it a function" is an argument, not an
-   > enforcement — see §2.3 "Two shorts, no winner". Where the argument fails, the fold returns
-   > **`null`** rather than a winner, so the one-key lookup is a *partial* function and P1's park
-   > is what covers the hole. `openOp` therefore sees `att === null` for two reasons now — absent,
-   > and contested — and **both are parks, never rejections**.
+   > **AMENDED 2026-08-27 (I-3), and again 2026-08-28.** "the four conditions make it a function"
+   > is an argument, not an enforcement. What ENFORCES it is §2.3's "One short, one signer": the
+   > register must have been written by the device it attests, which only the holder of that
+   > device's signing key can do — and which is sound **because of this very section**, since P2,
+   > P3 and check 4 below are what make a stamp ending in `S` a signature by `S`'s key. **§5.2.2
+   > is therefore load-bearing for the fold and not only for this envelope: check 4 may not be
+   > weakened, made optional, or moved after the decrypt.** The lookup remains a *partial*
+   > function and P1's park still covers the hole: `att === null` means absent, unproven, or
+   > proved twice, and **all of them are parks, never rejections**.
 
 #### 5.2.2 The gate, in order
 
@@ -681,6 +808,11 @@ op.dev === att.deviceId  ∧  op.act === att.memberId === M
   and cannot be — see §2.3 "A `deviceId` is a label, not an identity". It is instead made
   worthless: the fold publishes no `deviceId → memberId` resolver, so the copied label admits
   exactly the ops an invented label would, and the contest is reported on `deviceIdCollisions`.
+  Filing another member's **`deviceShort`** — which the four conditions also fail to close, and
+  which P2 does **not** close either — is made worthless the same way and by the same reasoning:
+  the register is admitted, reported on `unprovenShorts`, and never becomes a credential, because
+  she cannot author the op that would prove it (§2.3 "One short, one signer"; the proof rests on
+  check 4 above, which is why that check is not optional). *(extended 2026-08-28, I-3 closed.)*
 - **T2 / T3 (removed member, stolen laptop).** The attestation is **not revocable** — §2.3
   "Revocation — the gap, and who owns it". Only the epoch bump limits the damage, and it limits
   future *reads*, not authorship. WP-9.
@@ -696,12 +828,19 @@ fold does the wrong thing: `authz.js:671` **rejects** `unattestedDevice`, and `s
 drops the rejected op without appending it to the log, so it is never re-evaluated. A park reason
 (`ATTESTATION`) must exist in `ops.js`'s `PARK_REASONS` before WP-8 pulls from a real peer.
 
-**`att === null` now has a second cause, and it is also a park.** Since 2026-08-27 the fold
-returns `null` for a **contested** short as well as an absent one (§2.3 "Two shorts, no winner").
-`openOp` must not distinguish them: both mean *this envelope cannot be resolved to a device right
-now*, both are re-evaluable — the absent one when the attestation arrives, the contested one when
-`attestOpen`'s P2 refuses the squat — and turning either into a rejection is the same silent data
-loss. A caller that wants to *report* the difference reads `AuthzResult.shortCollisions`.
+**`att === null` has more than one cause, and every one of them is a park.** The fold returns
+`null` for an **absent** short, for one whose only claims are **unproven** (§2.3 "One short, one
+signer"), and for one **proved on two member records**. `openOp` must not distinguish them: all
+mean *this envelope cannot be resolved to a device right now*, all are re-evaluable — the absent
+one when the attestation arrives, the unproven one when the real device files its own register —
+and turning any of them into a rejection is the same silent data loss. A caller that wants to
+*report* the difference reads `AuthzResult.unprovenShorts` and `AuthzResult.shortCollisions`.
+
+> **2026-08-28.** The sentence struck here said the contested case resolves itself "when
+> `attestOpen`'s P2 refuses the squat". P2 does not refuse the squat and never could — see §2.3.
+> The pre-collision window it hid is the case that used to *resolve*, decrypt and then throw at
+> check 5, which is a rejection and therefore the silent data loss this paragraph exists to
+> forbid. It parks now.
 
 Checks P2, P3, 1, 2, 3, 4 and 5 remain **hard failures**: those are protocol violations, not version
 or delivery skew.
@@ -943,6 +1082,51 @@ cuts off everything after it. The Datenschutz text (21.3, LZP-1001) says this in
 - **`wrapKey('pkcs8', …, {name:'AES-GCM', iv})`** — never AES-KW (§1 rule 6).
 - Import still clears undo/redo and goes through the §8.5 diff transaction of ADR 001 (5.4).
 
+**AMENDED 2026-08-28 — findings S3, S7 and S8. Nothing in the shape above changes; the AAD, the
+passphrase field and the import RESULT do.**
+
+- **S3 — the `board` block is inside the AAD on the identity path.** The AAD is
+  `canonicalJSON` of the plaintext header **plus `board: {digest, hash}`**, where `digest` is
+  `b64u(SHA-256(boardDigestInput(file.board)))`, recomputed on both sides. **It is not a field of
+  the file**: there is nothing to strip, nothing to downgrade and no wire format to version, and
+  the `identity` shape above is untouched. Rewrite one character of one note and the tag fails;
+  the import reports `cannot-open`, the same honest code a wrong passphrase gets, because from
+  outside the module the two are the same event.
+
+  This ANSWERS finding **E3-6**, which was filed as a PO question, and it answers rather than
+  overrules its argument. E3-6 said board authentication "would exist on only one of the two
+  export paths, and a guarantee that holds on one path is worse than one stated plainly." That is
+  true of the **board-only** file — which has no key and therefore cannot have the guarantee —
+  and says nothing about the file that says *„DIES IST DEIN SCHLÜSSEL"* across the top and was
+  half unsigned. Two paths with **two stated guarantees** is the shape the argument permits;
+  `LIMITS.board.withIdentity` and `LIMITS.board.boardOnly` are those two sentences, in German and
+  English, and `README.boardOnly` already tells the user which file she is holding.
+
+  E3-6's second objection is paid rather than argued away: `boardDigestInput` deliberately does
+  **not** use `canonicalJSON`, which refuses floats — losing a user's whole export because
+  `settings` picked up a `0.5` would be the worse failure. It is a total function over everything
+  `JSON.stringify` can write, and it sorts object keys, so a file re-serialized by a different
+  writer still opens. Both halves are pinned in tier 1 and in WebKit.
+
+- **S7 — the passphrase has a named floor.** `PASSPHRASE_FLOOR` (12 code points, 5 distinct) and
+  a pure `passphraseStrength()` are exported; a passphrase below the floor is **accepted and
+  reported**, never silently accepted. The floor is soft on purpose — see DESIGN-DECISIONS D8's
+  2026-08-28 extension for the argument and for the one-line change that makes it hard.
+
+- **S8 — a ring that does not cover `1..e` is reported.** `importBackup` returns
+  `spaces.<which>.missingEpochs` **only when the ring has holes**, and switches the consequence
+  to `identity-restored-keys-pending`. The wrapping side already refused a partial ring loudly
+  (§4.2); the restoring side accepted one in silence, so the two sides disagreed about §4.3's own
+  rule. Reported rather than refused: a restore that recovers everything from epoch 4 on is worth
+  having on a Mac whose owner may have nothing else left, and §7.3 step 6 already says what
+  happens to the rest.
+
+- **What is still NOT checkable here, now SAID rather than omitted.** `importBackup` returns
+  `familyBinding = {spaceId, verified:false, say}` on every family restore. Whether the Kreis the
+  file names is this member's is not in the file — the enumerated domain proves it, because the
+  „my Kreis" and „another Kreis" inputs are literally the same bytes — so the statement is
+  unconditional and the check itself belongs to §7.3 step 5's `POST /devices/adopt`.
+
 ### 7.3 Re-join on import (A2, LZP-1004)
 
 1. `importBoard` detects an `identity` block and prompts for the passphrase.
@@ -954,10 +1138,19 @@ cuts off everything after it. The Datenschutz text (21.3, LZP-1001) says this in
    `Member.recoveryPubSig` (a public key) and verifies, then attaches the device to the existing
    member. **No admin involvement, no new invite** — this is the only path that survives losing
    every device.
+   **This step now carries a named obligation (2026-08-28, C2c-2).** It is the ONLY thing in the
+   system that can contradict a backup file about which Kreis it enrols a Mac in: `family.id` is
+   a payload field, and `importBackup` is I/O-free and cannot check it — the enumerated domain
+   shows the honest and the hostile file are the same bytes at that seam. The client says so
+   (`result.familyBinding.say`); the server is where it is decided.
 6. The restored epoch keys decrypt everything already on the server. If the family epoch has
    advanced past what the backup holds, the client requests a wrap and the rotation coverage
    check (§4.2) means the next rotation includes it; until then, newer ops are **parked**, not
    lost, and the sync status shows „Schlüssel ausstehend".
+   **AMENDED 2026-08-28 (S8): the same is now true of a ring with a hole BELOW the top, and the
+   client is told which.** `result.spaces.<which>.missingEpochs` carries the numbers, present only
+   when there are any, and `result.consequence` becomes `identity-restored-keys-pending`. Before
+   this, a sparse ring restored in total silence and the Mac simply could not read epochs 1-3.
 7. Personal space rotates to `e+1` and the recovered device joins as a normal own-device.
 
 ### 7.4 Copy contract — what the UI may and may not claim
@@ -1178,4 +1371,7 @@ under `LZP-CRYPTO-1` every row must match. Note: `evaluateJavaScript` cannot ret
 8. Joiners receive **all** epochs; removed members receive none.
 9. Recovery keys are never written to disk or to a backup in plaintext.
 10. `personalRecipients` and `familyRecipients` are separate functions with non-overlapping
-    scopes, and neither may take the other's list.
+    scopes, and neither may take the other's list. **Amended 2026-08-28 (finding S1): those same
+    two lists are the two admissible SENDER sets, and `admitWraps` may not run without one.** The
+    devices entitled to receive a space key and the devices entitled to deliver it are the same
+    devices, so this rule reads in both directions and there is deliberately no third list.

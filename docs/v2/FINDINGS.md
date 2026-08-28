@@ -105,11 +105,16 @@ the classifier that guards the precondition of the whole ADR and had a hole in i
 sides. So are the seven HIGHs that a file on disk could reach, including A3-M5 (round 5 promoted
 it out of MEDIUM) and **R6-4**, which is A3-M5's *cost* re-created by A3-M5's own *fix*. The three
 HIGHs that remain are one convergence blocker (A3-H4) and two rows found *while proving other
-fixes* (I-1, I-2). The HIGH **decision** is I-3, which round 5 escalated: §4.5.
+fixes* (I-1, I-2). The HIGH **decision** was I-3, which round 5 escalated — **decided and built
+2026-08-28, §4.5 option (a)**.
 
-**§4 is down to two open decisions.** §4.6 (R5-11g — a bar edge with no faithful v2 value) is
+**§4 has no open decisions left.** §4.6 (R5-11g — a bar edge with no faithful v2 value) is
 **closed**: round 7 showed the dilemma was not about fidelity at all but about one rule being asked
-to serve two fields, and the answer is per field. No PO ruling is owed there.
+to serve two fields, and the answer is per field. No PO ruling is owed there. **§4.5 (I-3 / R5-7)
+is decided and built** — 2026-08-28, option (a), as a possession proof at fold time rather than as
+the first-writer race the option was priced as. What survives it is two obligations on WP-8, not a
+question: nothing may append an op that has not passed `openOp`, and ADR 002 §5.2.2's check 4 may
+not be weakened.
 
 **One open row is this pass's own doing.** **R7-1** — R6-6 added a fourth boot outcome to a
 three-valued `diagnostics().source`, and the value it reports for that outcome is the one
@@ -124,7 +129,7 @@ worth as little as a finding that is never written down:
 | row | was | is | what changed the reading |
 |---|---|---|---|
 | **A3-M5** | MEDIUM, open, "latent — nothing appends, so nothing grows" | **HIGH, fixed** | It was never latent. R5-4 measured it live on every launch after the first: no op the user made was written to the log again, ever. |
-| **I-3** | MEDIUM, open | **HIGH, decision (§4.5)** | R5-7 turned a lookup-shadowing trick into a permanent remote mute of a named device, self-authorizing and irrevocable. |
+| **I-3** | MEDIUM, open | **HIGH, decision (§4.5)** — *decided and **built** 2026-08-28, option (a)* | R5-7 turned a lookup-shadowing trick into a permanent remote mute of a named device, self-authorizing and irrevocable. The answer is a possession proof at fold time, not P2. |
 | **A3-C1** | CRITICAL, fixed | **CRITICAL, fixed** (unchanged) — but see **R5-3** | The rule held; the *implementation* grew a second door into it. Recorded as its own row rather than by quietly re-opening the old one. |
 
 **Suites at the close of the ROUND-7 integration pass**, all four fully green:
@@ -350,7 +355,7 @@ that does not match `board.json` must be **quarantined**, not trusted.
 | **I-1** | new | `replaceAll()` discards the live board **before** the projection that can refuse it — an import or an 11.5 snapshot restore that throws leaves `state` a blank the app can never have produced, and the ordinary 700 ms autosave writes the blank to `board.json` | `src/js/store.js` (`replaceAll`, `restoreSnapshot`) | **WP-4** | open |
 | **I-2** | new | `init()` throws `MaterializeError` on a **poisoned `board.json`** (`startMonth: "nope"`, `pageYears: 1e9`) and `ready` stays `false` — the white screen A3-H1 closed, reached through the board rather than the checkpoint | `src/js/store.js` (`init` → `_project`) | **WP-3** | open |
 | **A3-M5** | M-5 · R5-4 | **PROMOTED FROM MEDIUM.** `_persistOps()` documents itself as "append the tail, then checkpoint" and **never calls `appendOps`**; `truncateOps(0)` is guarded `keepFromLine > 0` so it **keeps every line**. Filed as latent. It was not: from the **second launch onward nothing the user did was ever written to the log again** | `src/js/store.js` (`_persistOps`), `src/js/core/oplog.js` (`resolveHorizon`) | **WP-3** | **fixed** |
-| **I-3** | new · R5-7 | **ESCALATED FROM MEDIUM.** A contested `deviceShort` is resolved by **refusing it**, and the short is trivially discoverable — so one `member.set` filed under a peer's short makes every sealed envelope from that Mac park **for ever** | `src/js/core/authz.js` (`attestationOf`, `shortCollisions`) | **PO** → WP-6 | **decision** — §4.5 |
+| ~~I-3~~ | new · R5-7 | **ESCALATED FROM MEDIUM.** A contested `deviceShort` is resolved by **refusing it**, and the short is trivially discoverable — so one `member.set` filed under a peer's short makes every sealed envelope from that Mac park **for ever** | `src/js/core/authz.js` (`attestationOf`, `shortCollisions`) | **PO** → WP-6 | **CLOSED 2026-08-28** — §4.5 option (a), built as a possession proof at fold time |
 | **R6-4** | R6-4a/b/c · D2 × D3 | **A3-M5, re-created by A3-M5's own fix, and remotely triggerable.** One ordinary op stamped beyond the 24 h window is **parked** — ADR 001 §7.4's shock absorber, applied to no register. `_clockSkew` walked `ops({includeParked:true})`, found that stamp, and quarantined **the entire log** as `clock-skew` **on every launch until the stamp passed** — at +90 days, for ninety days — with `_quarantineLog` setting `_opsPersisted = false`, so the device recorded nothing for the duration. And because `foldAuthorized` decided the park **before** any authorisation stage ran, an op the store refuses outright when stamped *now* was **kept** when stamped +48 h: a stranger could disable the victim's whole history with nothing but a date | `src/js/store.js` (`_clockSkew`, `applyRemote`) | **WP-3** | **fixed** |
 | **R6-3** | R6-3a/b · D4 | **The bound on `ops.jsonl` was purchased with an unbounded `checkpoint.json`.** `compact()` calls `rememberBody` for every line it drops; `pruneSeqIndex` pruned `seqs`/`tsById` and **never touched `bodies`**; `bodies` is serialized into every checkpoint from then on. So the one file `saveCheckpoint` rewrites atomically on **every debounced save** grew with ops-**ever**-written rather than with the size of the board: measured at **6 000 fingerprints / 282 000 bytes** after 6 400 edits on a one-note board | `src/js/core/oplog.js` (`pruneSeqIndex`, new `boundBodies`) | **WP-3** | **fixed** |
 | **R6-10** | R6-10a…f · D6 | **A bar edge that sorts INSIDE the rendered range had no faithful v2 value** — R5-11 closed only the two ends, and `coerceToV1BarEdge` returned `null` for everything between them, so the edge was dropped and a one-ended bar was anchored to the other end. Measured over 9 104 (text × field × grid) cases: **2 414 painted the wrong columns.** A separate half, **R6-10e**, crossed the axis the enumeration left at `string`: `coerceToV1Date` accepts the **integer** `20260304`, every comparison a number makes against a date string in `layout.js` is `NaN`-false so v1 painted **all twelve** columns, and v2 painted 10 (`startDate`) / 3 (`endDate`) and wrote `"2026-03-04"` into `board.json` | `src/js/core/migrate1to2.js` (`isV1BarEdge`, `coerceToV1BarEdge`, the alphabet), `src/js/core/replace.js` | **WP-3** | **fixed** |
@@ -661,7 +666,7 @@ that does not match `board.json` must be **quarantined**, not trusted.
 | **A3-M4** | M-4 | A throwing `mutate()` callback's half-edit is adopted into the log **permanently** by the *next* action, with no undo step that can reach it | `src/js/store.js:586-594` | **WP-4** | open |
 | **A3-M5** | M-5 | *(moved to **HIGH** — round 5 proved it was not latent. See the HIGH table.)* | | | **fixed** |
 | **F-10** | Part C | `foldAuthorized` returns `memberOfDevice(deviceId)` and **discards the decoded attestation payload**, so `openOp` cannot perform ADR 002 §5.2's checks — **the concrete WP-6 unblocker** | `src/js/core/authz.js:650-663`, `:853-854` | **WP-6** | **fixed** |
-| **I-3** | new | *(escalated to **HIGH** and moved to §4.5 — round 5 (R5-7) turned this into a permanent remote mute of any named device, self-authorizing and irrevocable.)* | | | **decision** |
+| **I-3** | new | *(escalated to **HIGH** and moved to §4.5 — round 5 (R5-7) turned this into a permanent remote mute of any named device, self-authorizing and irrevocable.)* | `src/js/core/authz.js` stage 0a | WP-6 | **fixed 2026-08-28** — §4.5 (a) |
 | **R5-11** | R5-11 | An **unreadable bar edge** is dropped, and a dropped edge is anchored to the other end — so a bar v1 painted **nowhere** is painted by v2 across every column to the horizon, with chevrons, taking a lane from bars that are real | `src/js/core/migrate1to2.js`, `src/js/core/replace.js`, `src/js/core/entities.js` | **WP-3** | **fixed** — residual §4.6 **closed by R6-10/R6-11** |
 | **R6-11** | R6-11a/b/c · D6 | The **inside** class of R6-10, and the ruling that closed it: one rule over the whole alphabet rather than a three-way split, plus the per-field answer for an ISO tail carrying a **zone offset** — refused on a note date, taken as a position on a bar edge | `src/js/core/migrate1to2.js:719-748, :893` | **WP-3** | **fixed** |
 | **R6-7** | R6-7a/d/f · D5 | **The reconciler could not mint a position, so a restore moved the entry.** `diffCollection` asked one question — *is this id in `before`?* — and answered `born: true`, which writes `_born` = the op's own **fresh** stamp, and `_born` is the array-order sort key (ADR 001 §8.1). So restoring an older `board.json` over a log that had tombstoned an entry put the entry back **at the end of the list** instead of where the user had it, and an entity the log had never heard of landing in the **interior** of the order was sorted last | `src/js/store.js:258-470` (`diffCollection`, `cellsInLog`, `bornOfCells`, `bornBetween`) | **WP-3** | **fixed** |
@@ -1173,13 +1178,21 @@ a small change plus a re-derivation of the AAD.
 
 ### What E3 explicitly did **not** close, recorded so nothing downstream is built as though it did
 
-- **I-3 / R5-7 — still open.** §4.5's option (a) is still the only thing that closes it. E3
+- ~~**I-3 / R5-7 — still open.**~~ **CLOSED 2026-08-28 by the E3 fix pass** — §4.5 option (a),
+  built as a **possession proof at fold time**: a `dev.<S>` register is a credential only if the
+  op that wrote it was stamped by the device it attests. Everything the paragraph below says
+  about P2 is still true and is why the answer had to come from elsewhere; the characterization
+  rows are inverted, not deleted, and R5-7c / M-I3a — the rows asserting *that P2 does not close
+  it* — deliberately still assert exactly that. The original text follows.
+  §4.5's option (a) is the only thing that closes it. E3
   shipped **P2** (`deviceShortOf(att.sigPubRaw) === att.deviceShort`) as a **MUST** in
   `verifyAttestation`, which is what §4.5 said WP-6 owed — **and §4.5's warning was right: it does
   not close it.** `sigPubRaw` is a public key travelling in the victim's own register; the squatter
   copies it, tells the truth about it, and passes P2. `openOp` therefore treats `attestationOf` as
-  a **partial function** and **parks**. Characterization rows named *"I-3 / R5-7 IS STILL OPEN"*
-  exist in **both** test tiers and in three separate crypto suites.
+  a **partial function** and **parks** — and it still does, because `attestationOf` is still
+  partial for an absent, unproven or twice-proven short. Characterization rows named
+  *"I-3 / R5-7 IS STILL OPEN"* existed in **both** test tiers and in three separate crypto suites;
+  they are inverted in place.
 - **§2.3 / §8.2a — no device revocation anywhere.** `openOp` has **no revocation input** and did
   not invent one: a test asserts an attestation carrying a `revokedAt` still opens. If that row
   ever fails, revocation was invented at the wrong seam. Consequence for **WP-9**: a „Gerät
@@ -1216,9 +1229,11 @@ live. **Steps 1, 3-a and 5-a of the original list are done.** What is left, in o
    producer, and **ADR 001 §7.2's 30-day debuggability tail is still not implemented** (the
    compaction is total). If WP-8 needs the tail for anything but bounding the file, say so before
    building on it.
-7. **I-3** — **now a decision, not an engineering task: §4.5.** WP-6's owed P2 check was the
+7. ~~**I-3**~~ — **DECIDED AND BUILT 2026-08-28: §4.5 option (a).** WP-6's owed P2 check was the
    planned fix and round 5 proved it does not close the hole, because `sigPubRaw` is a public key
-   travelling in the victim's own register. Do not start this one by writing code.
+   travelling in the victim's own register. What closes it is a possession proof at fold time.
+   What is left of this item is the two obligations §4.5's ruling puts on WP-8: nothing may append
+   an op that has not passed `openOp`, and §5.2.2's check 4 may not be weakened.
 8. **R5-5b** — folding an adopted checkpoint through `applyRemote`'s gate. This is **F-5** seen
    from the authority rule's side, and closing F-5 closes both. ADR 006 §8.1's corollary comes
    with it: once a space exists, the persisted board is the FULL projection.
@@ -1245,7 +1260,7 @@ were opened by round 5** and are the two that block real work.
 | § | question | opened by | blocks |
 |---|---|---|---|
 | 4.4 | `GENESIS(index)` above a million entities | fix pass | nothing today |
-| **4.5** | **I-3 / R5-7 — a remote denial of service on any family member's device** | round 5 | **WP-6, and WP-8 behind it** |
+| ~~4.5~~ | ~~I-3 / R5-7 — a remote denial of service on any family member's device~~ | round 5 | **DECIDED AND BUILT 2026-08-28 — option (a). Nothing.** |
 | **4.6** | **R5-11g — a bar edge with no faithful v2 value at all** | round 5 | nothing today; it is a fidelity ceiling |
 
 ### 4.1 F-1 — does `board.json` go back to being a fixed point?  · **DECIDED: FIX**
@@ -1328,7 +1343,51 @@ in this register whose trigger no user can reach — but it should be *chosen*, 
 
 ---
 
-### 4.5 I-3 / R5-7 — a remote denial of service on any family member's device  · **OPEN**
+### 4.5 I-3 / R5-7 — a remote denial of service on any family member's device  · **DECIDED: OPTION (a) · BUILT 2026-08-28**
+
+> **THE RULING, AND WHAT WAS ACTUALLY BUILT.** The lead took option (a) on the E3 red team's
+> evidence: (b), a revocation register, is more machinery and is deferred anyway; (c), accept and
+> bound, would leave a permanent remote mute on any family member's Mac, which is not acceptable
+> in a product for a family.
+>
+> **The price the table below quoted for (a) — "the first writer wins a race" — is not paid**, and
+> that is the one thing that changed in the building. The pair `(sigPubRaw, deviceShort)` is not
+> claimed by whoever writes first; it is claimed by whoever can **prove** it, and only one party
+> ever can:
+>
+> > A `dev.<S>` register is a CREDENTIAL only if the op that wrote it was itself stamped by the
+> > device it attests — `devOf(cell.stamp) === att.deviceShort`.
+>
+> `openOp`'s P2, P3 and check 4 together mean an op stamped with `S` was signed by the holder of
+> the private key that hashes to `S`. `sigPubRaw` is public and copyable — which is exactly why
+> P2 alone never closed this — but the **signature** is not, and the stamp is where it shows
+> through into the plaintext the fold sees. So a genuine 16-character collision does **not** now
+> "resolve arbitrarily": two proven claims is an 80-bit event and is still refused outright.
+>
+> The squat is **admitted** (refusing it would hand any member the un-attest primitive `authz.js`
+> already refuses for the label), **reported** on the new `AuthzResult.unprovenShorts`, and never
+> resolved. Every honest flow already self-attests — ADR 002 §6.3 step 8, §7.3 step 4 — so nothing
+> legitimate changes shape.
+>
+> · **`src/js/core/authz.js`** stage 0a — the one line, plus the reporting surface.
+> · **ADR 002 §2.3** "Two shorts, no winner" is rewritten as **"One short, one signer"** and its
+>   claim that P2 closes this is struck as false.
+> · **Two obligations this creates**, both recorded in §2.3 and in `crypto.contract.js`:
+>   §5.2.2 check 4 may not be weakened, made optional, or moved after the decrypt; and nothing may
+>   append an op to the log without it having passed `openOp` — or that door must refuse
+>   `member.set{dev.*}`. Characterized as **M-I5b**. Owner: **WP-8**.
+> · **Rows inverted**, never deleted: `crypto-member-impersonate.test.js` M-I3b/c/d and M-I4 (plus
+>   new M-I3e and M-I5b), `round5-attestation.test.js` R5-7b/d, `round4-attestation.test.js`
+>   R4-14a/b, `tests/tier1/core-authz.test.js`. **R5-7c and M-I3a are NOT retired**: their claim —
+>   that P2 does not close this — is still true and is what made the answer have to come from
+>   somewhere else.
+> · **Proved in the real WKWebView**, not only in Node: `tests/tier2/crypto-identity.dom.js`.
+> · **Not closed, and next door:** the bootstrap. A brand-new device's own attestation travels in
+>   an envelope sealed under its own short, so a peer who has never seen that device cannot open
+>   the op that would tell it the key. That predates this change and is untouched by it. WP-9.
+>
+> The original trade-off analysis is kept below verbatim, because the reasoning that ruled out
+> (b) and (c) is the reasoning a later reader will want.
 
 **The trade-off, in two sentences.** `attestationOf` resolves a contested `deviceShort` by
 **refusing it**, which is the safe answer to *"two attestations claim this short"* and the
@@ -1368,6 +1427,9 @@ option (a), or P2 buys nothing here.
 > real paired device, then has a **different member** copy its `sigPubRaw` and `deviceShort`
 > verbatim into her own record and file a blob that **verifies**.
 >
+> **[SUPERSEDED 2026-08-28 — §4.5 is DECIDED and BUILT; see the ruling at the head of §4.5. The
+> paragraph below was right that option (a) was the only answer and right about P2; what it could
+> not know is that option (a) does not have to be a race.]**
 > So **§4.5 is still open and option (a) is still the only answer.** What changed is only that
 > the seam downstream of it is now built and is built to survive the gap: `openOp` treats
 > `attestationOf` as a **partial function** and **parks** a squatted short rather than opening it
@@ -1745,9 +1807,9 @@ asserting `_persistOps()` never appends, which A3-M5's closure made false, and i
 | R4-19c | `round4-fixed-point.test.js` | a scratchpad held as `""` — v1 is a fixed point here, v2 is not | F-1 residual |
 | R5-2g | `round5-authority.test.js` | a Time-Machine restore of a pre-lineage `board.json` destroys the log | R5-2g |
 | R5-5b | `round5-authority.test.js` | a field `board.json` cannot express at all is invisible to both halves | R5-5b / F-5 |
-| R5-7b | `round5-attestation.test.js` | ONE well-formed op mutes a named device, permanently | **I-3 / §4.5** |
-| R5-7c | `round5-attestation.test.js` | **P2 does not close it** — `sigPubRaw` is public | **I-3 / §4.5** |
-| R5-7d | `round5-attestation.test.js` | `authz.js:882` rules this trade out for the LABEL and ships it for the SHORT | **I-3 / §4.5** |
+| ~~R5-7b~~ | `round5-attestation.test.js` | ONE well-formed op mutes a named device, permanently | **INVERTED 2026-08-28 · I-3 closed** |
+| R5-7c | `round5-attestation.test.js` | **P2 does not close it** — `sigPubRaw` is public | **STILL TRUE, AND KEPT** — it is why §4.5 (a) was needed |
+| ~~R5-7d~~ | `round5-attestation.test.js` | `authz.js` rules this trade out for the LABEL and ships it for the SHORT | **INVERTED 2026-08-28** — it is now refused for both |
 | R5-11g | `round5-coercion.test.js` | an edge sorting INSIDE the alphabet has no faithful v2 date | **§4.6** |
 
 **Nine of the twenty-three trace to just three register rows** — F-2/F-7 (the `applyRemote` seam),
@@ -1851,8 +1913,10 @@ touched.** These are the items that need one of those files, or a file no one ow
 ### Needs a decision before an edit is possible
 
 3. **I-4** — `GENESIS(index)` above a million entities. §4.4.
-3b. **I-3 / R5-7** — §4.5. **This one is on the WP-6 path and the plan of record for it is wrong**:
-   the owed P2 check does not close it. Read §4.5 before writing any attestation code.
+3b. ~~**I-3 / R5-7** — §4.5.~~ **CLOSED 2026-08-28** by §4.5 option (a), built as a possession
+   proof at fold time. The observation that the owed P2 check does not close it was correct and
+   is why the answer came from elsewhere; read §4.5's ruling before writing any attestation code,
+   and in particular the two obligations it puts on `openOp` and on anything that appends.
 3c. ~~**R5-11g** — §4.6.~~ **CLOSED by round 7 (R6-10/R6-11). No decision is owed.** The dilemma
    was misstated: the collision with finding 6 is a question about *which field*, not about which
    fidelity, and the answer differs per field. What remains is a five-string ceiling that is now
@@ -1920,7 +1984,9 @@ touched.** These are the items that need one of those files, or a file no one ow
 5. **Remove `attestedDevices` / `memberOfDevice`** once their callers move to `attestationOf`.
    They have live callers in `ownership-authz-content.test.js` and `ownership-authz-admin.test.js`
    and are marked in `ops.contract.js` as derivable, "do not add new ones".
-6. ~~**Enforce the P2 binding in `attestOpen`** — row **I-3**.~~ **DO NOT START HERE.** Round 5
+6. ~~**Enforce the P2 binding in `attestOpen`** — row **I-3**.~~ **DONE, AND I-3 IS CLOSED
+   2026-08-28** — but not by this item. P2 shipped and did not close it; §4.5 option (a) did.
+   The reasoning below is kept because it is what ruled the shortcut out. Round 5
    (R5-7c) proved P2 does not close I-3: `sigPubRaw` is a public key travelling in the victim's own
    register, so a squatter copies it, tells the truth, and passes. **§4.5** is the decision that has
    to come first, and only option (a) — first-claim on `(sigPubRaw, short)` — makes the binding

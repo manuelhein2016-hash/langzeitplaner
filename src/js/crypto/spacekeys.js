@@ -24,12 +24,16 @@
 //      path between a `PSK` and an `FSK_e` — not a KDF, not a shared parent, no master key, and
 //      deliberately no relationship to the Keychain `DEK` either. Holding every family key gives
 //      **zero** information about any personal key.
-//   2. TRANSPORT SEPARATION. `personalRecipients()` and `familyRecipients()` are two functions
-//      with non-overlapping, hard-coded scopes, and neither can take the other's list:
-//      `personalRecipients` REFUSES a device belonging to any member but me, and every recipient
-//      carries a non-enumerable brand naming the space kind it may be wrapped for.
-//      `wrapToRecipients` refuses an unbranded or wrongly-branded recipient, so a hand-rolled
-//      object literal cannot slip past the two constructors. (ADR 002 §11 rule 10.)
+//   2. TRANSPORT SEPARATION, **IN BOTH DIRECTIONS**. `personalRecipients()` and
+//      `familyRecipients()` are two functions with non-overlapping, hard-coded scopes, and
+//      neither can take the other's list: `personalRecipients` REFUSES a device belonging to any
+//      member but me, and every recipient carries a non-enumerable brand naming the space kind it
+//      may be wrapped for. `wrapToRecipients` refuses an unbranded or wrongly-branded recipient,
+//      so a hand-rolled object literal cannot slip past the two constructors. (ADR 002 §11 rule
+//      10.)  **The same two lists are the admissible SENDER sets** — `admissibleSenders()` turns
+//      one into the only thing `admitWraps` will derive a KEK against (§6b, finding S1). The set
+//      of devices entitled to RECEIVE a space key and the set entitled to DELIVER it are the same
+//      set, so barrier 2 needed no second list, only a second direction.
 //   3. DOMAIN SEPARATION IN THE CRYPTOGRAPHY ITSELF, twice over and independently:
 //        · the HKDF salt is `wireSalt ‖ canonicalJSON([kind, spaceId, epoch])`, so the KEK that
 //          wraps `FSK_3` is a DIFFERENT KEY from the KEK that wraps `PSK_3` even for the same
@@ -446,7 +450,10 @@ export async function wrapSpaceKey(spaceKey, myKexPriv, theirKexPub, ctx) {
  *
  * @param {WrapBlob} blob
  * @param {CryptoKey} myKexPriv
- * @param {CryptoKey} theirKexPub the sender's ECDH public key, from their VERIFIED attestation
+ * @param {CryptoKey} theirKexPub the sender's ECDH public key, from their VERIFIED attestation.
+ *        Since 2026-08-28 that sentence is ENFORCED rather than documented: the only caller,
+ *        `admitWraps`, can obtain this key only from an `admissibleSenders()` set, which imports
+ *        it from the bytes `recipientProblem` bound to the attestation (§6b, finding S1).
  * @param {WrapContext} ctx
  * @returns {Promise<CryptoKey|null>} extractable AES-256-GCM, or null
  */
@@ -799,6 +806,177 @@ export async function assertRecipients(recipients, kind, ports) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 6b. Verification on the RECEIVING side — the admissible sender set (finding S1)
+//
+// ═══ THE FINDING THIS SECTION EXISTS FOR ═══
+//
+// `unwrapSpaceKey`'s contract has always said `theirKexPub` is "the sender's ECDH public key,
+// FROM THEIR VERIFIED ATTESTATION". Until 2026-08-28 its only caller, `admitWraps`, read that key
+// off `row.senderKexPubRaw` — a field of the RELAY'S OWN JSON — and verified nothing: no member
+// list, no attestation, no recipient check. One throwaway ECDH keypair and one extra row in
+// `GET /api/v1/spaces/:id/keys` put a key of the attacker's choosing into the victim's ring, for
+// the PERSONAL space as readily as the family one, and the victim then sealed its own Privat
+// entries under it. Barriers 1-4 all answer *which key opens which envelope*; this walked past
+// all four by changing *which key the victim uses*.
+//
+// ═══ WHY THIS IS A PARAMETER AND NOT AN `if` ═══
+//
+// ADR 002 §4.2 step 2 put the attestation check on the WRAPPING side only, and the receiving side
+// is the one that decides which key it will use. `admitWraps(ring, rows, ctx)` had nowhere to put
+// the verified set — no member list, no `attestationOf`, no allowlist — so the check had nowhere
+// to live and an `if` inside the loop would have had nothing to compare against. `ctx.senders` is
+// **REQUIRED and has no default**: a caller that forgets it gets a `SpaceKeyError` naming S1, not
+// a silent admission. E2/E5 is the first caller that will wire it.
+//
+// ═══ WHAT MAKES IT STRUCTURAL RATHER THAN A VALIDATION STEP ═══
+//
+//   · THE SET CANNOT BE HAND-ROLLED. `admissibleSenders` takes `Recipient[]`, and a `Recipient`
+//     exists only if `personalRecipients()` or `familyRecipients()` made it — the non-enumerable
+//     `SCOPE` brand of barrier 2 is not reachable from outside this module, and an object literal
+//     or a spread copy has none. So "the devices I will accept a key FROM" is computed by the same
+//     two constructors, under the same two hard-coded scopes, as "the devices I will wrap a key
+//     TO". `personalRecipients` REFUSES any device that is not mine, so the personal space's
+//     sender set cannot contain Mama however the caller assembles the list.
+//   · THE SET IS BOUND TO ONE SPACE. A `SenderSet` carries the `spaceId` it was verified for and
+//     `admitWraps` refuses one built for a different space or kind — a family sender set can
+//     never authorize a `psp_` admission.
+//   · **THE ROW SELECTS A SENDER; IT CANNOT SUPPLY ONE.** `row.senderKexPubRaw` is now an INDEX
+//     into the verified set and nothing else. The `CryptoKey` the KEK is derived against is the
+//     one this module imported from `Recipient.kexPubRaw` at verification time — the key
+//     `recipientProblem` bound to `att.kexPubRaw` (§2.3). Relay bytes never reach `deriveBits`.
+//   · THE RING REMEMBERS. `KeyRing.put`'s fourth argument records the origin, so a ring entry can
+//     say which verified device delivered it (`ring.originOf`). A `CryptoKey` carries no
+//     provenance; the slot it sits in now does.
+//
+// ═══ THE ONE THING THIS DOES NOT CLOSE, STATED PLAINLY ═══
+//
+// A device's FIRST family sync — §7.1 step 6, before it holds any epoch key — cannot fold the
+// family stream, so it cannot build `familyRecipients` from authenticated state. Its roster has
+// to come from relay coordination data (`MemberRowDb.recoveryPubSig` plus the `dev.*` blobs), and
+// every attestation in it is verified here, under the recovery key the row carries. A relay that
+// wants an admission must therefore invent a MEMBER — recovery key, attestation, the lot — and
+// that member appears in the member list (15.4) as somebody nobody invited. That converts an
+// invisible, unattributable key injection into ADR 002 §8.5's already-accepted, UI-surfaceable
+// phantom member. It does not eliminate it. The PERSONAL space has no such bootstrap: its sender
+// set comes from my own pairing record (§6), which was authenticated out of band by the SAS.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SENDER_SET = Symbol('lzp/v2/spacekeys/verified-sender-set');
+
+/**
+ * @typedef {Object} SenderSet
+ * @property {'personal'|'family'} kind
+ * @property {string} spaceId
+ * @property {(kexPubRaw:Uint8Array|string) => {deviceId:string, memberId:string, kexPub:CryptoKey}|null} lookup
+ * @property {() => number} size
+ * @property {() => string[]} deviceIds
+ */
+
+/** Is this a `SenderSet` this module built? `false` for anything else, including a copy of one. */
+export function isSenderSet(v) {
+  return !!(v && typeof v === 'object' && v[SENDER_SET] === true);
+}
+
+/**
+ * The devices this space will accept an epoch key FROM, verified once and reusable.
+ *
+ * Every recipient is put through the identical gate the WRAPPING side uses — the brand must match
+ * the space kind, the attestation must verify under the housing member's `RK_sig`, and
+ * `att.kexPubRaw` must equal the key itself (`recipientProblem`, §2.3, §4.2 step 2). The result
+ * indexes the VERIFIED `CryptoKey`s by their raw bytes, so `admitWraps` never imports a point the
+ * relay sent it.
+ *
+ * **An EMPTY list is allowed and means "I can authenticate nobody yet"** — every row is then
+ * refused as `unauthorized` and the ops stay parked (§4.4), which is the right answer for a
+ * joiner between §7.1 steps 2 and 6. `assertRecipients` refuses an empty list because a wrap to
+ * nobody is a lost epoch; an admission from nobody is merely a sync that admitted nothing, and
+ * throwing here would push callers towards passing a list they had not verified.
+ *
+ * A recovery recipient (`role:'recovery'`, my own key, never off the wire) is included: it is the
+ * one recipient with no attestation, and `personalRecipients` only ever produces MINE.
+ *
+ * @param {Recipient[]|SenderSet} recipients
+ * @param {string} spaceId
+ * @param {CryptoPorts} [ports]
+ * @returns {Promise<SenderSet>}
+ */
+export async function admissibleSenders(recipients, spaceId, ports) {
+  const who = 'admissibleSenders';
+  const kind = spaceKindOf(spaceId);
+
+  if (isSenderSet(recipients)) {
+    if (recipients.spaceId !== spaceId) {
+      throw new SpaceKeyError(
+        `${who}: this sender set was verified for ${recipients.spaceId} and cannot authorize an ` +
+        `admission into ${spaceId}. A set is bound to ONE space (ADR 002 §3 barrier 2, finding S1).`
+      );
+    }
+    return recipients;
+  }
+  if (!Array.isArray(recipients)) {
+    throw new SpaceKeyError(
+      `${who}: expected the Recipient[] from personalRecipients() or familyRecipients() — the ` +
+      'same two constructors the wrapping side uses. There is no third way to name a device this ' +
+      'space may accept a key from (ADR 002 §11 rule 10).'
+    );
+  }
+
+  /** @type {Map<string, {deviceId:string, memberId:string, kexPub:CryptoKey}>} */
+  const byKey = new Map();
+  const ids = new Set();
+  for (const r of recipients) {
+    const scope = recipientScope(r);
+    if (scope !== kind) {
+      throw new SpaceKeyError(
+        `${who}: a ${scope === null ? 'UNBRANDED' : JSON.stringify(scope)} recipient cannot ` +
+        `authorize a ${JSON.stringify(kind)}-space admission. The two scopes are disjoint by ` +
+        'construction (ADR 002 §3 barrier 2, §11 rule 10) — this is story 20.5, on the way IN.'
+      );
+    }
+    if (ids.has(r.deviceId)) throw new SpaceKeyError(`${who}: duplicate sender ${r.deviceId}`);
+    ids.add(r.deviceId);
+    const problem = await recipientProblem(r, ports);
+    if (problem !== null) throw new SpaceKeyError(`${who}: ${problem}`);
+
+    const raw = b64u(r.kexPubRaw);
+    const clash = byKey.get(raw);
+    if (clash) {
+      throw new SpaceKeyError(
+        `${who}: devices ${clash.deviceId} and ${r.deviceId} present the SAME agreement key. Two ` +
+        'devices sharing an `IK_kex` cannot be told apart by a wrap row, so the set would be ' +
+        'ambiguous about who delivered a key — refusing rather than picking one.'
+      );
+    }
+    // RULE 5: `keyUsages: []`, and always through `identity.importKexPublic`. This is the key the
+    // KEK is derived against — imported HERE, from the verified attestation's bytes, never from a
+    // relay row.
+    byKey.set(raw, {
+      deviceId: r.deviceId,
+      memberId: r.memberId,
+      kexPub: await importKexPublic(r.kexPubRaw, ports),
+    });
+  }
+
+  const set = {
+    kind,
+    spaceId,
+    lookup(kexPubRaw) {
+      let raw;
+      try {
+        raw = b64u(rawOf(kexPubRaw, who, 'senderKexPubRaw'));
+      } catch {
+        return null; // peer data: absent, malformed, not a point. Not in the set either way.
+      }
+      return byKey.get(raw) || null;
+    },
+    size: () => byKey.size,
+    deviceIds: () => [...ids].sort(),
+  };
+  Object.defineProperty(set, SENDER_SET, { value: true, enumerable: false, writable: false });
+  return Object.freeze(set);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 7. Wrapping to many — one epoch, and then ALL of them
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -919,9 +1097,19 @@ function normalizeKeysByEpoch(v, who) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * @typedef {Object} KeyOrigin
+ * @property {'local'|'admitted'} how  `local` — minted here, or restored from this device's own
+ *           key store. `admitted` — unwrapped from a relay row whose sender was verified.
+ * @property {string|null} deviceId  the VERIFIED device that delivered it; null when `local`
+ * @property {string|null} memberId
+ */
+
+/**
  * @typedef {Object} KeyRing
  * @property {(space:string, epoch:number) => CryptoKey|null} get
- * @property {(space:string, epoch:number, k:CryptoKey) => boolean} put  false ⇒ the slot was taken
+ * @property {(space:string, epoch:number, k:CryptoKey, origin?:KeyOrigin) => boolean} put
+ *           false ⇒ the slot was taken
+ * @property {(space:string, epoch:number) => KeyOrigin|null} originOf
  * @property {(space:string, epoch:number) => boolean} has
  * @property {(space:string) => number} currentEpoch   0 ⇒ no key for this space
  * @property {(space:string) => number[]} epochs       ascending; every epoch ever held
@@ -938,9 +1126,14 @@ function normalizeKeysByEpoch(v, who) {
  * @param {Iterable<[string, number, CryptoKey]>} [entries]
  * @returns {KeyRing}
  */
+/** The origin every key that was NOT admitted from the network carries. */
+const LOCAL_ORIGIN = Object.freeze({ how: 'local', deviceId: null, memberId: null });
+
 export function createKeyRing(entries) {
   /** @type {Map<string, Map<number, CryptoKey>>} */
   const bySpace = new Map();
+  /** Provenance, keyed identically. A `CryptoKey` carries none; the SLOT does (finding S1). */
+  const originBySpace = new Map();
   let refused = 0;
   const skipped = [];
 
@@ -953,7 +1146,7 @@ export function createKeyRing(entries) {
       return (m && m.get(epoch)) || null;
     },
 
-    put(space, epoch, key) {
+    put(space, epoch, key, origin) {
       // Our own data: loud. A key entering the ring under a space id nobody can classify, or
       // under an epoch that is not an epoch, is a bug that must not become a silent no-op.
       spaceKindOf(space);
@@ -973,7 +1166,28 @@ export function createKeyRing(entries) {
         return false;
       }
       m.set(epoch, key);
+      let o = originBySpace.get(space);
+      if (!o) originBySpace.set(space, (o = new Map()));
+      o.set(epoch, origin === undefined || origin === null ? LOCAL_ORIGIN : Object.freeze({
+        how: origin.how === 'admitted' ? 'admitted' : 'local',
+        deviceId: typeof origin.deviceId === 'string' ? origin.deviceId : null,
+        memberId: typeof origin.memberId === 'string' ? origin.memberId : null,
+      }));
       return true;
+    },
+
+    /**
+     * WHO PUT THIS KEY HERE. `null` for a slot that holds nothing.
+     *
+     * This is the answer to "a `KeyRing` entry is a `CryptoKey` and a `CryptoKey` carries no
+     * provenance" (finding S1). `how:'admitted'` names the VERIFIED device the wrap came from —
+     * `admitWraps` is the only writer that can set it, and it can only set it to a device that
+     * was in the `SenderSet`.
+     */
+    originOf(space, epoch) {
+      if (ring.get(space, epoch) === null) return null;
+      const o = originBySpace.get(space);
+      return (o && o.get(epoch)) || LOCAL_ORIGIN;
     },
 
     has: (space, epoch) => ring.get(space, epoch) !== null,
@@ -1020,7 +1234,9 @@ export function createKeyRing(entries) {
     _skip: (id) => void skipped.push(id),
   };
 
-  if (entries) for (const [space, epoch, key] of entries) ring.put(space, epoch, key);
+  // `[space, epoch, key]`, plus an optional fourth element for a caller that already knows the
+  // origin — `loadKeyRing` rebuilding a ring whose entries were admitted in an earlier session.
+  if (entries) for (const [space, epoch, key, origin] of entries) ring.put(space, epoch, key, origin);
   return ring;
 }
 
@@ -1262,40 +1478,80 @@ export async function rotateSpace(opts) {
  * Admit every wrap the relay returned for this device (`GET /api/v1/spaces/:id/keys` returns
  * every wrap addressed to it, ALL epochs — §4.4).
  *
- * A blob that does not open is counted, not thrown on: the ordinary cause is a wrap authored by a
- * member whose ECDH key this device has not yet folded, and the answer is the same as for an
- * unknown epoch — park, and re-evaluate when more arrives.
+ * **`ctx.senders` IS REQUIRED — it is the fix for finding S1 and it has no default.** See §6b
+ * above for why it is a parameter rather than a branch. It is the `Recipient[]` from
+ * `personalRecipients()` / `familyRecipients()`, or a `SenderSet` from `admissibleSenders()` when
+ * the caller wants to verify once and admit many times.
+ *
+ * THE ORDER OF THE THREE OUTCOMES IS ITSELF A DECISION:
+ *
+ *   1. `ring.has(spaceId, epoch)` short-circuits FIRST, so a slot this device already holds is a
+ *      `duplicate` whoever sent the row. First-write-wins has already decided; an unauthenticated
+ *      row at an occupied epoch never gets as far as an authentication question and could not
+ *      change the answer if it did. (D9's ordinary case — two member devices both wrapping the
+ *      ring to a joiner, §7.1 step 4 — lands here and must stay quiet.)
+ *   2. Then the SENDER: `row.senderKexPubRaw` is looked up in the verified set. A miss is
+ *      `unauthorized` — counted separately from `refused`, because "a stranger tried to give me a
+ *      key" and "a wrap did not open" are different events and only one of them is a security
+ *      event a caller may want to surface.
+ *   3. Only then the AEAD. A blob that does not open is counted, not thrown on: the ordinary
+ *      cause is a wrap addressed to a sibling device, and the answer is the same as for an unknown
+ *      epoch — park, and re-evaluate when more arrives (§4.4).
+ *
+ * `unauthorized` is folded into `refused` as well, so the pre-S1 report shape keeps its meaning
+ * ("how many rows did not become keys") for any caller that only reads that.
  *
  * @param {KeyRing} ring
  * @param {Array<{epoch:number, wrapped:WrapBlob, senderKexPubRaw:Uint8Array|string}>} rows
- * @param {{spaceId:string, myKexPriv:CryptoKey} & CryptoPorts} ctx
- * @returns {Promise<{admitted:number[], refused:number, duplicates:number}>}
+ * @param {{spaceId:string, myKexPriv:CryptoKey, senders:Recipient[]|SenderSet} & CryptoPorts} ctx
+ * @returns {Promise<{admitted:number[], refused:number, duplicates:number, unauthorized:number,
+ *                    unauthorizedEpochs:number[]}>}
  */
 export async function admitWraps(ring, rows, ctx) {
   assertRing(ring, 'admitWraps');
-  if (!ctx || typeof ctx !== 'object') throw new SpaceKeyError('admitWraps: a {spaceId, myKexPriv} context is required');
+  if (!ctx || typeof ctx !== 'object') throw new SpaceKeyError('admitWraps: a {spaceId, myKexPriv, senders} context is required');
   const { spaceId, myKexPriv } = ctx;
   spaceKindOf(spaceId);
   if (!Array.isArray(rows)) throw new SpaceKeyError('admitWraps: rows must be an array');
+  if (ctx.senders === undefined || ctx.senders === null) {
+    throw new SpaceKeyError(
+      'admitWraps: `ctx.senders` is REQUIRED and has no default. Every row here is relay data, ' +
+      'and without the set of devices this space may accept a key FROM, `senderKexPubRaw` is an ' +
+      'attacker-chosen ECDH key that decides which key this device will seal its own private ' +
+      'entries under (finding S1; ADR 002 §4.2 step 2, §4.4). Pass the Recipient[] from ' +
+      'personalRecipients()/familyRecipients(), or a SenderSet from admissibleSenders(). Pass an ' +
+      'EMPTY array to mean "I can authenticate nobody yet" — every row is then refused and the ' +
+      'ops stay parked, which is the correct state between §7.1 steps 2 and 6.'
+    );
+  }
+  const senders = await admissibleSenders(ctx.senders, spaceId, ctx);
 
   const admitted = [];
   let refused = 0;
   let duplicates = 0;
+  const unauthorizedEpochs = [];
   for (const row of rows) {
     if (!row || typeof row !== 'object' || !isEpoch(row.epoch)) { refused++; continue; }
     if (ring.has(spaceId, row.epoch)) { duplicates++; continue; }
-    let theirKexPub;
-    try {
-      theirKexPub = await importKexPublic(rawOf(row.senderKexPubRaw, 'admitWraps', 'senderKexPubRaw'), ctx);
-    } catch {
+
+    // THE ROW SELECTS A SENDER; IT CANNOT SUPPLY ONE. `senderKexPubRaw` is an index into the
+    // verified set — absent, malformed, or simply not one of us all give the same `null` — and
+    // the `CryptoKey` below was imported from the sender's own VERIFIED attestation, never from
+    // these bytes.
+    const sender = senders.lookup(row.senderKexPubRaw);
+    if (sender === null) {
       refused++;
+      unauthorizedEpochs.push(row.epoch);
       continue;
     }
-    const key = await unwrapSpaceKey(row.wrapped, myKexPriv, theirKexPub, { ...ctx, spaceId, epoch: row.epoch });
+
+    const key = await unwrapSpaceKey(row.wrapped, myKexPriv, sender.kexPub, { ...ctx, spaceId, epoch: row.epoch });
     if (key === null) { refused++; continue; }
-    if (ring.put(spaceId, row.epoch, key)) admitted.push(row.epoch);
-    else duplicates++;
+    if (ring.put(spaceId, row.epoch, key, { how: 'admitted', deviceId: sender.deviceId, memberId: sender.memberId })) {
+      admitted.push(row.epoch);
+    } else duplicates++;
   }
   admitted.sort((a, b) => a - b);
-  return { admitted, refused, duplicates };
+  unauthorizedEpochs.sort((a, b) => a - b);
+  return { admitted, refused, duplicates, unauthorized: unauthorizedEpochs.length, unauthorizedEpochs };
 }

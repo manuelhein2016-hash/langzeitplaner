@@ -111,7 +111,14 @@ test('FAILED — she cannot re-admit herself: an old wrap cannot be promoted to 
   const ring = createKeyRing();
   const report = await admitWraps(ring, [
     { epoch: 4, wrapped: epoch3Row.wrapped, senderKexPubRaw: c.admin.att.kexPubRaw },
-  ], { spaceId: c.fsp, myKexPriv: c.ex.kexPriv });
+  ], {
+    spaceId: c.fsp,
+    myKexPriv: c.ex.kexPriv,
+    // Finding S1: `ctx.senders` is required. The admin IS in her (stale) sender set and the row
+    // names him truthfully, so the refusal below is the AAD's — not the sender check's. Handing
+    // her a set that did not contain him would make this row pass for the wrong reason.
+    senders: familyRecipients([memberRecord(c.admin), memberRecord(c.papa), memberRecord(c.ex)]),
+  });
 
   // Refused: the wrap's AAD and its HKDF salt both bind the epoch, so the KEK does not even match.
   assert.deepEqual(report.admitted, []);
@@ -214,8 +221,14 @@ test('SUCCEEDED — a stale member list re-admits her to EVERY epoch, including 
   const mine = rotation.wraps
     .filter((w) => w.deviceId === c.ex.deviceId)
     .map((w) => ({ epoch: w.epoch, wrapped: w.wrapped, senderKexPubRaw: c.admin.att.kexPubRaw }));
-  const report = await admitWraps(herRing, mine, { spaceId: c.fsp, myKexPriv: c.ex.kexPriv });
+  // …and her own sender set is stale in exactly the same way, which is the point: S1's fix
+  // authenticates WHO sent a key, and this attack is about WHOSE LIST the rotator used. The two
+  // are different questions and closing one does not close the other.
+  const report = await admitWraps(herRing, mine, {
+    spaceId: c.fsp, myKexPriv: c.ex.kexPriv, senders: recipients,
+  });
   assert.deepEqual(report.admitted, [4]);
+  assert.equal(report.unauthorized, 0, 'the rotator is honest and attested — S1 has no purchase here');
   assert.equal(await rawAesOf(herRing.get(c.fsp, 4)), await rawAesOf(e4));
 
   const op = makeOp(c.papa, c.fsp, { k: 'space.set', e: `space:${c.fsp}`, f: { name: 'Ohne sie' } });

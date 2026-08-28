@@ -131,12 +131,64 @@ The owner and the colour are **never fields on the entry**. One fewer thing that
    object carrying a non-enumerable brand; `sealOp` refuses any family-space `pub.set` whose
    patch is unbranded. **No future caller can bypass the allowlist**, including one written by a
    downstream agent who never read this document.
-4. **`level` is read from the *authenticated entity state*, not from the caller.** `sealOp`
-   re-derives `level` as `patch['pub.level'] ?? currentPubLevel(entityKey)` from the register map
-   before applying barrier 2. A caller that passes `'geteilt'` for a Belegt entry does **not** get
-   its text sealed — this is the correction to a design in which `projectForFamily(entry, vis)`
-   and its assertion trusted the same caller-supplied argument, so a single level confusion
-   defeated all four barriers at once.
+4. **`level` is read from the *authenticated entity state*, not from the caller.** A caller that
+   passes `'geteilt'` for a Belegt entry does **not** get its text sealed — this is the correction
+   to a design in which `projectForFamily(entry, vis)` and its assertion trusted the same
+   caller-supplied argument, so a single level confusion defeated all four barriers at once.
+
+   > **AMENDED 2026-08-28 — finding S5.** This clause used to spell the re-derivation as
+   > `level = patch['pub.level'] ?? currentPubLevel(entityKey)`. **That formula reinstated the
+   > very confusion the barrier exists to correct**, and `envelope.js` implemented it literally.
+   > The caller's `pub.level` won whenever the caller supplied one, and a projection supplies one
+   > on every transition — so nearly always. `brand.level === level` was then satisfied by the
+   > same caller having lied twice, and the backstop was handed the lie as its level. The E3 red
+   > team sealed a `pub.text` for an entry the register map called **belegt**
+   > (`tests/attack/crypto-member-read.test.js`, row M-R7c); the enumeration of input domain C4
+   > (`tests/helpers/crypto-domains.js`) priced it at 35 of 324 cells — every cell where the brand
+   > backs the lie.
+   >
+   > **Two things were wrong, and the second is why the first looked necessary.**
+   >
+   > **(a) The wrong register was named.** `currentPubLevel(entityKey)` is the folded `pub.level`
+   > of the *family* entity — the **level a transition is moving away FROM**. Against that, every
+   > legitimate share disagrees, so the `??` was papering over a mis-named source rather than
+   > protecting a real case. The authenticated state this barrier means is the entity's own
+   > **`visibility` truth register in the personal space** (§2.1's last row: `visibility` is what
+   > `pub.level` is *published as*). At publish time that register already carries the **new**
+   > level, because the visibility op is emitted and folded before the publish microtask runs
+   > (§2.3, ADR 001 §0.9). The transition therefore agrees with the map and needs no exception.
+   >
+   > **(b) A declared level was treated as a substitute. It is a claim to be CHECKED.**
+   >
+   > The normative rule, which `src/js/crypto/envelope.js:assertProjected` now implements and
+   > `tests/property/crypto-domains.test.js` walks over all 325 C4 inputs:
+   >
+   > ```js
+   > const level = ctx.levelOf(op.e);              // the ONLY assignment; `declared` never appears
+   > if (!VISIBILITY_LEVELS.includes(level)) throw new RedactionError(…, 'barrier4');
+   > const declared = op.f['pub.level'];           // a RESTATEMENT, checked like brand.level
+   > if (declared !== undefined && declared !== null && declared !== level)
+   >   throw new RedactionError(…, 'barrier4');
+   > ```
+   >
+   > `absent` and `null` are **silence**, not disagreement — they consult the map, which is what
+   > the map is for, and §5's withdrawal patches legitimately carry `pub.level: null`. An answer
+   > from the map outside `privat|belegt|geteilt` (including `null` and `undefined`) is a
+   > **refusal**, never a fallback to the patch: on a fresh device mid-pull the map has no answer
+   > for most entities, and "no authenticated level" must read *you cannot publish*.
+   >
+   > **The obligation this puts on the outbox (WP-10):** `ctx.levelOf` MUST be wired to the truth
+   > register, not to the published one. Wired to the published one, every first share becomes a
+   > barrier-4 refusal — loudly, on the first attempt, which is the correct symptom of a mis-wired
+   > seam and the reason this is safe to state as a hard rule. `PROJECT_CONTRACT` in
+   > `src/js/crypto/envelope.js` carries it as an executable clause.
+   >
+   > **Still open, and NOT this barrier's to close:** barriers 3, 4 and the backstop are all
+   > **author-side**. `geteiltOnly` (`core/ops.js` `FIELDS`) is enforced at seal time only and
+   > `core/authz.js` never reads it, so a peer running a patched build still has no seal path to
+   > defeat and a receiver applies whatever arrives. The mirror check belongs in the fold: refuse
+   > (or null out) a `geteiltOnly` field carrying a non-null value when the entity's folded
+   > `pub.level` is not `geteilt`. Asserted as still-missing by row M-R7c.
 
 ### 2.3 The failure path is loud, never swallowed
 

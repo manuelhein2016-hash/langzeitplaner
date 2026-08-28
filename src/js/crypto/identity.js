@@ -380,7 +380,7 @@ export async function buildDeviceAttestation(who, devSigPub, devKexPub, ports) {
  * `att.sigPubRaw`?
  *
  * ⚠ WHAT P2 DOES AND DOES NOT BUY — read this before relying on it (finding I-3 / R5-7,
- * `docs/v2/FINDINGS.md` §4.5, OPEN):
+ * `docs/v2/FINDINGS.md` §4.5, CLOSED 2026-08-28 — but NOT by this function):
  *
  *   P2 makes an attestation SELF-CONSISTENT. It does NOT make `deviceShort -> DeviceAttestation`
  *   a function across the space, because `sigPubRaw` is a **public** key travelling in the
@@ -389,9 +389,17 @@ export async function buildDeviceAttestation(who, devSigPub, devKexPub, ports) {
  *   spare. Any plan of the form "I-3 gets fixed when the attestation binding lands" is wrong.
  *
  * So: this function is worth having — it stops a member inventing a short that has no relation
- * to any key, and it is the check the crypto layer CAN make — and it must not be described as
- * closing I-3. What closes I-3 is a first-claim binding on the PAIR `(sigPubRaw, deviceShort)`
- * at fold time, which is a decision owned by `src/js/core/authz.js` and is not made here.
+ * to any key, it is what refuses the OTHER spelling (a peer's `sigPubRaw` under one's own short),
+ * and it is the check the crypto layer CAN make — and it must not be described as closing I-3.
+ *
+ * WHAT DID CLOSE I-3, so nobody reopens this by "simplifying" the fold: `src/js/core/authz.js`
+ * stage 0a now requires the register to have been WRITTEN by the device it attests
+ * (`devOf(cell.stamp) === att.deviceShort`). That is FINDINGS §4.5 option (a) — first-claim
+ * binding on the pair `(sigPubRaw, deviceShort)` — with the race removed, because a claim only
+ * counts once it is proved and only one party can prove it. It is sound because `openOp`'s P2,
+ * P3 and check 4 together mean an op stamped with `S` was signed by the holder of `S`'s private
+ * key: the public fields are copyable, the signature is not. ADR 002 §2.3 "One short, one
+ * signer".
  *
  * @param {DeviceAttestation} att
  * @returns {boolean}

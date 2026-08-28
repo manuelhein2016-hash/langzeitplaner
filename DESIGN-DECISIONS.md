@@ -269,6 +269,39 @@ That file is a complete device takeover, and it would sit in a mail archive fore
 Copy consequence: the export sheet must say what the passphrase protects and that **losing it
 loses the backup** — there is no reset, by design (Section 3's Option-B trade).
 
+> **EXTENDED 2026-08-28, E3 fix pass — findings S3 and S7. Neither reverses D8; both are the UX
+> half of it, and both are one line away from a different answer if the PO wants one.**
+>
+> **S7 — the passphrase now has a FLOOR, and the floor is SOFT.** `passphraseBytes` refused the
+> empty string and whitespace-only and nothing else, so `'1'`, `'1234'` and `'passwort'` all
+> sealed a real identity; the red team cracked a `'1234'` file with a four-entry dictionary.
+> 600 000 rounds is the right number and it is not a substitute for entropy — a 4-digit PIN is
+> 10 000 candidates, minutes on one laptop, against the file whose own README says *„Wer diese
+> Datei und dein Passwort hat, ist du."*
+>
+> `backup.js` now exports `PASSPHRASE_FLOOR` (12 code points, 5 distinct characters) and a pure
+> `passphraseStrength()`, and `EXPORT_SHEET_COPY.passphrase` carries the German and English copy
+> the sheet shows **before** anything is typed. A weak passphrase is still **accepted**, with the
+> warning shown and the button reading *„Trotzdem so sichern"*.
+>
+> **Why soft.** A hard refusal on this artefact has a failure mode strictly worse than the one it
+> prevents: the user who cannot get past the field clicks *„Nur Einträge sichern"* instead and
+> now has **no recovery artefact at all** — no keys, no Familienkreis, one dead Mac away from
+> nothing. (The other well-known outcome is the sticky note, which moves the secret from a KDF to
+> a desk.) A weak passphrase behind 600 000 rounds is a bad lock on a real door; the board-only
+> file is no door. **If the PO wants a hard floor**, it is `PASSPHRASE_FLOOR.hard = true` plus
+> flipping `exported` on rows `C2d-3…7` in `tests/helpers/crypto-domains.js`; the error code
+> `passphrase-too-weak` and its German and English sentence already exist, unused, so that the
+> switch really is one line and no caller's `switch` stops being exhaustive.
+>
+> **S3 — the board block is now authenticated too, on this path only.** ADR 002's finding E3-6
+> was a PO question and it is answered: with a passphrase, a SHA-256 of the whole `board` block
+> is bound into the AES-GCM AAD, so whoever edits a recovery file can no longer open it. E3-6's
+> argument for leaving it unbound — *"the board-only path has no key, so the guarantee would hold
+> on one of the two paths"* — is true of the board-only file and says nothing about the file that
+> says „DIES IST DEIN SCHLÜSSEL" across the top. **Two paths with two stated guarantees** is the
+> shape that argument permits, and `LIMITS.board` carries both sentences in both languages.
+
 ## D9 — invites do NOT carry wrapped keys
 
 The tighter of the two options, chosen deliberately. A leaked invite email is **never**

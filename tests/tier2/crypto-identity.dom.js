@@ -21,6 +21,8 @@ const ids = await importApp('core/ids.js');
 const b64 = await importApp('core/b64.js');
 const canon = await importApp('core/canon.js');
 const authz = await importApp('core/authz.js');
+const stamp = await importApp('core/stamp.js');
+const entities = await importApp('core/entities.js');
 const keystore = await importApp('platform/keystore.js');
 
 const S = crypto.subtle;
@@ -323,9 +325,17 @@ test('P2 is enforced here too: a validly-signed but inconsistent short verifies 
   assert.equal(threw, true, 'and it is never minted in the first place');
 });
 
-test('I-3 / R5-7 is still OPEN in WebKit as well: P2 does not stop a copied public key', async () => {
-  // The same characterization tier 1 carries, in the shipping engine, so the finding cannot be
-  // dismissed as a Node artefact. `sigPubRaw` is PUBLIC and travels in the victim's own register.
+test('I-3 / R5-7 in WebKit: P2 still does not stop a copied public key — and the fold does', async () => {
+  // Tier 1 carries the same pair of claims; this is the shipping engine, so neither the finding
+  // nor its fix can be dismissed as a Node artefact. Two halves, and the first is UNCHANGED:
+  //
+  //  (1) P2 does not close I-3. `sigPubRaw` is PUBLIC and travels in the victim's own register,
+  //      so the squat copies key and short together, tells the truth about both, mints, and
+  //      verifies. ADR 002 §2.3's struck sentence claimed otherwise.
+  //  (2) What closes it is the possession proof at fold time (§2.3 "One short, one signer"):
+  //      a `dev.<S>` register is a credential only if the op that WROTE it was stamped by the
+  //      device it attests. Mallory can copy every public field; she cannot stamp an op with a
+  //      short whose private key she does not hold, because that envelope must pass P3.
   const victim = await makeMember();
   const mallory = await makeMember();
   const squat = {
@@ -340,7 +350,55 @@ test('I-3 / R5-7 is still OPEN in WebKit as well: P2 does not stop a copied publ
   const blob = await identity.attestDevice(squat, mallory.rec.recSig.privateKey);
   const opened = await identity.verifyAttestation(blob, mallory.rec.recSig.publicKey);
   assert.notEqual(opened, null, 'and it verifies under her own recovery key');
-  assert.notEqual(opened.memberId, victim.memberId, 'two member records now claim one short');
+  assert.notEqual(opened.memberId, victim.memberId, 'two member records still claim one short');
+
+  // ── (2), in the real fold, with keys this engine generated and blobs it signed ──
+  const FSP = ids.spaceId('family');
+  const V = victim.attestation.deviceShort;
+  const M = mallory.attestation.deviceShort;
+  const attOp = (memberId, blobValue, regShort, byShort, ms) => ({
+    v: 1,
+    id: ids.opId(),
+    ts: stamp.fmt(ms, 1, byShort),
+    space: FSP,
+    act: memberId,
+    dev: memberId === victim.memberId ? victim.deviceId : mallory.deviceId,
+    gid: ids.groupId(),
+    k: 'member.set',
+    e: entities.memberKey(memberId),
+    f: { ['dev.' + regShort]: blobValue },
+  });
+  // The real `attestOpen`, pre-resolved with the real `verifyAttestation` — never a stub.
+  const table = new Map();
+  for (const [mid, key] of [[victim.memberId, victim.rec.recSig.publicKey],
+    [mallory.memberId, mallory.rec.recSig.publicKey]]) {
+    for (const bl of [victim.blob, blob]) {
+      table.set(identity.attestOpenKey(mid, bl), await identity.verifyAttestation(bl, key));
+    }
+  }
+  const attestOpen = identity.attestOpenFrom(table);
+
+  const honest = attOp(victim.memberId, victim.blob, V, V, 1787836800000);
+  const theSquat = attOp(mallory.memberId, blob, V, M, 1787836700000);   // backdated, deliberately
+
+  const r = authz.foldAuthorized([honest, theSquat], { me: victim.memberId, attestOpen });
+  assert.equal(r.rejected.length, 0, 'the squat is ADMITTED — refusing it would be the DoS handle');
+  assert.deepEqual(r.shortCollisions, [], 'and it contests nothing, because it was never a claim');
+  assert.deepEqual(r.unprovenShorts, [V], 'it is reported instead');
+  assert.equal(r.attestationOf(V).memberId, victim.memberId, 'the victim keeps his own short');
+
+  // The pre-collision window — one op, no contest to see — resolves to NOBODY, not to her.
+  const windowOnly = authz.foldAuthorized([theSquat], { me: victim.memberId, attestOpen });
+  assert.equal(windowOnly.attestationOf(V), null, 'she is never handed a short she cannot sign for');
+  assert.deepEqual(windowOnly.unprovenShorts, [V]);
+
+  // And the proof is a real signature check in this engine, not a string comparison: an op
+  // stamped with the victim's short verifies ONLY under the victim's signing key.
+  const aad = TE.encode('lzp/v2/probe/' + V);
+  const sig = await identity.signBytes(mallory.identity.devSig.privateKey, aad);
+  const victimPub = await identity.importSigPublic(b64.ub64(victim.attestation.sigPubRaw));
+  assert.equal(await identity.verifyBytes(victimPub, sig, aad), false,
+    'a signature she can make never verifies under the key his short names — this is P3');
 });
 
 test('ensureDeviceIdentity is idempotent in WebKit and refuses a partial store', async () => {

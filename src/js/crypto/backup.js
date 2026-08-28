@@ -75,16 +75,35 @@
 //
 // 3. **What the AAD binds.** `aesgcm()` refuses an empty AAD (§1 rule 2 / §11 rule 3), so there
 //    has to be one. It is `canonicalBytes` of the file's ENTIRE PLAINTEXT HEADER — both READMEs,
-//    `format`, `v`, `exportedAt`, `app`, `identity.memberId` and every `identity.kdf` field. Two
-//    consequences worth having: a `sealed` blob cannot be relabelled under another member's id or
-//    re-stamped with a different iteration count without the tag failing, and the honesty copy in
-//    the header cannot be stripped from a file that still opens.
-//    **The `board` block is deliberately NOT in the AAD, and that is an honest limit, not an
-//    oversight.** The board-only file has no key at all, so board authentication could exist on
-//    only one of the two paths — and a guarantee that holds on one path is worse than one stated
-//    plainly. (It would also mean an export could fail on a board whose `settings` picked up a
-//    float, since `canonicalJSON` refuses non-integers, and losing the user's export to a stray
-//    setting is a worse failure than the one it defends against.) See `LIMITS` at the bottom.
+//    `format`, `v`, `exportedAt`, `app`, `identity.memberId`, every `identity.kdf` field **and a
+//    SHA-256 digest of the whole `board` block**. Three consequences worth having: a `sealed`
+//    blob cannot be relabelled under another member's id or re-stamped with a different
+//    iteration count without the tag failing, the honesty copy in the header cannot be stripped
+//    from a file that still opens, and — finding **S3** — **an identity-bearing file's entries
+//    cannot be rewritten by whoever finds the file.**
+//
+//    **S3, and why the earlier answer was wrong.** E3-6 left the board unbound, and the argument
+//    was: "the board-only file has no key at all, so board authentication could exist on only one
+//    of the two paths, and a guarantee that holds on one path is worse than one stated plainly."
+//    That is true OF THE BOARD-ONLY FILE and says nothing about the identity-bearing one. The
+//    file that says „DIES IST DEIN SCHLÜSSEL" is the one an attacker goes looking for on the
+//    family NAS, and half of it was unsigned: Mama rewrites `board.notes`, adds one, DELETES one,
+//    puts the file back, Papa restores after a disk failure with HIS passphrase, and her board
+//    comes back as his — with `identityRestored: true` beside it (M-B4). Two paths with two
+//    DIFFERENT, STATED guarantees is not the failure the old argument feared; ONE path silently
+//    weaker than the file's own README is. `LIMITS.board` now carries both sentences, separately,
+//    in both languages, and `README.boardOnly` already tells the user which file she is holding.
+//
+//    THE DIGEST IS NOT A FIELD OF THE FILE, and that is deliberate. It is recomputed from
+//    `file.board` on both sides and only ever appears inside the AAD, so there is nothing to
+//    strip, nothing to downgrade, and no wire-format field to version. §7.2's `identity` shape is
+//    unchanged; only the AAD's derivation is, and `sealAad()` is the single place that knows.
+//
+//    §7.2's other objection — "an export could fail on a board whose `settings` picked up a
+//    float, since `canonicalJSON` refuses non-integers" — was a real cost and it is paid rather
+//    than argued away: `boardDigestInput()` does NOT use `canonicalJSON`. It is a total function
+//    over every value `JSON.stringify` can write, floats included, because losing a user's export
+//    to a stray setting would be the worse failure. See its own comment for why it round-trips.
 //
 // 4. **How the recovery PUBLIC halves come back.** §7.2 seals `recSigPkcs8` / `recKexPkcs8`, and
 //    PKCS#8 imports to a PRIVATE `CryptoKey` only — but every consumer needs a `CryptoKeyPair`.
@@ -131,6 +150,7 @@ import { V1_ENTRY_FIELDS } from '../core/materialize.js';
 import {
   AEAD,
   BACKUP_KDF,
+  HASH,
   INFO,
   KDF,
   PKCS8_P256_BYTES,
@@ -321,6 +341,11 @@ export const EXPORT_SHEET_COPY = Object.freeze({
       de: 'Das Passwort kann niemand zurücksetzen. Ist es weg, ist dieses Backup weg.',
       en: 'Nobody can reset the password. If it is gone, this backup is gone.',
     }),
+    /** S3 — the guarantee this button buys that the other one does not. */
+    sealsEntriesToo: Object.freeze({
+      de: 'Auch die Einträge sind versiegelt: eine veränderte Datei lässt sich nicht mehr öffnen.',
+      en: 'The entries are sealed too: an altered file no longer opens.',
+    }),
   }),
   boardOnly: Object.freeze({
     code: 'board-only',
@@ -332,6 +357,44 @@ export const EXPORT_SHEET_COPY = Object.freeze({
     lose: Object.freeze({
       de: 'Deine Schlüssel sind nicht in der Datei: geht dein letzter Mac verloren, musst du dem Familienkreis neu beitreten.',
       en: 'Your keys are not in the file: if you lose your last Mac you have to join the Familienkreis again.',
+    }),
+    /** S3 — and the honest other half of it, on the button it is true of. */
+    entriesNotSealed: Object.freeze({
+      de: 'Ohne Passwort sind die Einträge nicht versiegelt: wer die Datei ändert, ändert dein Board.',
+      en: 'Without a password the entries are not sealed: whoever edits the file edits your board.',
+    }),
+  }),
+  /**
+   * S7 — the passphrase field's own copy. **`hint` is shown BEFORE anything is typed**, because a
+   * requirement that only appears as a rejection is a requirement the user argues with; `weak` is
+   * shown when `passphraseStrength(pw).weak` is true, and it is a WARNING, not a wall.
+   *
+   * Deliberately not scolding, and deliberately concrete. „Mindestens 12 Zeichen" with a red
+   * border produces „Sommer2026!" on a sticky note; three words the user already associates
+   * produce something they can type and nobody can guess.
+   */
+  passphrase: Object.freeze({
+    hint: Object.freeze({
+      de:
+        'Nimm drei Wörter, die nur du miteinander verbindest — „Kirschbaum-Sonntag-Regenschirm". '
+        + 'Das ist leichter zu merken und deutlich schwerer zu raten als ein kurzes kompliziertes '
+        + 'Passwort.',
+      en:
+        'Take three words only you connect — "cherry-tree-sunday-umbrella". Easier to remember '
+        + 'and far harder to guess than a short complicated password.',
+    }),
+    weak: Object.freeze({
+      de:
+        'Dieses Passwort ist kurz genug, um durchprobiert zu werden. Diese Datei ist der '
+        + 'Ersatzschlüssel für alles — hier ist ein längeres wirklich der Unterschied.',
+      en:
+        'This password is short enough to be guessed by brute force. This file is the spare key '
+        + 'to everything — a longer one genuinely is the difference here.',
+    }),
+    /** Shown next to `weak`, so the user can decide rather than be told. */
+    weakAnyway: Object.freeze({
+      de: 'Trotzdem so sichern',
+      en: 'Save it anyway',
     }),
   }),
   /** Addendum §3 — this is not an account password, and the sheet has to say so. */
@@ -372,6 +435,45 @@ export const IMPORT_CONSEQUENCE = Object.freeze({
       'Your board is back and so are your keys. This Mac is part of your Familienkreis again; '
       + 'the others’ shared entries arrive by themselves at the next sync.',
   }),
+  /**
+   * S8 — the same restore, when the ring in the file does not cover every epoch `1..e`.
+   *
+   * §7.3 step 6's „Schlüssel ausstehend" is the string this is written from, and it is the
+   * RESTORE side of a rule the WRAPPING side already enforces loudly: §4.3 and §7.1 step 5 make
+   * "all epochs 1..e" what lets a member read Oma's birthday from three years ago.
+   * `result.spaces.<which>.missingEpochs` carries the numbers; this carries the sentence.
+   */
+  identityRestoredWithGaps: Object.freeze({
+    code: 'identity-restored-keys-pending',
+    de:
+      'Dein Board ist zurück und deine Schlüssel auch — aber nicht alle. Für einen Teil der '
+      + 'älteren geteilten Einträge fehlt der Schlüssel; sie bleiben leer, bis er ankommt '
+      + '(„Schlüssel ausstehend"). Alles andere ist da.',
+    en:
+      'Your board is back and so are your keys — but not all of them. Some of the older shared '
+      + 'entries are missing their key; they stay blank until it arrives ("keys pending"). '
+      + 'Everything else is here.',
+  }),
+  /**
+   * M-B6 / C2c-2, said rather than checked. `importBackup` is I/O-free and CANNOT know whether
+   * the Kreis this file names is the Kreis this member belongs to — the member list is the fold's
+   * and arrives later, and §7.3 step 5's `POST /devices/adopt` is the only thing that can
+   * contradict a file. "Cannot check" and "does not mention" are different, and only the first is
+   * forced by the design. So the id is on `result.spaces.family.id` and this is the sentence that
+   * goes beside it, on EVERY family restore — including the honest one, because the module cannot
+   * tell the honest one from „ich hab dir dein Backup wiederhergestellt".
+   */
+  familyBindingUnverified: Object.freeze({
+    code: 'family-binding-unverified',
+    de:
+      'Diese Datei trägt dich in einen Familienkreis ein. Welcher es ist, steht in der Datei — '
+      + 'dieser Mac kann es nicht nachprüfen. Wenn dir jemand anderes diese Datei gegeben hat, '
+      + 'sieh im Familienkreis nach, ob es deiner ist.',
+    en:
+      'This file enrols you in a Familienkreis. Which one is stated in the file — this Mac cannot '
+      + 'check it. If somebody else handed you this file, look in the Familienkreis and make sure '
+      + 'it is yours.',
+  }),
   boardOnly: Object.freeze({
     code: 'no-identity-in-file',
     de:
@@ -394,15 +496,61 @@ export const LIMITS = Object.freeze({
     de: 'Es gibt keine Wiederherstellung des Passworts. Das ist Absicht, nicht ein fehlendes Feature.',
     en: 'There is no password recovery. That is by design, not a missing feature.',
   }),
-  /** Resolution 3 above — the board block is not authenticated, and the copy must not imply it is. */
+  /**
+   * Resolution 3 above, in the two sentences S3 split it into. TWO PATHS, TWO STATED
+   * GUARANTEES — which is the shape the E3-6 argument actually permits, and the shape the user
+   * can act on: `README.boardOnly` already tells her which of the two files she is holding.
+   *
+   * `boardNotAuthenticated` is kept as an ALIAS of `board.boardOnly` because that key is quoted
+   * by name in `docs/v2/FINDINGS.md`, `docs/v2/STATUS.md` and `docs/v2/E3-VERIFICATION.md`, and a
+   * dangling reference in an audit document is a worse outcome than one extra key here. It now
+   * says the smaller true thing: it is about the file WITHOUT keys.
+   */
+  board: Object.freeze({
+    withIdentity: Object.freeze({
+      de:
+        'Auch die Einträge in dieser Datei sind versiegelt: wer sie verändert — ein Wort, ein '
+        + 'zusätzlicher Eintrag, ein gelöschter Eintrag — kann sie danach nicht mehr öffnen. Es '
+        + 'kommt entweder dein Board zurück oder gar keins.',
+      en:
+        'The entries in this file are sealed as well: whoever changes one — a word, an added '
+        + 'entry, a deleted entry — can no longer open the file at all. Either your board comes '
+        + 'back, or none does.',
+    }),
+    boardOnly: Object.freeze({
+      de:
+        'Diese Datei enthält keine Schlüssel, deshalb sind die Einträge darin nicht signiert: wer '
+        + 'die Datei verändert, verändert das Board, das beim Import zurückkommt. Ein Backup mit '
+        + 'Passwort ist auch hier versiegelt.',
+      en:
+        'This file holds no keys, so the entries in it are not signed: whoever edits the file '
+        + 'edits the board that comes back on import. A backup made with a password is sealed '
+        + 'here too.',
+    }),
+  }),
+  /** @deprecated alias of `LIMITS.board.boardOnly` — see above. */
   boardNotAuthenticated: Object.freeze({
     de:
-      'Die Einträge in der Datei sind nicht signiert: wer die Datei verändert, verändert das '
-      + 'Board, das beim Import zurückkommt. Die Schlüssel dagegen sind versiegelt — eine '
-      + 'veränderte Datei lässt sich nicht mehr öffnen.',
+      'Diese Datei enthält keine Schlüssel, deshalb sind die Einträge darin nicht signiert: wer '
+      + 'die Datei verändert, verändert das Board, das beim Import zurückkommt. Ein Backup mit '
+      + 'Passwort ist auch hier versiegelt.',
     en:
-      'The entries in the file are not signed: whoever edits the file edits the board that comes '
-      + 'back on import. The keys are sealed, though — a modified file no longer opens at all.',
+      'This file holds no keys, so the entries in it are not signed: whoever edits the file '
+      + 'edits the board that comes back on import. A backup made with a password is sealed '
+      + 'here too.',
+  }),
+  /**
+   * S7 / D8's UX, said once so the sheet and the audit read the same sentence. The floor is a
+   * FLOOR ON WHAT WE SAY, not a gate on what we accept — `PASSPHRASE_FLOOR` explains why.
+   */
+  passphraseFloor: Object.freeze({
+    de:
+      '600 000 Rechenrunden machen ein kurzes Passwort nicht lang. Eine vierstellige PIN hat '
+      + '10 000 Möglichkeiten — das ist auf einem Laptop eine Sache von Minuten, und es gibt kein '
+      + 'zweites Schloss dahinter.',
+    en:
+      '600 000 rounds do not make a short password long. A four-digit PIN has 10 000 candidates — '
+      + 'minutes on one laptop, and there is no second lock behind it.',
   }),
 });
 
@@ -424,6 +572,10 @@ export const BACKUP_ERROR_CODES = Object.freeze([
   'identity-damaged',
   'passphrase-required',
   'passphrase-empty',
+  // S7. Reachable ONLY when `PASSPHRASE_FLOOR.hard` is true, which it is not — it exists so that
+  // making the floor hard really is the one-line change §5a promises, rather than a one-line
+  // change plus a new code plus a new sentence plus a caller whose switch is no longer exhaustive.
+  'passphrase-too-weak',
   'cannot-open',
   'sealed-damaged',
   'keystore-conflict',
@@ -478,6 +630,14 @@ const SAY = Object.freeze({
     de: 'Bitte ein Passwort eingeben. Ein leeres Passwort schützt nichts.',
     en: 'Please enter a password. An empty one protects nothing.',
   },
+  'passphrase-too-weak': {
+    de:
+      'Dieses Passwort ist zu kurz, um diese Datei zu schützen. Nimm drei Wörter, die nur du '
+      + 'miteinander verbindest.',
+    en:
+      'This password is too short to protect this file. Take three words only you connect with '
+      + 'each other.',
+  },
   // ONE code for two causes, because the crypto cannot tell them apart and pretending otherwise
   // would be a guess dressed as a diagnosis. The AES-GCM tag fails identically for a wrong
   // passphrase and for a file whose header, salt or ciphertext was altered or truncated.
@@ -501,13 +661,19 @@ const SAY = Object.freeze({
       'This Mac already holds a different identity. A backup is never written over an existing '
       + 'one.',
   },
+  // S4 — the sentence changed WITH the behaviour. It used to say „muss neu gekoppelt werden",
+  // which was true of a module that never deleted and is now false: the unusable residue of an
+  // interrupted write is cleared, and the next attempt goes through. Say what happened and what
+  // to do, in that order.
   'keystore-partial': {
     de:
-      'Die Schlüsselablage auf diesem Mac ist unvollständig. Dieser Mac muss neu gekoppelt '
-      + 'werden; es wurde nichts verändert.',
+      'Ein früherer Import wurde mittendrin unterbrochen und hat einen unbrauchbaren Rest auf '
+      + 'diesem Mac hinterlassen. Der Rest wurde entfernt — es wurde keine gültige Identität '
+      + 'überschrieben. Bitte den Import noch einmal starten.',
     en:
-      'The key store on this Mac is incomplete. This Mac has to be paired again; nothing was '
-      + 'changed.',
+      'An earlier import was interrupted part way through and left an unusable remainder on this '
+      + 'Mac. The remainder has been removed — no valid identity was overwritten. Please start '
+      + 'the import once more.',
   },
 });
 
@@ -602,6 +768,119 @@ function assertSealable(bytes, who) {
   return bytes;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 5a. S7 — the passphrase floor
+//
+// `passphraseBytes` refused the empty string and whitespace-only and NOTHING ELSE, so `'1'`,
+// `'a'`, `'1234'` and `'passwort'` all sealed a real identity, and the red team cracked a
+// `'1234'` file with a four-entry dictionary (M-B2). 600 000 PBKDF2 rounds is the RIGHT number
+// and it is not a substitute for entropy: a 4-digit PIN is 10 000 candidates — 6e9 rounds, which
+// is minutes on one laptop — against the file whose own README says „Wer diese Datei und dein
+// Passwort hat, ist du."
+//
+// ⚠ THE FLOOR IS SOFT, AND THAT IS THE DECISION, NOT AN OMISSION.
+//
+// A hard refusal on THIS artefact has a failure mode that is strictly worse than the one it
+// prevents: the user who cannot get past the passphrase field clicks „Nur Einträge sichern"
+// instead, and now has no recovery artefact at all — no keys, no Familienkreis, one dead Mac away
+// from nothing. (The other well-known outcome is the sticky note, which moves the secret from a
+// KDF to a desk.) A weak passphrase behind 600 000 rounds is a bad lock on a real door; the
+// board-only file is no door. So: the module has a floor, states it, measures every passphrase
+// against it, and hands the verdict to the sheet — and the sheet says „Trotzdem so sichern"
+// rather than „Nein".
+//
+// EVERYTHING THAT WOULD HAVE TO CHANGE TO MAKE IT HARD IS IN ONE PLACE: set
+// `PASSPHRASE_FLOOR.hard = true` and `exportBackup` refuses `weak` with `passphrase-too-weak`.
+// The domain rows that decide it are `C2d-3…7` in `tests/helpers/crypto-domains.js` — flip
+// `exported: true → false` there and the property names every place the decision lands. That is
+// a PO decision (D8's UX) and this module does not make it; it makes it a one-line change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What this module considers a passphrase, in numbers rather than in adjectives.
+ *
+ * `minChars` counts CODE POINTS, not UTF-16 units — „Schlüsselbund" is 13 either way, but an
+ * emoji is one character to the user and two to `String.length`, and a floor that disagrees with
+ * the user about how long their password is loses that argument every time.
+ */
+export const PASSPHRASE_FLOOR = Object.freeze({
+  minChars: 12,
+  minDistinct: 5,
+  /** below this length, digits alone are a PIN or a date in practice */
+  digitsOnlyBelow: 20,
+  /** false ⇒ a weak passphrase is REPORTED and accepted. See the block comment above. */
+  hard: false,
+});
+
+/**
+ * THE WEAKNESSES, AS DATA. Each row is a total predicate over the measurement, so adding one is
+ * adding a row rather than editing a chain of `if`s — and `reasons` comes back as the list of
+ * codes that fired, so a caller can say WHICH one without re-deriving it.
+ *
+ * `empty` is first and is the only one that is also a refusal (`passphrase-empty`), because a
+ * passphrase that is nothing at all does not produce a file that "looks protected and is not" —
+ * it produces no protection to describe.
+ */
+const PASSPHRASE_WEAKNESSES = Object.freeze([
+  Object.freeze({ code: 'empty', of: (m) => m.blank }),
+  Object.freeze({ code: 'too-short', of: (m) => m.chars < PASSPHRASE_FLOOR.minChars }),
+  Object.freeze({ code: 'too-few-distinct', of: (m) => m.distinct < PASSPHRASE_FLOOR.minDistinct }),
+  Object.freeze({ code: 'one-character-repeated', of: (m) => m.chars > 1 && m.distinct === 1 }),
+  Object.freeze({
+    code: 'digits-only',
+    of: (m) => m.digitsOnly && m.chars < PASSPHRASE_FLOOR.digitsOnlyBelow,
+  }),
+]);
+
+/**
+ * @typedef {Object} PassphraseStrength
+ * @property {'ok'|'weak'|'empty'} code
+ * @property {boolean} weak  true for BOTH 'weak' and 'empty' — the sheet's one question
+ * @property {number} chars  code points, after NFC
+ * @property {number} distinct  distinct code points
+ * @property {string[]} reasons  which `PASSPHRASE_WEAKNESSES` fired, in order
+ * @property {{de:string,en:string}|null} say  the sentence to show, or `null` when there is none
+ */
+
+/**
+ * Measure a passphrase. **PURE, SYNCHRONOUS, NO CRYPTO** — so the export sheet can call it on
+ * every keystroke, which is the only way the answer arrives before the user has committed.
+ *
+ * It is deliberately EXPORTED and deliberately not called from inside the seal: a module that
+ * silently downgraded a user's choice would be making the product decision it just said it does
+ * not make. `exportBackup` calls it once, to report; the sheet calls it to decide what to show.
+ *
+ * @param {any} passphrase
+ * @returns {PassphraseStrength}
+ */
+export function passphraseStrength(passphrase) {
+  const s = typeof passphrase === 'string' ? passphrase.normalize('NFC') : '';
+  const points = [...s];
+  const m = {
+    blank: typeof passphrase !== 'string' || s.trim().length === 0,
+    chars: points.length,
+    distinct: new Set(points).size,
+    digitsOnly: points.length > 0 && points.every((c) => c >= '0' && c <= '9'),
+  };
+  // `empty` SUBSUMES the rest rather than joining them. Every other predicate is also true of the
+  // empty string, and „zu kurz, zu wenig verschiedene Zeichen, nur Ziffern" under an empty field
+  // is three sentences that all mean "you have not typed anything yet".
+  const reasons = m.blank
+    ? ['empty']
+    : PASSPHRASE_WEAKNESSES.filter((w) => w.of(m)).map((w) => w.code);
+  const code = m.blank ? 'empty' : reasons.length > 0 ? 'weak' : 'ok';
+  return Object.freeze({
+    code,
+    weak: code !== 'ok',
+    chars: m.chars,
+    distinct: m.distinct,
+    reasons: Object.freeze(reasons),
+    say: code === 'empty' ? SAY['passphrase-empty']
+      : code === 'weak' ? EXPORT_SHEET_COPY.passphrase.weak
+        : null,
+  });
+}
+
 /**
  * The passphrase, as bytes.
  *
@@ -666,21 +945,97 @@ export async function deriveBackupKey(passphrase, salt, iterations, ports) {
 }
 
 /**
- * The AAD — resolution 3. `canonicalBytes` of the file's ENTIRE plaintext header.
+ * S3 — THE BYTES THE BOARD DIGEST IS TAKEN OVER.
+ *
+ * Not `canonicalJSON`, and the reason is the one E3-6 used as an argument against binding the
+ * board at all: `canonicalJSON` refuses floats, non-safe integers, `undefined`, `NaN` and
+ * anything that is not a plain object. `board.settings` is a bag the product writes into, and
+ * losing a user's ENTIRE EXPORT because one setting picked up a `0.5` would be a worse failure
+ * than the one this defends against. So this is a TOTAL function over every value
+ * `JSON.stringify` can write — which is exactly the set of values that can survive in the file.
+ *
+ * **It must satisfy one equation and only one:**
+ *
+ *     boardDigestInput(b) === boardDigestInput(JSON.parse(JSON.stringify(b)))
+ *
+ * because the export side hashes the board it built and the import side hashes the board that
+ * came back through the file. `JSON.stringify` is what makes that true: every value it writes
+ * parses back to a value it writes identically (numbers via ECMA-262's shortest round-trip
+ * `ToString`, strings with well-formed escapes since ES2019), and every value it DROPS —
+ * `undefined`, functions, symbols — is dropped on both sides.
+ *
+ * The replacer sorts object keys so insertion order cannot change the digest. Integer-like keys
+ * are then re-ordered ahead of the rest by `OrdinaryOwnPropertyKeys`, in both engines, which is
+ * deterministic and therefore harmless. Arrays are left alone: order is content in a board.
+ *
+ * `utf8()` here is `core/canon.js`'s plain `TextEncoder` — it does NOT normalise, so the digest
+ * is over exactly the code units the file carries.
+ *
+ * @param {any} board
+ * @returns {Uint8Array} never empty — `{}` is two bytes
+ */
+export function boardDigestInput(board) {
+  const sorted = (key, value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+    const out = {};
+    for (const k of Object.keys(value).sort()) out[k] = value[k];
+    return out;
+  };
+  let text;
+  try {
+    text = JSON.stringify(board, sorted);
+  } catch (err) {
+    // A cycle, or a `toJSON` that threw. Both mean the board cannot become a file at all, so
+    // this is the same failure the caller's own `JSON.stringify` is one step from having.
+    throw new Error(`backup: the board cannot be serialized (${err && err.message})`);
+  }
+  if (typeof text !== 'string') {
+    throw new Error('backup: the board is not JSON-serializable — it has no digest');
+  }
+  return assertSealable(utf8(text), 'boardDigestInput');
+}
+
+/**
+ * `b64u(SHA-256(boardDigestInput(board)))` — the value that goes INTO the AAD, and nowhere else.
+ * @param {SubtleCrypto} S @param {any} board @returns {Promise<string>}
+ */
+async function boardDigest(S, board) {
+  return b64u(new Uint8Array(await S.digest(HASH, boardDigestInput(board))));
+}
+
+/**
+ * The AAD — resolution 3. `canonicalBytes` of the file's ENTIRE plaintext header, plus a digest
+ * of its ENTIRE board.
  *
  * Built from one function so that the export side and the import side cannot disagree about a
- * single field: `sealAad(header)` is called with the object that was written, and again with the
- * object that was read. Any difference at all makes the tag fail, which is precisely the point.
+ * single field: `sealAad(header, …)` is called with the object that was written, and again with
+ * the object that was read. Any difference at all makes the tag fail, which is precisely the
+ * point.
+ *
+ * **S3 — the board digest is a THIRD ARGUMENT, not a field of the file.** It is recomputed from
+ * `file.board` on both sides, so there is no field to strip, no field to downgrade, and no wire
+ * format to version: §7.2's `identity` shape is untouched. Rewrite one character of one note and
+ * the AAD changes, the tag fails, and the import comes back `cannot-open` — the same honest code
+ * a wrong passphrase gets, because from outside the module the two are the same event: this file
+ * is not the file it claims to be.
  *
  * @param {{_README_de:string,_README_en:string,format:string,v:number,exportedAt:string,app:string}} header
  * @param {{memberId:string, kdf:Object}} idHeader
+ * @param {string} boardSha the b64url SHA-256 of `boardDigestInput(file.board)`
  * @returns {Uint8Array} never empty — `aesgcm()` refuses an empty AAD
  */
-function sealAad(header, idHeader) {
+function sealAad(header, idHeader, boardSha) {
+  if (typeof boardSha !== 'string' || boardSha.length === 0) {
+    throw new Error(
+      'sealAad: the board digest is REQUIRED. The board is inside the AAD (finding S3); a caller '
+      + 'that omits it would silently rebuild the exact hole S3 closed.'
+    );
+  }
   return canonicalBytes({
     _README_de: header._README_de,
     _README_en: header._README_en,
     app: header.app,
+    board: { digest: boardSha, hash: HASH },
     exportedAt: header.exportedAt,
     format: header.format,
     kdf: {
@@ -782,7 +1137,19 @@ export async function exportBackup(board, identity, spaces, passphrase, opts = {
   // Validated HERE, before a single private key is exported. An empty passphrase discovered three
   // calls later would mean the PKCS#8 bytes had already been materialised in the JS heap for a
   // file that is then never written — work that D8 says should not happen at all on that path.
-  if (withIdentity) passphraseBytes(passphrase).fill(0);
+  if (withIdentity) {
+    passphraseBytes(passphrase).fill(0);
+    // S7 — measured on the way past, never silently. `PASSPHRASE_FLOOR.hard` is false, so this
+    // REPORTS; the sheet decides what to do with it (§5a, §9). The optional port exists so that
+    // "the caller was told" is a testable fact rather than a convention.
+    const strength = passphraseStrength(passphrase);
+    if (strength.weak) {
+      if (PASSPHRASE_FLOOR.hard) {
+        fail('passphrase-too-weak', `exportBackup: the passphrase is below the floor (${strength.reasons.join(', ')})`);
+      }
+      if (typeof opts.onWeakPassphrase === 'function') opts.onWeakPassphrase(strength);
+    }
+  }
 
   const file = {
     _README_de: withIdentity ? README.withIdentity.de : README.boardOnly.de,
@@ -854,8 +1221,11 @@ async function sealIdentity(identity, spaces, passphrase, header, opts) {
 
   const plaintext = assertSealable(canonicalBytes(payload), 'sealIdentity');
   const key = await deriveBackupKey(passphrase, salt, iterations, opts);
+  // S3 — `header.board` is already the filtered, exported board at this point (`exportBackup`
+  // sets it before it calls here), so this hashes the bytes the file will actually carry.
+  const boardSha = await boardDigest(S, header.board);
   const ct = new Uint8Array(
-    await S.encrypt(aesgcm(iv, sealAad(header, idHeader)), key, plaintext)
+    await S.encrypt(aesgcm(iv, sealAad(header, idHeader, boardSha)), key, plaintext)
   );
 
   const secrets = [
@@ -1149,10 +1519,16 @@ function saltBytes(s) {
  * @property {boolean} identityRestored
  * @property {import('./identity.js').Identity|null} identity  fresh DEVICE keys, restored
  *           RECOVERY keys. `null` when the file carried none.
- * @property {{personal:Object|null, family:Object|null}|null} spaces  epoch keys as `CryptoKey`s
+ * @property {{personal:Object|null, family:Object|null}|null} spaces  epoch keys as `CryptoKey`s.
+ *           Each bundle carries `{id, epoch?, epochs}` and, **only when the ring has holes**,
+ *           `missingEpochs: number[]` — S8. Its ABSENCE is the "complete" signal.
  * @property {Object|null} attestation  this machine's SELF-attestation under the restored RK_sig
  * @property {string|null} blob  the `dev.<deviceShort>` register value — §7.3 step 4
- * @property {{code:string, de:string, en:string}} consequence  ALWAYS present
+ * @property {{code:string, de:string, en:string}} consequence  ALWAYS present. `identityRestored`
+ *           or, when any ring has holes, `identityRestoredWithGaps` (§7.3 step 6).
+ * @property {{spaceId:string, verified:false, say:Object}|null} familyBinding  M-B6 — the Kreis
+ *           this file enrols the Mac in, and the statement that NOTHING HERE VERIFIED IT.
+ *           `null` when the file carries no family bundle.
  */
 
 /**
@@ -1166,7 +1542,8 @@ function saltBytes(s) {
  *   3. derive, decrypt (the AES-GCM tag catches a wrong passphrase and a tampered or truncated
  *      file alike), parse the payload, import every key — ALL IN MEMORY;
  *   4. only now look at the KeyStore, and refuse a conflicting or partial one BEFORE writing a
- *      byte;
+ *      byte — clearing the dead residue of an interrupted earlier write on the way out, so the
+ *      retry is not refused for ever (S4; `prepareKeyStore` argues the whole of it);
  *   5. write the recovery records, keys first and metadata last — the same order and the same
  *      canonical bytes `identity.js` writes, so a crash between them leaves a PARTIAL store that
  *      `ensureRecoveryIdentity` refuses loudly rather than one that is silently wrong;
@@ -1205,6 +1582,7 @@ export async function importBackup(file, passphrase, ks, opts = {}) {
       attestation: null,
       blob: null,
       consequence: IMPORT_CONSEQUENCE.boardOnly,
+      familyBinding: null,
     });
   }
 
@@ -1221,9 +1599,14 @@ export async function importBackup(file, passphrase, ks, opts = {}) {
   let plain;
   try {
     const key = await deriveBackupKey(passphrase, salt, id.kdf.iterations, opts);
+    // S3 — the SAME digest, over the board that arrived. A rewritten note, an added entry, a
+    // deleted entry or a rewritten `_v2` lineage all change this string, and the AEAD tag then
+    // refuses the whole file. Nothing downstream has to remember to check the board, because
+    // nothing downstream runs.
+    const boardSha = await boardDigest(S, file.board);
     plain = new Uint8Array(
       await S.decrypt(
-        aesgcm(parts.iv, sealAad(file, { memberId: id.memberId, kdf: id.kdf })),
+        aesgcm(parts.iv, sealAad(file, { memberId: id.memberId, kdf: id.kdf }, boardSha)),
         key,
         parts.ct
       )
@@ -1242,7 +1625,7 @@ export async function importBackup(file, passphrase, ks, opts = {}) {
   const restored = await importRecoveryPair(S, payload);
   const spaces = await importSpaces(S, payload);
 
-  await assertKeyStoreIsFree(ks, id.memberId);                                   // step 4
+  await prepareKeyStore(ks, id.memberId);                                        // step 4
 
   const { createdAt, deviceId } = opts;
   if (typeof createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(createdAt)) {
@@ -1261,6 +1644,13 @@ export async function importBackup(file, passphrase, ks, opts = {}) {
     { deviceId, createdAt, ...opts }
   );
 
+  // S8 — the consequence follows the RING, not the happy path. `IMPORT_CONSEQUENCE` is the one
+  // thing this module promises to say on every success (§7.3 step 6, "reported rather than
+  // silent"), and „alles ist zurück" over a ring with a hole in it is the silence S8 is about.
+  const gaps = ['personal', 'family']
+    .map((w) => (spaces[w] && spaces[w].missingEpochs ? spaces[w].missingEpochs.length : 0))
+    .reduce((a, b) => a + b, 0);
+
   return Object.freeze({
     board,
     lineage,
@@ -1273,7 +1663,23 @@ export async function importBackup(file, passphrase, ks, opts = {}) {
     spaces,
     attestation: minted.attestation,
     blob: minted.blob,
-    consequence: IMPORT_CONSEQUENCE.identityRestored,
+    consequence: gaps > 0 ? IMPORT_CONSEQUENCE.identityRestoredWithGaps : IMPORT_CONSEQUENCE.identityRestored,
+    // M-B6 / C2c-2 — WHAT THIS MODULE CANNOT CHECK, NAMED RATHER THAN OMITTED.
+    //
+    // `family.id` is a payload field. Whether this member is still in that Kreis, or ever was, is
+    // the fold's to know and arrives later; §7.3 step 5's `POST /devices/adopt` is the only thing
+    // that can contradict a file. So the CALLER — which does know which Kreis this Mac expects,
+    // or can ask — gets the id and the sentence, on every family restore. This is deliberately
+    // NOT conditional: a file naming somebody else's Kreis is indistinguishable here from one
+    // naming your own, and a warning that only appeared on the bad one would be a claim this
+    // module cannot make. `null` when the file carries no family bundle at all.
+    familyBinding: spaces.family
+      ? Object.freeze({
+        spaceId: spaces.family.id,
+        verified: false,
+        say: IMPORT_CONSEQUENCE.familyBindingUnverified,
+      })
+      : null,
   });
 }
 
@@ -1424,6 +1830,22 @@ async function importSpaces(S, payload) {
     }
     const out = { id: bundle.id, epochs };
     if (bundle.epoch !== undefined) out.epoch = bundle.epoch;
+
+    // S8 — A SPARSE RING IS NO LONGER ACCEPTED IN SILENCE.
+    //
+    // §4.3 and §7.1 step 5 make "every epoch 1..e" the rule that lets a member read Oma's
+    // birthday from three years ago, and the WRAPPING side already refuses a partial ring loudly
+    // (`wrapRingToRecipients`). The restoring side accepted one without a word, so a restored Mac
+    // could not read epochs 1–3 and said nothing — the two sides disagreed about the same rule.
+    //
+    // REPORTED, NOT REFUSED, and the asymmetry is deliberate: refusing would throw away a
+    // restore that recovers everything from epoch 4 onward, on a Mac whose owner may have nothing
+    // else left. §7.3 step 6 already describes the right behaviour for keys that have not arrived
+    // — the ops are PARKED and the status says „Schlüssel ausstehend" — and this is the number
+    // that status needs. The field is ABSENT when the ring is complete, so its presence is the
+    // signal and a caller cannot read `[]` as „alles da" by accident.
+    const missing = missingEpochsOf(epochs, bundle.epoch);
+    if (missing.length > 0) out.missingEpochs = Object.freeze(missing);
     return Object.freeze(out);
   };
   return Object.freeze({
@@ -1433,7 +1855,29 @@ async function importSpaces(S, payload) {
 }
 
 /**
- * Step 4 — refuse BEFORE writing.
+ * Which of `1..e` this ring does not hold. `e` is the bundle's own `epoch` when it carries one
+ * and the highest epoch present otherwise — a ring that stops at 4 with no `epoch` field is
+ * complete for everything it claims to cover, and inventing a higher `e` would report a gap that
+ * only the server can know about (§4.4: an epoch the file has never heard of PARKS, it is not
+ * missing from the file).
+ *
+ * @param {Map<number,CryptoKey>} epochs @param {number|undefined} epoch
+ * @returns {number[]} ascending, possibly empty
+ */
+function missingEpochsOf(epochs, epoch) {
+  const held = [...epochs.keys()];
+  if (held.length === 0) return [];
+  const top = Number.isSafeInteger(epoch) && epoch > 0 ? Math.max(epoch, ...held) : Math.max(...held);
+  const gaps = [];
+  for (let n = FIRST_BACKUP_EPOCH; n <= top; n++) if (!epochs.has(n)) gaps.push(n);
+  return gaps;
+}
+
+/** `1`. Named rather than spelled, because `bundleFor` and `importSpaces` both refuse below it. */
+const FIRST_BACKUP_EPOCH = 1;
+
+/**
+ * Step 4 — refuse BEFORE writing, and **S4: leave a store a retry can succeed on.**
  *
  * `ensureRecoveryIdentity` would refuse a partial store too, but it would refuse it AFTER this
  * function's caller had already decided to go ahead, and `ensureAttestedDevice` would refuse a
@@ -1445,48 +1889,90 @@ async function importSpaces(S, payload) {
  * be idempotent rather than a scary error. The public halves ARE comparable — they are public —
  * so this is a real check and not a shrug. (Rule 1 does not apply: these are key bytes, not
  * signature bytes.)
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * S4 — WHY THIS FUNCTION NOW DELETES, AND EXACTLY WHAT IT WILL DELETE
+ *
+ * `KeyStore.put` writes one record at a time. §7.3's ordering makes a crash between the writes
+ * leave 2 of 3 records rather than a silently wrong identity, which is right — but this function
+ * then classified that residue as `keystore-partial` and refused it **on every retry, for ever**,
+ * and nothing in this module ever deleted. A user holding a half-written store and their own
+ * backup file had no supported way to finish: the Mac was intact, the file was intact, and the
+ * restore was impossible. (`C2e-8` is the proof that this was a gap and not a law of nature: the
+ * OTHER half-apply shape — a complete recovery triple and no device records — has always
+ * completed idempotently.)
+ *
+ * THE RESIDUE IT CLEARS IS PROVABLY DEAD, on two independent grounds, and it clears nothing else:
+ *
+ *   1. **It is partial**, 1 or 2 of 3. Every reader in `identity.js` refuses a partial triple by
+ *      construction, so no code path in this product can ever turn it back into an identity. It
+ *      is not "someone's keys"; it is the wreckage of an interrupted write.
+ *   2. **No readable metadata in the store names anyone else.** A `recMeta`/`devMeta` naming a
+ *      different member is a `keystore-conflict` — checked FIRST, below, and now checked even
+ *      when the triple is partial, which is strictly stricter than before. Somebody else's Mac
+ *      is refused, permanently, and untouched.
+ *
+ * And it still REFUSES this attempt. The retry is what succeeds. That ordering is the point:
+ * nothing is written over anything in the same breath as discovering it, the user is told the
+ * store was broken and that it has been cleared (`SAY['keystore-partial']`), and the second
+ * attempt meets an empty store and behaves exactly like a first-ever restore.
+ *
+ * ⚠ WHERE THIS FUNCTION IS CALLED FROM IS PART OF THE ARGUMENT. It runs at step 4, i.e. AFTER the
+ * AES-GCM tag has already authenticated the file under the user's passphrase. Somebody who finds
+ * your Mac and a random file cannot reach the delete — they never get past step 3.
  */
-async function assertKeyStoreIsFree(ks, memberId) {
+async function prepareKeyStore(ks, memberId) {
   for (const m of ['get', 'put', 'del', 'list']) {
     if (typeof ks?.[m] !== 'function') {
       throw new Error(`importBackup: the KeyStore port must implement get/put/del/list (missing ${m})`);
     }
   }
 
-  const rec = await Promise.all([
-    ks.get(KEYSTORE_IDS.recSig), ks.get(KEYSTORE_IDS.recKex), ks.get(KEYSTORE_IDS.recMeta),
-  ]);
-  const dev = await Promise.all([
-    ks.get(KEYSTORE_IDS.devSig), ks.get(KEYSTORE_IDS.devKex), ks.get(KEYSTORE_IDS.devMeta),
-  ]);
-  const count = (xs) => xs.filter((v) => v !== null && v !== undefined).length;
+  // THE TWO HALVES, AS DATA. One description per half, so the recovery half and the device half
+  // cannot drift into two slightly different policies — which is how the device half came to be
+  // the benign one and the recovery half the one that bricked the Mac.
+  const halves = [
+    {
+      which: 'recovery',
+      ids: [KEYSTORE_IDS.recSig, KEYSTORE_IDS.recKex, KEYSTORE_IDS.recMeta],
+      conflict: (who) => `importBackup: this store already holds the recovery identity of ${who}`,
+    },
+    {
+      which: 'device',
+      ids: [KEYSTORE_IDS.devSig, KEYSTORE_IDS.devKex, KEYSTORE_IDS.devMeta],
+      conflict: (who) => `importBackup: this Mac already has a device identity belonging to ${who}`,
+    },
+  ];
 
-  const nRec = count(rec);
-  if (nRec !== 0 && nRec !== 3) {
-    fail('keystore-partial', `importBackup: the key store holds ${nRec} of 3 recovery records`);
+  const seen = [];
+  for (const half of halves) {
+    const values = await Promise.all(half.ids.map((id) => ks.get(id)));
+    const present = values.filter((v) => v !== null && v !== undefined).length;
+    const meta = readMeta(values[2]);
+    seen.push({ half, present, meta });
   }
-  if (nRec === 3) {
-    const meta = readMeta(rec[2]);
-    if (!meta || meta.memberId !== memberId) {
-      fail(
-        'keystore-conflict',
-        `importBackup: this store already holds the recovery identity of ${meta ? meta.memberId : '(unreadable)'}`
-      );
+
+  // PASS 1 — CONFLICTS, before anything is deleted. A store belonging to someone else is refused
+  // whole, and a partial store that still names someone else counts: 2 of 3 of THEIR records is
+  // not this member's wreckage to tidy up.
+  for (const { half, present, meta } of seen) {
+    if (meta && meta.memberId !== memberId) {
+      fail('keystore-conflict', half.conflict(meta.memberId));
+    }
+    if (present === 3 && !meta) {
+      fail('keystore-conflict', half.conflict('(unreadable metadata)'));
     }
   }
 
-  const nDev = count(dev);
-  if (nDev !== 0 && nDev !== 3) {
-    fail('keystore-partial', `importBackup: the key store holds ${nDev} of 3 device records`);
-  }
-  if (nDev === 3) {
-    const meta = readMeta(dev[2]);
-    if (!meta || meta.memberId !== memberId) {
-      fail(
-        'keystore-conflict',
-        `importBackup: this Mac already has a device identity belonging to ${meta ? meta.memberId : '(unreadable)'}`
-      );
-    }
+  // PASS 2 — the dead residue, cleared, and this attempt refused all the same.
+  for (const { half, present } of seen) {
+    if (present === 0 || present === 3) continue;
+    for (const id of half.ids) await ks.del(id);
+    fail(
+      'keystore-partial',
+      `importBackup: the key store held ${present} of 3 ${half.which} records — an interrupted `
+      + 'write. The residue has been cleared; retrying this import now succeeds (S4).'
+    );
   }
 }
 
@@ -1530,6 +2016,15 @@ async function putRecoveryIdentity(ks, memberId, restored, createdAt) {
 //        export needs no crypto at all and must stay available on an engine that has none.
 //     2. show `EXPORT_SHEET_COPY`: two buttons, `gain` and `lose` under each, plus
 //        `notAnAccount` and `singlePointOfFailure`. Neither button is the silent default.
+//        S3: `withPassword.sealsEntriesToo` and `boardOnly.entriesNotSealed` are the one line
+//        that distinguishes the two files' guarantees — show them under their own button.
+//     2a. **S7 — the passphrase field.** Show `EXPORT_SHEET_COPY.passphrase.hint` BEFORE anything
+//        is typed. On every change call `passphraseStrength(value)`; when `.weak` is true show
+//        `.say` (= `EXPORT_SHEET_COPY.passphrase.weak`) beside the field and label the confirm
+//        button `passphrase.weakAnyway`. **It is a warning, not a wall** — `PASSPHRASE_FLOOR.hard`
+//        is false and §5a says why at length. Passing `{ onWeakPassphrase }` in `opts` is the
+//        belt to that braces: it fires from inside `exportBackup`, so „the sheet forgot to ask"
+//        is a testable condition rather than a review comment.
 //     3. `exportBackup(store.state, identity, keyring, passphraseOrNull,
 //                      { exportedAt: todayISO(), app: APP_VERSION })`
 //     4. `JSON.stringify(file, null, 2)` → the native save dialog. The filename is v1's
@@ -1548,7 +2043,16 @@ async function putRecoveryIdentity(ks, memberId, restored, createdAt) {
 //        v1 board and must not go through `migrateV1`.
 //     6. show `result.consequence` — ALWAYS, on both paths. That is the ticket's "reported rather
 //        than silent", and `boardOnly` is the sentence that says the Familienkreis did not come
-//        back.
+//        back. S8: the identity path has TWO sentences now — `identity-restored` and
+//        `identity-restored-keys-pending` — and the second one is chosen for you when a ring has
+//        holes. `result.spaces.<which>.missingEpochs` carries the numbers behind it and is the
+//        input to §7.3 step 6's „Schlüssel ausstehend" status.
+//     6a. **M-B6 — `result.familyBinding`.** Non-null on every family restore. Show
+//        `familyBinding.say` with `familyBinding.spaceId` beside it. Nothing at this seam can
+//        verify that id, so the sentence is unconditional and must not be suppressed for the
+//        „normal" case: this module cannot tell the normal case from „ich hab dir dein Backup
+//        wiederhergestellt". The thing that CAN contradict a file is step 7's
+//        `POST /devices/adopt`, and until that exists this line is the only check there is.
 //     7. if `result.identityRestored`: `POST /api/v1/devices/adopt` with `result.blob`, signed
 //        with `result.identity.recSig.privateKey` (ADR 003 §2), then load `result.spaces` into
 //        the key ring and pull from seq 0. Newer ops the epoch keys do not cover are PARKED, not

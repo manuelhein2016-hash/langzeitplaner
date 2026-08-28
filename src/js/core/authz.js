@@ -23,7 +23,9 @@
 //                               `op.act === M` alone, because requiring an attested device to
 //                               author an attestation is an infinite regress. Signature check is
 //                               injected (`ctx.attestOpen`, or the legacy boolean
-//                               `ctx.attestVerify`).
+//                               `ctx.attestVerify`). Admission is not credential: a register is
+//                               only handed to `openOp` if the op that wrote it was stamped by
+//                               the device it attests (I-3 / §4.5 option (a), see §2 below).
 //   0b  device gate             every other op: `op.dev` must be an attested device of `op.act`
 //                               (family), or a device of mine (personal/local, §4.0's "checked
 //                               against the local device set").
@@ -71,7 +73,7 @@
 // does, and only the entity's own owner can write it at all. Reported as a gap in
 // `registers.js` rather than papered over here.
 
-import { cmp } from './stamp.js';
+import { cmp, devOf } from './stamp.js';
 import { canonicalJSON, utf8Decode } from './canon.js';
 import { ub64 } from './b64.js';
 import { isDeviceShort } from './ids.js';
@@ -148,6 +150,14 @@ export const REJECT_REASONS = Object.freeze({
   NOT_MEMBER: 'notMember',
   /** A co-editor wrote a field whose `FIELDS[kind][f].coEdit` is not true. */
   NOT_COEDITABLE: 'notCoEditable',
+  /**
+   * Stage 3c: EVERY field of the patch was content above the entity's folded `pub.level`, so
+   * nothing of it is applicable. The ordinary case is a partial redaction — the offending field
+   * is dropped and the rest of the op is folded — and this reason exists only for the case where
+   * the redaction empties the patch, because `applyOp` refuses an op that writes nothing
+   * (`registers.js:applicabilityError`). Reported on `contentAboveLevel` either way.
+   */
+  CONTENT_ABOVE_LEVEL: 'contentAboveLevel',
 });
 
 const REJECT_CODES = new Set(Object.values(REJECT_REASONS));
@@ -181,7 +191,10 @@ export const isRejectReason = (r) => REJECT_CODES.has(r);
 //
 // THE ONE-KEY LOOKUP, AND WHAT MAKES IT SOUND. `attestationOf` is keyed by `deviceShort` ALONE
 // because `op.act` is not knowable pre-decrypt. ADR 002 §2.3's four acceptance conditions are
-// what make `deviceShort → DeviceAttestation` a function, and all four are enforced below, at
+// what make `deviceShort → DeviceAttestation` well-formed — they are NOT what makes it a
+// function, and §2.3 as amended says so: a FIFTH rule, the possession proof
+// `devOf(cell.stamp) === att.deviceShort`, is what makes the lookup single-valued, and it lives
+// with the table it guards (see "A CONTESTED `deviceShort`…" below). The four, enforced below at
 // stage 0a:
 //   (1) `op.act === memberId`      → the `NOT_SELF` rejection on the housing record;
 //   (2) register name === `att.deviceShort`;
@@ -255,16 +268,64 @@ export const isRejectReason = (r) => REJECT_CODES.has(r);
 // minimal-under-`≺` and report the short on `shortCollisions`, which handed a backdated squatter
 // `openOp`'s verification key and left the report with no reader.
 //
-// The contest is no longer resolved, because it has no correct resolution: a short claimed on
-// more than one member record is REFUSED BY `attestationOf`, which returns `null`. `null` is
-// already a defined outcome at that seam — §5.2.2 P1 PARKS the sealed envelope, unopened, and a
-// park is re-evaluable (§5.2.5) — so a squatter can stall an envelope but can never be handed
-// the key that opens it, and no honest op is lost. `shortCollisions` keeps reporting, and now
-// has a reader: this function. Two shorts are contested:
-//   · one short on two different member records; and
+// Refusing the contest was the first answer, and it was the wrong side of the trade — the same
+// trade this file already refuses two paragraphs above, for the LABEL. `deviceShort` is the last
+// sixteen characters of every stamp a device has ever written, so it is trivially discoverable;
+// a bare `dev.*` register is self-authorizing; `dev.*` is write-once; and there is no revocation
+// anywhere in this fold. One `member.set` from any member therefore parked every envelope a named
+// Mac would ever seal, for the lifetime of the board, with no way back (finding I-3 / R5-7, red-
+// team rows M-I3b and M-I3c). And in the window BEFORE the victim's own register has been folded
+// — a partial pull, a fresh joiner from seq 0, any batch boundary; there is no causal delivery —
+// the squatter's blob was the only claim, so it RESOLVED: P2 passed, P3 passed, the AEAD passed,
+// and §5.2.2's check 5 threw. A rejection is final, so in that window the squat did not park the
+// victim's traffic, it DROPPED it.
+//
+// ── WHAT CLOSES IT: THE PAIR `(sigPubRaw, deviceShort)`, BOUND BY POSSESSION ──
+//
+// FINDINGS §4.5 option (a) — first-claim binding on the pair — with the one strengthening the
+// red team's measurement forced: the claim only counts when it is PROVED, and then "first" is
+// not a race at all, because there is only ever one claimant who can prove it.
+//
+//     A `dev.<S>` register is a CREDENTIAL only if the op that wrote it was itself stamped by
+//     the device it attests:  devOf(cell.stamp) === att.deviceShort.
+//
+// That one equality is a possession proof, and it is the ONLY one this fold can read. Every op
+// in this fold arrived through `openOp`, which binds three things to `env.dv`: P2 (`env.dv` is
+// the short of `att.sigPubRaw`), P3 (the envelope signature verifies under `att.sigPubRaw`), and
+// check 4 (`devOf(op.ts) === env.dv`). So an op whose stamp ends in S was signed by the holder of
+// the private key that hashes to S. `sigPubRaw` is public and copyable — that is exactly why P2
+// alone never closed this — but the SIGNATURE is not, and the stamp is where the signature shows
+// through into the plaintext the fold sees.
+//
+// The squatter can mint the blob (P2 is satisfied — she copies key and short together and tells
+// the truth about both), can file it in her own record, and can pass all four §2.3 conditions.
+// She cannot author the op that files it: her envelope would have to carry `dv = S` and verify
+// under a key she does not hold. So her claim is admitted, recorded, REPORTED on
+// `unprovenShorts`, and never resolved. The victim's own register, filed by the victim's own Mac,
+// is unaffected, resolves as it always did, and his envelopes open.
+//
+// THIS IS WHAT THE HONEST FLOW ALREADY DOES, EVERYWHERE. ADR 002 §6.3 step 8: the new Mac
+// "self-attests" and writes its own register (`pairing.js` `adoptPairedDevice`). §7.3 step 4:
+// the restoring Mac self-attests (`backup.js` step 6, `ensureAttestedDevice`). There is no flow
+// in which one device files another device's attestation, and there cannot be: the blob is signed
+// by `RK_sig`, but the REGISTER is written by an op, and an op is stamped by whoever authored it.
+//
+// WHAT IS STILL REFUSED, AND WHY BOTH HALVES STAY. `attestationOf` still returns `null` for:
+//   · a short with no proven claim at all — including the pre-collision window above, which is
+//     now a PARK (P1) instead of a resolve-then-throw. A park is re-evaluable (§5.2.5); a
+//     rejection is not, and that difference was S2(c);
+//   · a short PROVEN by two different member records. Two members cannot both hold one signing
+//     private key, so this is a genuine 80-bit collision or a broken engine, and neither is a
+//     contest a fold may pick a winner in. Reported on `shortCollisions`;
 //   · one `sigPubRaw` under two different shorts — a DIRECT contradiction of §1.2 that needs no
-//     hash to see, since one signing key hashes to exactly one short.
-// P2 in `attestOpen` (WP-6) still closes this at the root; until then the fold refuses to guess.
+//     hash to see. `verifyAttestation` enforces P2 and refuses that blob at condition (4) before
+//     it ever reaches here, so this is defence in depth against a blob arriving some other way,
+//     not the live check it looks like. Also on `shortCollisions`.
+//
+// AND WHAT IS NOT REJECTED: an unproven claim is still ADMITTED. Refusing it would hand any
+// member a way to un-attest an honest peer by naming their short, which is the same worse trade
+// this file already refuses for the label — and it would cost the forger nothing, since any op
+// she can author under a peer's short she can author under an invented one.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** b64url is the alphabet ADR 002 §2.3 fixes for the two raw public points. */
@@ -609,9 +670,18 @@ const byId = (a, b) => (idOf(a) < idOf(b) ? -1 : idOf(a) > idOf(b) ? 1 : 0);
  * derivable from it (`attestationOf(dv).memberId` / `.deviceId`). WP-6 removes them once those
  * callers move — see `docs/v2/contracts/ops.contract.js` §4.
  * @property {(dv:string) => DeviceAttestation|null} attestationOf   keyed by deviceShort ALONE;
- *                                           `null` for a CONTESTED short (I-3) as well as a miss
- * @property {string[]} shortCollisions      sorted contested deviceShorts — one short on two
- *                                           member records, or one `sigPubRaw` under two shorts
+ *                                           `null` for a CONTESTED short, for an UNPROVEN one
+ *                                           (I-3 / §4.5 option (a)) and for a plain miss
+ * @property {string[]} shortCollisions      sorted contested deviceShorts — one short PROVEN on
+ *                                           two member records, or one `sigPubRaw` under two
+ *                                           shorts
+ * @property {string[]} unprovenShorts       sorted deviceShorts whose `dev.*` register was filed
+ *                                           by some OTHER device — admitted, reported, and never
+ *                                           resolved: the squat (I-3 / R5-7) lands here
+ * @property {Array<{opId:string,e:string,field:string,level:string|null}>} contentAboveLevel
+ *                                           stage 3c: registers DROPPED because the entity's
+ *                                           folded `pub.level` does not carry them (INV-R1 on
+ *                                           the receiving device). Sorted by `(opId, field)`.
  * @property {Map<string, Set<string>>} attestedDevices      memberId → attested deviceIds
  * @property {(deviceId:string) => string|null} memberOfDevice  the SOLE claimant, else null
  * @property {string[]} deviceIdCollisions   sorted deviceIds claimed on more than one member
@@ -769,6 +839,7 @@ export function foldAuthorized(ops, ctx) {
   const attByShort = new Map();        // deviceShort -> { att: DeviceAttestation, member }
   const shortOfSigPub = new Map();     // sigPubRaw -> deviceShort   — §1.2 is a function
   const shortCollisions = new Set();   // contested deviceShorts: `attestationOf` refuses these
+  const unprovenShorts = new Set();    // claimed by a record that did not file it FROM that device
   const attestOps = [];
   const wellFormed = [];
   const rest = [];
@@ -851,16 +922,27 @@ export function foldAuthorized(ops, ctx) {
       // picking the one whose author chose the smaller stamp.
       if (!claimants.has(att.deviceId)) claimants.set(att.deviceId, new Set());
       claimants.get(att.deviceId).add(subject);
-      // THE `deviceShort → DeviceAttestation` TABLE (F-10). One short can appear at most once
-      // per member record — the register NAME is the short, and a Map has one cell per name —
-      // so a second sighting is always a second MEMBER claiming the same short. §2.3 argues that
-      // cannot happen honestly (it would need the same signing private key), and the four
-      // conditions do not make it impossible, only dishonest. The contest is NOT resolved (I-3):
-      // `attestationOf` refuses a contested short outright, so no ordering, no stamp and no
-      // arrival decides who gets handed `openOp`'s verification key.
-      const prior = attByShort.get(att.deviceShort);
-      if (prior === undefined) attByShort.set(att.deviceShort, { att, member: subject });
-      else if (prior.member !== subject) shortCollisions.add(att.deviceShort);
+      // THE `deviceShort → DeviceAttestation` TABLE (F-10), AND THE POSSESSION PROOF THAT MAKES
+      // IT A CREDENTIAL (I-3 / R5-7, FINDINGS §4.5 option (a)).
+      //
+      // One short can appear at most once per member record — the register NAME is the short, and
+      // a Map has one cell per name — so a second sighting is always a second MEMBER claiming the
+      // same short. §2.3 argues that cannot happen honestly; the four conditions do not make it
+      // impossible, only dishonest. What makes it impossible is the line below.
+      //
+      // `cell.stamp` IS the writing op's `ts`, and its last sixteen characters are the authoring
+      // device's short (`stamp.js`: pad13(ms).pad6(ctr).deviceShort16). That op reached this fold
+      // through `openOp`, whose P2, P3 and check 4 together mean: an op stamped with S was signed
+      // by the holder of the private key that hashes to S. So a register that attests S and was
+      // written by S is PROVED; one written by any other device is a claim its author could not
+      // back, and is never handed to `openOp` as a verification key. See the §2 block above for
+      // why it is still admitted rather than rejected.
+      if (devOf(cell.stamp) !== att.deviceShort) unprovenShorts.add(att.deviceShort);
+      else {
+        const prior = attByShort.get(att.deviceShort);
+        if (prior === undefined) attByShort.set(att.deviceShort, { att, member: subject });
+        else if (prior.member !== subject) shortCollisions.add(att.deviceShort);
+      }
       // The one half of ADR 001 §1.2 a pure fold CAN check: the short is a hash of `sigPubRaw`,
       // so one signing key hashes to exactly one short. Two shorts over one key is a direct
       // contradiction — visible without hashing anything — and both shorts are contested. This
@@ -1047,10 +1129,102 @@ export function foldAuthorized(ops, ctx) {
     admittedFamily.push(op);   // stage 3a is already folded, so appending here cannot feed back
   }
 
-  for (const op of [...admittedContent, ...admittedFamily]) foldOp(regs, op);
+  // ── Stage 3c. INV-R1 on the RECEIVING device (ADR 004 §2.2, barrier 4's mirror) ───────────
+  //
+  // WHY THIS EXISTS AT ALL. Every redaction barrier in the product lives in `sealOp` — barriers
+  // 3 and 4 and the `assertNoContentAboveLevel` backstop are all AUTHOR-side. A member running a
+  // patched build has no seal path to defeat: they hand the relay an envelope whose plaintext
+  // carries `pub.text` for an entry the family only ever agreed to see as Belegt, and until this
+  // stage existed every honest peer decrypted it, folded it and rendered it. `geteiltOnly` was a
+  // mark that only the writer consulted, which makes it a house style rather than an invariant.
+  //
+  // THE RULE IS MIRRORED, NOT INVENTED. Two rules already say what may exist at a level, and a
+  // third answer to that question is the duplication ADR 004 warns against, so this reads the
+  // same `FIELDS` marks the author side reads and adds no table of its own:
+  //
+  //   at `geteilt`            nothing is above the level
+  //   at `belegt`             the `geteiltOnly` fields are      (`assertNoContentAboveLevel`)
+  //   at `privat`, or with
+  //   no level register yet   every non-governing `pub.*` field is   (barrier 4's privat clause)
+  //
+  // GOVERNING REGISTERS ARE NEVER DROPPED. `pub.level`, `pub.coEdit`, `pub.alive` and `_born`
+  // carry no content, and they are HOW a withdrawal is expressed — a rule that dropped them
+  // could not be undone by the admin unshare that has to survive it (§4.3 stage 3a).
+  //
+  // AN EXPLICIT `null` ALWAYS PASSES, at every level. §5's withdrawal escape: a downgrade
+  // clears a published value by writing null, so a rule that refused nulls below Geteilt would
+  // make the downgrade unrepresentable. A null can never carry a value, which is the whole
+  // distinction, and it is the same sentence `assertNoContentAboveLevel` makes on the far side.
+  //
+  // THE FIELD IS DROPPED, THE OP IS NOT REJECTED — and that is not politeness, it is the
+  // difference between the two implementable rules. Rejecting the op would drop its `pub.date`
+  // too, and at Belegt a date is not content above the level, it is the ENTIRE legitimate Belegt
+  // payload. So an owner who later downgrades Geteilt → Belegt would silently destroy the
+  // booking the downgrade was supposed to keep. Dropping the field keeps it. Domain C5 measures
+  // `date` beside `text` for exactly this reason.
+  //
+  // IT READS THE FINAL FOLDED LEVEL, exactly as stage 3b's co-edit predicate does and for the
+  // reason stated there: admissibility must not depend on which op the folding device saw first.
+  // That also makes it RETROACTIVE, which is the point rather than a side effect — an op that
+  // was entirely legitimate when it was sealed (the entry really was Geteilt then) is redacted
+  // once the owner downgrades, so a replayed envelope, an older client that downgraded without
+  // nulling, and a patched build that never nulls at all all land in the same place. No non-null
+  // `geteiltOnly` value can survive in the register map while the level says otherwise, whatever
+  // order the ops arrived in.
+  const contentAboveLevel = [];
+  const redacted = new Map();          // opId -> the patch with the offending fields removed
+  for (const op of admittedFamily) {
+    const level = registerValue(govRegs, op.e, 'pub.level');
+    if (level === 'geteilt') continue;              // nothing is above the top level
+    const kind = parseEntityKey(op.e).kind;
+    const drop = [];
+    for (const name of Object.keys(op.f)) {
+      const s = fieldSpec(kind, name);
+      // A field with no spec is not classifiable as content and is left to the gates that own
+      // field names; a governing register is not content at all.
+      if (!s || s.gov === true) continue;
+      if (op.f[name] === null) continue;            // the withdrawal escape
+      if (level === 'belegt' && !s.geteiltOnly) continue;
+      drop.push(name);
+    }
+    if (!drop.length) continue;
+    const f = {};
+    for (const [k, v] of Object.entries(op.f)) if (!drop.includes(k)) f[k] = v;
+    redacted.set(op.id, Object.keys(f).length ? f : null);   // null = nothing of it survives
+    for (const name of drop) {
+      contentAboveLevel.push({ opId: op.id, e: op.e, field: name, level: level ?? null });
+    }
+  }
+  // A function of the SET, like every other reported array here (§0.2).
+  contentAboveLevel.sort((a, b) => (a.opId < b.opId ? -1 : a.opId > b.opId ? 1
+    : a.field < b.field ? -1 : a.field > b.field ? 1 : 0));
+
+  // AN OP IS REPLACED BY ITS REDACTED BODY EVERYWHERE, `admitted` INCLUDED — and that is a
+  // contract, not tidiness. `admitted` is the audit trail of what produced the register map, so
+  // `ops.contract.js` §3's guarantee (re-applying an admitted op to the settled map changes
+  // nothing — property P2, and deliverable 17.5's „neu" dot rests on it) is false the moment
+  // `admitted` hands back a body that was not the one folded. Replaying the ORIGINAL patch would
+  // also put the redacted value straight back into the map, which would make stage 3c cosmetic on
+  // any path that re-folds. Nothing persists `admitted` — the log keeps the original envelope —
+  // so redacting the derived array loses nothing that is not still on disk.
+  //
+  // A patch redacted to NOTHING is rejected rather than admitted with an empty body:
+  // `applyOp` refuses an op that writes nothing, so an inapplicable op in `admitted` would break
+  // the same contract from the other side. Stage 3b sets the precedent — it rejects a co-editor's
+  // whole op when ANY field is non-co-editable — so refusing one where EVERY field is refused is
+  // the more permissive of the two, not a new severity.
+  const foldedFamily = [];
+  for (const op of admittedFamily) {
+    if (!redacted.has(op.id)) { foldedFamily.push(op); continue; }
+    const f = redacted.get(op.id);
+    if (f === null) { reject(op, STAGES[3], REJECT_REASONS.CONTENT_ABOVE_LEVEL); continue; }
+    foldedFamily.push(Object.freeze({ ...op, f: Object.freeze(f) }));
+  }
+
+  for (const op of [...admittedContent, ...foldedFamily]) foldOp(regs, op);
   for (const op of admittedSpaceOps) foldOp(regs, op);
 
-  const admitted = [...attestOps, ...admittedSpaceOps, ...admittedMemberOps, ...admittedContent, ...admittedFamily]
+  const admitted = [...attestOps, ...admittedSpaceOps, ...admittedMemberOps, ...admittedContent, ...foldedFamily]
     .sort(opOrder);
   rejected.sort(byId);
   parked.sort(byId);
@@ -1074,12 +1248,25 @@ export function foldAuthorized(ops, ctx) {
     // has decrypted anything and therefore before it knows `op.act`. Never throws on a bad key:
     // `env.dv` is peer-supplied, and peer-supplied input is refused, not thrown on.
     //
-    // I-3: a CONTESTED short resolves to `null`, not to a winner. `null` is a defined outcome at
-    // this seam — §5.2.2 P1 parks the sealed envelope and a park is re-evaluable — so refusing
-    // costs liveness at worst, while resolving cost `openOp` its verification key to whichever
-    // claimant backdated harder. This is `shortCollisions`' reader.
+    // I-3 / §4.5 option (a): only a PROVEN claim is a credential. `attByShort` holds nothing but
+    // registers filed by the device they attest, so an unproven claim is already absent from it
+    // — the squat resolves to `null` without a second table being consulted, in the contested
+    // case AND in the pre-collision window where it is the only claim there is. A genuine
+    // collision — one short proven twice — is still refused outright, and `null` is a defined
+    // outcome at this seam: §5.2.2 P1 parks the sealed envelope and a park is re-evaluable.
+    // This is `shortCollisions`' reader.
     attestationOf: (dv) => (shortCollisions.has(dv) ? null : attByShort.get(dv)?.att ?? null),
     shortCollisions: [...shortCollisions].sort(),
+    // The squat's report. A short claimed by a record that could not author an op under it: the
+    // §2.3 device panel SHOULD render these next to `shortCollisions`, because this is the one
+    // contest that is now decided rather than merely visible, and the loser should still be able
+    // to see that somebody tried.
+    unprovenShorts: [...unprovenShorts].sort(),
+    // Stage 3c's report. Content the fold DROPPED because the entity's folded `pub.level` does
+    // not carry it — `{opId, e, field, level}` per dropped register, sorted. The panel should
+    // render it: the receiving device is now deliberately disagreeing with the sender about what
+    // was published, and a redaction nobody can see is indistinguishable from a sync bug.
+    contentAboveLevel,
     // Retained for existing callers; both fall out of `attestationOf`. WP-6 removes them.
     attestedDevices: attested,
     // The SOLE-CLAIMANT function, not a first-writer-wins map (R4-13a/b). A `deviceId` is a
@@ -1142,6 +1329,12 @@ export function snapshot(r) {
     splicedIds: r.splicedIds.slice(),
     attestations,
     shortCollisions: r.shortCollisions.slice(),
+    unprovenShorts: r.unprovenShorts.slice(),
+    // Stage 3c rides in the snapshot for the same reason the contest reports do: it is a
+    // decision the fold makes, so P5 ("shuffling ops never changes the fold") has to cover it.
+    // A device that redacted a field its peer applied would be exactly the divergence INV-R1 is
+    // supposed to remove, and it would be invisible without this line.
+    contentAboveLevel: r.contentAboveLevel.map((x) => ({ ...x })),
     // Both contest reports ride in the snapshot, so P5 ("shuffling never changes the fold")
     // covers them: a device that reported a collision its peer did not would be a divergence in
     // the one place the design now leans on — `attestationOf` refuses a contested short, so the

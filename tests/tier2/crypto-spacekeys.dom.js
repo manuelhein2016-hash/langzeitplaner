@@ -92,12 +92,18 @@ const ownRecord = (m) => ({
   devices: m.devices.map((d) => ({ deviceId: d.deviceId, memberId: m.memberId, kexPubRaw: d.kexPubRaw, attestation: d.attestation })),
 });
 
-/** Deliver every wrap addressed to one device into a fresh ring. */
-async function ringFor(wraps, device, senderKexPubRaw, spaceId) {
+/**
+ * Deliver every wrap addressed to one device into a fresh ring.
+ *
+ * `senders` is `admitWraps`' REQUIRED `ctx.senders` (finding S1): the branded, attestation-checked
+ * list of devices this space will accept an epoch key FROM. It is real here, not a stub — a wrong
+ * or missing one makes every call below refuse, which is what the S1 row at the end asserts.
+ */
+async function ringFor(wraps, device, senderKexPubRaw, spaceId, senders) {
   const ring = sk.createKeyRing();
   const rows = wraps.filter((w) => w.deviceId === device.deviceId)
     .map((w) => ({ epoch: w.epoch, wrapped: w.wrapped, senderKexPubRaw }));
-  const report = await sk.admitWraps(ring, rows, { spaceId, myKexPriv: device.devKex.privateKey });
+  const report = await sk.admitWraps(ring, rows, { spaceId, myKexPriv: device.devKex.privateKey, senders });
   return { ring, report };
 }
 
@@ -246,6 +252,69 @@ test('key injection in WKWebView: an attestation naming a DIFFERENT agreement ke
   assert.equal(await sk.recipientProblem(sk.familyRecipients([rec])[0]), null);
 });
 
+test('S1 in WKWebView: an unauthenticated sender cannot put a key into either ring', async () => {
+  // FINDING S1, in the engine the family actually runs. Until 2026-08-28 `admitWraps` derived its
+  // KEK from `row.senderKexPubRaw` — the relay's own JSON — so one throwaway ECDH keypair put a
+  // key of the attacker's choosing into the victim's ring and the victim sealed its Privat entries
+  // under it. This row is not a Node property: `admissibleSenders` runs an ECDSA P-256 verify over
+  // every attestation and a raw public-key import with `keyUsages: []` (rule 5) before a single
+  // byte is derived, and both are §1 rules precisely because the two engines disagree about them.
+  const me = await makeMember(2);            // my Mac, and my own second Mac
+  const mama = await makeMember();           // a real, attested, current member of the Kreis
+  const V = me.devices[0];
+  const myKexPub = await identity.importKexPublic(V.kexPubRaw);
+  const attacker = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
+  const attackerRaw = new Uint8Array(await S.exportKey('raw', attacker.publicKey));
+
+  // The personal space, which is what story 20.5 is about. Its sender set is MY OWN devices, and
+  // `personalRecipients` refuses to build any other kind.
+  const ctx = {
+    spaceId: PSP,
+    myKexPriv: V.devKex.privateKey,
+    senders: sk.personalRecipients(ownRecord(me)),
+  };
+  const ring = sk.createKeyRing();
+  const report = await sk.admitWraps(ring, [
+    { epoch: 2,
+      wrapped: await sk.wrapSpaceKey(await sk.createSpaceKey(), attacker.privateKey, myKexPub, { spaceId: PSP, epoch: 2 }),
+      senderKexPubRaw: b64.b64u(attackerRaw) },
+    { epoch: 3,
+      wrapped: await sk.wrapSpaceKey(await sk.createSpaceKey(), mama.devices[0].devKex.privateKey, myKexPub, { spaceId: PSP, epoch: 3 }),
+      senderKexPubRaw: mama.devices[0].kexPubRaw },
+  ], ctx);
+  assert.deepEqual(report.admitted, [], 'neither a stranger nor an attested fellow member reaches my Privat ring');
+  assert.equal(report.unauthorized, 2);
+  assert.equal(ring.size(), 0);
+
+  // My own second Mac IS admitted, so the refusal above is a decision and not a broken engine.
+  const psk = await sk.createSpaceKey();
+  const mine = await sk.admitWraps(ring, [{
+    epoch: 2,
+    wrapped: await sk.wrapSpaceKey(psk, me.devices[1].devKex.privateKey, myKexPub, { spaceId: PSP, epoch: 2 }),
+    senderKexPubRaw: me.devices[1].kexPubRaw,
+  }], ctx);
+  assert.deepEqual(mine.admitted, [2]);
+  assert.equal(ring.originOf(PSP, 2).deviceId, me.devices[1].deviceId, 'and the ring names who delivered it');
+
+  // The whole entry, round-tripped under the key that was actually admitted.
+  const env = await sealUnder(ring.get(PSP, 2), hdrFor(PSP, 2, 'PRIV000000000000'), 'Zahnarzt 14:30 — Privat');
+  assert.equal(await openUnder(ring.get(PSP, 2), env), 'Zahnarzt 14:30 — Privat');
+
+  // And the family space, same engine, same refusal: an unattested sender is nobody there either.
+  const fsp = await sk.admitWraps(sk.createKeyRing(), [{
+    epoch: 1,
+    wrapped: await sk.wrapSpaceKey(await sk.createSpaceKey(), attacker.privateKey, myKexPub, { spaceId: FSP, epoch: 1 }),
+    senderKexPubRaw: b64.b64u(attackerRaw),
+  }], { spaceId: FSP, myKexPriv: V.devKex.privateKey, senders: sk.familyRecipients([memberRecord(mama), memberRecord(me)]) });
+  assert.deepEqual(fsp.admitted, []);
+  assert.equal(fsp.unauthorized, 1);
+
+  // A check that can be skipped is not a check: omitting the set throws in this engine too.
+  const omitted = await refused(() => sk.admitWraps(sk.createKeyRing(), [], { spaceId: PSP, myKexPriv: V.devKex.privateKey }));
+  assert.notEqual(omitted, null, '`ctx.senders` has no default');
+  diag('WebKit admitWraps without ctx.senders -> ' + omitted);
+});
+
 // ═════════════════════════════════════════════════════════════════════════════
 // 3. Rotation, end to end, in the real engine
 // ═════════════════════════════════════════════════════════════════════════════
@@ -273,7 +342,7 @@ test('3 members · rotate · remove one · rotate — in WKWebView: e opens, e+1
   const after = await sealUnder(ring.get(FSP, 3), hdrFor(FSP, 3, 'NACH000000000000'), 'Neuer Plan');
 
   // Oma's ring is what she held at removal: epochs 1 and 2.
-  const omaSide = await ringFor(e2.wraps, oma.devices[0], senderPub, FSP);
+  const omaSide = await ringFor(e2.wraps, oma.devices[0], senderPub, FSP, all());
   assert.deepEqual(omaSide.ring.epochs(FSP), [1, 2]);
   assert.equal(await openUnder(omaSide.ring.get(FSP, 2), before), 'Schwimmen Samstag', 'epoch e still opens — she already had that key');
   assert.equal(omaSide.ring.get(FSP, 3), null, 'and epoch e+1 is not in her ring at all');
@@ -281,7 +350,7 @@ test('3 members · rotate · remove one · rotate — in WKWebView: e opens, e+1
   assert.notEqual(stillClosed, null, 'T2: no key she holds opens a post-removal op');
 
   for (const d of [mama.devices[0], mama.devices[1], papa.devices[0]]) {
-    const side = await ringFor(e3.wraps, d, senderPub, FSP);
+    const side = await ringFor(e3.wraps, d, senderPub, FSP, all());
     assert.deepEqual(side.ring.epochs(FSP), [1, 2, 3], 'every remaining member holds the whole ring');
     assert.equal(await openUnder(side.ring.get(FSP, 2), before), 'Schwimmen Samstag');
     assert.equal(await openUnder(side.ring.get(FSP, 3), after), 'Neuer Plan');
@@ -302,11 +371,11 @@ test("A4 in WKWebView: a joiner delivered by an ORDINARY member reads Oma's birt
     entries.push(await sealUnder(rot.key, hdrFor(FSP, e, 'ALT0000000000000'), e === 1 ? 'Omas Geburtstag' : 'Eintrag ' + e));
   }
   const last = await sk.buildRotation(FSP, 4, ring.keysByEpoch(FSP), admin.devices[0].devKex.privateKey, seed(), []);
-  const papaSide = await ringFor(last.wraps, papa.devices[0], admin.devices[0].kexPubRaw, FSP);
+  const papaSide = await ringFor(last.wraps, papa.devices[0], admin.devices[0].kexPubRaw, FSP, seed());
   assert.deepEqual(papaSide.ring.epochs(FSP), [1, 2, 3, 4]);
 
   const wraps = await sk.wrapRingTo(papaSide.ring, FSP, papa.devices[0].devKex.privateKey, sk.familyRecipients([memberRecord(joiner)]));
-  const herSide = await ringFor(wraps, joiner.devices[0], papa.devices[0].kexPubRaw, FSP);
+  const herSide = await ringFor(wraps, joiner.devices[0], papa.devices[0].kexPubRaw, FSP, sk.familyRecipients([memberRecord(papa)]));
   assert.deepEqual(herSide.report.admitted, [1, 2, 3, 4], 'ALL epochs, not just the current one (A4, 17.1, R11)');
   assert.equal(herSide.report.refused, 0);
   assert.equal(await openUnder(herSide.ring.get(FSP, 1), entries[0]), 'Omas Geburtstag');

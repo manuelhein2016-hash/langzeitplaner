@@ -10,33 +10,46 @@
 //
 // ═══ THE I-3 / R5-7 VERDICT, WHICH IS THE THING THIS FILE WAS OPENED FOR ═══
 //
-// The task asks whether the situation is better, worse or unchanged now that P2 is enforced.
-// Answer: **the confidentiality half is closed, the availability half is WORSE than the ADR
-// admits, and ADR 002 §2.3's stated remedy is provably ineffective.** Three separate claims,
-// each with a row below:
+// The task asked whether the situation was better, worse or unchanged now that P2 is enforced.
+// The answer was: **the confidentiality half is closed, the availability half is WORSE than the
+// ADR admits, and ADR 002 §2.3's stated remedy is provably ineffective.**
 //
-//  (a) CLOSED. A squatter can never be handed `openOp`'s verification key for a short she does
-//      not own, and can never make an op read as authored by her victim. §2.3 condition (3)
-//      forces `att.memberId` to be the HOUSING member, so check 5 refuses. M-I4.
+// ── AMENDED 2026-08-28. (b) AND (c) ARE CLOSED; (a) AND (d) STILL STAND, VERBATIM. ────────────
 //
-//  (b) WORSE. `attestationOf` returns `null` for a contested short, `dev.*` is write-once, and
-//      there is no revocation anywhere — so ONE op from any member permanently parks EVERY
-//      envelope the victim's Mac will ever seal. The ADR calls this "a squatter can stall a
-//      peer's envelopes"; the honest word is *permanently*, and it is one op, not a campaign.
-//      M-I3a/b.
+// The rows below are INVERTED, not deleted: each still runs the identical attack and now asserts
+// that it fails. What closed (b) and (c) is one line in `src/js/core/authz.js` stage 0a —
+// FINDINGS §4.5 option (a), first-claim binding on the pair `(sigPubRaw, deviceShort)`, made
+// unraceable by requiring the claim to be PROVED:
 //
-//  (c) AND THERE IS A WINDOW IN WHICH IT IS NOT EVEN A PARK. Before the victim's own
-//      `member.set{dev.*}` has been folded — a partial pull, a fresh joiner, any batch boundary —
-//      `attestationOf` resolves the squatter's blob, P2 PASSES (she copied a public key and told
-//      the truth about it), and check 5 then throws. §5.2.5 is explicit that a rejection is final
-//      and that `store.js` drops a rejected op without appending it. So in that window the squat
-//      converts the victim's traffic from *parked* to *dropped*. M-I3c.
+//     a `dev.<S>` register is a credential only if the op that WROTE it was stamped by the
+//     device it attests — `devOf(cell.stamp) === att.deviceShort`.
 //
-//  (d) THE STATED REMEDY DOES NOT WORK. ADR 002 §2.3 "Two shorts, no winner" says:
-//      "`attestOpen` (WP-6) MUST enforce P2, which closes this at the root and removes the
-//      stall." It does not, and `identity.js`'s own header says so: `sigPubRaw` is a PUBLIC key
-//      travelling in the victim's own register. The built `attestOpen` (`verifyAttestation`)
-//      enforces P2 today, and the squat still passes. M-I3a asserts exactly that.
+//  (a) CLOSED, AND UNTOUCHED. A squatter can never be handed `openOp`'s verification key for a
+//      short she does not own, and can never make an op read as authored by her victim. §2.3
+//      condition (3) forces `att.memberId` to be the HOUSING member, so check 5 refuses. M-I4.
+//      The fix below must not, and does not, lean on this: it takes the credential away one
+//      barrier earlier, so both barriers are still independently sufficient.
+//
+//  (b) CLOSED. The squat no longer parks anything at all. Her claim is admitted (refusing it
+//      would let anyone un-attest a peer by naming their short), reported on the new
+//      `AuthzResult.unprovenShorts`, and never resolved. Papa's own register — filed by Papa's
+//      own Mac — resolves as it always did and his envelopes OPEN. M-I3b.
+//
+//  (c) CLOSED, AND BY THE SAME LINE, WHICH IS THE HALF THAT PROVES THE SEAM IS RIGHT. In the
+//      pre-collision window there is no contest to detect — her blob is the only claim there is —
+//      so no ordering rule could ever have helped. It is refused for being unproven, `openOp`
+//      parks at P1, and check 5 never runs. `envelope.js` was NOT touched: check 5 is still a
+//      throw, and should be, because it is a genuine protocol violation once the attestation is
+//      a credential. What was wrong was admitting a blob nobody could back AS one. M-I3c.
+//
+//  (d) THE STATED REMEDY STILL DOES NOT WORK, AND THIS ROW MUST NOT BE RETIRED. ADR 002 §2.3
+//      "Two shorts, no winner" said: "`attestOpen` (WP-6) MUST enforce P2, which closes this at
+//      the root and removes the stall." It does not. The built `attestOpen`
+//      (`verifyAttestation`) enforces P2 today and the squat still mints, still verifies, still
+//      passes all four §2.3 conditions and still folds — M-I3a asserts exactly that, unchanged.
+//      P2 binds a short to a key, and the squat tells the truth about that binding: it copies
+//      both. What she cannot copy is a SIGNATURE, and the stamp is where the signature shows
+//      through into the plaintext the fold sees. M-I3e proves she cannot forge the stamp either.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import '../helpers/env.js';
@@ -200,7 +213,7 @@ describe('T5 claims another member\'s deviceShort (I-3 / R5-7)', () => {
     assert.equal(opened.deviceShort, P.deviceShort);
   });
 
-  test('M-I3b **SUCCEEDED** — one op permanently parks every envelope the victim will ever seal, and there is no way back', async () => {
+  test('M-I3b INVERTED — the same op no longer parks anything: the short still resolves to Papa and his envelope OPENS', async () => {
     const papa = await makeMember();
     const mama = await makeMember();
     const P = papa.devices[0];
@@ -215,40 +228,86 @@ describe('T5 claims another member\'s deviceShort (I-3 / R5-7)', () => {
     const squat = attOp(mama.memberId, M, blob, P.deviceShort, FSP, 1787836900000);   // LATER, deliberately
 
     const r = foldAuthorized([honest, squat], { me: papa.memberId, attestOpen });
-    // Both are ADMITTED. Neither is rejected: they are well-formed writes to two different
-    // records, and write-once is per-register.
+    // Both are STILL ADMITTED, and that has not changed and must not: they are well-formed writes
+    // to two different records, write-once is per-register, and refusing hers would hand any
+    // member a way to un-attest an honest peer by naming their short — the same worse trade
+    // `authz.js` already refuses for the LABEL (R4-13a).
     assert.deepEqual(r.rejected, []);
-    assert.deepEqual(r.shortCollisions, [P.deviceShort]);
-    // …and the lookup now refuses to answer at all.
-    assert.equal(r.attestationOf(P.deviceShort), null);
 
-    // So every envelope Papa's Mac seals parks, for ever.
+    // What changed: her claim is UNPROVEN. Her `member.set` was authored by HER Mac, so its stamp
+    // ends in HER short, not his — and she cannot author one that ends in his (M-I3e). So the
+    // short is not contested, it is DECIDED.
+    assert.deepEqual(r.shortCollisions, [], 'nothing is contested — one of the two claims is not a claim');
+    assert.deepEqual(r.unprovenShorts, [P.deviceShort], 'and the attempt is still visible');
+    const resolved = r.attestationOf(P.deviceShort);
+    assert.notEqual(resolved, null, 'if this is null, I-3 is BACK');
+    assert.equal(resolved.memberId, papa.memberId);
+    assert.equal(resolved.deviceId, P.deviceId);
+
+    // So every envelope Papa's Mac seals still OPENS.
     const PSP = mkSpaceId('personal');
     const key = await sk.createSpaceKey();
     const op = makeOp(P, PSP);
     const env = await sealOp(op, ring([[PSP, 1, key]]), P.devSig.privateKey, hdrFor(op, P, 1));
-    assert.equal(
-      await outcomeOf(() => openOp(env, ring([[PSP, 1, key]]), (dv) => r.attestationOf(dv))),
-      `park:${ENVELOPE_PARK.ATTESTATION}`
-    );
+    const opened = await openOp(env, ring([[PSP, 1, key]]), (dv) => r.attestationOf(dv));
+    assert.equal(opened.status, 'opened');
+    assert.equal(opened.op.id, op.id);
+    assert.equal(opened.op.act, papa.memberId);
 
-    // THERE IS NO WAY BACK, and this is the half that makes it worse than the ADR says. Papa
-    // cannot withdraw or amend anything (`dev.*` is write-once), and Mama's claim cannot be
-    // revoked (there is no revocation input anywhere in the fold — §8.2a). A second attestation
-    // for the SAME short in Papa's record loses to his own first claim; a `null` write loses too.
+    // The three facts that USED to make this permanent are all still true — and none of them
+    // matters any more, which is the point of listing them here rather than deleting them.
+    // `dev.*` is still write-once, there is still no revocation (§8.2a, R4-16a), and Papa still
+    // cannot re-key around it because his short is the last 16 characters of every stamp he has
+    // ever written. He does not need to: nothing was ever taken away.
     const replacement = attOp(papa.memberId, P, P.attestation, P.deviceShort, FSP, 1787837000000);
-    const withdrawal = { ...attOp(papa.memberId, P, P.attestation, P.deviceShort, FSP, 1787837100000) };
-    withdrawal.f = { [`dev.${P.deviceShort}`]: null };
-    const r2 = foldAuthorized([honest, squat, replacement, withdrawal], { me: papa.memberId, attestOpen });
+    const r2 = foldAuthorized([honest, squat, replacement], { me: papa.memberId, attestOpen });
     assert.equal(r2.rejectionOf(replacement.id).reason, 'writeOnce');
-    assert.equal(r2.attestationOf(P.deviceShort), null, 'still refused');
-
-    // And Papa cannot re-key around it either: a NEW device gets a NEW short, but every op he
-    // ever wrote is stamped with the old one and every one of those envelopes stays parked.
+    assert.equal(r2.attestationOf(P.deviceShort).memberId, papa.memberId);
     assert.equal(op.ts.endsWith(P.deviceShort), true, 'the short is the last 16 chars of every stamp');
   });
 
-  test('M-I3c **SUCCEEDED, AND WORSE THAN A PARK** — in the pre-collision window the victim\'s envelopes are HARD-REJECTED, which §5.2.5 says is silent data loss', async () => {
+  test('M-I3e — SHE CANNOT FORGE THE ONE FIELD THE FIX READS: an op stamped with his short never survives openOp', async () => {
+    // The possession proof is `devOf(cell.stamp) === att.deviceShort`, and `cell.stamp` is the
+    // writing op's `ts`. So the whole fix rests on one claim: Mama cannot author an op whose
+    // stamp ends in Papa's short. This row is that claim, end to end, in the real engine — not
+    // an assertion about the fold, which sees plaintext, but about the seam plaintext comes
+    // through.
+    const papa = await makeMember();
+    const mama = await makeMember();
+    const P = papa.devices[0];
+    const M = mama.devices[0];
+    const { blob } = await squatOn(P, mama);
+
+    // She writes the squat register HERSELF, stamped with HIS short, which is exactly the op the
+    // fold would accept as proof. `sealOp` refuses to build it: the header `dv` must agree with
+    // the stamp (check 4, mirrored), and her own attestation says her short.
+    const forged = attOp(mama.memberId, M, blob, P.deviceShort, FSP, 1787836900000);
+    forged.ts = fmt(1787836900000, 1, P.deviceShort);
+    assert.equal(forged.ts.endsWith(P.deviceShort), true);
+
+    const key = await sk.createSpaceKey();
+    // Sealing it under a header that names HIS short and signing with HER device key: the only
+    // combination that could produce the bytes she needs.
+    const env = await sealOp(forged, ring([[FSP, 1, key]]), M.devSig.privateKey,
+      { v: 1, sp: FSP, ep: 1, dv: P.deviceShort, oid: forged.id, wit: '' });
+    // On every peer it dies at P3, BEFORE the decrypt: the signature must verify under
+    // `att.sigPubRaw`, which is Papa's public point, and only Papa's private half signs for it.
+    const attestOpen = await attestOpenOver([[papa.memberId, P.attestation, papa.rec.recSig.publicKey]]);
+    const table = foldAuthorized(
+      [attOp(papa.memberId, P, P.attestation, P.deviceShort, FSP, 1787836800000)],
+      { me: papa.memberId, attestOpen });
+    assert.equal(
+      await outcomeOf(() => openOp(env, ring([[FSP, 1, key]]), (dv) => table.attestationOf(dv))),
+      'P3');
+    // …and if she does not name his short in the header, `sealOp` refuses on this side instead,
+    // so the forged stamp never leaves her Mac at all.
+    assert.equal(
+      await outcomeOf(() => sealOp(forged, ring([[FSP, 1, key]]), M.devSig.privateKey,
+        { v: 1, sp: FSP, ep: 1, dv: M.deviceShort, oid: forged.id, wit: '' })),
+      'C4');
+  });
+
+  test('M-I3c INVERTED — the pre-collision window is a PARK, not a drop: her blob is refused for being unproven, and check 5 never runs', async () => {
     // The window is ordinary, not contrived: there is no causal delivery (ADR 001 §2), pulls are
     // batched, and a joiner starts from seq 0. Any client that has folded the squat but not yet
     // Papa's own `member.set{dev.*}` is in it.
@@ -265,25 +324,42 @@ describe('T5 claims another member\'s deviceShort (I-3 / R5-7)', () => {
       [attOp(mama.memberId, M, blob, P.deviceShort, FSP, 1787836900000)],
       { me: papa.memberId, attestOpen });
 
-    // The lookup hands `openOp` HER blob for HIS short — there is nothing yet to contest it.
-    const resolved = squatOnly.attestationOf(P.deviceShort);
-    assert.notEqual(resolved, null);
-    assert.equal(resolved.memberId, mama.memberId);
-    assert.deepEqual(squatOnly.shortCollisions, [], 'nothing is reported as contested yet');
+    // THERE IS STILL NOTHING TO CONTEST — and that is why this window, not the contested one,
+    // is the cell that pinned down what the fix had to be. No ordering rule, no "earlier wins",
+    // no collision report could ever have helped here: her blob is the only claim in the log.
+    assert.deepEqual(squatOnly.shortCollisions, [], 'nothing is contested, then or now');
+    // It is refused because it is UNPROVEN: she filed his register from her own Mac.
+    assert.equal(squatOnly.attestationOf(P.deviceShort), null, 'she is never handed his short');
+    assert.deepEqual(squatOnly.unprovenShorts, [P.deviceShort]);
 
     const PSP = mkSpaceId('personal');
     const key = await sk.createSpaceKey();
     const op = makeOp(P, PSP, { f: { date: '2026-09-10', text: 'Zahnarzt' } });
     const env = await sealOp(op, ring([[PSP, 1, key]]), P.devSig.privateKey, hdrFor(op, P, 1));
 
-    // P2 passes (his key, his short). P3 passes (his signature, verified under his own key,
-    // named by her blob). P4 passes. The decrypt SUCCEEDS. It dies at check 5 — a THROW.
+    // So `openOp` stops at P1 and PARKS, unopened. It used to pass P2 (his key, his short), pass
+    // P3 (his signature under his own key, named by her blob), pass P4, DECRYPT, and then throw
+    // at check 5 — a rejection, which §5.2.5 makes final and `store.js` drops without appending.
+    // `envelope.js` is unchanged: check 5 is still a throw, it simply never runs now.
     assert.equal(
       await outcomeOf(() => openOp(env, ring([[PSP, 1, key]]), (dv) => squatOnly.attestationOf(dv))),
-      'C5');
+      `park:${ENVELOPE_PARK.ATTESTATION}`);
+
+    // And the park is re-evaluable (§5.2.5): the same envelope opens the moment Papa's own
+    // register arrives, which is the whole difference between a park and a drop.
+    const withPapa = foldAuthorized(
+      [attOp(mama.memberId, M, blob, P.deviceShort, FSP, 1787836900000),
+        attOp(papa.memberId, P, P.attestation, P.deviceShort, FSP, 1787836800000)],
+      { me: papa.memberId, attestOpen: await attestOpenOver([
+        [mama.memberId, blob, mama.rec.recSig.publicKey],
+        [papa.memberId, P.attestation, papa.rec.recSig.publicKey],
+      ]) });
+    const opened = await openOp(env, ring([[PSP, 1, key]]), (dv) => withPapa.attestationOf(dv));
+    assert.equal(opened.status, 'opened');
+    assert.equal(opened.op.id, op.id);
   });
 
-  test('M-I3d — the contest is DETECTABLE, which is the whole of the mitigation that exists', async () => {
+  test('M-I3d INVERTED — the attempt is still DETECTABLE, and now it is decided as well as visible', async () => {
     const papa = await makeMember();
     const mama = await makeMember();
     const P = papa.devices[0];
@@ -297,9 +373,14 @@ describe('T5 claims another member\'s deviceShort (I-3 / R5-7)', () => {
       attOp(papa.memberId, P, P.attestation, P.deviceShort, FSP, 1787836800000),
       attOp(mama.memberId, M, blob, P.deviceShort, FSP, 1787836900000),
     ], { me: papa.memberId, attestOpen });
-    assert.deepEqual(r.shortCollisions, [P.deviceShort]);
-    // §2.3's closing paragraph asks the member panel to render this. Nothing else acts on it,
-    // and the panel is WP-9, so today it is reported to nobody.
+    // It moved report: it is no longer a CONTEST (nothing contests a proven claim), it is an
+    // unbacked claim, and it is named.
+    assert.deepEqual(r.shortCollisions, []);
+    assert.deepEqual(r.unprovenShorts, [P.deviceShort]);
+    // §2.3's closing paragraph asks the member panel to render this, and it still should — the
+    // difference is that the loser can now see somebody tried, instead of the victim seeing his
+    // calendar stop. The panel is WP-9.
+    assert.equal(r.attestationOf(P.deviceShort).memberId, papa.memberId);
   });
 });
 
@@ -314,25 +395,42 @@ describe('T5 tries to make an op read as another member\'s', () => {
     const P = papa.devices[0];
     const M = mama.devices[0];
 
-    // The only attestation she can get into the table under Papa's short is one whose
-    // `memberId` is HERS (§2.3 condition (3), enforced at `authz.js` stage 0a). So the best she
-    // can do is make Papa's envelopes fail check 5 — which is M-I3c — and NEVER make one of her
-    // OWN envelopes read as his.
+    // TWO BARRIERS, EACH INDEPENDENTLY SUFFICIENT, AND THIS ROW ASSERTS BOTH — because the 2026-
+    // 08-28 fix added the outer one and the ADR's confidentiality result must not quietly come to
+    // depend on it.
+    //
+    //   OUTER (new): her claim on his short is unproven, so `attestationOf` hands `openOp`
+    //                NOTHING for it.
+    //   INNER (§2.3 condition (3), unchanged): even if it did resolve, the only attestation she
+    //                can get under his short is one whose `memberId` is HERS — she cannot put his
+    //                memberId in there — so check 5 refuses on every envelope she seals.
     const { blob, att } = await squatOn(P, mama, { deviceId: M.deviceId });
     const attestOpen = await attestOpenOver([[mama.memberId, blob, mama.rec.recSig.publicKey]]);
     const r = foldAuthorized([attOp(mama.memberId, M, blob, P.deviceShort, FSP, 1787836900000)],
       { me: mama.memberId, attestOpen });
-    const table = r.attestationOf(P.deviceShort);
-    assert.equal(table.memberId, mama.memberId, 'she cannot put HIS memberId in there');
+    assert.equal(r.attestationOf(P.deviceShort), null, 'OUTER: unproven, so not a credential');
+    // INNER, measured directly on the register bytes, so it is asserted even though the outer
+    // barrier now stops the caller ever reaching it.
+    assert.equal(att.memberId, mama.memberId, 'she cannot put HIS memberId in there');
+    const table = { ...att };
 
     // She now seals under HIS short. She has no key for it: P3 is verified against
     // `att.sigPubRaw`, which is Papa's public point, and only Papa's private half signs for it.
+    // Asserted against the STRONGEST table available to her — Papa's own honest attestation,
+    // resolved — so the refusal is P3's and not a side effect of the outer barrier above.
     const PSP = mkSpaceId('personal');
     const key = await sk.createSpaceKey();
+    const honestTable = foldAuthorized(
+      [attOp(papa.memberId, P, P.attestation, P.deviceShort, FSP, 1787836800000)],
+      { me: papa.memberId,
+        attestOpen: await attestOpenOver([[papa.memberId, P.attestation, papa.rec.recSig.publicKey]]) });
     const op = makeOp(M, PSP, { ts: fmt(1787836800123, 3, P.deviceShort), dev: M.deviceId });
     const env = await sealOp(op, ring([[PSP, 1, key]]),
       M.devSig.privateKey, { v: 1, sp: PSP, ep: 1, dv: P.deviceShort, oid: op.id, wit: '' });
-    assert.equal(await outcomeOf(() => openOp(env, ring([[PSP, 1, key]]), (dv) => r.attestationOf(dv))), 'P3');
+    assert.equal(
+      await outcomeOf(() => openOp(env, ring([[PSP, 1, key]]), (dv) => honestTable.attestationOf(dv))),
+      'P3');
+    void r;
 
     // And a `deviceId` copied into her own honest attestation buys nothing: the fold publishes
     // no `deviceId → memberId` resolver, so the label has no owner and is merely reported.
@@ -403,5 +501,41 @@ describe('T5 stamps her ops with a peer\'s deviceShort', () => {
     await assert.rejects(
       () => sealOp(op, ring([[PSP, 1, key]]), M.devSig.privateKey, hdrFor(op, M, 1)),
       (err) => err.check === 'C4');
+  });
+
+  test('M-I5b — THE PRICE OF THE I-3 FIX, STATED: `openOp` is now the sole enforcer of a CREDENTIAL, not just of an order', async () => {
+    // M-I5 above was filed as "check 4 is enforced at exactly one seam", and its cost was a
+    // premise about `≺`. Since 2026-08-28 the same one seam also carries the possession proof
+    // that closes I-3: `authz.js` reads `devOf(cell.stamp)` and trusts it because `openOp`'s P2,
+    // P3 and check 4 together mean an op stamped with S was signed by the holder of S's key.
+    //
+    // So the scope of M-I5 is now larger and this row says so out loud rather than leaving it to
+    // be rediscovered: an op that reaches the log by ANY OTHER DOOR — a v1 migration, an import,
+    // a local author, a future replay path — carries whatever stamp its author chose, and if it
+    // is a `dev.*` register it will be believed. `foldAuthorized` cannot check this; it is pure
+    // and synchronous and the check is a signature verification.
+    //
+    // THE OBLIGATION THIS CREATES, on WP-8 and on anything that appends: no op may enter the log
+    // without having passed `openOp`, or the door must refuse `member.set{dev.*}` outright.
+    const papa = await makeMember();
+    const mama = await makeMember();
+    const P = papa.devices[0];
+    const M = mama.devices[0];
+    const { blob } = await squatOn(P, mama);
+    const attestOpen = await attestOpenOver([
+      [papa.memberId, P.attestation, papa.rec.recSig.publicKey],
+      [mama.memberId, blob, mama.rec.recSig.publicKey],
+    ]);
+
+    // The squat, filed by Mama, with a stamp she could never have sealed (M-I3e proves that).
+    const smuggled = attOp(mama.memberId, M, blob, P.deviceShort, FSP, 1787836900000);
+    smuggled.ts = fmt(1787836900000, 1, P.deviceShort);
+    const r = foldAuthorized([smuggled], { me: papa.memberId, attestOpen });
+    // The fold believes the stamp, because the fold's whole justification for believing it is a
+    // check it does not run. This is CHARACTERIZATION, not a defect in this file: the bytes
+    // cannot exist unless something appended an op that never went through `openOp`.
+    assert.equal(r.attestationOf(P.deviceShort)?.memberId, mama.memberId,
+      'if this becomes null, a second enforcer of check 4 was added and M-I5 can be retired');
+    assert.deepEqual(r.unprovenShorts, []);
   });
 });

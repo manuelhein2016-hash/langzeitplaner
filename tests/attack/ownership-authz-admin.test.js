@@ -498,11 +498,47 @@ test('A6c CLOSED (C2): an unshare that omits one null — an older build\'s — 
   assert.equal(wasAdmitted(r, op), true);
   assert.equal(r.regs.get(target).get('pub.level').value, 'privat', 'THE POINT: it really unshares');
 
-  // The field the short patch never mentioned is NOT withdrawn by this op — nothing pretends it
-  // was. ADR 004 §5.3 mechanism 2 (the `oplog.js` forget pass, which fires on the level landing
-  // at `privat`) is what removes the residue, and that is the honest division of labour.
-  assert.equal(r.regs.get(target).get('pub.text')?.value, 'Papas Termin',
-    'the omitted field is untouched by THIS op — mechanism 2 blanks it, not stage 3a');
+  // ── AMENDED 2026-08-28 BY S5(r). THIS LINE USED TO READ: ────────────────────────────────
+  //
+  //     assert.equal(r.regs.get(target).get('pub.text')?.value, 'Papas Termin',
+  //       'the omitted field is untouched by THIS op — mechanism 2 blanks it, not stage 3a');
+  //
+  // …with the note that ADR 004 §5.3 mechanism 2 (the `oplog.js` forget pass, which fires on the
+  // level landing at `privat`) removes the residue, and that this was "the honest division of
+  // labour". It was honest about stage 3a and it was ALSO a live leak: between the unshare
+  // landing and the forget pass running, every peer's register map held Papa's note text for an
+  // entry the admin had just made Privat — and ADR 004 §11.2 lists that mechanism as
+  // CLIENT-COOPERATIVE, i.e. a peer that simply does not run it keeps the text for ever.
+  //
+  // Stage 3c makes it structural instead. `pub.text` is content the entity's folded level does
+  // not carry, so no fold on any device applies it, whatever build wrote the unshare and whether
+  // or not the forget pass ever runs. Mechanism 2 is now defence in depth, which is what it
+  // should always have been: the thing standing between an old build's unshare and a leaked note
+  // is no longer a pass somebody else has to remember to run.
+  assert.equal(r.regs.get(target).get('pub.text'), undefined,
+    'THE POINT, INVERTED: the residue the short patch never withdrew is refused by the fold '
+    + 'itself. If this reads "Papas Termin" again, stage 3c is gone and the leak is back.');
+  // …and the peer SAYS what it withheld, rather than diverging in silence. Note which op the
+  // report names: the ORIGINAL Geteilt publication, because that is the op that carried the
+  // text. The unshare carried nothing to withhold — it is the op that moved the LEVEL, and the
+  // level is what made the earlier write inadmissible. A report keyed on the unshare would have
+  // been keyed on the wrong op, and would have said nothing at all about a replay of the
+  // original envelope arriving afterwards.
+  //
+  // ALL THREE content fields are reported, not just the one the short patch forgot: at Privat
+  // the entry does not appear in the family space at all, so every non-governing value the
+  // original publication carried is above the level. `pub.date` and `pub.repeatsYearly` are
+  // ALSO nulled by the unshare's own patch a stamp later — this is the belt beside that brace,
+  // and the reason the belt matters is that the short patch proves the brace can be missing.
+  assert.deepEqual(
+    r.contentAboveLevel.filter((x) => x.e === target).map((x) => `${x.field}@${x.level}`),
+    ['pub.date@privat', 'pub.repeatsYearly@privat', 'pub.text@privat'],
+    'the fold names the field, the entity and the level that refused it');
+  assert.equal(r.contentAboveLevel.some((x) => x.opId === op.id), false,
+    'and it is NOT attributed to the unshare, which carried no content of its own');
+
+  // Still true, and still the row's actual claim: the unshare is not REJECTED for being short.
+  assert.equal(r.regs.get(target).get('pub.level').value, 'privat');
 
   // NOT VACUOUS — drop the level from the patch and it is a hard rejection again, so the
   // admission above is the C2 rule working and not stage 3a having been disabled wholesale.

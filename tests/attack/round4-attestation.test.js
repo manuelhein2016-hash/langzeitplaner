@@ -55,7 +55,16 @@ import { pad22, short16, FSP } from './_kit.js';
 const ME = `mem_${pad22('ME')}`;
 const MAMA = `mem_${pad22('MAMA')}`;
 const EVE = `mem_${pad22('EVE')}`;
-const dev = (t) => ({ id: `dev_${pad22(t)}`, short: short16(t) });
+/** A device, and — since 2026-08-28 — a registry, because the fold now reads WHO FILED a
+ *  `dev.*` register and not only what it says (I-3 closed; ADR 002 §2.3 "One short, one signer").
+ *  A fixture that stamps every attestation with one constant short cannot express an honest
+ *  self-attestation at all, so `attestOp` below derives the stamp from the FILING device. */
+const SHORT_OF = new Map();
+const dev = (t) => {
+  const d = { id: `dev_${pad22(t)}`, short: short16(t) };
+  SHORT_OF.set(d.id, d.short);
+  return d;
+};
 const D_ME = dev('DME');
 const D_MAMA = dev('DMAMA');
 const D_EVE = dev('DEVE');
@@ -106,7 +115,8 @@ function mk(k, e, f, o) {
   return Object.freeze(op);
 }
 const attestOp = (housing, regShort, blob, ms, byDev) =>
-  mk('member.set', memberKey(housing), { [`dev.${regShort}`]: blob }, { act: housing, dev: byDev, ts: fmt(ms, 0, short16('T')), space: FSP });
+  mk('member.set', memberKey(housing), { [`dev.${regShort}`]: blob },
+    { act: housing, dev: byDev, ts: fmt(ms, 0, SHORT_OF.get(byDev) ?? short16('T')), space: FSP });
 
 const fold = (ops, over = {}) => foldAuthorized(ops, { me: ME, attestVerify: verifier, ...over });
 const reasons = (r) => r.rejected.map((o) => r.rejectionOf(o.id).reason).sort();
@@ -235,31 +245,41 @@ describe('R4-13 · adopting a peer\'s deviceId', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('R4-14 · I-3: a contested short is not a credential', () => {
-  // INVERTED 2026-08-27. The contest used to be resolved minimal-under-`≺`, which handed the
-  // lookup to whoever backdated. It is no longer resolved at all: `attestationOf` refuses a
-  // contested short. `null` is a DEFINED outcome there — ADR 002 §5.2.2 P1 parks the sealed
-  // envelope, unopened, and a park is re-evaluable (§5.2.5) — so a squatter costs liveness and
-  // never gains a key. `shortCollisions` finally has a reader: `attestationOf` itself.
-  test('R4-14a REFUSED · attestationOf(mamaShort) hands `openOp` nothing at all', () => {
+  // INVERTED 2026-08-27, and INVERTED AGAIN 2026-08-28 — this row has now recorded all three
+  // answers the fold has given to one question, which is why it is worth keeping whole:
+  //   1. resolve minimal-under-`≺` — handed the lookup to whoever backdated hardest;
+  //   2. refuse the contest — safe against impersonation, catastrophic as denial of service:
+  //      one op muted a named Mac for the lifetime of the board (round 5's R5-7);
+  //   3. REQUIRE THE CLAIM TO BE PROVED — a `dev.<S>` register is a credential only if the op
+  //      that wrote it was stamped by the device it attests. Eve's op is stamped with HER short,
+  //      because she cannot make an envelope carrying Mama's `dv` verify under Mama's key.
+  // ADR 002 §2.3 "One short, one signer"; FINDINGS §4.5 option (a).
+  test('R4-14a REFUSED · the squat is admitted, reported, and never handed to `openOp`', () => {
     const eveBlob = attBlob({ memberId: EVE, deviceId: D_EVE.id, deviceShort: D_MAMA.short });
     const r = fold([MAMA_HONEST(), attestOp(EVE, D_MAMA.short, eveBlob, BASE - DAY, D_EVE.id)]);
 
     assert.deepEqual(reasons(r), [], 'all four acceptance conditions still pass — nothing pure refuses it');
-    assert.equal(r.attestationOf(D_MAMA.short), null,
-      'FIXED: the backdated squatter takes nothing; P1 parks the envelope instead');
-    assert.deepEqual(r.shortCollisions, [D_MAMA.short], 'and the contest is reported, as before');
+    assert.equal(r.attestationOf(D_MAMA.short).memberId, MAMA,
+      'and the backdated squatter takes nothing — the lookup still answers Mama');
+    assert.deepEqual(r.shortCollisions, [], 'there is no contest to report …');
+    assert.deepEqual(r.unprovenShorts, [D_MAMA.short], '… but the attempt is reported');
 
-    // The bound: it is a stall, not a loss. Mama's own attestation is still in her record and
-    // still attests her device, so stage 0b keeps admitting her plaintext ops.
+    // The bound is now tighter than "a stall, not a loss": there is no stall. Mama's own
+    // attestation is in her record, attests her device, and still opens her envelopes.
     assert.ok([...(r.attestedDevices.get(MAMA) ?? [])].includes(D_MAMA.id));
   });
 
-  test('R4-14b · backdating no longer changes the answer, in either direction', () => {
+  test('R4-14b · backdating still changes nothing, in either direction', () => {
     const eveBlob = attBlob({ memberId: EVE, deviceId: D_EVE.id, deviceShort: D_MAMA.short });
     for (const ms of [BASE - DAY, BASE + DAY]) {
       const r = fold([MAMA_HONEST(), attestOp(EVE, D_MAMA.short, eveBlob, ms, D_EVE.id)]);
-      assert.equal(r.attestationOf(D_MAMA.short), null, `stamp ${ms}`);
+      assert.equal(r.attestationOf(D_MAMA.short).memberId, MAMA, `stamp ${ms}`);
     }
+    // And with Mama's own register absent — the pre-collision window — the squat resolves to
+    // NOBODY rather than to Eve, which is the half that used to be a hard drop at check 5.
+    const alone = fold([attestOp(EVE, D_MAMA.short, eveBlob, BASE - DAY, D_EVE.id)]);
+    assert.equal(alone.attestationOf(D_MAMA.short), null);
+    assert.deepEqual(alone.unprovenShorts, [D_MAMA.short]);
   });
 
   test('R4-14c · one signing key under two shorts is contested WITHOUT hashing anything', () => {

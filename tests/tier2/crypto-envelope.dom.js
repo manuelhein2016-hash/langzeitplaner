@@ -466,6 +466,66 @@ test('sealOp refuses an unbranded family patch in WebKit, and the brand never re
   assert.equal(envelope.FAMILY_PATCH_BRAND === Symbol.for('lzp/v2/family-patch'), true);
 });
 
+test('BARRIER 4 in WebKit: a declared `pub.level` is a CLAIM CHECKED against the map (S5)', async () => {
+  // Finding S5, closed 2026-08-28. `envelope.js` used to compute
+  //     level = declared === undefined || declared === null ? folded : declared
+  // so the caller's `pub.level` governed whenever the caller supplied one, and the brand — minted
+  // by the same caller in the same expression — agreed with the lie. The red team sealed a
+  // `pub.text` for an entry the register map calls belegt (row M-R7c). The level is now the map's:
+  // `const level = folded`, and a declared level that disagrees is a barrier-4 refusal.
+  //
+  // This runs in the SHIPPING ENGINE because barrier 4 is the only one of ADR 004's four whose
+  // outcome is a REFUSAL TO ENCRYPT — Node proving it is Node proving a branch, and 21.1's claim
+  // is about the bytes WebKit puts on the wire. The two seals below are the same input to
+  // WKWebView's SubtleCrypto with one field changed.
+  const dev = await makeDevice();
+  const sp = ids.spaceId('family');
+  const kr = ring([[sp, 3, await spaceKey()]]);
+  const entity = 'fnote:' + dev.memberId + '/' + ids.entityUuid();
+  const nop = () => {};
+  const seal = (f, level) => {
+    const op = makeOp(dev, sp, { k: 'pub.set', e: entity, f });
+    return envelope.sealOp(op, kr, dev.sigPriv, hdrFor(op, dev.dv),
+      { levelOf: () => level, assertFamilyPatch: nop });
+  };
+
+  // The attack, verbatim: the caller lies in `pub.level` AND in the brand that restates it.
+  const lie = envelope.brandFamilyPatch(
+    { 'pub.level': 'geteilt', 'pub.alive': true, 'pub.date': '2026-09-10',
+      'pub.text': 'Scheidungsanwalt 14:30' },
+    { kind: 'fnote', level: 'geteilt' });
+  assert.equal(await barrierOf(() => seal(lie, 'belegt')), 'barrier4');
+  // Told honestly at belegt, the same text still dies at the BACKSTOP — the two are independent
+  // and the fix did not move the leak from one to the other.
+  const honestBelegt = envelope.brandFamilyPatch(
+    { 'pub.level': 'belegt', 'pub.alive': true, 'pub.date': '2026-09-10',
+      'pub.text': 'Scheidungsanwalt 14:30' },
+    { kind: 'fnote', level: 'belegt' });
+  assert.equal(await barrierOf(() => seal(honestBelegt, 'belegt')), 'backstop');
+  // The map agreeing with the declaration is the legitimate transition, and it SEALS — the fix is
+  // not "refuse everything", and a share that stopped working would be the loud symptom of a
+  // `levelOf` wired to the last-published level instead of the entity's own truth register.
+  assert.equal(typeof (await seal(lie, 'geteilt')).ct, 'string');
+
+  // The whole (declared × folded) cross, on a withdrawal payload so `privat` is reachable at all.
+  for (const declared of ['privat', 'belegt', 'geteilt']) {
+    for (const folded of ['privat', 'belegt', 'geteilt']) {
+      const p = envelope.brandFamilyPatch(
+        { 'pub.level': declared, 'pub.text': null }, { kind: 'fnote', level: declared });
+      const where = declared + ' declared / ' + folded + ' folded';
+      if (declared === folded) assert.equal(typeof (await seal(p, folded)).ct, 'string', where);
+      else assert.equal(await barrierOf(() => seal(p, folded)), 'barrier4', where);
+    }
+  }
+
+  // And an answer the map cannot give is a refusal in its own right — never a fallback to the
+  // patch. `undefined` matters here specifically: it is what a `levelOf` returns for an entity it
+  // has never seen, which is every entity on a fresh device mid-pull.
+  for (const answer of [null, undefined, 'oeffentlich']) {
+    assert.equal(await barrierOf(() => seal(lie, answer)), 'barrier4', String(answer));
+  }
+});
+
 test('the backstop refuses content above the level even with a no-op barrier 2, in WebKit', async () => {
   const dev = await makeDevice();
   const sp = ids.spaceId('family');

@@ -6,15 +6,23 @@
 // member who got hold of it — from a shared Dropbox, a family NAS, an unlocked Mac.
 //
 //   M-B1  a stolen file, no passphrase                    FAILED (D8 holds: sealed or absent)
-//   M-B2  a weak passphrase                               **SUCCEEDED** — there is no floor
+//   M-B2  a weak passphrase                               was **SUCCEEDED** — INVERTED 2026-08-28
+//                                                          (S7): the floor is named, measured and
+//                                                          surfaced; it is deliberately SOFT
 //   M-B3  a tampered `identity` block                     FAILED (the header is the AAD)
-//   M-B4  a tampered BOARD block                          **SUCCEEDED** — the board is NOT in
-//                                                          the AAD (this is E3-6, and it is
-//                                                          exploitable, not merely open)
-//   M-B5  an import that half-applies                     **SUCCEEDED** — one shape bricks the
-//                                                          Mac for that backup, permanently
-//   M-B6  a re-join that binds you to the wrong Kreis     **SUCCEEDED** in the sense that
-//                                                          nothing here can refuse it
+//   M-B4  a tampered BOARD block                          was **SUCCEEDED** — INVERTED 2026-08-28
+//                                                          (S3): the board digest is in the AAD
+//                                                          on the identity path. E3-6 answered.
+//   M-B5  an import that half-applies                     was **SUCCEEDED** — INVERTED 2026-08-28
+//                                                          (S4): still refused, no longer for ever
+//   M-B6  a re-join that binds you to the wrong Kreis     HALF INVERTED 2026-08-28 (S8): the
+//                                                          epoch gaps are reported; the KREIS
+//                                                          still cannot be checked here, and is
+//                                                          now SAID rather than omitted
+//
+// EVERY ROW BELOW THAT SAYS "INVERTED" ASSERTS THE OPPOSITE OF WHAT IT ASSERTED, over the same
+// attack, from the same starting position. None of them was deleted: a red-team row that is
+// removed when it is fixed takes the proof of the fix with it.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import '../helpers/env.js';
@@ -23,7 +31,8 @@ import assert from 'node:assert/strict';
 
 import * as sk from '../../src/js/crypto/spacekeys.js';
 import {
-  exportBackup, importBackup, inspectBackup, deriveBackupKey, BACKUP_ERROR_CODES, LIMITS,
+  exportBackup, importBackup, inspectBackup, deriveBackupKey, passphraseStrength,
+  BACKUP_ERROR_CODES, LIMITS, PASSPHRASE_FLOOR, EXPORT_SHEET_COPY,
 } from '../../src/js/crypto/backup.js';
 import { BACKUP_KDF } from '../../src/js/crypto/suite.js';
 import { memKeyStore } from '../../src/js/platform/keystore.js';
@@ -85,24 +94,44 @@ describe('T5 steals the backup file', () => {
     assert.ok(BACKUP_ERROR_CODES.includes('cannot-open'));
   });
 
-  test('M-B2 **SUCCEEDED** — there is no passphrase floor, so 600 000 PBKDF2 rounds protect a one-character password by a factor of 600 000', async () => {
-    // `passphraseBytes` refuses empty and whitespace-only, and nothing else. „Wer diese Datei und
-    // dein Passwort hat, ist du" is the whole security model of this file, and the model has no
-    // opinion about what a passwort is. 600 000 rounds is the RIGHT number and it is not a
-    // substitute for entropy: a 4-digit PIN is 10 000 candidates, i.e. 6e9 PBKDF2 rounds, which
-    // is minutes on one laptop.
+  test('M-B2 INVERTED — the floor exists, is named, and is surfaced on every passphrase the attack used', async () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────
+    // WAS: "**SUCCEEDED** — there is no passphrase floor, so 600 000 PBKDF2 rounds protect a
+    // one-character password by a factor of 600 000." The dictionary attack below is the SAME
+    // attack, run against the SAME file, and it still cracks it — because the fix is not a
+    // pretence that 600 000 rounds became more than 600 000 rounds. What changed is that the
+    // module now HAS an opinion about the Passwort and hands it to the sheet before the user
+    // commits, which is what „Wer diese Datei und dein Passwort hat, ist du" needed all along.
+    //
+    // ⚠ THE FLOOR IS SOFT ON PURPOSE, and this row is where that decision is visible: every weak
+    // passphrase below still EXPORTS. A hard refusal pushes the user onto „Nur Einträge sichern"
+    // — no keys at all — which is strictly worse than a bad lock on a real door. If the PO rules
+    // otherwise, `PASSPHRASE_FLOOR.hard` flips and this row goes red by name.
+    // ─────────────────────────────────────────────────────────────────────────────────────
     const { me } = await aBackup();
     const psk = await sk.createSpaceKey();
     for (const weak of ['1', 'a', '1234', 'passwort', '        x']) {
+      const told = [];
       const f = await exportBackup(
         board({ owner: me.memberId }),
         { memberId: me.memberId, recSig: me.rec.recSig, recKex: me.rec.recKex },
         { personal: { id: mkSpaceId('personal'), epochs: new Map([[1, psk]]) } },
-        weak, { exportedAt: DAY, app: APP, iterations: FAST });
+        weak, { exportedAt: DAY, app: APP, iterations: FAST, onWeakPassphrase: (x) => told.push(x) });
+      // still accepted…
       assert.equal(inspectBackup(f).hasIdentity, true, `${JSON.stringify(weak)} was refused`);
+      // …and no longer accepted IN SILENCE, which is the whole of the fix.
+      assert.equal(passphraseStrength(weak).weak, true, `${JSON.stringify(weak)} passes the floor`);
+      assert.equal(told.length, 1, `${JSON.stringify(weak)} exported without telling anyone`);
+      assert.ok(told[0].reasons.length > 0);
+      assert.ok(told[0].say.de.length > 0 && told[0].say.en.length > 0);
+      // …and NOTHING about the weakness is written into the file. A „this one was weak" flag
+      // would hand the thief a sorting key for the drawer.
+      assert.equal(JSON.stringify(f).includes('weak'), false);
+      assert.equal(JSON.stringify(f).includes('strength'), false);
     }
-    // The dictionary attack, run for real over a five-entry dictionary, to show that nothing in
-    // the file resists it beyond the cost of the KDF.
+
+    // THE DICTIONARY ATTACK, UNCHANGED AND STILL SUCCESSFUL. It is kept exactly as the red team
+    // ran it, because the fix does not claim to defeat it — it claims the user was warned.
     const target = await exportBackup(
       board({ owner: me.memberId }),
       { memberId: me.memberId, recSig: me.rec.recSig, recKex: me.rec.recKex },
@@ -114,9 +143,14 @@ describe('T5 steals the backup file', () => {
       if (r !== 'cannot-open') { cracked = guess; break; }
     }
     assert.equal(cracked, '1234', 'the file resisted a four-word dictionary');
-    // The only mitigation that exists is the KDF cost, and it is a constant.
     assert.equal(BACKUP_KDF.iterations, 600000);
     assert.equal(LIMITS.kdfIterations ?? BACKUP_KDF.iterations, BACKUP_KDF.iterations);
+
+    // And the passphrase the honest user is nudged towards is not weak by the same measure.
+    assert.equal(passphraseStrength('Kirschbaum-Sonntag-Regenschirm-41').weak, false);
+    assert.equal(PASSPHRASE_FLOOR.hard, false, 'the floor became hard — M-B2 needs re-reading');
+    assert.ok(EXPORT_SHEET_COPY.passphrase.hint.de.length > 0);
+    assert.ok(LIMITS.passphraseFloor.de.includes('10 000'));
   });
 });
 
@@ -146,50 +180,102 @@ describe('T5 tampers with the file', () => {
     assert.equal(await outcomeOf(() => importBackup(t, 'Schlüsselbund-2026', memKeyStore(), opts())), 'cannot-open');
   });
 
-  test('M-B4 **SUCCEEDED** — the BOARD is outside the AAD: a tampered board imports with a fully valid identity beside it (E3-6)', async () => {
-    // THE SEQUENCE. Mama finds Papa's backup on the family NAS. She cannot read the identity
-    // block and does not try. She rewrites `board.notes` — changes a text, adds an entry, deletes
-    // one — and puts the file back. Papa restores after a disk failure, types HIS passphrase, and
-    // the import succeeds: the AEAD tag covers the header and the sealed payload and says nothing
-    // about the board, so `importBackup` returns her board and his identity together.
+  test('M-B4 INVERTED — the BOARD is inside the AAD now: her file no longer opens at all (E3-6, answered)', async () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────
+    // THE SEQUENCE, UNCHANGED. Mama finds Papa's backup on the family NAS. She cannot read the
+    // identity block and does not try. She rewrites `board.notes` — changes a text, adds an
+    // entry, deletes one — and puts the file back. Papa restores after a disk failure and types
+    // HIS passphrase.
     //
-    // ADR 002 §7.2 lists `board` as a sibling of `identity` and never says it is authenticated;
-    // `sealAad()` enumerates seven fields and `board` is not among them. E3-6 is filed as a PO
-    // QUESTION ("should the backup's board block be authenticated"). This is the answer to it in
-    // the form of a running attack: with a passphrase the file already claims to be „dein
-    // Schlüssel", and half of it is unsigned.
+    // WAS: the import succeeded, `identityRestored: true`, and her board came back as his, with
+    // `inspectBackup` reporting HER counts as fact. E3-6 was filed as a PO question and this was
+    // the answer to it in the form of a running attack.
+    //
+    // NOW: the AAD carries a SHA-256 of the whole `board` block, recomputed on both sides, so
+    // her edit changes the additional data and the AES-GCM tag refuses the file. The code is
+    // `cannot-open` — the same one a wrong passphrase gets — because from outside the module the
+    // two are the same event: this is not the file it claims to be.
+    //
+    // E3-6's objection is answered rather than overruled. It said a guarantee on ONE of the two
+    // export paths is worse than one stated plainly; `LIMITS.board` now states BOTH paths
+    // plainly, and `README.boardOnly` already tells the user which file she is holding.
+    // ─────────────────────────────────────────────────────────────────────────────────────
     const { me, file } = await aBackup();
-    const tampered = clone(file);
-    tampered.board.notes[0].text = 'Scheidungsanwalt';
-    tampered.board.notes.push({ id: 'n2', owner: me.memberId, date: '2026-12-24', text: 'eingeschmuggelt' });
 
-    const out = await importBackup(tampered, 'Schlüsselbund-2026', memKeyStore(), opts());
-    assert.equal(out.identityRestored, true, 'if this ever fails, M-B4 is FIXED');
-    assert.deepEqual(out.board.notes.map((n) => n.text), ['Scheidungsanwalt', 'eingeschmuggelt']);
-    assert.equal(out.consequence.code, 'identity-restored');
-    // And `inspectBackup` — the pure pre-flight the sheet renders — reports HER counts as fact.
-    assert.equal(inspectBackup(tampered).counts.notes, 2);
+    const attacks = [
+      ['rewritten', (f) => { f.board.notes[0].text = 'Scheidungsanwalt'; }],
+      ['added', (f) => { f.board.notes.push({ id: 'n2', owner: me.memberId, date: '2026-12-24', text: 'eingeschmuggelt' }); }],
+      // The quieter shape, and the one the red team called worse: DELETING leaves no count
+      // anywhere to compare against, because the count is derived from the block being attacked.
+      ['emptied', (f) => { f.board.notes = []; }],
+      ['category', (f) => { f.board.categories.push({ id: 'x', name: 'X' }); }],
+      ['settings', (f) => { f.board.settings = { bundesland: 'HH' }; }],
+      ['scratchpad', (f) => { f.board.scratchpads = { '2026-09': 'anders' }; }],
+      ['lineage', (f) => { f.board._v2 = { lineageId: 'lin_AAAAAAAAAAAAAAAAAAAAAAAAAA', gen: 1 }; }],
+    ];
+    for (const [what, tamper] of attacks) {
+      const t = clone(file);
+      tamper(t);
+      const ks = memKeyStore();
+      assert.equal(await outcomeOf(() => importBackup(t, 'Schlüsselbund-2026', ks, opts())),
+        'cannot-open', `${what}: if this ever succeeds, M-B4 is OPEN AGAIN`);
+      assert.deepEqual(await ks.list(), [], `${what} wrote to the key store`);
+    }
 
-    // The same hole in its quieter shape: DELETING entries. There is no count anywhere the user
-    // could compare against, because the count is derived from the block being attacked.
+    // The one thing that is NOT tampering: the same board through a different JSON writer. The
+    // digest sorts keys, so re-serialising the file does not brick it — without this the fix
+    // would be a landmine under every caller that ever re-writes the file.
+    const reordered = clone(file);
+    const bd = reordered.board;
+    reordered.board = { settings: bd.settings, notes: bd.notes, bars: bd.bars,
+      categories: bd.categories, scratchpads: bd.scratchpads, schemaVersion: bd.schemaVersion };
+    const ok = await importBackup(reordered, 'Schlüsselbund-2026', memKeyStore(), opts());
+    assert.equal(ok.identityRestored, true);
+    assert.equal(ok.board.notes[0].text, 'Zahnarzt');
+
+    // `inspectBackup` is still PURE and still pre-passphrase, so it still renders what the FILE
+    // says — it cannot hash without SubtleCrypto and it is called before the user has typed
+    // anything. That is not the hole any more: the sheet may show her counts, and then the import
+    // refuses and applies nothing. Asserted so nobody "fixes" it into an async function.
     const emptied = clone(file);
     emptied.board.notes = [];
-    const out2 = await importBackup(emptied, 'Schlüsselbund-2026', memKeyStore(), opts());
-    assert.equal(out2.identityRestored, true);
-    assert.deepEqual(out2.board.notes, []);
+    assert.equal(inspectBackup(emptied).counts.notes, 0);
+    assert.equal(await outcomeOf(() => importBackup(emptied, 'Schlüsselbund-2026', memKeyStore(), opts())),
+      'cannot-open');
+
+    // The board-only file is UNCHANGED and still unauthenticated — the honest half of the limit,
+    // on the path it is true of.
+    const plain = await exportBackup(
+      board({ owner: me.memberId }),
+      { memberId: me.memberId, recSig: me.rec.recSig, recKex: me.rec.recKex },
+      null, null, { exportedAt: DAY, app: APP });
+    const p = clone(plain);
+    p.board.notes[0].text = 'von Mama';
+    const out = await importBackup(p, null, memKeyStore(), opts());
+    assert.equal(out.board.notes[0].text, 'von Mama');
+    assert.equal(out.identityRestored, false);
+    assert.ok(LIMITS.board.boardOnly.de.includes('nicht signiert'));
+    assert.ok(LIMITS.board.withIdentity.de.includes('versiegelt'));
   });
 });
 
 describe('T5 makes the import half-apply', () => {
-  test('M-B5 **SUCCEEDED in one shape** — a failure between the two recovery writes leaves 2 of 3 records and the Mac then refuses that backup for ever', async () => {
-    // §7.3's ordering is careful and it is right as far as it goes: nothing is written until
-    // everything is decrypted, and `assertKeyStoreIsFree` refuses a conflicting store BEFORE any
-    // write. What it cannot do is make the writes themselves atomic — `KeyStore.put` is one
-    // record at a time — so a crash, an eviction or a full disk between them is a state
-    // `assertKeyStoreIsFree` classifies as `keystore-partial` and REFUSES on every retry.
+  test('M-B5 INVERTED — the half-written store is still refused, and no longer refused FOR EVER', async () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────
+    // WAS: "**SUCCEEDED in one shape** — a failure between the two recovery writes leaves 2 of 3
+    // records and the Mac then refuses that backup for ever." §7.3's ordering was right as far as
+    // it went — nothing written until everything is decrypted, a conflicting store refused before
+    // any write — but `KeyStore.put` is one record at a time, so a crash between them left a
+    // state `assertKeyStoreIsFree` classified as `keystore-partial` and REFUSED on every retry.
+    // The Mac was intact, the file was intact, and the restore was impossible.
     //
-    // There is no repair path in the module: `importBackup` never deletes, and a user with a
-    // half-written store and a backup file has no supported way to finish the restore.
+    // NOW: the refusal STAYS — nothing is written over anything in the same breath as discovering
+    // it, and the user is told — and the dead residue is cleared on the way out, so the retry
+    // meets an empty store. The delete is narrow and argued in `prepareKeyStore`: the residue is
+    // partial (every reader in `identity.js` refuses it by construction, so no code path in this
+    // product can ever turn it back into an identity) AND no readable metadata names another
+    // member. M-B5c below is the row that proves the second half.
+    // ─────────────────────────────────────────────────────────────────────────────────────
     const { file } = await aBackup();
     const inner = memKeyStore();
     let n = 0;
@@ -198,14 +284,49 @@ describe('T5 makes the import half-apply', () => {
       put: async (id, v) => { n += 1; if (n > 2) throw new Error('disk full'); return inner.put(id, v); },
     };
     await assert.rejects(() => importBackup(file, 'Schlüsselbund-2026', flaky, opts()));
-    const left = await inner.list();
-    assert.equal(left.length, 2, 'the store is neither empty nor complete');
+    assert.equal((await inner.list()).length, 2, 'the store is neither empty nor complete');
 
-    // Retry, on a healthy store containing exactly that residue.
+    // The attempt that meets the residue is still REFUSED, loudly, with the code that names what
+    // happened…
     assert.equal(await outcomeOf(() => importBackup(file, 'Schlüsselbund-2026', inner, opts())),
-      'keystore-partial', 'if this ever succeeds, M-B5 is FIXED');
-    // …and it stays refused: nothing in the module clears the residue.
-    assert.equal(await outcomeOf(() => importBackup(file, 'Schlüsselbund-2026', inner, opts())), 'keystore-partial');
+      'keystore-partial');
+    // …and the residue is gone, so the retry is a first-ever restore.
+    assert.deepEqual(await inner.list(), [], 'the residue survived — M-B5 is OPEN AGAIN');
+    const out = await importBackup(file, 'Schlüsselbund-2026', inner, opts());
+    assert.equal(out.identityRestored, true, 'if this ever fails, M-B5 is OPEN AGAIN');
+    assert.equal((await inner.list()).length, 6);
+
+    // A THIRD import is the idempotent one — the shape users actually produce by clicking twice.
+    assert.equal((await importBackup(file, 'Schlüsselbund-2026', inner, opts())).identityRestored, true);
+
+    // The copy moved with the behaviour: it used to say „Dieser Mac muss neu gekoppelt werden",
+    // which would now send the user to re-pair a Mac that needs one more click.
+    const inner2 = memKeyStore();
+    let k = 0;
+    const flaky2 = {
+      get: inner2.get, del: inner2.del, list: inner2.list,
+      put: async (id, v) => { k += 1; if (k > 1) throw new Error('disk full'); return inner2.put(id, v); },
+    };
+    await assert.rejects(() => importBackup(file, 'Schlüsselbund-2026', flaky2, opts()));
+    let err = null;
+    try { await importBackup(file, 'Schlüsselbund-2026', inner2, opts()); } catch (e) { err = e; }
+    assert.equal(err.code, 'keystore-partial');
+    assert.equal(err.say.de.includes('neu gekoppelt'), false);
+    assert.ok(err.say.de.includes('noch einmal'));
+
+    // AND THE DELETE IS BEHIND THE TAG. T5, who has the Mac but not the passphrase, cannot use
+    // this path to wipe anything: `prepareKeyStore` is step 4, after the AEAD has authenticated
+    // the file, and a file she cannot open never gets there.
+    const inner3 = memKeyStore();
+    let j = 0;
+    const flaky3 = {
+      get: inner3.get, del: inner3.del, list: inner3.list,
+      put: async (id, v) => { j += 1; if (j > 2) throw new Error('disk full'); return inner3.put(id, v); },
+    };
+    await assert.rejects(() => importBackup(file, 'Schlüsselbund-2026', flaky3, opts()));
+    const before = (await inner3.list()).sort();
+    assert.equal(await outcomeOf(() => importBackup(file, 'falsch', inner3, opts())), 'cannot-open');
+    assert.deepEqual((await inner3.list()).sort(), before, 'a wrong passphrase reached the delete');
   });
 
   test('M-B5b FAILED — the OTHER half-apply shape is benign: a failure after the recovery triple is idempotently completable', async () => {
@@ -236,18 +357,29 @@ describe('T5 makes the import half-apply', () => {
 });
 
 describe('T5 binds a re-join to the wrong Kreis', () => {
-  test('M-B6 **SUCCEEDED at this seam** — the restored family space id and epoch ring are taken from the file, and nothing here can check them', async () => {
+  test('M-B6 HALF INVERTED — the epoch gaps are now reported; the KREIS still cannot be checked here, and is now SAID', async () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────
     // §7.3 step 6 says the restored epoch keys "decrypt everything already on the server" and
     // that a newer epoch parks. What no part of `importBackup` can know is whether this member is
     // STILL in that Kreis, or ever was: `family.id` and the epochs are payload fields, and the
-    // authority that could contradict them (the member list, the admin chain) is the fold's, and
-    // arrives later. So a backup handed to you by a family member — the honest scenario is „ich
-    // hab dir dein Backup wiederhergestellt" — attaches your restored Mac to whatever Kreis the
-    // file names, under whatever recovery identity it carries.
+    // authority that could contradict them (the member list, the admin chain) is the fold's and
+    // arrives later. So a backup handed to you by a family member — „ich hab dir dein Backup
+    // wiederhergestellt" — attaches your restored Mac to whatever Kreis the file names.
     //
-    // This is not a flaw in `backup.js`: refusing here would need I/O and this module is I/O-free
-    // by design. It is a REPORTED GAP at the seam above it (§7.3 step 5's `POST /devices/adopt`
-    // is the only thing that can contradict a file, and `server/` is `vercel.json`).
+    // THE TWO HALVES CAME APART UNDER MEASUREMENT, and the domain is what separated them:
+    //
+    //   THE EPOCHS (S8) — CLOSED. A sparse ring used to import in total silence while the
+    //   WRAPPING side refused a partial ring loudly; the two sides disagreed about §4.3's own
+    //   rule. `result.spaces.<which>.missingEpochs` now carries the numbers and the consequence
+    //   becomes `identity-restored-keys-pending` — §7.3 step 6's „Schlüssel ausstehend".
+    //
+    //   THE KREIS — NOT CLOSABLE HERE, and `tests/helpers/crypto-domains.js` proves it rather
+    //   than asserting it: C2c-1 („mein Kreis") and C2c-2 („ein anderer Kreis") are the SAME
+    //   INPUT — two fresh, well-formed `fsp_` ids — because the difference is not in the file.
+    //   No implementation can warn on one and stay silent on the other. So the honest thing is
+    //   said UNCONDITIONALLY, on `result.familyBinding`, and the check itself is carried to §7.3
+    //   step 5's `POST /devices/adopt`, which is the only authority that can contradict a file.
+    // ─────────────────────────────────────────────────────────────────────────────────────
     const me = await makeMember();
     const psk = await sk.createSpaceKey();
     const fsk = await sk.createSpaceKey();
@@ -259,18 +391,27 @@ describe('T5 binds a re-join to the wrong Kreis', () => {
         personal: { id: mkSpaceId('personal'), epochs: new Map([[1, psk]]) },
         family: { id: FSP, epoch: 4, epochs: new Map([[4, fsk]]) },
       },
-      'pass', { exportedAt: DAY, app: APP, iterations: FAST });
+      'ein-langes-Passwort-2026', { exportedAt: DAY, app: APP, iterations: FAST });
 
-    const out = await importBackup(file, 'pass', memKeyStore(), opts());
+    const out = await importBackup(file, 'ein-langes-Passwort-2026', memKeyStore(), opts());
     assert.equal(out.spaces.family.id, FSP);
-    // A SPARSE ring — epoch 4 only, no 1..3 — is accepted without comment, even though §4.3 and
-    // §7.1 step 5 make "all epochs 1..e" the rule that lets a member see Oma's birthday. The
-    // WRAPPING side refuses a partial ring loudly (`wrapRingToRecipients`); the RESTORING side
-    // does not, so a restored Mac silently cannot read epochs 1–3 and reports nothing.
     assert.deepEqual([...out.spaces.family.epochs.keys()], [4]);
-    // The self-attestation minted here is under the RESTORED recovery key, so it binds this Mac
-    // to whatever `identity.memberId` the file carried — which is the intended behaviour and is
-    // exactly why the file is „dein Schlüssel".
+
+    // S8 — the silence is gone. The restore still happens (refusing would throw away everything
+    // from epoch 4 on, for a member who may have nothing else left), and it says what is missing.
+    assert.deepEqual([...out.spaces.family.missingEpochs], [1, 2, 3],
+      'a sparse ring imported without comment — S8 is OPEN AGAIN');
+    assert.equal(out.consequence.code, 'identity-restored-keys-pending');
+    assert.ok(out.consequence.de.includes('Schlüssel ausstehend'));
+
+    // M-B6's own half: the Kreis is NAMED and NAMED AS UNVERIFIED, on every family restore.
+    assert.equal(out.familyBinding.spaceId, FSP);
+    assert.equal(out.familyBinding.verified, false);
+    assert.ok(out.familyBinding.say.de.includes('nicht nachprüfen'));
+
+    // …and this is what is STILL TRUE and still not fixable here: the self-attestation binds this
+    // Mac to whatever `identity.memberId` the file carried. That is the intended behaviour — it
+    // is exactly why the file is „dein Schlüssel" — and it is why the sentence above matters.
     assert.equal(out.attestation.memberId, me.memberId);
     assert.equal(typeof out.blob, 'string');
   });
@@ -290,8 +431,18 @@ describe('T5 binds a re-join to the wrong Kreis', () => {
     truncated.identity.sealed = truncated.identity.sealed.slice(0, truncated.identity.sealed.length - 8);
     assert.equal(await outcomeOf(() => importBackup(truncated, 'Schlüsselbund-2026', memKeyStore(), opts())),
       'identity-damaged');
+    // NOT THE LAST CHARACTER, AND THE REASON IS A REAL TRAP — found by this row FLAKING once in
+    // sixteen runs. A base64url string whose byte length is not a multiple of 3 ends in a
+    // character carrying SLACK BITS, and `ub64` is strict about them: `A`→`B` there sets a slack
+    // bit, so the string stops being base64url at all and `inspectBackup` refuses it with
+    // `identity-damaged` BEFORE the tag is ever reached. The row then measured the shape guard
+    // instead of the AEAD, at random, depending on what the last ciphertext byte happened to be.
+    // A middle character is fully significant, and `A`↔`z` (0 ↔ 51) moves the high bits.
     const flipped = clone(file);
-    flipped.identity.sealed = flipped.identity.sealed.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A'));
+    const mid = Math.floor(flipped.identity.sealed.length / 2);
+    flipped.identity.sealed = flipped.identity.sealed.slice(0, mid)
+      + (flipped.identity.sealed[mid] === 'A' ? 'z' : 'A')
+      + flipped.identity.sealed.slice(mid + 1);
     assert.equal(await outcomeOf(() => importBackup(flipped, 'Schlüsselbund-2026', memKeyStore(), opts())),
       'cannot-open');
   });

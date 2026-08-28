@@ -29,7 +29,7 @@
 //   tests/tier1/crypto-pairing.test.js (57) · tests/tier2/crypto-pairing.dom.js (13) ·
 //   the hostile relay `tests/helpers/mitm.js`.
 // §7 is DELIVERED 2026-08-27 — LZP-305: `src/js/crypto/backup.js`, with
-//   tests/tier1/crypto-backup.test.js (69) · tests/tier2/crypto-backup.dom.js (16).
+//   tests/tier1/crypto-backup.test.js (78) · tests/tier2/crypto-backup.dom.js (21).
 // §6 (invites) is **NOT DELIVERED and two of its three functions are RETIRED by D9** — read §6.
 //
 // E3 INTEGRATION 2026-08-27: the eight numbered product guarantees these seven files exist to
@@ -279,10 +279,18 @@ export async function attestDevice(att, recSigPriv) { throw new Error('not imple
  *     never the payload's self-declared `att.memberId` (§2.3 condition (4)); and
  *   · it MUST also check `deviceShortOf(att.sigPubRaw) === att.deviceShort` (§5.2.2 P2). The
  *     fold cannot: the binding is a SHA-256 and nothing in `authz.js` may await. Enforcing it
- *     here is what makes `deviceShort -> DeviceAttestation` a real function instead of an
- *     argued one — see `AuthzResult.shortCollisions`. [Was SHOULD; raised to MUST 2026-08-27,
- *     finding I-3. Until this lands, the fold REFUSES a contested short rather than resolving
- *     it, which costs liveness on a squatted short — so P2 here is what restores it.]
+ *     here is what makes an attestation SELF-CONSISTENT — see `AuthzResult.shortCollisions`.
+ *     [Was SHOULD; raised to MUST 2026-08-27, finding I-3.]
+ *     [CORRECTED 2026-08-28. The bracket that stood here said P2 "makes `deviceShort ->
+ *     DeviceAttestation` a real function instead of an argued one" and "is what restores"
+ *     liveness on a squatted short. BOTH CLAIMS WERE FALSE and were measured false: `sigPubRaw`
+ *     is a PUBLIC key travelling in the victim's own register, so the squatter copies the key
+ *     AND the short together, tells the truth about the binding, and passes P2 — a remedy that
+ *     binds two fields cannot catch an attacker who copies both. P2 stays a MUST, because it
+ *     stops a member inventing a short unrelated to any key and it is the check this layer CAN
+ *     make; it is not the check that makes the lookup a function. That is
+ *     `devOf(cell.stamp) === att.deviceShort` at fold time — see `AuthzResult.unprovenShorts`
+ *     and ADR 002 §2.3 "One short, one signer".]
  * The fold publishes the payload decoded from the REGISTER BYTES, not the one this returns, and
  * treats a disagreement between the two as a failed verification — on ALL SIX fields, `kexPubRaw`
  * and `createdAt` included (R4-15a). An opener that may disagree about `kexPubRaw` while still
@@ -455,7 +463,7 @@ export async function wrapRingToRecipients(spaceKeysByEpoch, myKexPriv, recipien
  * @property {(space:string, epoch:number) => CryptoKey|null} get   TOTAL — `null` for anything
  *           not held, INCLUDING a malformed id: `env.sp`/`env.ep` are peer data and a miss is a
  *           park (§5.2.2 P4), so a throw here would turn a hostile header into a crashed sync.
- * @property {(space:string, epoch:number, k:CryptoKey) => boolean} put  LOUD on our own data —
+ * @property {(space:string, epoch:number, k:CryptoKey, origin?:KeyOrigin) => boolean} put  LOUD on our own data —
  *           it throws on an unclassifiable space id, a non-epoch, or a key that is not an
  *           extractable AES-256-GCM. **FIRST WRITE WINS**: a second key for an epoch already
  *           held returns `false` and does not displace one that is already decrypting ops. It is
@@ -466,6 +474,13 @@ export async function wrapRingToRecipients(spaceKeysByEpoch, myKexPriv, recipien
  * @property {(space:string) => Map<number,CryptoKey>} keysByEpoch
  * @property {(space:string, upTo:number) => number[]} missing
  * @property {(space:string, upTo:number) => boolean} covers
+ * @property {(space:string, epoch:number) => KeyOrigin|null} originOf  WHO PUT THIS KEY HERE —
+ *           `null` for a slot that holds nothing. Added 2026-08-28 for finding S1: "a `KeyRing`
+ *           entry is a `CryptoKey`, and a `CryptoKey` carries no provenance" was the sentence
+ *           that made the injection invisible to `sealOp`. `how:'admitted'` names the VERIFIED
+ *           device the wrap came from, and only `admitWraps` can set it — to a device that was in
+ *           its `SenderSet`. Everything else (minted here, restored from this device's own key
+ *           store) is `how:'local'` with both ids `null`.
  * @property {() => number} refusedPuts
  * @property {() => string[]} loadSkipped
  */
@@ -506,11 +521,48 @@ export async function buildRotation(spaceId, nextEpoch, spaceKeysByEpoch, myKexP
  *  it just sealed. @returns {Promise<Rotation & {key:CryptoKey}>} */
 export async function rotateSpace(opts) { throw new Error('not implemented'); }
 
-/** Admit every wrap the relay returned for this device (`GET /spaces/:id/keys` — every epoch,
- *  §4.4). A blob that does not open is COUNTED, not thrown on: the ordinary cause is a wrap from
- *  a member whose key this device has not folded yet, and the answer is the same as an unknown
- *  epoch — park and re-evaluate.
- *  @returns {Promise<{admitted:number[], refused:number, duplicates:number}>} */
+/**
+ * The admissible SENDER set for one space — **the anti-key-injection measure on the way IN**
+ * (finding S1, ADR 002 §4.2 step 6 as amended 2026-08-28).
+ *
+ * `recipients` is the branded `Recipient[]` from `personalRecipients()` / `familyRecipients()` —
+ * §3 barrier 2's two constructors, and there is no third way to name a device a space may accept
+ * a key from. Every entry goes through `recipientProblem()`: brand matches the space kind, the
+ * attestation verifies under the housing member's `RK_sig`, and `att.kexPubRaw` is bound to the
+ * key itself. The returned set indexes the public keys IT imported and is bound to ONE `spaceId`.
+ *
+ * An EMPTY list is legal and means "I can authenticate nobody yet" — every row is then refused
+ * and the ops stay parked (§4.4), which is the correct state for a joiner between §7.1 steps 2
+ * and 6.
+ *
+ * @returns {Promise<SenderSet>} frozen, branded, unforgeable by a caller
+ */
+export async function admissibleSenders(recipients, spaceId, ports) { throw new Error('not implemented'); }
+
+/** Is this a `SenderSet` `admissibleSenders()` built? `false` for a copy — the brand is a
+ *  non-enumerable module-private Symbol, so a spread loses it. */
+export function isSenderSet(v) { throw new Error('not implemented'); }
+
+/**
+ * Admit every wrap the relay returned for this device (`GET /spaces/:id/keys` — every epoch,
+ * §4.4). A blob that does not open is COUNTED, not thrown on: the ordinary cause is a wrap from
+ * a member whose key this device has not folded yet, and the answer is the same as an unknown
+ * epoch — park and re-evaluate.
+ *
+ * **`ctx.senders` IS REQUIRED and has no default** (finding S1). Without it, `senderKexPubRaw` is
+ * an attacker-chosen ECDH key that decides which key this device seals its own private entries
+ * under; ADR 002 §4.2 step 2 put the attestation check on the wrapping side only, and the
+ * receiving side is the one that decides which key it will use. It takes the `Recipient[]` from
+ * `personalRecipients()` / `familyRecipients()`, or a `SenderSet` from `admissibleSenders()`. A
+ * row's `senderKexPubRaw` is an INDEX into that set — it selects a sender and cannot supply one.
+ *
+ * `unauthorized` counts rows whose sender is not in the set. It is folded into `refused` as well,
+ * so the pre-S1 shape keeps its meaning, but it is reported apart because "a stranger tried to
+ * give me a key" is a security event and "a wrap did not open" is not.
+ *
+ * @param {{spaceId:string, myKexPriv:CryptoKey, senders:Recipient[]|SenderSet}} ctx
+ * @returns {Promise<{admitted:number[], refused:number, duplicates:number,
+ *                    unauthorized:number, unauthorizedEpochs:number[]}>} */
 export async function admitWraps(ring, rows, ctx) { throw new Error('not implemented'); }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -524,7 +576,31 @@ export async function admitWraps(ring, rows, ctx) { throw new Error('not impleme
 //  (a) **`sealOp` takes a 5th argument, `ctx`** — `{assertFamilyPatch?, levelOf?, attestation?,
 //      subtle?, random?}`. Barrier 4 is UNIMPLEMENTABLE without `levelOf`: the security note
 //      below says "re-derive the level from the authenticated register map" and the four-argument
-//      signature gives `sealOp` no way to reach one. `assertFamilyPatch` is ADR 004 §2.2's
+//      signature gives `sealOp` no way to reach one.
+//
+//      ⚠ **THE PRECONDITION WP-10 MUST SATISFY BEFORE IT BUILDS ON BARRIER 4 (finding S5, closed
+//      2026-08-28; ADR 004 §2.2 barrier 4 as AMENDED).** Two clauses, and the second is the one
+//      that makes the first survivable:
+//
+//        1. `op.f['pub.level']` IS A RESTATEMENT, NEVER AN INPUT. `sealOp` computes
+//           `level = ctx.levelOf(op.e)` and nothing else; a declared `pub.level` that is present,
+//           non-null and different from it is a `barrier4` refusal, exactly like a disagreeing
+//           `brand.level`. `absent` and `null` are silence and consult the map (§5's withdrawal
+//           patches carry `pub.level: null`). A map answer outside `privat|belegt|geteilt` —
+//           `null` and `undefined` included — is a refusal, never a fallback to the patch.
+//           This replaces the old `patch['pub.level'] ?? currentPubLevel(entityKey)`, which let
+//           the caller's value win whenever the caller supplied one and which the E3 red team
+//           walked through to seal a `pub.text` for a **belegt** entry (row M-R7c).
+//        2. `ctx.levelOf` MUST BE WIRED TO THE ENTITY'S AUTHENTICATED `visibility` TRUTH REGISTER,
+//           **not** to the last-published `pub.level` of the family entity. The published level is
+//           the level a transition is moving AWAY from; wiring `levelOf` to it makes every
+//           legitimate share a barrier-4 refusal on the first attempt. The truth register already
+//           carries the NEW level when the publish microtask runs (ADR 001 §0.9, ADR 004 §2.3), so
+//           the honest transition agrees with the map and the caller asserts nothing. Domain C4 in
+//           `tests/helpers/crypto-domains.js` walks all 325 inputs of
+//           (declared × folded × brand × payload) against this rule.
+//
+//      `assertFamilyPatch` is ADR 004 §2.2's
 //      barrier 2, injected because `core/project.js` (WP-10) does not exist — and it is
 //      REQUIRED for a family `pub.set`, not optional: a security check that is skipped when its
 //      module is missing is not a security check, and the failure of an unbuilt module must read
@@ -551,7 +627,7 @@ export async function admitWraps(ring, rows, ctx) { throw new Error('not impleme
 //                           NOT unforgeable; barrier 3's job is that an agent who never read
 //                           ADR 004 gets a refusal, and a deliberate forger still has to restate
 //                           the redaction decision for barrier 4 and the backstop to check.
-//   PROJECT_CONTRACT        the six clauses WP-10 must satisfy, executable. Until all four
+//   PROJECT_CONTRACT        the seven clauses WP-10 must satisfy, executable. Until all four
 //                           land, NO family `pub.set` can be sealed at all.
 //   ENVELOPE_PARK           park reasons. `ENVELOPE_PARK.ATTESTATION` is defined HERE with the
 //                           value `core/ops.js` must adopt, because `PARK_REASONS.ATTESTATION`
@@ -587,8 +663,10 @@ export function aadOf(hdr) { throw new Error('not implemented'); }
  * Seal one op.
  * SECURITY: for a family space this MUST
  *   (a) refuse an unbranded patch (only projectForFamily produces a branded one), and
- *   (b) RE-DERIVE the level from the authenticated register map — never trust a caller-supplied
- *       level — before running assertFamilyPatch (ADR 004 §2.2 barriers 3 and 4).
+ *   (b) READ the level from the authenticated register map — `level = ctx.levelOf(op.e)`, the
+ *       entity's `visibility` truth register — and REFUSE, not prefer, a `op.f['pub.level']` that
+ *       disagrees with it, before running assertFamilyPatch (ADR 004 §2.2 barriers 3 and 4, as
+ *       amended for finding S5; deviation (a) above states the full precondition).
  * It also does three things beyond the brief, each because the failure it prevents is REMOTE
  * AND SILENT:
  *   · with `ctx.attestation` supplied it mirrors the whole far-side gate — P2, checks 3 and 5,
@@ -647,14 +725,30 @@ export async function sealOp(op, keyring, sigPriv, hdr, ctx) { throw new Error('
  *
  * [AMENDED 2026-08-27 — I-3.] The fold no longer RESOLVES that contest. It used to pick
  * minimal-under-`≺`, which handed a backdated squatter the lookup and therefore handed THIS
- * FUNCTION the squatter's verification key. `attestationOf` now returns `null` for any short on
+ * FUNCTION the squatter's verification key. `attestationOf` returns `null` for any short on
  * `AuthzResult.shortCollisions`, so a squatted short reaches P1 and PARKS the sealed envelope
  * instead of being opened under the wrong key. Two consequences for `openOp`:
- *   · P1's `null` now has a second cause — contested, not merely absent — and both are parks.
- *     Do not turn either into a rejection; §5.2.5's argument covers both.
- *   · a squatter can therefore STALL a peer's envelopes. That is the deliberate trade (a park is
- *     re-evaluable; a wrong key is not), and P2 inside `attestOpen` is what removes the stall by
- *     refusing the squat at fold time. Ship P2 in `attestOpen`, not only here.
+ *   · P1's `null` has more than one cause — absent, contested, or unproven — and all of them are
+ *     parks. Do not turn any of them into a rejection; §5.2.5's argument covers all.
+ *   · a squatter could therefore STALL a peer's envelopes, which was the deliberate trade (a
+ *     park is re-evaluable; a wrong key is not).
+ *
+ * [AMENDED 2026-08-28 — I-3 / R5-7 CLOSED, and the sentence above about P2 removing the stall is
+ * struck. It said "P2 inside `attestOpen` is what removes the stall by refusing the squat at
+ * fold time." P2 shipped, and the squat still passed it: `sigPubRaw` is public, so she copies
+ * key and short together and tells the truth about both. WHAT CLOSED IT is a possession proof
+ * the fold CAN make — a `dev.<S>` register is a credential only if the op that WROTE it was
+ * stamped by the device it attests (`devOf(cell.stamp) === att.deviceShort`), which is sound
+ * precisely because THIS FUNCTION's P2, P3 and check 4 mean an op stamped with S was signed by
+ * the holder of S's private key. Consequences for `openOp`, and they are obligations:
+ *   · `openOp` is now the SOLE enforcer of a credential, not just of an ordering premise. Check
+ *     4 (`devOf(op.ts) === env.dv`) may not be weakened, made optional, or moved after the
+ *     decrypt: the authorization fold reads the stamp and trusts it because of this check.
+ *   · nothing may append an op to the log without it having passed `openOp` — or that door must
+ *     refuse `member.set{dev.*}` outright. Characterized as M-I5b in
+ *     `tests/attack/crypto-member-impersonate.test.js`.
+ *   · P1's `null` is still a park in every case, including the pre-collision window that used to
+ *     resolve, decrypt and then throw at check 5. Check 5 is unchanged and stays a throw.]
  *
  * WHAT DOES NOT EXIST YET, AND `openOp` MUST NOT PRETEND IT DOES: **device revocation.** There
  * is none, anywhere — see ADR 002 §2.3 "Revocation — the gap, and who owns it" (owner: WP-9).
@@ -673,8 +767,9 @@ export async function sealOp(op, keyring, sigPriv, hdr, ctx) { throw new Error('
  *
  * @param {Envelope} env @param {KeyRing} keyring
  * @param {(dv:string) => DeviceAttestation|null} attestationOf  AuthzResult.attestationOf —
- *        a PARTIAL function. I-3/R5-7 is open: a squatted short returns `null` and PARKS, and
- *        `openOp` must not be built as though P2 restored liveness on one.
+ *        still a PARTIAL function, and `openOp` must stay built for that. I-3/R5-7 is CLOSED
+ *        (2026-08-28) so a SQUATTED short no longer returns `null`; an absent one, an unproven
+ *        one and a genuine two-signer collision still do, and all three PARK.
  * @param {{subtle?:SubtleCrypto}} [ports]
  * @returns {Promise<{status:'opened', op:Object, attestation:DeviceAttestation}
  *                 | {status:'park', parkReason:string, reason:string, fields?:string[]}>}
@@ -842,11 +937,13 @@ export async function openInviteKeys(blob, wrapKey, salt) { throw new Error('RET
 //     it is pinned three ways: a second hand-rolled implementation in `tests/helpers/kat.js`
 //     reproduces a real file, and two hex vectors (4 096 and the shipped 600 000) are asserted
 //     byte-identical in Node and WebKit.
-//   · **The AAD is the ENTIRE PLAINTEXT HEADER** — both READMEs, `format`, `v`, `exportedAt`,
-//     `app`, `identity.memberId`, every `identity.kdf` field. A `sealed` blob cannot be
-//     relabelled under another member, re-stamped with a different iteration count, or have the
-//     honesty copy stripped, without the tag failing. **The `board` block is deliberately NOT
-//     bound — see the limit below.**
+//   · **The AAD is the ENTIRE PLAINTEXT HEADER, PLUS A DIGEST OF THE BOARD** — both READMEs,
+//     `format`, `v`, `exportedAt`, `app`, `identity.memberId`, every `identity.kdf` field, and
+//     `board: {digest, hash}` where `digest = b64u(SHA-256(boardDigestInput(file.board)))`.
+//     A `sealed` blob cannot be relabelled under another member, re-stamped with a different
+//     iteration count, have the honesty copy stripped, **or have one word of one entry rewritten**,
+//     without the tag failing. The digest is **not a field of the file** — it is recomputed on
+//     both sides, so there is nothing to strip and no wire format to version. See S3 below.
 //   · **The public halves are RECOVERED, not stored.** §7.2 seals only `recSigPkcs8`/
 //     `recKexPkcs8`; PKCS#8 imports to a private key alone and every consumer needs a
 //     `CryptoKeyPair`. Rather than add fields or parse DER by offset, the private key is
@@ -868,16 +965,52 @@ export async function openInviteKeys(blob, wrapKey, salt) { throw new Error('RET
 //     "successfully" and then minted an attestation that `core/authz.js`'s
 //     `parseAttestationBlob` refuses on EVERY machine, with nothing anywhere saying why.
 //
-// ⚠ **ONE HONEST LIMIT, AND IT IS A PO DECISION IF YOU WANT IT CLOSED. The board block is not
-// authenticated.** With a passphrase a board digest could be bound into the AAD, but the
-// board-only path has no key at all, so the guarantee would exist on ONE of the two export
-// paths — and a guarantee that holds on one path is worse than one stated plainly. (It would
-// also let an export FAIL on a board whose `settings` picked up a float, since `canonicalJSON`
-// refuses non-integers; losing the user's export to a stray setting is the worse failure.)
-// Consequence: whoever edits a backup file edits the board that comes back. **The keys are
-// unaffected — a modified file will not open at all.** Carried as `LIMITS.boardNotAuthenticated`
-// in German and English, and asserted as a characterization row so it cannot be quietly assumed
-// away. If you want it bound, it is a small change plus a re-derivation of the AAD.
+// ─────────────────────────────────────────────────────────────────────────────
+// FIXED 2026-08-28 — S3, S4, S7, S8. The four backup findings from the E3 red team.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// **S3 — the board block IS authenticated, on the identity path.** This replaces the "one honest
+// limit" that stood here, and E3-6 (which was filed as a PO question) is answered. E3-6's
+// argument was that binding the board "would exist on ONE of the two export paths, and a
+// guarantee that holds on one path is worse than one stated plainly." That is true of the
+// BOARD-ONLY file, which has no key and therefore cannot have the guarantee, and says nothing
+// about the file that says „DIES IST DEIN SCHLÜSSEL" across the top and was half unsigned:
+// whoever found it on the family NAS could rewrite, add or DELETE entries and the import returned
+// a fully valid identity beside her board. Two paths with TWO STATED guarantees is the shape the
+// argument permits — `LIMITS.board.withIdentity` and `LIMITS.board.boardOnly`, German and
+// English, plus one line each under the two export-sheet buttons.
+//   E3-6's second objection is PAID rather than argued away. `boardDigestInput` deliberately does
+//   NOT use `canonicalJSON` (which refuses floats): it is a total function over everything
+//   `JSON.stringify` can write, so a `settings` that picked up a `0.5` cannot cost the user their
+//   export. It sorts object keys, so a file re-serialized by a different writer still opens — the
+//   one member of the field domain where "the import must SUCCEED" is the requirement (C2a-20).
+//
+// **S4 — a half-written key store is repairable.** `prepareKeyStore` (was `assertKeyStoreIsFree`)
+// still REFUSES the attempt that meets a partial store, and now clears the dead residue on the
+// way out, so the retry meets an empty store. It deletes only what is provably dead on two
+// independent grounds — the triple is partial (every reader in `identity.js` refuses it by
+// construction) AND no readable metadata names another member, which is now checked even on a
+// PARTIAL triple, i.e. strictly stricter than before. It runs at step 4, after the AEAD tag, so a
+// thief with the Mac and a random file never reaches the delete. `SAY['keystore-partial']` changed
+// with it: „Dieser Mac muss neu gekoppelt werden" was true of a module that never deleted.
+//
+// **S7 — the passphrase has a named, SOFT floor.** `PASSPHRASE_FLOOR` + a pure
+// `passphraseStrength()` + `EXPORT_SHEET_COPY.passphrase` (DE/EN, shown BEFORE anything is typed)
+// + an optional `opts.onWeakPassphrase` port so "the sheet forgot to ask" is testable. Soft
+// because a hard refusal pushes the user onto „Nur Einträge sichern" — no recovery artefact at
+// all — which is strictly worse. `PASSPHRASE_FLOOR.hard = true` is the whole of the other
+// decision; the code `passphrase-too-weak` and its sentence exist, unused, so it stays one line.
+//
+// **S8 — a ring that does not cover 1..e is reported.** `result.spaces.<which>.missingEpochs`,
+// present ONLY when there are holes, and `result.consequence` becomes
+// `identity-restored-keys-pending` (§7.3 step 6's „Schlüssel ausstehend").
+//
+// ⚠ **WHAT IS STILL NOT CHECKABLE HERE, AND IS NOW SAID.** `result.familyBinding =
+// {spaceId, verified:false, say}` on every family restore. Whether the Kreis the file names is
+// this member's is NOT IN THE FILE, and the enumerated domain proves it rather than asserting it:
+// the „mein Kreis" and „ein anderer Kreis" inputs (C2c-1, C2c-2) are the same bytes, so no
+// implementation can warn on one and stay silent on the other. The check belongs to §7.3 step 5's
+// `POST /api/v1/devices/adopt`. **Owner: `server/`.**
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -887,7 +1020,8 @@ export async function openInviteKeys(blob, wrapKey, salt) { throw new Error('RET
  * @property {string} exportedAt @property {string} app
  * @property {Object} board       materialized v1-shape state, MY entries only (A2)
  * @property {{ kdf:Object, memberId:string, sealed:string }} [identity]
- *           AES-256-GCM over canonicalJSON({recSigPkcs8, recKexPkcs8, personal, family}).
+ *           AES-256-GCM over canonicalJSON({recSigPkcs8, recKexPkcs8, personal, family}),
+ *           with the plaintext header AND a SHA-256 of `board` as the AAD (S3).
  *           OMITTED ENTIRELY when no passphrase is given. NEVER written in plaintext.
  */
 
@@ -937,9 +1071,32 @@ export async function deriveBackupKey(passphrase, salt, iterations, ports) { thr
  *          random?:Function}} opts
  * @returns {Promise<{board:Object, lineage:Object|null, identityRestored:boolean,
  *          identity:Identity|null, spaces:Object|null, attestation:DeviceAttestation|null,
- *          blob:string|null, consequence:Object}>}
+ *          blob:string|null, consequence:Object,
+ *          familyBinding:{spaceId:string, verified:false, say:Object}|null}>}
+ *          `spaces.<which>` carries `missingEpochs:number[]` ONLY when the ring has holes (S8);
+ *          its ABSENCE is the "complete" signal, and `consequence` then becomes
+ *          `identity-restored-keys-pending`. `familyBinding` is non-null on every family restore.
  */
 export async function importBackup(file, passphrase, ks, opts) { throw new Error('not implemented'); }
+
+/**
+ * S7 — PURE, SYNCHRONOUS, NO CRYPTO, so the export sheet can call it on every keystroke.
+ * The floor is REPORTED, not enforced: `PASSPHRASE_FLOOR.hard` is false and D8's 2026-08-28
+ * extension argues why. `exportBackup` also calls it once and fires `opts.onWeakPassphrase`.
+ * @param {any} passphrase
+ * @returns {{code:'ok'|'weak'|'empty', weak:boolean, chars:number, distinct:number,
+ *            reasons:string[], say:{de,en}|null}}
+ */
+export function passphraseStrength(passphrase) { throw new Error('not implemented'); }
+
+/**
+ * S3 — the bytes the board digest is taken over, and the only thing that must be true of them:
+ *   `boardDigestInput(b)` === `boardDigestInput(JSON.parse(JSON.stringify(b)))`
+ * NOT `canonicalJSON` — that refuses floats, and losing a user's export to a stray `settings`
+ * value would be worse than the attack this defends against. Sorts object keys; leaves arrays.
+ * @param {any} board @returns {Uint8Array} never empty
+ */
+export function boardDigestInput(board) { throw new Error('not implemented'); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 8. Helpers

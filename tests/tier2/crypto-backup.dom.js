@@ -20,6 +20,11 @@
 //   3. **Engine difference 9 and resolution 4 in WebKit.** `importKey('pkcs8', …)` of a P-256
 //      private key with `verify` in the usages must be refused HERE too, and `exportKey('jwk')`
 //      of that private key must carry `x` and `y` — which is how the public halves come back.
+//   4. **S3's board digest, in WebKit's SHA-256 and WebKit's `JSON.stringify`.** The digest is a
+//      function of `JSON.stringify` output and of engine property ordering, and it is now part of
+//      the AAD — so a WebKit that disagreed with Node about either would open no Node-made file
+//      at all, and would seal files Node could not open. Section 5 is that proof, and it is a
+//      claim NOTHING in `npm test` can make.
 //
 // THE FIXTURE CONTAINS REAL, SEALED PRIVATE KEYS AND THAT IS FINE: they were generated for this
 // file, they belong to no member, they protect nothing, and they are under a passphrase written
@@ -53,6 +58,13 @@ const FIXTURE_PW = 'Tier-Zwei-Passwort';
 // (2 048 rather than 600 000 only so this file stays fast; the shipped count is exercised by the
 // KDF vector below). Regenerating it is a deliberate act: if it ever has to be replaced, the
 // replacement must be produced by Node and pasted here, or the cross-engine claim evaporates.
+//
+// RE-SEALED 2026-08-28 for finding S3. The AAD now carries a SHA-256 of the whole `board` block,
+// so the tag changed; NOTHING ELSE DID. The same salt, the same IV, the same passphrase and the
+// SAME SEALED PAYLOAD — the file was decrypted under the old AAD in Node and re-encrypted under
+// the new one, which is why every pinned public point below is still the one it was. Only the
+// last ciphertext block and the tag differ from the 2026-08-27 fixture, exactly as CTR-mode plus
+// a new AAD predicts, and that is itself worth knowing when reading the diff.
 // ─────────────────────────────────────────────────────────────────────────────
 const FIXTURE = {
   _README_de: "DIES IST DEIN SCHLÜSSEL. Wer diese Datei und dein Passwort hat, ist du. Ohne diese Datei und ohne deine Macs sind die Daten unwiederbringlich — niemand sonst hat die Schlüssel.",
@@ -117,7 +129,7 @@ const FIXTURE = {
       'd-BEAMZ6al-rvO-FlhektQdeYSrQJi0JSWegYdzLBhSLr8W2KUj5LSdB2G-mE4NRs1TdlRkkTYMp2JOvdlu2bukUbBOHt8-Q' +
       'lCitlD2UYlU4qB8T9IysnzBKc-e3H7fc1TWXq-oWEhrzscy6vfietPy7aNp7YGJMthiE2UV2NLpXrutAiocb2RUZFEPiAg5C' +
       'F1E34WH_uaqDkajkGigAvpxF3cjfkmIs79dQcsbdCNTwOKJsSJDAlFBdt6tv9r-Lv4b9bskvX-zbdWBOtlNuPhK7HvLVagHz' +
-      't7DDhqNRAgleiJHtUuKqe28R9Yt-jB5jaFZlOAdAwvzBgWH01JlENqmQvLjQ2WxBTWZMadGaIFnw',
+      't7DDhqNRAgleiJHtUuKqe28R9Yt-jB5jaFZlOAdAwvzBgWH01JlENqlmY277NVwQTJrsWCXp3C0Q',
   },
 };
 
@@ -467,4 +479,160 @@ test('the board-only path in WebKit reports the consequence and never opens the 
   assert.equal(r.consequence.code, 'no-identity-in-file');
   assert.includes(r.consequence.de, 'Familienkreis');
   assert.deepEqual(await ks.list(), []);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 5. S3, S4, S7, S8 — the four backup findings, proved in the engine that ships
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('S3 in WebKit: the board digest agrees with Node — the Node-made fixture opens, a rewritten one does not', async () => {
+  // THE CROSS-ENGINE CLAIM, and the one that could not exist before S3. The AAD now contains a
+  // SHA-256 over `JSON.stringify` output with sorted keys, so it depends on TWO things WebKit and
+  // Node could in principle disagree about: the exact bytes `JSON.stringify` writes, and the
+  // order `Object.keys` returns. If either differed, this engine would open no file the other
+  // wrote. The fixture opening at all (section 1) is already half the proof; this is the other
+  // half, from the attacking side.
+  for (const tamper of [
+    (f) => { f.board.notes[0].text = 'vom Angreifer eingesetzt'; },
+    (f) => { f.board.notes = []; },
+    (f) => { f.board.bars.push({ id: 'b9', startDate: '2026-01-01', endDate: '2026-01-02' }); },
+    (f) => { f.board.scratchpads['2026-09'] = 'anders'; },
+    (f) => { f.board.settings.bundesland = 'HH'; },
+    (f) => { f.board.categories[0].name = 'Privat'; },
+  ]) {
+    const f = clone(FIXTURE);
+    tamper(f);
+    const ks = keystore.memKeyStore();
+    const err = await rejects(
+      () => backup.importBackup(f, FIXTURE_PW, ks, { deviceId: ids.deviceId(), createdAt: DAY }),
+      'a rewritten board'
+    );
+    assert.equal(err.code, 'cannot-open');
+    assert.deepEqual(await ks.list(), [], 'a refused import wrote to the key store');
+  }
+
+  // …and a re-ordered board is NOT a rewritten one. WebKit's `Object.keys` order is what makes
+  // this pass or fail, which is precisely why it cannot be proved in Node.
+  const r = clone(FIXTURE);
+  const b = r.board;
+  r.board = { settings: b.settings, scratchpads: b.scratchpads, categories: b.categories,
+    bars: b.bars, notes: b.notes, schemaVersion: b.schemaVersion };
+  const ok = await backup.importBackup(r, FIXTURE_PW, keystore.memKeyStore(),
+    { deviceId: ids.deviceId(), createdAt: DAY });
+  assert.equal(ok.identityRestored, true, 'a re-ordered board broke the digest in WebKit');
+
+  // A file this engine WRITES is a file this engine reads back, board included — the round trip
+  // that catches a digest which is merely self-consistent.
+  const m = await makeMember();
+  const own = clone(await backup.exportBackup(makeBoard(m.memberId), m.identity, m.spaces, 'Ein langes Passwort',
+    { exportedAt: DAY, app: '2.0.0', iterations: 1000 }));
+  assert.equal((await backup.importBackup(own, 'Ein langes Passwort', keystore.memKeyStore(),
+    { deviceId: ids.deviceId(), createdAt: DAY })).identityRestored, true);
+  own.board.notes[0].text = 'geaendert';
+  assert.equal((await rejects(() => backup.importBackup(own, 'Ein langes Passwort', keystore.memKeyStore(),
+    { deviceId: ids.deviceId(), createdAt: DAY }), 'a board this engine sealed')).code, 'cannot-open');
+
+  // The copy that states the two paths' two guarantees ships in both languages.
+  assert.ok(backup.LIMITS.board.withIdentity.de.length > 0);
+  assert.ok(backup.LIMITS.board.boardOnly.en.length > 0);
+});
+
+test('S3 in WebKit: the digest is a total function — a float in `settings` does not lose the export', async () => {
+  // E3-6's second argument against binding the board was that `canonicalJSON` refuses
+  // non-integers, so an export could FAIL on a board whose `settings` picked up a `0.5`. That
+  // cost is paid rather than argued away: `boardDigestInput` is not `canonicalJSON`. Proved in
+  // this engine because `JSON.stringify` of a float is the number formatting the digest rests on.
+  const m = await makeMember();
+  const odd = makeBoard(m.memberId);
+  odd.settings = { ...odd.settings, zoom: 0.5, offset: -1.25, big: 1e21 };
+  const file = clone(await backup.exportBackup(odd, m.identity, m.spaces, 'Ein langes Passwort',
+    { exportedAt: DAY, app: '2.0.0', iterations: 1000 }));
+  const r = await backup.importBackup(file, 'Ein langes Passwort', keystore.memKeyStore(),
+    { deviceId: ids.deviceId(), createdAt: DAY });
+  assert.equal(r.identityRestored, true, 'a float in settings cost the user their export');
+  assert.equal(r.board.settings.zoom, 0.5);
+  assert.equal(r.board.settings.big, 1e21);
+});
+
+test('S4 in WebKit: a half-written store is refused, cleared, and the retry restores', async () => {
+  // The shape E3-1 makes REAL on this engine rather than theoretical: WebKit persists `CryptoKey`s
+  // under a Keychain-held master key, and a record that reads back `null` is exactly the "2 of 3"
+  // state this path is about. `memKeyStore` here (custody itself is `crypto-keystore-phase*`), but
+  // the classification and the repair are the module's and are proved where they ship.
+  const file = clone(FIXTURE);
+  const imp = () => ({ deviceId: ids.deviceId(), createdAt: DAY });
+  const ks = keystore.memKeyStore();
+  await backup.importBackup(clone(FIXTURE), FIXTURE_PW, ks, imp());
+  assert.equal((await ks.list()).length, 6);
+
+  await ks.del(identity.KEYSTORE_IDS.recMeta);
+  await ks.del(identity.KEYSTORE_IDS.devSig);
+  await ks.del(identity.KEYSTORE_IDS.devKex);
+  await ks.del(identity.KEYSTORE_IDS.devMeta);
+  assert.equal((await ks.list()).length, 2);
+
+  const err = await rejects(() => backup.importBackup(file, FIXTURE_PW, ks, imp()), 'a partial store');
+  assert.equal(err.code, 'keystore-partial');
+  assert.deepEqual(await ks.list(), [], 'the dead residue was left behind');
+  const r = await backup.importBackup(file, FIXTURE_PW, ks, imp());
+  assert.equal(r.identityRestored, true, 'the retry is still refused — S4 is open in WebKit');
+  assert.equal((await ks.list()).length, 6);
+  assert.ok(err.say.de.includes('noch einmal'));
+});
+
+test('S7 in WebKit: the passphrase floor is the same floor, and NFC is why it has to be measured here', async () => {
+  // `passphraseStrength` normalises to NFC before counting, for the same reason
+  // `passphraseBytes` does: macOS produces decomposed umlauts on some input paths, and this is
+  // the engine that receives what macOS typed. A floor that counted UTF-16 units, or counted an
+  // NFD „ü" as two characters, would disagree with the user about their own password HERE and
+  // nowhere else.
+  assert.equal(backup.PASSPHRASE_FLOOR.hard, false);
+  for (const [pw, weak] of [['1', true], ['1234', true], ['passwort', true], ['        x', true],
+    ['Schlüsselbund-2026', false], ['Kirschbaum-Sonntag-Regenschirm-41', false]]) {
+    assert.equal(backup.passphraseStrength(pw).weak, weak, pw);
+  }
+  // NFD and NFC are one passphrase, by the same count and with the same verdict…
+  const nfc = 'Schlüsselbund-2026';
+  const nfd = 'Schlüsselbund-2026';
+  assert.equal(backup.passphraseStrength(nfd).chars, backup.passphraseStrength(nfc).chars);
+  assert.equal(backup.passphraseStrength(nfd).weak, false);
+  // …and a file sealed under one really opens with the other, in this engine.
+  const m = await makeMember();
+  const file = clone(await backup.exportBackup(makeBoard(m.memberId), m.identity, m.spaces, nfd,
+    { exportedAt: DAY, app: '2.0.0', iterations: 1000 }));
+  const r = await backup.importBackup(file, nfc, keystore.memKeyStore(), { deviceId: ids.deviceId(), createdAt: DAY });
+  assert.equal(r.identityRestored, true, 'NFD sealed a file NFC cannot open');
+
+  // Weak still exports — the floor is soft — and the caller is told, once.
+  const told = [];
+  const weakFile = await backup.exportBackup(makeBoard(m.memberId), m.identity, m.spaces, '1234',
+    { exportedAt: DAY, app: '2.0.0', iterations: 1000, onWeakPassphrase: (s) => told.push(s) });
+  assert.equal(backup.inspectBackup(clone(weakFile)).hasIdentity, true);
+  assert.equal(told.length, 1);
+  assert.equal(JSON.stringify(weakFile).includes('strength'), false, 'the file carries a weakness flag');
+});
+
+test('S8 in WebKit: a ring that does not cover 1..e restores, and says which epochs are missing', async () => {
+  const m = await makeMember();
+  const ek = async () => crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+  const file = clone(await backup.exportBackup(makeBoard(m.memberId), m.identity, {
+    personal: { id: 'psp_T3st2P3rs0nalSpac3AAAA', epochs: new Map([[1, await ek()]]) },
+    family: { id: 'fsp_T3st2Fam1lySpac3AAAAAA', epoch: 4, epochs: new Map([[4, await ek()]]) },
+  }, 'Ein langes Passwort', { exportedAt: DAY, app: '2.0.0', iterations: 1000 }));
+
+  const r = await backup.importBackup(file, 'Ein langes Passwort', keystore.memKeyStore(),
+    { deviceId: ids.deviceId(), createdAt: DAY });
+  assert.equal(r.identityRestored, true);
+  assert.deepEqual([...r.spaces.family.missingEpochs], [1, 2, 3]);
+  assert.equal(r.consequence.code, 'identity-restored-keys-pending');
+  assert.includes(r.consequence.de, 'Schlüssel ausstehend');
+  // M-B6 — the Kreis is named, and named as unverified, on every family restore.
+  assert.equal(r.familyBinding.spaceId, 'fsp_T3st2Fam1lySpac3AAAAAA');
+  assert.equal(r.familyBinding.verified, false);
+
+  // The COMPLETE ring says nothing: the field's absence is the signal.
+  const full = await backup.importBackup(clone(FIXTURE), FIXTURE_PW, keystore.memKeyStore(),
+    { deviceId: ids.deviceId(), createdAt: DAY });
+  assert.equal('missingEpochs' in full.spaces.family, false);
+  assert.equal(full.consequence.code, 'identity-restored');
 });

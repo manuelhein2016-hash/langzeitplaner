@@ -429,9 +429,11 @@ export function unpad(paddedBytes) {
 // §2.2 lists four independent barriers; two of them live here:
 //
 //   barrier 3  sealOp accepts only a BRANDED patch for a family-space `pub.set`.
-//   barrier 4  sealOp re-derives `level` from the AUTHENTICATED register map and never trusts a
+//   barrier 4  sealOp reads `level` from the AUTHENTICATED register map and never trusts a
 //              caller-supplied one. A caller that passes 'geteilt' for a Belegt entry does not get
-//              its text sealed.
+//              its text sealed — and since finding S5 that is true of a caller who passes it in
+//              `op.f['pub.level']` too, not only of one who passes it in the brand. A declared
+//              level is a CLAIM CHECKED AGAINST the map; the map is the only source of the level.
 //
 // `src/js/core/project.js` is WP-10's and DOES NOT EXIST YET. Everything below is therefore
 // written as a SEAM with a stated contract, and today's behaviour is REFUSAL: a family-space
@@ -546,11 +548,22 @@ export const PROJECT_CONTRACT = Object.freeze({
       + 'The seal path INJECTS it as ctx.assertFamilyPatch; sealOp REFUSES to seal a family-space '
       + 'pub.set without it, so it can never be an optional check.',
     'The seal path injects ctx.levelOf(entityKey) -> "privat"|"belegt"|"geteilt"|null, read from '
-      + 'the AUTHENTICATED register map (the folded pub.level of that entity), so sealOp can '
-      + 're-derive the level rather than trust the caller (barrier 4).',
+      + 'the entity\'s AUTHENTICATED `visibility` TRUTH register — NOT from the last-published '
+      + '`pub.level` of the family entity, which is the level a transition is moving away from. '
+      + 'That was finding S5: naming the published register is what made barrier 4 need a `??` '
+      + 'onto the caller\'s value, and the `??` was the hole. The truth register already holds the '
+      + 'NEW level when the publish microtask runs (ADR 001 §0.9), so the transition needs no '
+      + 'exception and the caller asserts nothing.',
     'A patch whose brand.level disagrees with the re-derived level is REFUSED, not corrected: the '
       + 'disagreement means the projection and the register map are looking at different entities, '
       + 'and guessing which one is right is how a Belegt entry gets its text published.',
+    'THE PRECONDITION WP-10 MUST SATISFY BEFORE IT BUILDS ON BARRIER 4: op.f["pub.level"] is a '
+      + 'RESTATEMENT, not an input. sealOp refuses any family pub.set whose declared pub.level is '
+      + 'present, non-null and different from ctx.levelOf(op.e); `absent` and `null` are silence '
+      + 'and consult the map. So projectForFamily MUST emit the level it was actually given by the '
+      + 'truth register, and the outbox MUST wire ctx.levelOf to that same register — a levelOf '
+      + 'wired to the published pub.level makes every legitimate transition a barrier-4 refusal, '
+      + 'loudly and on the first share, which is the correct symptom of a mis-wired seam.',
   ]),
 });
 
@@ -604,7 +617,16 @@ function assertNoContentAboveLevel(patch, kind, level) {
  *           ADR 004 §2.2 barrier 2, injected from `core/project.js`. REQUIRED for a family-space
  *           `pub.set`; its absence is a refusal, never a skip.
  * @property {(entityKey:string) => ('privat'|'belegt'|'geteilt'|null)} [levelOf]
- *           barrier 4 — the authenticated register map's current `pub.level` for that entity.
+ *           barrier 4 — THE authenticated level of that entity, read from its own `visibility`
+ *           truth register in the personal space, NOT from the last-published `pub.level` of the
+ *           family entity. The distinction is the whole of finding S5: the published level is the
+ *           level a transition is moving AWAY from, so an implementation that answered with it
+ *           would force barrier 4 to accept the caller's word on every transition — which is
+ *           precisely the hole the `??` in the old formula opened. The truth register already
+ *           carries the NEW level when the publish microtask runs (ADR 001 §0.9), so the honest
+ *           transition needs no exception. Whatever this returns GOVERNS: `op.f['pub.level']` is
+ *           checked against it and can never replace it. An answer outside
+ *           `privat|belegt|geteilt` is a refusal, never a fallback to the patch.
  * @property {DeviceAttestation} [attestation]
  *           OPTIONAL, and the outbox SHOULD pass it: this device's own attestation. When present,
  *           `sealOp` mirrors the WHOLE far-side gate against the op it is about to seal — P2,
@@ -797,7 +819,43 @@ function assertProjected(op, ctx) {
       `sealOp: the patch was projected as a ${brand.kind} but addresses a ${kind}`, 'barrier3');
   }
 
-  // BARRIER 4 — re-derive the level from the AUTHENTICATED register map, never from the caller.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // BARRIER 4 — THE LEVEL IS THE AUTHENTICATED ONE. A DECLARED LEVEL IS A CLAIM TO BE CHECKED
+  // AGAINST IT, NEVER A SUBSTITUTE FOR IT.
+  //
+  // This used to read
+  //
+  //     const level = declared === undefined || declared === null ? folded : declared;
+  //
+  // — ADR 004 §2.2 barrier 4's formula `patch['pub.level'] ?? currentPubLevel(entityKey)`, taken
+  // literally. The E3 red team's row M-R7c walked straight through it and the enumeration of
+  // domain C4 (`tests/helpers/crypto-domains.js`) priced it at 35 of 324 cells: the caller's value
+  // won whenever the caller supplied one, a legitimate projection supplies one on every
+  // transition, and `brand.level === level` was then satisfied by the SAME caller having lied
+  // twice. The backstop was handed the lie as its level, so a `pub.text` sealed for an entry the
+  // register map calls **belegt**. Barrier 4 — the barrier whose entire job is to stop a future
+  // caller who never read ADR 004 — stopped nothing.
+  //
+  // WHY THE `??` LOOKED NECESSARY, AND WHAT ACTUALLY GOES THERE. The case it was reaching for is
+  // real: a level TRANSITION. "Share this entry" emits a patch carrying a NEW `pub.level`, and if
+  // the authenticated source were the last-PUBLISHED level — `currentPubLevel`, the folded
+  // `pub.level` of the family entity, the level being transitioned FROM — then every transition
+  // would disagree with it and sharing would be impossible. The `??` was papering over the fact
+  // that the formula named the wrong register.
+  //
+  // The fix is not to let the caller assert the from-level. It is to read the level the entity
+  // actually HAS: `ctx.levelOf` answers from the entity's own authenticated `visibility` truth
+  // register (ADR 004 §2.2 barrier 4 as amended — "the authenticated entity state", which is that
+  // barrier's own headline). At transition time that register already carries the NEW level,
+  // because the visibility op is emitted and folded BEFORE the publish microtask runs (ADR 001
+  // §0.9, ADR 004 §2.3). So the honest transition agrees with the map and seals; nothing the
+  // caller writes into `pub.level` can move the level a single step.
+  //
+  // `pub.level` therefore stays in the patch — the receiver needs it, §4.2 renders from it — but
+  // it is now a restatement checked for agreement, exactly like `brand.level` three lines below,
+  // and refused for the identical reason the code already gave: a guess here is how a Belegt entry
+  // gets its text published.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
   if (typeof ctx.levelOf !== 'function') {
     throw new RedactionError(
       'sealOp: no ctx.levelOf — the level must be re-derived from the authenticated register map ' +
@@ -806,11 +864,23 @@ function assertProjected(op, ctx) {
   }
   const declared = Object.prototype.hasOwnProperty.call(op.f, 'pub.level') ? op.f['pub.level'] : undefined;
   const folded = ctx.levelOf(op.e);
-  const level = declared === undefined || declared === null ? folded : declared;
+  // (i) THE ONLY ASSIGNMENT. There is deliberately no expression here in which `declared` appears.
+  const level = folded;
   if (!VISIBILITY_LEVELS.includes(level)) {
     throw new RedactionError(
-      `sealOp: cannot re-derive a level for ${JSON.stringify(op.e)} — the patch declares ` +
-      `${JSON.stringify(declared)} and the register map says ${JSON.stringify(folded)}`, 'barrier4');
+      `sealOp: the authenticated register map has no level for ${JSON.stringify(op.e)} — it answers ` +
+      `${JSON.stringify(folded)}. There is nothing to re-derive FROM, and a level the patch declares ` +
+      `(${JSON.stringify(declared)}) may not supply one (ADR 004 §2.2 barrier 4).`, 'barrier4');
+  }
+  // (ii) THE DECLARED LEVEL AS A CLAIM. `undefined` (absent) and `null` are silence, not
+  // disagreement — silence consults the map, which is what the map is for, and §5's withdrawal
+  // patches legitimately carry `pub.level: null`.
+  if (declared !== undefined && declared !== null && declared !== level) {
+    throw new RedactionError(
+      `sealOp: the patch declares level ${JSON.stringify(declared)} but the authenticated register ` +
+      `map says ${JSON.stringify(level)}. A declared level is a claim to be CHECKED against the map, ` +
+      'never a substitute for it — refusing rather than picking one (ADR 004 §2.2 barrier 4).',
+      'barrier4');
   }
   if (level === 'privat') {
     // A Privat entry produces no family op at all (ADR 004 §1, 16.1). The one thing that legitimately
@@ -877,25 +947,37 @@ function assertProjected(op, ctx) {
  * envelope that has never been decrypted, re-opened when the attesting `member.set{dev.*}` arrives
  * — the same shape §4.4's unknown-epoch park already requires of the inbox.
  *
- * **`att === null` HAS TWO CAUSES AND BOTH ARE PARKS.** Absent (first contact, a partial pull —
- * there is no causal delivery in this system) and CONTESTED (§2.3 "Two shorts, no winner": the fold
- * refuses to resolve a short claimed twice, rather than handing a backdated squatter the lookup and
- * therefore handing this function the squatter's verification key). `openOp` MUST NOT distinguish
- * them: both mean *this envelope cannot be resolved to a device right now*, both are re-evaluable,
- * and turning either into a rejection is the same silent data loss. A caller that wants to REPORT
- * the difference reads `AuthzResult.shortCollisions`.
+ * **`att === null` HAS SEVERAL CAUSES AND EVERY ONE IS A PARK.** Absent (first contact, a partial
+ * pull — there is no causal delivery in this system); UNPROVEN (§2.3 "One short, one signer": the
+ * only claims on the short were filed by devices other than the one they attest, so none of them
+ * is a credential); and PROVED TWICE (one short proven on two member records, which needs one
+ * signing private key in two places). `openOp` MUST NOT distinguish them: all mean *this envelope
+ * cannot be resolved to a device right now*, all are re-evaluable, and turning any of them into a
+ * rejection is the same silent data loss. A caller that wants to REPORT the difference reads
+ * `AuthzResult.unprovenShorts` and `AuthzResult.shortCollisions`.
  *
- * ⚠ **I-3 / R5-7 IS OPEN, AND THIS FUNCTION IS ITS BLAST RADIUS.** A squatter who files a
- * well-formed attestation under a peer's `deviceShort` makes `attestationOf` return `null` for that
- * short for ever — `dev.*` is write-once, there is no revocation anywhere in the fold, and the short
+ * ⚠ **I-3 / R5-7 IS CLOSED (2026-08-28), AND THIS FUNCTION IS WHY THE FIX IS SOUND — SO IT IS NOW
+ * LOAD-BEARING FOR THE FOLD AND NOT ONLY FOR THIS ENVELOPE.** A squatter who files a well-formed
+ * attestation under a peer's `deviceShort` used to make `attestationOf` return `null` for that
+ * short for ever: `dev.*` is write-once, there is no revocation anywhere in the fold, and the short
  * is the last 16 characters of every stamp that device has ever written, so it is trivially
- * discoverable. Every sealed envelope from that Mac then parks, permanently. `openOp` treats
- * `attestationOf` as a **PARTIAL FUNCTION** and parks, exactly as §5.2.1's amendment says; it does
- * NOT assume P2 restores liveness on a squatted short, because `sigPubRaw` is a public key
- * travelling in the victim's own register and the squatter can copy it and tell the truth about it
- * (round 5, R5-7c). Closing this needs FINDINGS §4.5 option (a) — first-claim binding on the PAIR
- * `(sigPubRaw, deviceShort)` at fold time — which is `src/js/core/authz.js`'s decision. Nothing at
- * this seam closes it and nothing built on this seam may pretend otherwise.
+ * discoverable. Every sealed envelope from that Mac then parked, permanently.
+ *
+ * The fold now refuses to treat her register as a credential at all, because the op that wrote it
+ * was not stamped by the device it attests (`devOf(cell.stamp) === att.deviceShort`) — FINDINGS
+ * §4.5 option (a), the pair `(sigPubRaw, deviceShort)` bound by possession rather than by a race.
+ * **That rule is sound only because of P2, P3 and check 4 below**, which together mean an op
+ * stamped with `S` was signed by the holder of `S`'s private key. Two obligations follow, and they
+ * are not stylistic:
+ *   · **check 4 may not be weakened, made optional, or moved after the decrypt.** The fold reads
+ *     the stamp and trusts it because this function checked it.
+ *   · **nothing may append an op to the log without it having passed `openOp`** — or that door
+ *     must refuse `member.set{dev.*}` outright. Characterized as M-I5b in
+ *     `tests/attack/crypto-member-impersonate.test.js`.
+ * `openOp` still treats `attestationOf` as a **PARTIAL FUNCTION** and parks, exactly as §5.2.1's
+ * amendment says, and still does NOT assume P2 restores liveness on a squatted short — P2 never
+ * could, because `sigPubRaw` is public and the squatter copies key and short together and tells
+ * the truth about both (round 5, R5-7c, which is still green and must stay).
  *
  * ═══ POST-DECRYPT — ALL FIVE, EVERY ONE A THROW (§5.2.2) ═══
  *
@@ -912,6 +994,11 @@ function assertProjected(op, ctx) {
  * silently stop being ATTRIBUTABLE, and the honest fix is one string comparison here rather than an
  * argument later. It is also the only T5 gap the lookup reading otherwise leaves open: forging a
  * peer's short inside one's own stamps.
+ *
+ * **AND SINCE 2026-08-28 IT CARRIES MORE THAN AN ORDERING PREMISE.** `core/authz.js` closes I-3 by
+ * reading `devOf(op.ts)` off the op that wrote a `dev.*` register and treating it as proof that the
+ * writer holds that short's signing key. The proof is this check plus P3. Drop check 4 and the
+ * squat works again — one op, and any named Mac in the family goes silent.
  *
  * **THERE IS NO REVOCATION INPUT HERE, AND INVENTING ONE IS NOT THIS SEAM'S JOB.** ADR 002 §2.3
  * "Revocation — the gap, and who owns it" (owner: WP-9): `dev.*` registers are write-once, so an

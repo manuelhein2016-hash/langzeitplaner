@@ -51,7 +51,15 @@ import { pad22, short16, FSP } from './_kit.js';
 const ME = `mem_${pad22('ME')}`;
 const MAMA = `mem_${pad22('MAMA')}`;
 const EVE = `mem_${pad22('EVE')}`;
-const dev = (t) => ({ id: `dev_${pad22(t)}`, short: short16(t) });
+/** A device, and — since 2026-08-28 — a registry: the fold reads WHO FILED a `dev.*` register,
+ *  not only what it says (I-3 closed; ADR 002 §2.3 "One short, one signer"). `attestOp` below
+ *  therefore derives the stamp from the FILING device, which is what a real Mac does. */
+const SHORT_OF = new Map();
+const dev = (t) => {
+  const d = { id: `dev_${pad22(t)}`, short: short16(t) };
+  SHORT_OF.set(d.id, d.short);
+  return d;
+};
 const D_MAMA = dev('DMAMA');
 const D_MAMA2 = dev('DMAMA2');          // 19.4 — Mama's iPad
 const D_EVE = dev('DEVE');
@@ -107,7 +115,7 @@ function mk(k, e, f, o) {
 }
 const attestOp = (housing, regShort, blob, ms, byDev) => mk(
   'member.set', memberKey(housing), { [`dev.${regShort}`]: blob },
-  { act: housing, dev: byDev, ts: fmt(ms, 0, short16('T')), space: FSP },
+  { act: housing, dev: byDev, ts: fmt(ms, 0, SHORT_OF.get(byDev) ?? short16('T')), space: FSP },
 );
 const U1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 /** A FAMILY content op — the space stage 0b's device gate actually guards. */
@@ -146,10 +154,15 @@ describe('R5-6 · the demoted label', () => {
   });
 
   test('R5-6b FAILED (held) · 19.4: a member\'s SECOND device still works, and Eve cannot break it', async () => {
+    // FILED BY THE IPAD ITSELF (corrected 2026-08-28). ADR 002 §6.3 step 8: the new Mac "mints
+    // its own non-extractable IK_sig/IK_kex, SELF-ATTESTS with the restored RK_sig, registers the
+    // device, and pulls from seq 0" — `pairing.js` `adoptPairedDevice` returns the blob the NEW
+    // device writes. This fixture had Mama's first Mac filing it, which no flow does, and since
+    // I-3 closed the difference is load-bearing: the fold reads who filed the register.
     const mama2 = attestOp(
       MAMA, D_MAMA2.short,
       attBlob({ memberId: MAMA, deviceId: D_MAMA2.id, deviceShort: D_MAMA2.short, keysOf: D_MAMA2.short }),
-      BASE + 10, D_MAMA.id,
+      BASE + 10, D_MAMA2.id,
     );
     const r = fold([MAMA_HONEST(), mama2]);
     assert.deepEqual([...r.attestedDevices.get(MAMA)].sort(), [D_MAMA.id, D_MAMA2.id].sort(),
@@ -179,6 +192,28 @@ describe('R5-6 · the demoted label', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('R5-7 · a contested deviceShort is a one-op, permanent, remote mute', () => {
+  // ── INVERTED 2026-08-28. I-3 / R5-7 IS CLOSED, and this round's finding is what closed it. ──
+  //
+  // Round 5's verdict was right on every point and it is worth writing down which point mattered:
+  // R5-7c proved that the fix everyone was waiting for — P2 inside `attestOpen` — could not work,
+  // because `sigPubRaw` is a PUBLIC key in the victim's own register. That is the reason the
+  // answer had to come from somewhere else, and where it came from is one line in
+  // `src/js/core/authz.js` stage 0a (FINDINGS §4.5 option (a), ADR 002 §2.3 "One short, one
+  // signer"):
+  //
+  //     a `dev.<S>` register is a CREDENTIAL only if the op that WROTE it was stamped by the
+  //     device it attests — `devOf(cell.stamp) === att.deviceShort`.
+  //
+  // Eve can copy every public field in Mama's register. She cannot author an op stamped with
+  // Mama's short: that envelope must carry `dv = <Mama's short>` and verify under Mama's signing
+  // key (`openOp` P2/P3/check 4). So R5-7a stands verbatim — the short is still printed in every
+  // stamp, and it still is not a secret — and it stops being a weapon, because knowing the short
+  // was never what was missing.
+  //
+  // R5-7d's argument survives INTACT and is now applied consistently: the trade `authz.js`
+  // refused for the LABEL — "refusing both claims would let anybody un-attest an honest peer" —
+  // is refused for the SHORT too. Both contests are admitted, both are reported, and neither
+  // costs the honest device anything.
   test('R5-7a SUCCEEDED (reachability) · the short a squatter needs is printed in every stamp the victim has ever written', async () => {
     // A REACHABILITY CHARACTERIZATION, not a defect row: it has no mutant, because what it
     // asserts is the stamp FORMAT (ADR 001 §1.3), which is correct and must not change. It is
@@ -196,7 +231,7 @@ describe('R5-7 · a contested deviceShort is a one-op, permanent, remote mute', 
     assert.equal(payload.sigPubRaw, MAMA_PUBKEY);
   });
 
-  test('R5-7b SUCCEEDED (defect) · ONE well-formed op from anybody mutes Mama\'s device, permanently', async () => {
+  test('R5-7b INVERTED · the same one op mutes nothing: it is admitted, reported, and never a credential', async () => {
     const squat = attestOp(
       EVE, D_MAMA.short,
       attBlob({ memberId: EVE, deviceId: D_EVE.id, deviceShort: D_MAMA.short, keysOf: D_EVE.short }),
@@ -206,23 +241,36 @@ describe('R5-7 · a contested deviceShort is a one-op, permanent, remote mute', 
     assert.ok(before.attestationOf(D_MAMA.short), 'before: Mama\'s envelopes can be opened');
 
     const after = fold([MAMA_HONEST(), squat]);
-    assert.equal(after.attestationOf(D_MAMA.short), null,
-      'after: §5.2.2 P1 parks every sealed envelope from that device, for ever');
-    assert.deepEqual(after.shortCollisions, [D_MAMA.short]);
-    // Nothing is rejected — the squat is ADMITTED, which is what makes it permanent.
+    assert.equal(after.attestationOf(D_MAMA.short).memberId, MAMA,
+      'after: unchanged — Eve filed Mama\'s register from HER OWN Mac, so it proves nothing');
+    assert.deepEqual(after.shortCollisions, [], 'there is no contest: one of the two was never a claim');
+    assert.deepEqual(after.unprovenShorts, [D_MAMA.short], 'and the attempt is still visible');
+    // Nothing is rejected — the squat is still ADMITTED, and that is deliberate: refusing it
+    // would hand Eve the un-attest primitive `authz.js` refuses her for the label (R5-7d).
     assert.equal(after.admitted.some((o) => o.id === squat.id), true, 'the squat is admitted …');
     assert.equal(after.rejected.length, 0, '… nothing is refused …');
-    // …and `dev.*` is write-once, so Mama cannot overwrite the collision, and there is no
-    // revocation op anywhere in the fold (R4-16a).
+    // The three facts that USED to make this permanent are all still true, and none of them
+    // matters now: `dev.*` is write-once, a re-attestation loses to Mama's own first claim, and
+    // there is still no revocation op anywhere in the fold (R4-16a). She never lost the short.
     const retry = attestOp(MAMA, D_MAMA.short, MAMA_BLOB, BASE + 999, D_MAMA.id);
     const still = fold([MAMA_HONEST(), squat, retry]);
-    assert.equal(still.attestationOf(D_MAMA.short), null, 'a re-attestation changes nothing');
+    assert.equal(still.rejected.some((o) => o.id === retry.id), true, 'write-once still refuses the retry');
+    assert.equal(still.attestationOf(D_MAMA.short).memberId, MAMA, 'and she did not need it');
+
+    // THE PRE-COLLISION WINDOW, which is where this used to be a DROP rather than a park: with
+    // Mama's own register not yet folded, Eve's blob is the only claim on the short and there is
+    // nothing to contest. It resolves to nobody, so `openOp` parks at P1 instead of resolving,
+    // decrypting and throwing at check 5.
+    const windowOnly = fold([squat]);
+    assert.equal(windowOnly.attestationOf(D_MAMA.short), null, 'she is never handed a short she cannot sign for');
+    assert.deepEqual(windowOnly.shortCollisions, []);
+    assert.deepEqual(windowOnly.unprovenShorts, [D_MAMA.short]);
     // Her own ops keep folding. The cost is confidentiality-preserving liveness, not integrity.
     const c = fold([MAMA_HONEST(), squat, contentOp(MAMA, D_MAMA.id, BASE + 40, rid('k'))]);
     assert.equal(c.admitted.some((o) => o.k === 'pub.set'), true, 'stage 0b is untouched, as designed');
   });
 
-  test('R5-7c SUCCEEDED (defect) · P2 — WP-6\'s owed fix — DOES NOT CLOSE IT, because sigPubRaw is public', async () => {
+  test('R5-7c STILL SUCCEEDS AS A CLAIM ABOUT P2 · P2 does not close it, and this row must never be retired', async () => {
     // First, the control: P2 is real here and it DOES refuse the naive squat of R5-7b, which is
     // exactly why the register records "until WP-6 ships P2, a squatted short costs liveness".
     const naive = attestOp(
@@ -246,17 +294,22 @@ describe('R5-7 · a contested deviceShort is a one-op, permanent, remote mute', 
     );
     const r = fold([MAMA_HONEST(), copied], { attestOpen: openerWithP2, attestVerify: undefined });
 
+    // THE CLAIM THIS ROW EXISTS FOR IS UNCHANGED AND STILL TRUE. Everything P2 can see is true.
     assert.equal(r.rejected.length, 0, 'ADR 002 §2.3 (1)(2)(3)(4) all pass …');
-    assert.equal(r.admitted.some((o) => o.id === copied.id), true, '… P2 passes, because the key IS that short\'s key …');
-    assert.deepEqual(r.shortCollisions, [D_MAMA.short], '… and the short is contested anyway');
-    assert.equal(r.attestationOf(D_MAMA.short), null, 'so Mama is muted with P2 shipped and armed');
-
+    assert.equal(r.admitted.some((o) => o.id === copied.id), true, '… and P2 passes, because the key IS that short\'s key');
     // And the §1.2 cross-check cannot see it either: Eve told the truth about `sigPubRaw`, so
     // `sigPubRaw → deviceShort` is still a function.
-    assert.equal(r.shortCollisions.length, 1, 'only the member-collision fired, not the key-collision');
+    assert.deepEqual(r.shortCollisions, [], 'the key-collision cannot fire on a truthful copy …');
+
+    // WHAT CHANGED IS ONLY THE CONSEQUENCE. The blob is admitted and it is not a credential,
+    // because P2 was never the question: `sigPubRaw` is public and she copied it honestly, but
+    // the op filing the register is stamped with HER short, and only Mama's Mac can stamp Mama's.
+    assert.deepEqual(r.unprovenShorts, [D_MAMA.short]);
+    assert.equal(r.attestationOf(D_MAMA.short).memberId, MAMA,
+      'so Mama is NOT muted, with P2 shipped and armed and the copy admitted');
   });
 
-  test('R5-7d SUCCEEDED (defect) · the trade `authz.js:882` rules out for the LABEL is what ships for the SHORT', async () => {
+  test('R5-7d INVERTED · the trade `authz.js` rules out for the LABEL is now refused for the SHORT too', async () => {
     // Both contests are one op by anybody. One is admitted and reported; the other is refused.
     const labelContest = attestOp(EVE, D_EVE.short,
       attBlob({ memberId: EVE, deviceId: D_MAMA.id, deviceShort: D_EVE.short, keysOf: D_EVE.short }), BASE + 1, D_EVE.id);
@@ -268,8 +321,12 @@ describe('R5-7 · a contested deviceShort is a one-op, permanent, remote mute', 
 
     // The label: the honest device keeps everything that enforces anything.
     assert.ok(byLabel.attestationOf(D_MAMA.short), 'label contested ⇒ the credential still resolves');
-    // The short: the honest device loses the credential.
-    assert.equal(byShort.attestationOf(D_MAMA.short), null, 'short contested ⇒ the credential is gone');
+    // The short: SO DOES THE SHORT, NOW. This row's argument was that one op by anybody must not
+    // cost an honest peer anything, and that `authz.js` had said so itself about the label while
+    // shipping the opposite for the short. It now says the same thing twice.
+    assert.equal(byShort.attestationOf(D_MAMA.short).memberId, MAMA,
+      'short contested ⇒ the credential still resolves, and the asymmetry is gone');
+    assert.deepEqual(byShort.unprovenShorts, [D_MAMA.short], 'reported, exactly as the label contest is');
     // `memberOfDevice` is the one place the label DOES answer null — so the un-attest primitive
     // the comment says it avoided exists there too, for any consumer of that accessor.
     assert.equal(byLabel.memberOfDevice(D_MAMA.id), null,

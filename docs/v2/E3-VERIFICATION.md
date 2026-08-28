@@ -257,7 +257,16 @@ Everything here is **reported, not reached into**: no E3 file touches another ow
 
 ### Open, and not closed by anything in E3
 
-- **I-3 / R5-7 stays OPEN**, and every E3 module says so in its own tests rather than assuming
+- ~~**I-3 / R5-7 stays OPEN**~~ — **CLOSED 2026-08-28, in `src/js/core/authz.js`, and no E3 file
+  changed.** Everything this entry says about P2 is true and is the reason the answer had to come
+  from the fold: a `dev.<S>` register is a credential only if the op that wrote it was stamped by
+  the device it attests (`devOf(cell.stamp) === att.deviceShort`), which is sound because
+  `openOp`'s P2, P3 and check 4 mean an op stamped with `S` was signed by `S`'s key. Two
+  obligations land on this layer as a result and are recorded in `crypto.contract.js`: **check 4
+  may not be weakened, made optional, or moved after the decrypt**, and **nothing may append an op
+  that has not passed `openOp`** (M-I5b). `attestationOf` is still a **partial** function — absent,
+  unproven, or proved twice — so nothing built on the park behaviour changes. Original text follows.
+  Every E3 module says so in its own tests rather than assuming
   otherwise. `verifyAttestation` enforces **P2** as a MUST — it refuses a validly-signed blob whose
   `deviceShort` is not `crock32(SHA-256(sigPubRaw)[0..10])`, and `attestDevice` refuses to mint one.
   **But P2 buys self-consistency, not identity**: `sigPubRaw` is a **public key travelling in the

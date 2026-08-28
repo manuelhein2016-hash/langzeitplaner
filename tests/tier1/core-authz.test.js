@@ -40,7 +40,7 @@ import {
 } from '../../src/js/core/authz.js';
 
 import { fmt, cmp } from '../../src/js/core/stamp.js';
-import { createdAt, cmpWrites } from '../../src/js/core/registers.js';
+import { createdAt, cmpWrites, applyOp, getValue } from '../../src/js/core/registers.js';
 import { b64u, ub64 } from '../../src/js/core/b64.js';
 import { canonicalBytes, utf8, utf8Decode } from '../../src/js/core/canon.js';
 import { FIELDS, fieldsOf, fieldSpec, validateOp, PARK_REASONS } from '../../src/js/core/ops.js';
@@ -655,18 +655,24 @@ test('F-10: ctx.attestOpen is accepted, and its answer may not disagree with the
   assert.equal(foldAuthorized(ops, { me: ME }).admitted.length, 0, 'and neither injection is fail-open');
 });
 
-test('I-3: a CONTESTED deviceShort resolves to nobody, at any stamp', () => {
+test('I-3 CLOSED: a SQUATTED deviceShort is unproven, so the victim keeps it — at any stamp', () => {
   // §2.3 argues `deviceShort → DeviceAttestation` is a function because two members would need
   // the same signing PRIVATE key. The four conditions do not enforce that: nothing in a pure,
   // synchronous fold can check `crock32(SHA-256(sigPubRaw)[0..10]) === deviceShort` — that is
   // §5.2.2's P2 and it lives in `openOp`. So a member CAN mint a well-formed attestation under a
-  // peer's short.
+  // peer's short, and P2 does not stop her: `sigPubRaw` is public and she copies it.
   //
-  // This used to be resolved minimal-under-`≺`, which handed the lookup — and therefore
-  // `openOp`'s verification key — to whichever claimant backdated harder, and left
-  // `shortCollisions` with no reader at all. The contest is no longer resolved: `attestationOf`
-  // REFUSES a contested short. `null` there is a defined outcome (P1 parks the sealed envelope,
-  // §5.2.5), so a squatter can stall an envelope and can never be handed the key that opens it.
+  // Two answers to that have been tried here. The FIRST resolved the contest minimal-under-`≺`,
+  // which handed the lookup — and therefore `openOp`'s verification key — to whichever claimant
+  // backdated harder. The SECOND refused the contest outright, which was safe against
+  // impersonation and catastrophic against denial of service: one op, and every envelope the
+  // victim's Mac would ever seal parked for ever (I-3 / R5-7).
+  //
+  // THE THIRD, and the one asserted here — FINDINGS §4.5 option (a): a `dev.<S>` register is a
+  // credential only if the op that WROTE it was stamped by the device it attests. The squatter
+  // can copy every public field; she cannot author an op whose stamp ends in his short, because
+  // that envelope must verify under his key (`openOp` P3 + check 4). So there is no contest to
+  // resolve — one of the two claims was never a claim.
   const { ops } = family({ members: [ME] });
   const squat = (ms) => mk('member.set', memberKey(EVE), {
     [`dev.${D[ME].short}`]: attBlob({ memberId: EVE, deviceId: devIdOf('EVEX'), deviceShort: D[ME].short }),
@@ -674,9 +680,10 @@ test('I-3: a CONTESTED deviceShort resolves to nobody, at any stamp', () => {
 
   for (const ms of [BASE + 5000, 0]) {
     const r = foldAuthorized([...ops, squat(ms)], CTX());
-    assert.deepEqual(r.shortCollisions, [D[ME].short], `ms=${ms}: the contest is REPORTED`);
-    assert.equal(r.attestationOf(D[ME].short), null,
-      `ms=${ms}: and REFUSED — no stamp the squatter picks buys the lookup any more`);
+    assert.deepEqual(r.shortCollisions, [], `ms=${ms}: nothing is contested`);
+    assert.deepEqual(r.unprovenShorts, [D[ME].short], `ms=${ms}: the attempt is still REPORTED`);
+    assert.equal(r.attestationOf(D[ME].short).memberId, ME,
+      `ms=${ms}: and no stamp the squatter picks takes the lookup away from its owner`);
   }
 
   // Stage 0b is untouched either way: the device gate is per-member, so ME's own ops still stand.
@@ -684,6 +691,25 @@ test('I-3: a CONTESTED deviceShort resolves to nobody, at any stamp', () => {
   assert.equal(early.attestedDevices.get(ME).has(D[ME].id), true);
   assert.equal(early.memberOfDevice(D[ME].id), ME);
   assert.equal(early.rejected.length, 0, 'and nothing is rejected — refusing both claims would be a DoS handle');
+
+  // THE PRE-COLLISION WINDOW — S2(c). With the victim's own register not yet folded there is
+  // nothing to contest at all, so no ordering rule could ever have helped here. The squat is
+  // refused for being unproven, which turns what used to be a resolve-decrypt-THROW (a final
+  // rejection, i.e. silent data loss) into a P1 park.
+  const alone = foldAuthorized([squat(0)], CTX());
+  assert.deepEqual(alone.shortCollisions, []);
+  assert.equal(alone.attestationOf(D[ME].short), null, 'she is never handed a short she cannot sign for');
+  assert.deepEqual(alone.unprovenShorts, [D[ME].short]);
+
+  // TWO PROVEN CLAIMS IS STILL A REFUSAL, and that half must not be lost: it needs one signing
+  // private key in two member records, which is an 80-bit collision or a broken engine, and
+  // neither is a contest a fold may pick a winner in.
+  const twinOfMine = mk('member.set', memberKey(EVE), {
+    [`dev.${D[ME].short}`]: attBlob({ memberId: EVE, deviceId: devIdOf('EVEX'), deviceShort: D[ME].short }),
+  }, { act: EVE, dev: devIdOf('EVEX'), ts: S(BASE + 7000, 0, D[ME].short), space: FSP, id: pad22('twin') });
+  const both = foldAuthorized([...ops, twinOfMine], CTX());
+  assert.deepEqual(both.shortCollisions, [D[ME].short]);
+  assert.equal(both.attestationOf(D[ME].short), null);
 
   // The only thing that would be fatal: two devices resolving the short differently.
   for (const seed of [1, 2, 3, 4, 5]) {
@@ -1306,6 +1332,141 @@ test('a co-editor writing a governing field takes the 3a path, never the 3b one'
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 7c. Stage 3c — INV-R1 on the RECEIVING device (ADR 004 §2.2, barrier 4's mirror)
+//
+// Every other redaction barrier lives in `sealOp`, on the machine the author controls. These
+// rows are about the machine they do NOT control: what the fold does with a `pub.set` that
+// carries content the entity's own level does not carry, however it got sealed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('S5(r) — a geteiltOnly value below Geteilt is DROPPED, and the rest of the op survives', () => {
+  const { ops, e } = published({ level: 'belegt' });
+  // The patched build: a real member, a real device, real authority over their own entity — and
+  // a `pub.text` for an entry the family only ever agreed to see as Belegt.
+  const leak = pubOp('fnote', ME, U1, { 'pub.date': '2026-10-01', 'pub.text': 'Scheidungsanwalt' },
+    S(BASE + 800, 0, D[ME].short), { act: ME });
+  const r = foldAuthorized([...ops, leak], CTX());
+
+  assert.equal(registerValue(r.regs, e, 'pub.text'), null,
+    'THE POINT: the value never reaches the register map — if this reads the string, S5(r) is back');
+  assert.equal(registerValue(r.regs, e, 'pub.date'), '2026-10-01',
+    'and the DATE survives: at Belegt a date is the legitimate payload, not content above the level');
+  assert.equal(reason(r, leak), null, 'the op itself is admitted — only the field was refused');
+
+  const rows = r.contentAboveLevel.filter((x) => x.opId === leak.id);
+  assert.deepEqual(rows.map((x) => x.field), ['pub.text'], 'exactly one field is reported dropped');
+  assert.equal(rows[0].level, 'belegt', 'the report says which level refused it');
+  assert.equal(rows[0].e, e);
+});
+
+test('S5(r) — `admitted` hands back the REDACTED body, so re-applying it cannot undo the drop', () => {
+  const { ops, e } = published({ level: 'belegt' });
+  const leak = pubOp('fnote', ME, U1, { 'pub.date': '2026-10-01', 'pub.text': 'Scheidungsanwalt' },
+    S(BASE + 800, 0, D[ME].short), { act: ME });
+  const r = foldAuthorized([...ops, leak], CTX());
+
+  const asFolded = r.admitted.find((o) => o.id === leak.id);
+  assert.ok(asFolded, 'the op IS admitted');
+  assert.deepEqual(Object.keys(asFolded.f), ['pub.date'],
+    'the body in `admitted` is the body that was folded, not the body that arrived');
+
+  // …and that is the whole reason it matters: `ops.contract.js` §3 lets a caller re-apply an
+  // admitted op to the settled map. Handing back the original would put the value straight back.
+  const copy = new Map();
+  for (const [k, cells] of r.regs) copy.set(k, new Map(cells));
+  assert.equal(applyOp(copy, asFolded), false, 're-applying an admitted op changes nothing (P2)');
+  assert.equal(getValue(copy, e, 'pub.text'), null, 'and it certainly does not restore the text');
+});
+
+test('S5(r) — an explicit null is a WITHDRAWAL and passes at every level', () => {
+  for (const level of ['privat', 'belegt', 'geteilt']) {
+    const { ops, e } = published({ level: 'geteilt' });
+    const down = pubOp('fnote', ME, U1, { 'pub.level': level, 'pub.text': null },
+      S(BASE + 800, 0, D[ME].short), { act: ME });
+    const r = foldAuthorized([...ops, down], CTX());
+    assert.equal(reason(r, down), null, `${level}: the downgrade is admitted`);
+    assert.equal(registerValue(r.regs, e, 'pub.text'), null, `${level}: the text is withdrawn`);
+    assert.deepEqual(r.contentAboveLevel.filter((x) => x.opId === down.id), [],
+      `${level}: a null is not "content above the level" and must not be reported as a drop`);
+  }
+});
+
+test('S5(r) — the rule is RETROACTIVE: a later downgrade withdraws a legitimately-shared text', () => {
+  // Sealed while the entry really WAS Geteilt. Nothing about this op was ever wrong.
+  const { ops, e } = published({ level: 'geteilt' });
+  assert.equal(foldAuthorized(ops, CTX()).regs.get(e).get('pub.text').value, 'Zahnarzt',
+    'control: at Geteilt the text is readable, so the drop below is the level and not the fixture');
+
+  // The owner downgrades — and, like an older build or a patched one, forgets the null.
+  const down = pubOp('fnote', ME, U1, { 'pub.level': 'belegt' }, S(BASE + 900, 0, D[ME].short), { act: ME });
+  const r = foldAuthorized([...ops, down], CTX());
+  assert.equal(registerValue(r.regs, e, 'pub.text'), undefined,
+    'THE POINT: the text goes even though the op that carried it was legitimate when it was sealed');
+  assert.equal(registerValue(r.regs, e, 'pub.date'), '2026-09-10', 'the Belegt payload stays');
+
+  // …and it does not depend on which op arrived first, which is the whole reason the rule reads
+  // the FINAL folded level rather than the level at the offending op's stamp.
+  const shuffled = foldAuthorized([down, ...ops], CTX());
+  assert.deepEqual(snapshot(shuffled).regs, snapshot(r).regs);
+});
+
+test('S5(r) — at Privat nothing is published at all, not even the date', () => {
+  const { ops, e } = published({ level: 'geteilt' });
+  const down = pubOp('fnote', ME, U1, { 'pub.level': 'privat' }, S(BASE + 900, 0, D[ME].short), { act: ME });
+  const r = foldAuthorized([...ops, down], CTX());
+  for (const f of ['pub.text', 'pub.date', 'pub.repeatsYearly']) {
+    assert.equal(registerValue(r.regs, e, f), undefined, `${f} is gone at Privat`);
+  }
+  assert.equal(registerValue(r.regs, e, 'pub.level'), 'privat', 'the governing register is NOT dropped');
+  assert.equal(registerValue(r.regs, e, 'pub.alive'), true,
+    'nor is `pub.alive` — governing registers are how a withdrawal is expressed');
+});
+
+test('S5(r) — an op the redaction empties is REJECTED, because `applyOp` refuses an empty patch', () => {
+  const { ops, e } = published({ level: 'belegt' });
+  const only = pubOp('fnote', ME, U1, { 'pub.text': 'nur Text' }, S(BASE + 800, 0, D[ME].short), { act: ME });
+  const r = foldAuthorized([...ops, only], CTX());
+  assert.equal(reason(r, only), REJECT_REASONS.CONTENT_ABOVE_LEVEL);
+  assert.equal(r.rejectionOf(only.id).stage, STAGES[3]);
+  assert.equal(r.admitted.some((o) => o.id === only.id), false,
+    'an op with nothing applicable left may not sit in `admitted` — P2 would throw on it');
+  assert.deepEqual(r.contentAboveLevel.filter((x) => x.opId === only.id).map((x) => x.field),
+    ['pub.text'], 'it is still REPORTED — a rejection is not a reason to stop saying what was dropped');
+});
+
+test('S5(r) — a co-editor cannot unlock the field by asserting the level in the same patch', () => {
+  // The receiving-side re-run of S5's own move: if the level cannot be declared at seal time,
+  // try declaring it in the op the peer folds. `pub.level` is governing, so this is not a
+  // co-edit at all and stage 3a refuses it before stage 3c is even asked.
+  const { ops, e } = published({ level: 'belegt' });
+  const grab = pubOp('fnote', ME, U1, { 'pub.level': 'geteilt', 'pub.text': 'fremd' },
+    S(BASE + 800, 0, D[MAMA].short), { act: MAMA });
+  const r = foldAuthorized([...ops, grab], CTX());
+  assert.equal(reason(r, grab), REJECT_REASONS.NOT_OWNER);
+  assert.equal(registerValue(r.regs, e, 'pub.level'), 'belegt', 'the level did not move');
+  assert.equal(registerValue(r.regs, e, 'pub.text'), null, 'and the text did not land');
+});
+
+test('S5(r) — the honest Geteilt publication is untouched: the rule refuses, it does not blank', () => {
+  const { ops, e } = published({ level: 'geteilt' });
+  const r = foldAuthorized(ops, CTX());
+  assert.equal(registerValue(r.regs, e, 'pub.text'), 'Zahnarzt');
+  assert.equal(registerValue(r.regs, e, 'pub.date'), '2026-09-10');
+  assert.deepEqual(r.contentAboveLevel, [], 'nothing is reported dropped on an honest log');
+});
+
+test('S5(r) — the report rides in the snapshot, so P5 covers it', () => {
+  const { ops } = published({ level: 'belegt' });
+  const leak = pubOp('fnote', ME, U1, { 'pub.date': '2026-10-01', 'pub.text': 'x' },
+    S(BASE + 800, 0, D[ME].short), { act: ME });
+  const a = snapshot(foldAuthorized([...ops, leak], CTX()));
+  const b = snapshot(foldAuthorized([leak, ...ops.slice().reverse()], CTX()));
+  assert.equal(a.contentAboveLevel.length, 1);
+  assert.deepEqual(a.contentAboveLevel, b.contentAboveLevel,
+    'a device that reported a redaction its peer did not would be exactly the divergence INV-R1 removes');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 8. Structural ownership — risk R10, adversarially
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1743,6 +1904,12 @@ test('every declared reason code is actually reachable — except the one that i
   pubOp('fnote', PAPA, U1, { 'pub.text': 'x' }, S(BASE + 60, 0, D[MAMA].short), { act: MAMA })], CTX())); // notGeteilt
   collect(foldAuthorized([...ops, pub, memberOp(MAMA, { _alive: false }, S(BASE + 50, 0, D[MAMA].short)),
     pubOp('fnote', PAPA, U1, { 'pub.text': 'x' }, S(BASE + 60, 0, D[MAMA].short), { act: MAMA })], CTX())); // notMember
+  // contentAboveLevel — stage 3c, and reachable only when the redaction empties the patch. The
+  // OWNER writes `pub.text` (the `geteiltOnly` field) to their own entity while it stands at
+  // Belegt: nothing about the authority is wrong, and nothing of the patch survives the level.
+  collect(foldAuthorized([...ops, pubOp('fnote', PAPA, U1, { 'pub.level': 'belegt' },
+    S(BASE + 20, 0, D[PAPA].short), { act: PAPA }),
+  pubOp('fnote', PAPA, U1, { 'pub.text': 'x' }, S(BASE + 60, 0, D[PAPA].short), { act: PAPA })], CTX())); // contentAboveLevel
 
   const declared = Object.values(REJECT_REASONS).sort();
   const unreachable = [REJECT_REASONS.NOT_COEDITABLE];   // see the "defence in depth" test above

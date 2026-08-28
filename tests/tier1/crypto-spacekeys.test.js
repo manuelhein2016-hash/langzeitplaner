@@ -603,6 +603,212 @@ test('KeyRing RETAINS every epoch, and names the gaps a partial delivery left', 
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// 6b. THE ADMISSIBLE SENDER SET — finding S1, ADR 002 §4.2 step 6 (amended 2026-08-28)
+//
+// Barrier 2 on the way IN. Until 2026-08-28 `admitWraps` derived its KEK from the sender key the
+// RELAY put on the row, so one throwaway ECDH keypair chose which key the victim sealed its own
+// Privat entries under. The domain that says which cells this is about is `C1` in
+// `tests/helpers/crypto-domains.js` (128 cells, 30 of them S1's); the adversarial half is
+// `tests/attack/crypto-relay-keyinjection.test.js` and `crypto-member-read.test.js` M-R6.
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('admitWraps REFUSES to run without ctx.senders — a skippable check is not a check', async () => {
+  const me = await makeMember();
+  const peer = await makeMember();
+  const key = await sk.createSpaceKey();
+  const myPub = await identity.importKexPublic(me.devices[0].kexPubRaw);
+  const row = {
+    epoch: 1,
+    wrapped: await sk.wrapSpaceKey(key, peer.devices[0].devKex.privateKey, myPub, { spaceId: FSP, epoch: 1 }),
+    senderKexPubRaw: peer.devices[0].kexPubRaw,
+  };
+  const ring = sk.createKeyRing();
+  await assert.rejects(
+    () => sk.admitWraps(ring, [row], { spaceId: FSP, myKexPriv: me.devices[0].devKex.privateKey }),
+    (e) => e instanceof sk.SpaceKeyError && /`ctx.senders` is REQUIRED/.test(e.message)
+  );
+  assert.equal(ring.size(), 0, 'and nothing was admitted on the way to the throw');
+  // `null` is not "no opinion" either — a caller that computed an empty roster must pass `[]`.
+  await assert.rejects(
+    () => sk.admitWraps(ring, [row], { spaceId: FSP, myKexPriv: me.devices[0].devKex.privateKey, senders: null }),
+    /`ctx.senders` is REQUIRED/
+  );
+});
+
+test('the sender set is the RECIPIENT set: the two constructors, the same brand, the same verification', async () => {
+  const me = await makeMember(2);
+  const peer = await makeMember();
+  const psp = mkSpaceId('personal');
+
+  const family = await sk.admissibleSenders(sk.familyRecipients([memberRecord(me), memberRecord(peer)]), FSP);
+  assert.equal(sk.isSenderSet(family), true);
+  assert.equal(family.size(), 3, 'my two Macs and the peer\'s one');
+  assert.deepEqual(family.deviceIds(), [...me.devices, ...peer.devices].map((d) => d.deviceId).sort());
+
+  const personal = await sk.admissibleSenders(sk.personalRecipients(ownRecord(me)), psp);
+  assert.equal(personal.size(), 3, 'my two Macs plus my own recovery key');
+  // THE STRUCTURAL CLAIM: `personalRecipients` refuses a foreign device, so the personal sender
+  // set cannot contain one — not "must not", cannot. There is no list to pass that would work.
+  assert.throws(() => sk.personalRecipients({
+    ...ownRecord(me),
+    devices: [{ deviceId: peer.devices[0].deviceId, memberId: peer.memberId, kexPubRaw: peer.devices[0].kexPubRaw, attestation: peer.devices[0].attestation }],
+  }), /REFUSING a device belonging to member/);
+
+  // A set is BOUND to one space, and the brands do not cross.
+  await assert.rejects(() => sk.admissibleSenders(family, mkSpaceId('family')), /verified for .* cannot authorize/);
+  await assert.rejects(() => sk.admissibleSenders(sk.familyRecipients([memberRecord(peer)]), psp),
+    /cannot authorize a "personal"-space admission/);
+  await assert.rejects(() => sk.admissibleSenders(sk.personalRecipients(ownRecord(me)), FSP),
+    /cannot authorize a "family"-space admission/);
+
+  // Unbranded, and a spread copy of a branded one: both refused, because the brand is a
+  // non-enumerable module-private Symbol.
+  const [genuine] = sk.familyRecipients([memberRecord(peer)]);
+  await assert.rejects(() => sk.admissibleSenders([{ ...genuine }], FSP), /UNBRANDED recipient cannot authorize/);
+  assert.equal(sk.isSenderSet({ ...family }), false);
+  await assert.rejects(() => sk.admissibleSenders({ ...family }, FSP), /expected the Recipient\[\]/);
+
+  // And the same key-injection binding the wrapping side enforces (§2.3): an attestation that
+  // verifies but names a DIFFERENT agreement key is refused on the way in too.
+  const rec = memberRecord(peer);
+  const swapped = sk.familyRecipients([{ ...rec, devices: [{ ...rec.devices[0], kexPubRaw: me.devices[0].kexPubRaw }] }]);
+  await assert.rejects(() => sk.admissibleSenders(swapped, FSP), /DIFFERENT agreement key/);
+});
+
+test('an EMPTY sender set refuses every row and never throws — the joiner before step 6', async () => {
+  // `assertRecipients` refuses an empty list because a wrap to NOBODY is a lost epoch. An
+  // admission from nobody is merely a sync that admitted nothing, and throwing here would teach a
+  // caller to pass a roster it had not verified.
+  const her = await makeMember();
+  const peer = await makeMember();
+  const key = await sk.createSpaceKey();
+  const myPub = await identity.importKexPublic(her.devices[0].kexPubRaw);
+  const row = {
+    epoch: 1,
+    wrapped: await sk.wrapSpaceKey(key, peer.devices[0].devKex.privateKey, myPub, { spaceId: FSP, epoch: 1 }),
+    senderKexPubRaw: peer.devices[0].kexPubRaw,
+  };
+  const ring = sk.createKeyRing();
+  const parked = await sk.admitWraps(ring, [row], { spaceId: FSP, myKexPriv: her.devices[0].devKex.privateKey, senders: [] });
+  assert.deepEqual(parked, { admitted: [], refused: 1, duplicates: 0, unauthorized: 1, unauthorizedEpochs: [1] });
+  assert.equal(ring.size(), 0);
+  // …and the SAME row, once she can name the sender. Re-evaluable, which is what §4.4 requires.
+  const now = await sk.admitWraps(ring, [row], {
+    spaceId: FSP, myKexPriv: her.devices[0].devKex.privateKey, senders: sk.familyRecipients([memberRecord(peer)]),
+  });
+  assert.deepEqual(now.admitted, [1]);
+});
+
+test('the ring REMEMBERS who delivered each key — a CryptoKey carries no provenance, the slot does', async () => {
+  const me = await makeMember();
+  const peer = await makeMember();
+  const key = await sk.createSpaceKey();
+  const myPub = await identity.importKexPublic(me.devices[0].kexPubRaw);
+
+  const ring = sk.createKeyRing();
+  // Minted here, or restored from this device's own key store: `local`, with no device id.
+  ring.put(FSP, 1, await sk.createSpaceKey());
+  assert.deepEqual(ring.originOf(FSP, 1), { how: 'local', deviceId: null, memberId: null });
+  assert.equal(ring.originOf(FSP, 9), null, 'a slot that holds nothing has no origin');
+  assert.equal(ring.originOf('not-a-space', 1), null);
+
+  await sk.admitWraps(ring, [{
+    epoch: 2,
+    wrapped: await sk.wrapSpaceKey(key, peer.devices[0].devKex.privateKey, myPub, { spaceId: FSP, epoch: 2 }),
+    senderKexPubRaw: peer.devices[0].kexPubRaw,
+  }], {
+    spaceId: FSP, myKexPriv: me.devices[0].devKex.privateKey,
+    senders: sk.familyRecipients([memberRecord(peer)]),
+  });
+  assert.deepEqual(ring.originOf(FSP, 2), {
+    how: 'admitted', deviceId: peer.devices[0].deviceId, memberId: peer.memberId,
+  });
+
+  // `rotateSpace` mints, so its epoch is `local` — the ring can tell its own keys from the ones
+  // it accepted, which is the distinction the finding said did not exist.
+  const rot = await sk.rotateSpace({
+    ring, spaceId: PSP, myKexPriv: me.devices[0].devKex.privateKey,
+    recipients: sk.personalRecipients(ownRecord(me)),
+  });
+  assert.equal(ring.originOf(PSP, rot.epoch).how, 'local');
+});
+
+test('C1 in miniature: the four sender kinds against one free slot, both spaces', async () => {
+  // One cell from each row of `crypto-domains.js`'s C1 sender axis, kept here so the unit suite
+  // fails too when the property suite is not what someone is running.
+  const me = await makeMember(2);
+  const peer = await makeMember();
+  const outsider = await makeMember();
+  const throwaway = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
+  const myPub = await identity.importKexPublic(me.devices[0].kexPubRaw);
+  const myPriv = me.devices[0].devKex.privateKey;
+
+  const wrapFrom = async (priv, space, epoch) =>
+    sk.wrapSpaceKey(await sk.createSpaceKey(), priv, myPub, { spaceId: space, epoch });
+
+  for (const [space, senders, entitled] of [
+    [FSP, sk.familyRecipients([memberRecord(me), memberRecord(peer)]), ['member', 'myself']],
+    [PSP, sk.personalRecipients(ownRecord(me)), ['member', 'myself']],
+  ]) {
+    const kinds = {
+      // `member` — the CONTROL. In the family space that is the peer; in the personal space it is
+      // my own second Mac. If this ever refuses, every refusal below is vacuous.
+      member: space === FSP
+        ? { priv: peer.devices[0].devKex.privateKey, declared: peer.devices[0].kexPubRaw }
+        : { priv: me.devices[1].devKex.privateKey, declared: me.devices[1].kexPubRaw },
+      myself: { priv: myPriv, declared: me.devices[0].kexPubRaw },
+      'other-member': { priv: outsider.devices[0].devKex.privateKey, declared: outsider.devices[0].kexPubRaw },
+      unattested: { priv: throwaway.privateKey, declared: new Uint8Array(await S.exportKey('raw', throwaway.publicKey)) },
+      absent: { priv: throwaway.privateKey, declared: undefined },
+      malformed: { priv: throwaway.privateKey, declared: 'nicht-ein-punkt!!' },
+    };
+    let epoch = 1;
+    for (const [name, spec] of Object.entries(kinds)) {
+      const row = { epoch, wrapped: await wrapFrom(spec.priv, space, epoch) };
+      if (spec.declared !== undefined) row.senderKexPubRaw = spec.declared;
+      const ring = sk.createKeyRing();
+      const rep = await sk.admitWraps(ring, [row], { spaceId: space, myKexPriv: myPriv, senders });
+      if (entitled.includes(name)) {
+        assert.deepEqual(rep.admitted, [epoch], `${space} / ${name} must be ADMITTED`);
+        assert.equal(ring.originOf(space, epoch).how, 'admitted');
+      } else {
+        assert.deepEqual(rep.admitted, [], `${space} / ${name} must be REFUSED`);
+        assert.equal(rep.unauthorized, 1, `${space} / ${name} must be UNAUTHORIZED, not merely unopenable`);
+        assert.equal(ring.get(space, epoch), null);
+      }
+      epoch += 1;
+    }
+  }
+});
+
+test('a slot the ring ALREADY holds is a duplicate whoever sent the row — first-write-wins decides first', async () => {
+  // C1's `held` cells. The `ring.has` short-circuit runs BEFORE the sender check and must: two
+  // member devices both wrapping the same epoch to a joiner is D9's ordinary case (§7.1 step 4),
+  // and an unauthenticated row at an occupied slot could not change the answer anyway.
+  const me = await makeMember();
+  const peer = await makeMember();
+  const throwaway = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
+  const myPub = await identity.importKexPublic(me.devices[0].kexPubRaw);
+
+  const held = await sk.createSpaceKey();
+  const ring = sk.createKeyRing();
+  ring.put(FSP, 4, held);
+
+  const rep = await sk.admitWraps(ring, [{
+    epoch: 4,
+    wrapped: await sk.wrapSpaceKey(await sk.createSpaceKey(), throwaway.privateKey, myPub, { spaceId: FSP, epoch: 4 }),
+    senderKexPubRaw: b64u(new Uint8Array(await S.exportKey('raw', throwaway.publicKey))),
+  }], {
+    spaceId: FSP, myKexPriv: me.devices[0].devKex.privateKey,
+    senders: sk.familyRecipients([memberRecord(peer)]),
+  });
+  assert.deepEqual(rep, { admitted: [], refused: 0, duplicates: 1, unauthorized: 0, unauthorizedEpochs: [] });
+  const rawAes = async (k) => b64u(new Uint8Array(await S.exportKey('raw', k)));
+  assert.equal(await rawAes(ring.get(FSP, 4)), await rawAes(held), 'the key already decrypting ops is untouched');
+  assert.deepEqual(ring.originOf(FSP, 4), { how: 'local', deviceId: null, memberId: null });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 // 7. ALL EPOCHS — Oma's birthday (A4, story 17.1, risk R11)
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -645,7 +851,10 @@ test("A4: a joiner who arrives in epoch 7 can still read Oma's birthday, entered
   const admitted = await sk.admitWraps(
     herRing,
     wraps.map((w) => ({ epoch: w.epoch, wrapped: w.wrapped, senderKexPubRaw: senderPubRaw })),
-    { spaceId: FSP, myKexPriv: joiner.devices[0].devKex.privateKey }
+    // S1: the delivering device is named, not assumed. Mom's first family sync is §7.1 step 6 —
+    // she cannot fold the family stream yet, so this roster is the relay's coordination data and
+    // every attestation in it is verified by `admissibleSenders` before a byte is derived.
+    { spaceId: FSP, myKexPriv: joiner.devices[0].devKex.privateKey, senders: sk.familyRecipients([memberRecord(oldTimer)]) }
   );
   assert.deepEqual(admitted.admitted, [1, 2, 3, 4, 5, 6, 7]);
   assert.equal(admitted.refused, 0);
@@ -711,7 +920,9 @@ test('3 members · rotate · remove one · rotate: the removed member opens epoc
     const rows = rotation.wraps
       .filter((w) => w.deviceId === member.devices[deviceIx].deviceId)
       .map((w) => ({ epoch: w.epoch, wrapped: w.wrapped, senderKexPubRaw: mama.devices[0].kexPubRaw }));
-    await sk.admitWraps(r, rows, { spaceId: FSP, myKexPriv: member.devices[deviceIx].devKex.privateKey });
+    await sk.admitWraps(r, rows, {
+      spaceId: FSP, myKexPriv: member.devices[deviceIx].devKex.privateKey, senders: all(),
+    });
     return r;
   };
 
@@ -758,7 +969,7 @@ test('UNSHARING IS NOT UNREMEMBERING — the removed member keeps every op she h
     herRing,
     e1.wraps.filter((w) => w.deviceId === leaving.devices[0].deviceId)
       .map((w) => ({ epoch: w.epoch, wrapped: w.wrapped, senderKexPubRaw: admin.devices[0].kexPubRaw })),
-    { spaceId: FSP, myKexPriv: leaving.devices[0].devKex.privateKey }
+    { spaceId: FSP, myKexPriv: leaving.devices[0].devKex.privateKey, senders: both }
   );
 
   await sk.rotateSpace({
@@ -810,7 +1021,7 @@ test('D9: ANY existing member device delivers the ring — nothing here takes a 
     papaRing,
     e1.wraps.filter((w) => w.deviceId === papa.devices[0].deviceId)
       .map((w) => ({ epoch: w.epoch, wrapped: w.wrapped, senderKexPubRaw: admin.devices[0].kexPubRaw })),
-    { spaceId: FSP, myKexPriv: papa.devices[0].devKex.privateKey }
+    { spaceId: FSP, myKexPriv: papa.devices[0].devKex.privateKey, senders: seed }
   );
 
   // …so PAPA delivers, on his next ordinary sync, with the admin's laptop shut.
@@ -819,7 +1030,9 @@ test('D9: ANY existing member device delivers the ring — nothing here takes a 
   await sk.admitWraps(
     herRing,
     wraps.map((w) => ({ epoch: w.epoch, wrapped: w.wrapped, senderKexPubRaw: papa.devices[0].kexPubRaw })),
-    { spaceId: FSP, myKexPriv: joiner.devices[0].devKex.privateKey }
+    // …and PAPA is the verified sender here, not the admin. The sender set is a membership
+    // question, never a role question — D9's delivery half survives S1's fix intact.
+    { spaceId: FSP, myKexPriv: joiner.devices[0].devKex.privateKey, senders: sk.familyRecipients([memberRecord(papa)]) }
   );
   assert.equal(await openUnder(herRing.get(FSP, 1), entry), 'Omas Geburtstag');
 
@@ -962,7 +1175,9 @@ test('the exported surface is exactly what crypto.contract.js §3 names, plus wh
   // so it has nothing to put in the AAD and barrier 3 does not exist. The fourth argument is
   // MANDATORY here and the deviation is deliberate and reported.
   for (const name of ['createSpaceKey', 'wrapSpaceKey', 'unwrapSpaceKey', 'personalRecipients',
-    'familyRecipients', 'wrapToRecipients', 'loadKeyRing', 'buildRotation']) {
+    'familyRecipients', 'wrapToRecipients', 'loadKeyRing', 'buildRotation',
+    // Added to the contract 2026-08-28 with finding S1 — §4.2 step 6's receiving-side check.
+    'admissibleSenders', 'isSenderSet']) {
     assert.equal(typeof sk[name], 'function', `crypto.contract.js §3 names ${name}`);
   }
   assert.equal(sk.wrapSpaceKey.length, 4, 'the {spaceId, epoch} context is a required 4th argument');

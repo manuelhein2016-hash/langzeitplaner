@@ -19,11 +19,19 @@
 //   M-R3  a confused epoch — relabel, refile a wrap, downgrade the ring   FAILED (P3 / refused)
 //   M-R4  a personal envelope replayed into the family stream            FAILED (P3)
 //   M-R5  an "admin endpoint" — any capability in crypto/ that reads     FAILED (there is none)
-//   M-R6  KEY INJECTION through `admitWraps`                             **SUCCEEDED**
+//   M-R6  KEY INJECTION through `admitWraps`                             SUCCEEDED → **CLOSED**
 //
-// M-R6 is a live break of 20.5 and 21.2 and it is not any of the four barriers' fault: the four
-// barriers are about which key opens which envelope, and M-R6 changes WHICH KEY THE VICTIM USES.
-// See its own block for the sequence.
+// M-R6 was a live break of 20.5 and 21.2 and it was not any of the four barriers' fault: the four
+// barriers are about which key opens which envelope, and M-R6 changed WHICH KEY THE VICTIM USES.
+//
+// ⚠ INVERTED 2026-08-28 — finding S1. `admitWraps` now REQUIRES `ctx.senders`: the admissible
+// sender set for a space, built by the SAME two constructors that build the recipient set
+// (`personalRecipients` / `familyRecipients`) and verified by the same `recipientProblem`. A wrap
+// row's `senderKexPubRaw` selects a sender out of that set; it can no longer supply one. See
+// `spacekeys.js` §6b, and `tests/attack/crypto-relay-keyinjection.test.js` for the T1 half.
+//
+// The rows below are the attack unchanged, with the assertions inverted — M-R6 is the PERSONAL
+// instance (story 20.5, the sharpest one) and M-R6b the ordering instance.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import '../helpers/env.js';
@@ -34,12 +42,71 @@ import { fileURLToPath } from 'node:url';
 
 import * as sk from '../../src/js/crypto/spacekeys.js';
 import { sealOp, openOp, brandFamilyPatch, ENVELOPE_PARK } from '../../src/js/crypto/envelope.js';
+import { foldAuthorized, registerValue } from '../../src/js/core/authz.js';
 import {
   S, DAY, makeMember, memberRecord, ring, tableOf, makeOp, hdrFor, fnoteKey,
-  outcomeOf, rawKey, b64u, mkSpaceId, mkOpId,
+  outcomeOf, rawKey, b64u, mkSpaceId, mkOpId, attOp, attestOpenOver, fmt,
 } from './_member-kit.js';
 
 const CRYPTO_DIR = fileURLToPath(new URL('../../src/js/crypto/', import.meta.url));
+
+/**
+ * THE PATCHED BUILD, as a fixture. Everything about this attacker is real — a real member, real
+ * keys, a real attested device, real authority over her own entity — and the ONE thing she does
+ * that the shipped client cannot is skip `sealOp`. That is not cheating: `sealOp` runs on HER
+ * Mac, so every barrier inside it is hers to delete, and the question this helper asks is the
+ * only one left afterwards — what does the PEER do with the op when it arrives?
+ *
+ * Returns the peer's folded view of the entity: the two content registers, and what the fold
+ * says it withheld.
+ *
+ * @param {'privat'|'belegt'|'geteilt'} level the level the entity really stands at
+ */
+async function foldLeak(level) {
+  const her = await makeMember();
+  const dev = her.devices[0];
+  const FSP = mkSpaceId('family');
+  const E = fnoteKey(her.memberId);
+  const at = (n) => fmt(1787836800000 + n * 1000, 0, dev.deviceShort);
+  const op = (f, n) => ({ ...makeOp(dev, FSP, { k: 'pub.set', e: E, f }), ts: at(n) });
+
+  const ops = [
+    attOp(her.memberId, dev, dev.attestation, dev.deviceShort, FSP, 1787836700000),
+    { ...makeOp(dev, FSP, { k: 'member.set', e: `member:${her.memberId}`,
+      f: { displayName: 'Mama', _alive: true } }), ts: at(1) },
+    { ...makeOp(dev, FSP, { k: 'space.set', e: `space:${FSP}`,
+      f: { admin: her.memberId, adminPrev: null, name: 'Familie' } }), ts: at(2) },
+    op({ 'pub.level': level, 'pub.alive': true }, 3),
+    // The attack: the geteiltOnly field, carrying a value, for an entry at `level`.
+    op({ 'pub.date': '2026-10-01', 'pub.text': 'Scheidungsanwalt 14:30' }, 4),
+  ];
+  const attacker = ops[ops.length - 1];
+
+  const attestOpen = await attestOpenOver([[her.memberId, dev.attestation, her.rec.recSig.publicKey]]);
+  const r = foldAuthorized(ops, { me: her.memberId, attestOpen });
+  return {
+    text: registerValue(r.regs, E, 'pub.text'),
+    date: registerValue(r.regs, E, 'pub.date'),
+    reported: r.contentAboveLevel.filter((x) => x.opId === attacker.id).map((x) => x.field),
+    rejected: r.rejectionOf(attacker.id),
+  };
+}
+
+/**
+ * MY OWN devices, in the shape `personalRecipients` reads — barrier 2's personal half, which is
+ * also the personal space's admissible SENDER set since finding S1. `personalRecipients` REFUSES
+ * any device whose `memberId` is not mine, so this list cannot be widened by a caller mistake.
+ */
+const ownRecord = (m) => ({
+  memberId: m.memberId,
+  recoverySigPubRaw: m.recoveryPubSig,
+  devices: m.devices.map((d) => ({
+    deviceId: d.deviceId, memberId: m.memberId, kexPubRaw: d.kexPubRaw, attestation: d.attestation,
+  })),
+});
+
+/** The report shape `admitWraps` returns when NOTHING was admitted and nothing was unauthorized. */
+const REFUSED_ONE = { admitted: [], refused: 1, duplicates: 0, unauthorized: 0, unauthorizedEpochs: [] };
 
 // ═════════════════════════════════════════════════════════════════════════════
 // M-R1 · M-R2 · M-R4 — the family key, the forged tag, the cross-space replay
@@ -157,28 +224,36 @@ describe('T5 confuses an epoch', () => {
   });
 
   test('M-R3b FAILED — a wrap refiled under a different epoch or space is refused by admitWraps', async () => {
-    const rotator = await makeMember();
-    const peer = await makeMember();
+    // THE SENDER IS DELIBERATELY AUTHORIZED IN BOTH CALLS. Since S1 an unknown sender is refused
+    // before the AEAD ever runs, so a rotator who is a stranger would make this row pass for the
+    // wrong reason and stop measuring barrier 3 at all. `peer` has two Macs: the second is a
+    // legitimate member of the family sender set AND of `peer`'s own personal sender set, so the
+    // only thing left to refuse the refiled row is the salt/AAD binding — which is the point.
+    const peer = await makeMember(2);
+    const rotatorPriv = peer.devices[1].devKex.privateKey;
+    const rotatorPub = peer.devices[1].kexPubRaw;
     const FSP = mkSpaceId('family');
     const PSP = mkSpaceId('personal');
     const key3 = await sk.createSpaceKey();
 
-    const [w] = await sk.wrapToRecipients(
-      key3, rotator.devices[0].devKex.privateKey,
-      sk.familyRecipients([memberRecord(peer)]), { spaceId: FSP, epoch: 3 }
+    const wraps = await sk.wrapToRecipients(
+      key3, rotatorPriv, sk.familyRecipients([memberRecord(peer)]), { spaceId: FSP, epoch: 3 }
     );
+    const w = wraps.find((x) => x.deviceId === peer.devices[0].deviceId);
 
     // The salt AND the AAD both bind `[label, WRAP_V, SUITE_ID, kind, spaceId, epoch]`, so a row
     // the relay (or a member with push access) refiles is simply a blob that does not open.
     const asEpoch9 = await sk.admitWraps(sk.createKeyRing(),
-      [{ epoch: 9, wrapped: w.wrapped, senderKexPubRaw: rotator.devices[0].kexPubRaw }],
-      { spaceId: FSP, myKexPriv: peer.devices[0].devKex.privateKey });
-    assert.deepEqual(asEpoch9, { admitted: [], refused: 1, duplicates: 0 });
+      [{ epoch: 9, wrapped: w.wrapped, senderKexPubRaw: rotatorPub }],
+      { spaceId: FSP, myKexPriv: peer.devices[0].devKex.privateKey,
+        senders: sk.familyRecipients([memberRecord(peer)]) });
+    assert.deepEqual(asEpoch9, REFUSED_ONE, 'refused by the AEAD, with the sender authorized');
 
     const asPersonal = await sk.admitWraps(sk.createKeyRing(),
-      [{ epoch: 3, wrapped: w.wrapped, senderKexPubRaw: rotator.devices[0].kexPubRaw }],
-      { spaceId: PSP, myKexPriv: peer.devices[0].devKex.privateKey });
-    assert.deepEqual(asPersonal, { admitted: [], refused: 1, duplicates: 0 });
+      [{ epoch: 3, wrapped: w.wrapped, senderKexPubRaw: rotatorPub }],
+      { spaceId: PSP, myKexPriv: peer.devices[0].devKex.privateKey,
+        senders: sk.personalRecipients(ownRecord(peer)) });
+    assert.deepEqual(asPersonal, REFUSED_ONE, 'refused by the AEAD, with the sender authorized');
   });
 });
 
@@ -282,66 +357,100 @@ describe('T5 is the admin', () => {
     const kr = sk.createKeyRing();
     const admitted = await sk.admitWraps(kr,
       [{ epoch: 3, wrapped: row.wrapped, senderKexPubRaw: honest.devices[0].kexPubRaw }],
-      { spaceId: FSP, myKexPriv: phantom.devices[0].devKex.privateKey });
+      { spaceId: FSP, myKexPriv: phantom.devices[0].devKex.privateKey,
+        senders: sk.familyRecipients([memberRecord(honest)]) });
     assert.deepEqual(admitted.admitted, [3]);
     assert.equal(await rawKey(kr.get(FSP, 3)), await rawKey(fsk), 'the phantom holds FSK_3');
+    // S1's fix does not touch §8.5 and must not be read as if it did: the rotator here IS honest
+    // and IS in the phantom's sender set. What the fix changed is that the ring can now name who
+    // delivered the key, which is the difference between an anonymous injection and a member row
+    // somebody can look at.
+    assert.equal(kr.originOf(FSP, 3).deviceId, honest.devices[0].deviceId);
   });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// M-R6 — **SUCCEEDED.** Key injection through `admitWraps`.
+// M-R6 — SUCCEEDED, and **CLOSED 2026-08-28** (finding S1). Key injection through `admitWraps`.
 // ═════════════════════════════════════════════════════════════════════════════
 
 describe('T5 injects a key instead of stealing one', () => {
-  test('M-R6 SUCCEEDED — an UNATTESTED sender puts a key of its own choosing into a victim\'s PERSONAL ring, and then reads what the victim seals with it', async () => {
-    // THE SEQUENCE.
-    //  1. `unwrapSpaceKey`'s own contract says `theirKexPub` is "the sender's ECDH public key,
-    //     FROM THEIR VERIFIED ATTESTATION". Its only caller, `admitWraps`, takes it off
-    //     `row.senderKexPubRaw` — a field of the untrusted row — and verifies nothing.
-    //  2. So the attacker generates a throwaway ECDH pair, wraps a key SHE chose to the victim's
-    //     `IK_kex` (a public key, published in the victim's own attestation), and posts the row.
-    //  3. `admitWraps` admits it for any epoch the victim's ring does not already hold.
-    //  4. The victim now SEALS under the attacker's key. Everything that device writes in that
-    //     epoch — including its Privat entries, which live in the personal space — is readable by
-    //     the attacker and by nobody else.
+  test('M-R6 CLOSED — an UNATTESTED sender cannot put a key into a victim\'s PERSONAL ring, and neither can an ATTESTED fellow member', async () => {
+    // THE SEQUENCE THAT USED TO WORK.
+    //  1. `unwrapSpaceKey`'s contract says `theirKexPub` is "the sender's ECDH public key, FROM
+    //     THEIR VERIFIED ATTESTATION". Its only caller, `admitWraps`, took it off
+    //     `row.senderKexPubRaw` — a field of the untrusted row — and verified nothing.
+    //  2. So the attacker generated a throwaway ECDH pair, wrapped a key SHE chose to the victim's
+    //     `IK_kex` (a public key, published in the victim's own attestation), and posted the row.
+    //  3. `admitWraps` admitted it for any epoch the victim's ring did not already hold.
+    //  4. The victim then SEALED under the attacker's key.
     //
-    // ADR 002 §4.2 step 2 puts the attestation check on the WRAPPING side ("verify the device
-    // attestation of every current member device, THEN wrap"). There is no equivalent on the
-    // RECEIVING side, and the receiving side is the one that decides which key it will use.
-    const victim = await makeMember();
+    // THE FIX. `ctx.senders` is now required, and for a `psp_` space it can only be the output of
+    // `personalRecipients`, which REFUSES a device belonging to any member but me. So the personal
+    // space's sender set is my own attested Macs and nothing else — by construction, not by check.
+    //
+    // BOTH HALVES ARE ASSERTED, because a fix that only knew about strangers would leave 20.5
+    // broken by Mama, who is attested, current, and has no business in my Privat ring: row ② is
+    // the one that says "attested" was never the question. Attested BY WHOM, INTO WHAT, is.
+    const victim = await makeMember(2);          // my Mac, and my own second Mac
+    const mama = await makeMember();             // a real, attested, current member of the Kreis
     const V = victim.devices[0];
     const PSP = mkSpaceId('personal');
+    const KEX = { name: 'ECDH', namedCurve: 'P-256' };
 
-    const attackerKex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
+    const attackerKex = await S.generateKey(KEX, true, ['deriveKey', 'deriveBits']);
     const attackerKey = await sk.createSpaceKey();
-    const victimKexPub = await S.importKey('raw', V.kexPubRaw, { name: 'ECDH', namedCurve: 'P-256' }, true, []);
-    const injected = await sk.wrapSpaceKey(attackerKey, attackerKex.privateKey, victimKexPub,
-      { spaceId: PSP, epoch: 2 });
+    const victimKexPub = await S.importKey('raw', V.kexPubRaw, KEX, true, []);
+    const ctx = {
+      spaceId: PSP,
+      myKexPriv: V.devKex.privateKey,
+      senders: sk.personalRecipients(ownRecord(victim)),
+    };
 
     const kr = sk.createKeyRing();
-    const report = await sk.admitWraps(kr, [{
+    const report = await sk.admitWraps(kr, [
+      // ① the throwaway keypair — S1 in its purest form
+      {
+        epoch: 2,
+        wrapped: await sk.wrapSpaceKey(attackerKey, attackerKex.privateKey, victimKexPub, { spaceId: PSP, epoch: 2 }),
+        senderKexPubRaw: b64u(new Uint8Array(await S.exportKey('raw', attackerKex.publicKey))),
+      },
+      // ② Mama — attested, real, current, and not one of MY devices
+      {
+        epoch: 3,
+        wrapped: await sk.wrapSpaceKey(attackerKey, mama.devices[0].devKex.privateKey, victimKexPub, { spaceId: PSP, epoch: 3 }),
+        senderKexPubRaw: mama.devices[0].kexPubRaw,
+      },
+    ], ctx);
+
+    assert.deepEqual(report, {
+      admitted: [], refused: 2, duplicates: 0, unauthorized: 2, unauthorizedEpochs: [2, 3],
+    }, 'if this line ever fails, M-R6 is OPEN again');
+    assert.equal(kr.size(), 0, 'nothing this device did not authenticate is in the personal ring');
+
+    // Step 4, the other way round: the Privat entry is sealed under a key that came from MY OWN
+    // second Mac, and the attacker's key opens nothing.
+    const psk2 = await sk.createSpaceKey();
+    const mine = await sk.admitWraps(kr, [{
       epoch: 2,
-      wrapped: injected,
-      senderKexPubRaw: b64u(new Uint8Array(await S.exportKey('raw', attackerKex.publicKey))),
-    }], { spaceId: PSP, myKexPriv: V.devKex.privateKey });
+      wrapped: await sk.wrapSpaceKey(psk2, victim.devices[1].devKex.privateKey, victimKexPub, { spaceId: PSP, epoch: 2 }),
+      senderKexPubRaw: victim.devices[1].kexPubRaw,
+    }], ctx);
+    assert.deepEqual(mine.admitted, [2], 'my own second Mac is still admitted — the fix is not "refuse everything"');
+    assert.deepEqual(kr.originOf(PSP, 2),
+      { how: 'admitted', deviceId: victim.devices[1].deviceId, memberId: victim.memberId });
 
-    assert.deepEqual(report, { admitted: [2], refused: 0, duplicates: 0 },
-      'admitWraps refused an unattested sender — if this line ever fails, M-R6 is FIXED');
-    assert.equal(await rawKey(kr.get(PSP, 2)), await rawKey(attackerKey));
-
-    // Step 4 — the victim's own Privat entry, sealed under the injected key and read by the
-    // attacker. Nothing in `sealOp` can notice: a `KeyRing` entry is a `CryptoKey`, and a
-    // `CryptoKey` carries no provenance.
     const privat = makeOp(V, PSP, { f: { date: '2026-09-10', text: 'Therapietermin' } });
     const env = await sealOp(privat, kr, V.devSig.privateKey, hdrFor(privat, V, 2));
-    const stolen = await openOp(env, ring([[PSP, 2, attackerKey]]), tableOf(V));
-    assert.equal(stolen.status, 'opened');
-    assert.equal(stolen.op.f.text, 'Therapietermin', '21.2 / 20.5 are broken along this route');
+    assert.equal(await outcomeOf(() => openOp(env, ring([[PSP, 2, attackerKey]]), tableOf(V))), 'aead',
+      '21.2 / 20.5 hold along this route again');
+    assert.equal((await openOp(env, kr, tableOf(V))).op.f.text, 'Therapietermin');
   });
 
-  test('M-R6b SUCCEEDED — the relay chooses the ROW ORDER, so the injected key beats the honest one and the honest wrap is counted as a duplicate', async () => {
-    // The same hole, in the shape it takes when an honest wrap also exists. `admitWraps` is
-    // first-row-wins (`ring.has` short-circuits), and the row order is the relay's to choose.
+  test('M-R6b CLOSED — the relay still chooses the ROW ORDER, and the order no longer decides', async () => {
+    // The same hole, in the shape it took when an honest wrap also existed. `admitWraps` is still
+    // first-row-wins (`ring.has` short-circuits, and it must: two member devices both wrapping the
+    // ring to a joiner is D9's ordinary case, §7.1 step 4). What changed is that a row from a
+    // sender this device cannot name never reaches `put`, so winning the race buys nothing.
     const victim = await makeMember();
     const honest = await makeMember();
     const V = victim.devices[0];
@@ -349,8 +458,9 @@ describe('T5 injects a key instead of stealing one', () => {
     const honestKey = await sk.createSpaceKey();
     const attackerKey = await sk.createSpaceKey();
 
-    const victimKexPub = await S.importKey('raw', V.kexPubRaw, { name: 'ECDH', namedCurve: 'P-256' }, true, []);
-    const attackerKex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey', 'deriveBits']);
+    const KEX = { name: 'ECDH', namedCurve: 'P-256' };
+    const victimKexPub = await S.importKey('raw', V.kexPubRaw, KEX, true, []);
+    const attackerKex = await S.generateKey(KEX, true, ['deriveKey', 'deriveBits']);
     const honestWrap = await sk.wrapSpaceKey(honestKey, honest.devices[0].devKex.privateKey, victimKexPub, { spaceId: FSP, epoch: 4 });
     const forged = await sk.wrapSpaceKey(attackerKey, attackerKex.privateKey, victimKexPub, { spaceId: FSP, epoch: 4 });
 
@@ -358,17 +468,25 @@ describe('T5 injects a key instead of stealing one', () => {
     const report = await sk.admitWraps(kr, [
       { epoch: 4, wrapped: forged, senderKexPubRaw: b64u(new Uint8Array(await S.exportKey('raw', attackerKex.publicKey))) },
       { epoch: 4, wrapped: honestWrap, senderKexPubRaw: honest.devices[0].kexPubRaw },
-    ], { spaceId: FSP, myKexPriv: V.devKex.privateKey });
+    ], {
+      spaceId: FSP,
+      myKexPriv: V.devKex.privateKey,
+      senders: sk.familyRecipients([memberRecord(honest), memberRecord(victim)]),
+    });
 
-    assert.deepEqual(report, { admitted: [4], refused: 0, duplicates: 1 });
-    assert.equal(await rawKey(kr.get(FSP, 4)), await rawKey(attackerKey));
+    assert.deepEqual(report, {
+      admitted: [4], refused: 1, duplicates: 0, unauthorized: 1, unauthorizedEpochs: [4],
+    });
+    assert.equal(await rawKey(kr.get(FSP, 4)), await rawKey(honestKey));
+    // The injected row is no longer INDISTINGUISHABLE from the benign duplicate: `duplicates` is
+    // 0 and `unauthorized` is 1, so a caller finally has an anomaly it can surface.
+    assert.equal(report.duplicates, 0);
 
-    // And the second-order damage: every GENUINE epoch-4 envelope now fails the tag, and an
-    // AEAD failure in `openOp` is a THROW, not a park — so those ops are dropped, not retried.
+    // And the second-order damage goes with it: the genuine epoch-4 envelope opens.
     const author = honest.devices[0];
     const op = makeOp(author, FSP, { k: 'note.set', space: mkSpaceId('personal') });
     const genuine = await sealOp(op, ring([[op.space, 4, honestKey]]), author.devSig.privateKey, hdrFor(op, author, 4));
-    assert.equal(await outcomeOf(() => openOp(genuine, ring([[op.space, 4, attackerKey]]), tableOf(author))), 'aead');
+    assert.equal((await openOp(genuine, ring([[op.space, 4, honestKey]]), tableOf(author))).status, 'opened');
   });
 });
 
@@ -413,25 +531,29 @@ describe('T5 reads the content of a Belegt entry', () => {
     assert.equal(await outcomeOf(() => sealOp(op, kr, dev.devSig.privateKey, hdrFor(op, dev, 1), ctx)), 'backstop');
   });
 
-  test('M-R7c **SUCCEEDED against barrier 4** — the "authenticated" level is only consulted when the PATCH is silent', async () => {
-    // ADR 004 §2.2 barrier 4, and `envelope.js`'s own comment on the line: "re-derive the level
-    // from the AUTHENTICATED register map, NEVER from the caller."
+  test('M-R7c CLOSED (S5) — the declared level is a CLAIM CHECKED against the map, and the lie is refused', async () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // THIS ROW SUCCEEDED. IT IS INVERTED, NOT DELETED. What it used to prove:
     //
-    // What the code does:
     //     const declared = op.f['pub.level'] ?? undefined;
     //     const folded   = ctx.levelOf(op.e);
     //     const level    = declared === undefined || declared === null ? folded : declared;
     //
-    // The caller's value WINS whenever the caller supplies one — and a projection must supply one
-    // on every legitimate transition, so it supplies one nearly always. `brand.level === level` is
-    // then satisfied by the same caller having lied twice, and the backstop is handed the lie as
-    // its level. The authenticated register map is consulted only for a patch that omits
-    // `pub.level` entirely.
+    // The caller's value won whenever the caller supplied one — and a projection supplies one on
+    // every legitimate transition, so nearly always. `brand.level === level` was then satisfied by
+    // the same caller having lied twice, and the backstop was handed the lie as its level. The
+    // authenticated register map was consulted only for a patch that omitted `pub.level` entirely,
+    // so barrier 4 — the barrier that exists to stop a future caller who never read ADR 004 —
+    // stopped nothing. Finding **S5**; domain C4 priced it at 35 of 324 cells.
     //
-    // This does not let a member read a PEER's Belegt entry — barrier 4 guards the author's own
-    // outbound path, so the leak is self-inflicted. It does mean barrier 4 provides no defence
-    // against the bug it exists to catch (a projection that publishes text for a Belegt entry),
-    // which is what WP-10 will be building on top of.
+    // What the code does now (`src/js/crypto/envelope.js`, "BARRIER 4 — THE LEVEL IS THE
+    // AUTHENTICATED ONE"): `level = folded`, full stop, with `declared` appearing in no expression
+    // that produces it; a `declared` that is present, non-null and different from the map is a
+    // barrier-4 refusal; `absent` and `null` are silence. The legitimate transition still seals,
+    // because `ctx.levelOf` reads the entity's authenticated `visibility` TRUTH register — which
+    // already carries the NEW level when the publish microtask runs — and not the last-published
+    // `pub.level`, which is the level the transition is moving away FROM.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
     const me = await makeMember();
     const dev = me.devices[0];
     const FSP = mkSpaceId('family');
@@ -440,21 +562,48 @@ describe('T5 reads the content of a Belegt entry', () => {
 
     // The register map — the authenticated one — says this entry is BELEGT.
     const ctx = { levelOf: () => 'belegt', assertFamilyPatch: () => {} };
-    const op = makeOp(dev, FSP, {
-      k: 'pub.set', e,
-      f: brandFamilyPatch(
-        { 'pub.level': 'geteilt', 'pub.date': '2026-09-10', 'pub.text': 'Scheidungsanwalt 14:30' },
-        { kind: 'fnote', level: 'geteilt' }),
-    });
-    const env = await sealOp(op, kr, dev.devSig.privateKey, hdrFor(op, dev, 1), ctx);
-    assert.equal(typeof env.ct, 'string', 'barrier 4 refused — if this fails, M-R7c is FIXED');
+    const attack = brandFamilyPatch(
+      { 'pub.level': 'geteilt', 'pub.date': '2026-09-10', 'pub.text': 'Scheidungsanwalt 14:30' },
+      { kind: 'fnote', level: 'geteilt' });
+    const op = makeOp(dev, FSP, { k: 'pub.set', e, f: attack });
+    assert.equal(
+      await outcomeOf(() => sealOp(op, kr, dev.devSig.privateKey, hdrFor(op, dev, 1), ctx)),
+      'barrier4', 'the lie in pub.level is refused where it is told — if this fails, S5 is back');
 
-    // …and no reader refuses it either: `geteiltOnly` is enforced at SEAL time only. Grep-level
-    // assertion, because the fold is another workflow's file and this is a report, not a fix.
-    const ops = readFileSync(fileURLToPath(new URL('../../src/js/core/ops.js', import.meta.url)), 'utf8');
-    assert.ok(/geteiltOnly: true/.test(ops), 'the mark exists in FIELDS');
-    const authz = readFileSync(fileURLToPath(new URL('../../src/js/core/authz.js', import.meta.url)), 'utf8');
-    assert.equal(/geteiltOnly/.test(authz), false, 'nothing in the authorization fold reads it');
+    // The honest publication of the SAME entry still seals, so the fix is not "refuse everything".
+    const honest = brandFamilyPatch(
+      { 'pub.level': 'belegt', 'pub.date': '2026-09-10' }, { kind: 'fnote', level: 'belegt' });
+    const hOp = makeOp(dev, FSP, { k: 'pub.set', e, f: honest });
+    assert.equal(typeof (await sealOp(hOp, kr, dev.devSig.privateKey, hdrFor(hOp, dev, 1), ctx)).ct, 'string');
+
+    // ── THE RECEIVER SIDE — ALSO CLOSED, AND THIS HALF IS INVERTED TOO ──────────────────────
+    //
+    // What stood here until 2026-08-28 was a GREP: `assert.equal(/geteiltOnly/.test(authz),
+    // false, 'REPORTED, OPEN: nothing in the authorization fold reads geteiltOnly')`. It was a
+    // report rather than a proof because `core/authz.js` was another agent's file at the time.
+    //
+    // The finding it reported was real and it was the COMPOUNDING half of this row: barriers 3
+    // and 4 and the backstop all live in `sealOp`, so a member running a patched build has no
+    // seal path to defeat — they hand the relay an envelope whose plaintext already carries the
+    // text, and until stage 3c existed every honest peer decrypted it, folded it and rendered it.
+    // `geteiltOnly` was a mark only the writer consulted, which is a house style, not an
+    // invariant.
+    //
+    // Proven behaviourally now, not by grep — the attacker skips `sealOp` entirely, which is
+    // exactly the capability the patched build has and the honest one does not.
+    const belegt = await foldLeak('belegt');
+    assert.equal(belegt.text, undefined,
+      'THE POINT: the peer refuses to fold a geteiltOnly value for a Belegt entry. If this reads '
+      + 'the string, the receiver-side half of M-R7c is back and every barrier above it is '
+      + 'author-side, i.e. defeated by the build that mounted this attack.');
+    assert.equal(belegt.date, '2026-10-01',
+      'and the Belegt payload SURVIVES — the field is dropped, the op is not thrown away');
+    assert.deepEqual(belegt.reported, ['pub.text'], 'and the peer can say what it withheld');
+
+    // Not vacuous: the same op, the same attacker, an entity that really is Geteilt — it lands.
+    const geteilt = await foldLeak('geteilt');
+    assert.equal(geteilt.text, 'Scheidungsanwalt 14:30',
+      'control: at Geteilt the identical write is applied, so the refusal above is the LEVEL');
   });
 
   test('M-R7d FAILED — 16.7 holds: Belegt and Geteilt are the same length on the wire', async () => {

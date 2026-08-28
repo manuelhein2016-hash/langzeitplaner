@@ -278,8 +278,13 @@ export function deserializeRegisters(blob) { throw new Error('not implemented');
  * ADR 002 §5.2.2 needs `sigPubRaw` BEFORE it may decrypt (P2/P3) and `deviceId` / `memberId`
  * after (checks 3 and 5), none of which the two derived entries below carry.
  * @property {(dv:DeviceShort) => DeviceAttestation|null} attestationOf
- * @property {DeviceShort[]} shortCollisions    sorted CONTESTED shorts; `attestationOf` refuses
- *                                              every one of them — see the I-3 note below
+ * @property {DeviceShort[]} shortCollisions    sorted CONTESTED shorts — one short PROVEN on two
+ *                                              member records; `attestationOf` refuses every one
+ *                                              of them — see the I-3 note below
+ * @property {DeviceShort[]} unprovenShorts     sorted shorts whose `dev.*` register was filed by
+ *                                              an op NOT stamped by the device it attests.
+ *                                              Admitted, reported, never resolved — the I-3 /
+ *                                              R5-7 squat lands here (added 2026-08-28)
  * @property {Map<MemberId, Set<DeviceId>>} attestedDevices   memberId -> attested deviceIds
  * @property {(devId:DeviceId) => MemberId|null} memberOfDevice   the SOLE claimant, else null
  * @property {DeviceId[]} deviceIdCollisions    sorted deviceIds claimed on more than one member

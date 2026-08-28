@@ -39,14 +39,39 @@ import * as identity from '../../src/js/crypto/identity.js';
 import { memKeyStore } from '../../src/js/platform/keystore.js';
 import {
   BACKUP_ERROR_CODES, BACKUP_FORMAT, BACKUP_V, BACKUP_ENTRY_FIELDS, BackupError,
-  EXPORT_SHEET_COPY, IMPORT_CONSEQUENCE, LIMITS, MAX_KDF_ITERATIONS, README, SEALED_IV_BYTES,
-  deriveBackupKey, exportBackup, importBackup, inspectBackup, ownBoardOnly,
+  EXPORT_SHEET_COPY, IMPORT_CONSEQUENCE, LIMITS, MAX_KDF_ITERATIONS, PASSPHRASE_FLOOR, README,
+  SEALED_IV_BYTES, boardDigestInput, deriveBackupKey, exportBackup, importBackup, inspectBackup,
+  ownBoardOnly, passphraseStrength,
 } from '../../src/js/crypto/backup.js';
 
 import { hkdf as pureHkdf, pbkdf2 as purePbkdf2, hex, toHex } from '../helpers/kat.js';
 
 const S = globalThis.crypto.subtle;
 const DAY = '2026-08-27';
+
+/**
+ * S3 — THE BOARD DIGEST, REIMPLEMENTED HERE, and reimplemented rather than imported on purpose.
+ *
+ * The two KAT tests below rebuild the AES-GCM AAD by hand from a real file, which is the only
+ * thing in the suite that proves the AAD is what `backup.js` says it is rather than merely what
+ * `backup.js` does twice. `board` is now a member of that AAD, so the KAT needs the digest — and
+ * a KAT that got it by calling the function under test would prove nothing about it.
+ *
+ * This is a genuinely independent implementation: it SORTS THE TREE and then stringifies, where
+ * `boardDigestInput` stringifies THROUGH a sorting replacer. The two agree on every value a JSON
+ * file can carry, which is the whole domain either of them is ever handed.
+ */
+async function katBoardDigest(board) {
+  const sortDeep = (v) => {
+    if (Array.isArray(v)) return v.map(sortDeep);
+    if (v === null || typeof v !== 'object') return v;
+    const o = {};
+    for (const k of Object.keys(v).sort()) o[k] = sortDeep(v[k]);
+    return o;
+  };
+  const bytes = utf8(JSON.stringify(sortDeep(board)));
+  return b64u(new Uint8Array(await S.digest('SHA-256', bytes)));
+}
 const APP = '2.0.0';
 /** Test-only PBKDF2 rounds. The real 600 000 is paid by the two tests that say so in their name. */
 const FAST = { iterations: 1000 };
@@ -145,8 +170,22 @@ async function storeFingerprint(ks) {
   return out;
 }
 
-/** Run `fn`, expect a `BackupError` with `code`, and prove `ks` was not touched. */
-async function refuses(code, ks, fn) {
+/**
+ * Run `fn`, expect a `BackupError` with `code`, and say what the store must look like afterwards.
+ *
+ * `after` used to be implicit and universal — "prove `ks` was not touched" — and S4 is the reason
+ * it now has to be named. A refused import leaves the store ALONE in every case but one: the dead
+ * residue of an interrupted earlier write is cleared on the way out, so the retry is not refused
+ * for ever (`prepareKeyStore`). Making that an argument rather than a default keeps every OTHER
+ * call site asserting the strong thing, and makes the one exception impossible to introduce by
+ * accident.
+ *
+ * @param {string} code
+ * @param {Object} ks
+ * @param {() => Promise<any>} fn
+ * @param {'unchanged'|'cleared'} [after]
+ */
+async function refuses(code, ks, fn, after = 'unchanged') {
   const before = await storeFingerprint(ks);
   await assert.rejects(fn, (err) => {
     assert.ok(err instanceof BackupError, `expected a BackupError, got ${err && err.name}: ${err && err.message}`);
@@ -156,7 +195,12 @@ async function refuses(code, ks, fn) {
     assert.ok(err.say.de.length > 0 && err.say.en.length > 0);
     return true;
   });
-  assert.deepEqual(await storeFingerprint(ks), before, 'the key store was written to on a failed import');
+  if (after === 'cleared') {
+    assert.ok(before.length > 0, 'nothing was there to clear — the row measures nothing');
+    assert.deepEqual(await storeFingerprint(ks), [], 'the dead residue was left behind');
+  } else {
+    assert.deepEqual(await storeFingerprint(ks), before, 'the key store was written to on a failed import');
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -664,20 +708,115 @@ test('the AAD binds the whole plaintext header: memberId, kdf, dates and the REA
   }
 });
 
-test('CHARACTERIZATION — the board block is NOT authenticated, and the copy says so', async () => {
-  // An honest limit, asserted so it cannot be quietly assumed away. There is no key on the
-  // board-only path, so board authentication could exist on only one of the two export paths,
-  // and a guarantee that holds on one path is worse than one stated plainly. `LIMITS` carries the
-  // sentence; if this test ever goes red because the board WAS bound into the AAD, the copy has
-  // to change with it.
+test('S3 — the board block IS authenticated on the identity path, field by field (was the E3-6 characterization)', async () => {
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // INVERTED 2026-08-28. This row used to assert the opposite, and the sentence it was written
+  // from was: "there is no key on the board-only path, so board authentication could exist on
+  // only one of the two export paths, and a guarantee that holds on one path is worse than one
+  // stated plainly." That is true OF THE BOARD-ONLY FILE. The identity-bearing file says „DIES
+  // IST DEIN SCHLÜSSEL" across the top and half of it was unsigned (M-B4).
+  //
+  // Two paths with two DIFFERENT, STATED guarantees is what `LIMITS.board` now carries. The old
+  // key `LIMITS.boardNotAuthenticated` survives as an alias — it is quoted by name in FINDINGS.md,
+  // STATUS.md and E3-VERIFICATION.md — and now says the smaller true thing about the file it is
+  // true of.
+  // ─────────────────────────────────────────────────────────────────────────────────────────
   const m = await makeMember();
-  const f = roundTripped(await exportWith(m, 'pw'));
+
+  // EVERY collection, not one of them: the fix is in the AAD, so a per-field list would measure
+  // nothing, but a mutation of each is what proves there is no forgotten branch either.
+  const mutations = [
+    ['a note rewritten', (f) => { f.board.notes[0].text = 'vom Angreifer eingesetzt'; }],
+    ['a note added', (f) => { f.board.notes.push({ id: 'n9', date: '2026-12-24', text: 'eingeschmuggelt' }); }],
+    ['every note DELETED', (f) => { f.board.notes = []; }],
+    ['a bar rewritten', (f) => { f.board.bars[0].label = 'Dienstreise'; }],
+    ['a category added', (f) => { f.board.categories.push({ id: 'c9', name: 'X' }); }],
+    ['the Notizzettel', (f) => { f.board.scratchpads['2026-09'] = 'etwas anderes'; }],
+    ['the settings', (f) => { f.board.settings.bundesland = 'HH'; }],
+    ['the lineage', (f) => { f.board._v2 = { lineageId: 'lin_AAAAAAAAAAAAAAAAAAAAAAAAAA', gen: 1 }; }],
+    ['the schema version', (f) => { f.board.schemaVersion = 3; }],
+    ['a key REORDERED and a value changed with it', (f) => {
+      f.board = { settings: f.board.settings, notes: [], bars: f.board.bars,
+        categories: f.board.categories, scratchpads: f.board.scratchpads, schemaVersion: 2 };
+    }],
+  ];
+  for (const [what, mutate] of mutations) {
+    const f = roundTripped(await exportWith(m, 'pw'));
+    mutate(f);
+    const ks = memKeyStore();
+    const before = await storeFingerprint(ks);
+    await refuses('cannot-open', ks,
+      () => importBackup(f, 'pw', ks, { deviceId: mkDeviceId(), createdAt: DAY, ...FAST }));
+    assert.deepEqual(await storeFingerprint(ks), before, `${what} wrote to the key store`);
+  }
+
+  // …and REORDERING ALONE is not a mutation: the digest sorts, so a file that came back through a
+  // JSON writer with a different key order still opens. Without this the fix would be a landmine
+  // under every caller that ever re-serializes the file.
+  const reordered = roundTripped(await exportWith(m, 'pw'));
+  const b = reordered.board;
+  reordered.board = { settings: b.settings, scratchpads: b.scratchpads, categories: b.categories,
+    bars: b.bars, notes: b.notes, schemaVersion: b.schemaVersion, ...(b._v2 ? { _v2: b._v2 } : {}) };
+  const ok = await importBackup(reordered, 'pw', memKeyStore(), { deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
+  assert.equal(ok.identityRestored, true, 'a re-ordered board broke the digest');
+
+  // The copy moved with the behaviour, which is the half LZP-1003 audits.
+  assert.ok(LIMITS.board.withIdentity.de.includes('versiegelt'));
+  assert.ok(LIMITS.board.withIdentity.en.includes('sealed'));
+  assert.ok(LIMITS.board.boardOnly.de.includes('nicht signiert'));
+  assert.ok(LIMITS.board.boardOnly.en.includes('not signed'));
+  assert.equal(LIMITS.boardNotAuthenticated.de, LIMITS.board.boardOnly.de, 'the alias drifted');
+  assert.notEqual(LIMITS.board.withIdentity.de, LIMITS.board.boardOnly.de);
+});
+
+test('S3 — the BOARD-ONLY file is still unauthenticated, and that is the stated other half', async () => {
+  // The honest limit did not disappear; it moved to the path it is true of. A file with no key
+  // has nothing to bind a digest with, and pretending otherwise would be the guarantee-on-one-
+  // path problem in its real form.
+  const m = await makeMember();
+  const f = roundTripped(await exportBackup(makeBoard(m.memberId), m.identity, m.spaces, null,
+    { exportedAt: DAY, app: APP }));
+  assert.equal('identity' in f, false);
   f.board.notes[0].text = 'vom Angreifer eingesetzt';
-  const r = await importBackup(f, 'pw', memKeyStore(), { deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
+  const r = await importBackup(f, null, memKeyStore(), {});
   assert.equal(r.board.notes[0].text, 'vom Angreifer eingesetzt');
-  assert.equal(r.identityRestored, true);
-  assert.ok(LIMITS.boardNotAuthenticated.de.includes('nicht signiert'));
-  assert.ok(LIMITS.boardNotAuthenticated.en.includes('not signed'));
+  assert.equal(r.identityRestored, false);
+  assert.equal(r.consequence.code, 'no-identity-in-file');
+  // …and the button that produces this file says so, in both languages.
+  assert.ok(EXPORT_SHEET_COPY.boardOnly.entriesNotSealed.de.includes('nicht versiegelt'));
+  assert.ok(EXPORT_SHEET_COPY.withPassword.sealsEntriesToo.de.includes('versiegelt'));
+});
+
+test('S3 — `boardDigestInput` survives the JSON round trip, floats and all', () => {
+  // THE ONE EQUATION THE DIGEST HAS TO SATISFY, and the reason it is not `canonicalJSON`:
+  // `canonicalJSON` REFUSES floats, and E3-6's second argument against binding the board was that
+  // an export would then FAIL on a board whose `settings` picked up a `0.5`. Losing a user's whole
+  // export to a stray setting would be the worse failure — so the digest is a total function over
+  // everything `JSON.stringify` can write, and this is the row that says so.
+  const trip = (b) => JSON.parse(JSON.stringify(b));
+  const same = (b, why) => assert.deepEqual([...boardDigestInput(b)], [...boardDigestInput(trip(b))], why);
+
+  const boards = [
+    { schemaVersion: 2, notes: [], bars: [], categories: [], scratchpads: {}, settings: {} },
+    { settings: { zoom: 0.5, offset: -1.25, big: 1e21, tiny: 5e-324 } },       // floats — the E3-6 objection
+    { settings: { a: null, b: false, c: '' } },
+    { scratchpads: { '2026-09': 'Hütte buchen?', '2026-10': 'Grüße' } },        // NFC and NFD alike
+    { scratchpads: { '\u00e4': 'NFC', 'a\u0308': 'NFD' } },   // two keys that COLLIDE under NFC:
+    //                                                    `canonicalJSON` refuses this outright
+    { notes: [{ id: 'n1', text: 'a'.repeat(4000) }] },
+    { settings: { '0': 'integer-like key', '10': 'x', '2': 'y', z: 'last' } },  // engine key ordering
+    { deep: { a: { b: { c: [1, [2, [3, {}]]] } } } },
+  ];
+  for (const b of boards) same(b, JSON.stringify(b).slice(0, 60));
+
+  // Order is not content in an OBJECT…
+  assert.deepEqual([...boardDigestInput({ a: 1, b: 2 })], [...boardDigestInput({ b: 2, a: 1 })]);
+  // …and it IS content in an ARRAY. A board whose entries were re-ordered is a different board.
+  assert.notDeepEqual([...boardDigestInput({ n: [1, 2] })], [...boardDigestInput({ n: [2, 1] })]);
+  // `undefined` is dropped by JSON.stringify on both sides, so it must be dropped here too.
+  assert.deepEqual([...boardDigestInput({ a: 1, b: undefined })], [...boardDigestInput({ a: 1 })]);
+  // Rule 2: never zero-length, not even for the emptiest board there is.
+  assert.ok(boardDigestInput({}).length > 0);
 });
 
 test('two exports of the same identity are different files, and both open', async () => {
@@ -868,28 +1007,120 @@ test('a store already holding another member\'s DEVICE identity is refused too',
   assert.equal(untouched.deviceShort, theirDevice.deviceShort);
 });
 
-test('a PARTIAL key store is refused before anything is written, in both halves', async () => {
+test('S4 — a PARTIAL key store is refused, CLEARED, and the retry succeeds (was: refused for ever)', async () => {
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // INVERTED 2026-08-28. This row used to end with `assert.equal((await halfRec.list()).length,
+  // 2)` — "the partial store was completed instead of refused" — and that assertion was right
+  // about the danger and wrong about the remedy: it pinned a state the module could never leave.
+  // A user with a half-written store and their own backup file had no supported way to finish
+  // (M-B5). The refusal stays; what changed is that the residue does not.
+  //
+  // Both orders below are the ones a crash actually produces, and the member id MATCHES in both:
+  // this is the user's own Mac and the user's own file, which is exactly the case that must not
+  // be permanent.
+  // ─────────────────────────────────────────────────────────────────────────────────────────
   const m = await makeMember();
   const file = roundTripped(await exportWith(m, 'pw'));
+  const imp = () => ({ deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
 
-  // Note the member id MATCHES in both halves below: a partial store is refused even when it is
-  // unambiguously this member's, because "2 of 3" means the last write was interrupted and
-  // regenerating over it would fork the identity (`identity.js`'s partial-state discipline).
   const halfRec = memKeyStore();
   await identity.ensureRecoveryIdentity(halfRec, m.memberId, { createdAt: DAY });
   await halfRec.del(identity.KEYSTORE_IDS.recMeta);
   assert.equal((await halfRec.list()).length, 2);
-  await refuses('keystore-partial', halfRec,
-    () => importBackup(file, 'pw', halfRec, { deviceId: mkDeviceId(), createdAt: DAY, ...FAST }));
-  assert.equal((await halfRec.list()).length, 2, 'the partial store was completed instead of refused');
+  await refuses('keystore-partial', halfRec, () => importBackup(file, 'pw', halfRec, imp()), 'cleared');
+  const a = await importBackup(file, 'pw', halfRec, imp());
+  assert.equal(a.identityRestored, true, 'the retry is still refused — S4 is not closed');
+  assert.equal((await halfRec.list()).length, 6);
 
   const halfDev = memKeyStore();
   await identity.ensureDeviceIdentity(halfDev, m.memberId, { deviceId: mkDeviceId(), createdAt: DAY });
   await halfDev.del(identity.KEYSTORE_IDS.devKex);
   assert.equal((await halfDev.list()).length, 2);
-  await refuses('keystore-partial', halfDev,
-    () => importBackup(file, 'pw', halfDev, { deviceId: mkDeviceId(), createdAt: DAY, ...FAST }));
-  assert.equal((await halfDev.list()).length, 2);
+  await refuses('keystore-partial', halfDev, () => importBackup(file, 'pw', halfDev, imp()), 'cleared');
+  const b = await importBackup(file, 'pw', halfDev, imp());
+  assert.equal(b.identityRestored, true);
+
+  // …and every 1-of-3 and 2-of-3 shape, not the two a human happened to think of. Six records,
+  // six ways to lose one, six ways to lose two — the residue is dead in all of them.
+  const IDS = [identity.KEYSTORE_IDS.recSig, identity.KEYSTORE_IDS.recKex, identity.KEYSTORE_IDS.recMeta];
+  for (const keep of [[0], [1], [2], [0, 1], [0, 2], [1, 2]]) {
+    const ks = memKeyStore();
+    await importBackup(file, 'pw', ks, imp());
+    for (let i = 0; i < IDS.length; i++) if (!keep.includes(i)) await ks.del(IDS[i]);
+    await ks.del(identity.KEYSTORE_IDS.devSig);
+    await ks.del(identity.KEYSTORE_IDS.devKex);
+    await ks.del(identity.KEYSTORE_IDS.devMeta);
+    assert.equal((await ks.list()).length, keep.length);
+    await refuses('keystore-partial', ks, () => importBackup(file, 'pw', ks, imp()), 'cleared');
+    const again = await importBackup(file, 'pw', ks, imp());
+    assert.equal(again.identityRestored, true, `residue ${JSON.stringify(keep)} is not repairable`);
+  }
+
+  // The sentence changed with the behaviour — „muss neu gekoppelt werden" was true of a module
+  // that never deleted, and would now send the user to re-pair a Mac that needs one more click.
+  const err = await (async () => {
+    const ks = memKeyStore();
+    await identity.ensureRecoveryIdentity(ks, m.memberId, { createdAt: DAY });
+    await ks.del(identity.KEYSTORE_IDS.recMeta);
+    try { await importBackup(file, 'pw', ks, imp()); return null; } catch (e) { return e; }
+  })();
+  assert.equal(err.code, 'keystore-partial');
+  assert.ok(err.say.de.includes('noch einmal'), err.say.de);
+  assert.equal(err.say.de.includes('neu gekoppelt'), false, 'the copy still tells the user to re-pair');
+  assert.ok(err.say.en.toLowerCase().includes('once more'));
+});
+
+test('S4 — a store belonging to SOMEBODY ELSE is never cleared, not even when it is partial', async () => {
+  // The other side of the same decision, and the one that makes the delete defensible: the
+  // residue is cleared because it is provably dead AND provably not somebody else's. A partial
+  // store that still NAMES another member is a `keystore-conflict` — which is strictly stricter
+  // than before, when a partial store was `keystore-partial` whoever it belonged to.
+  const mine = await makeMember();
+  const theirs = await makeMember();
+  const file = roundTripped(await exportWith(mine, 'pw'));
+  const imp = () => ({ deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
+
+  for (const drop of [identity.KEYSTORE_IDS.recSig, identity.KEYSTORE_IDS.recKex]) {
+    const ks = memKeyStore();
+    await identity.ensureRecoveryIdentity(ks, theirs.memberId, { createdAt: DAY });
+    await ks.del(drop);                       // 2 of 3, and the META that names them survives
+    const before = (await ks.list()).sort();
+    assert.equal(before.length, 2);
+    await refuses('keystore-conflict', ks, () => importBackup(file, 'pw', ks, imp()));
+    assert.deepEqual((await ks.list()).sort(), before, 'somebody else\'s records were deleted');
+    // …and it stays refused. A retry that suddenly worked would be the defect.
+    await refuses('keystore-conflict', ks, () => importBackup(file, 'pw', ks, imp()));
+  }
+
+  // The same for the DEVICE half.
+  const ks = memKeyStore();
+  await identity.ensureDeviceIdentity(ks, theirs.memberId, { deviceId: mkDeviceId(), createdAt: DAY });
+  await ks.del(identity.KEYSTORE_IDS.devSig);
+  const before = (await ks.list()).sort();
+  await refuses('keystore-conflict', ks, () => importBackup(file, 'pw', ks, imp()));
+  assert.deepEqual((await ks.list()).sort(), before);
+});
+
+test('S4 — the delete is behind the AEAD tag: a wrong passphrase cannot wipe a residue', async () => {
+  // WHERE the check runs is half the argument. `prepareKeyStore` is step 4, after the file has
+  // been authenticated under the user's passphrase, so somebody who finds the Mac and hands it a
+  // file it cannot open never reaches the delete — nor does a file whose board was rewritten.
+  const m = await makeMember();
+  const file = roundTripped(await exportWith(m, 'pw'));
+  const imp = () => ({ deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
+
+  const attempts = [
+    ['a wrong passphrase', (f) => f, 'falsch'],
+    ['a rewritten board', (f) => { f.board.notes[0].text = 'x'; return f; }, 'pw'],
+  ];
+  for (const [what, tamper, pw] of attempts) {
+    const ks = memKeyStore();
+    await identity.ensureRecoveryIdentity(ks, m.memberId, { createdAt: DAY });
+    await ks.del(identity.KEYSTORE_IDS.recMeta);
+    const before = (await ks.list()).sort();
+    await refuses('cannot-open', ks, () => importBackup(tamper(roundTripped(file)), pw, ks, imp()));
+    assert.deepEqual((await ks.list()).sort(), before, `${what} reached the delete`);
+  }
 });
 
 test('the restored recovery records are the shape identity.js writes, so ensureRecoveryIdentity ADOPTS them', async () => {
@@ -961,6 +1192,7 @@ test('KAT: a second implementation of PBKDF2 → HKDF(lzp/v2/backup) → AES-GCM
     _README_de: file._README_de,
     _README_en: file._README_en,
     app: file.app,
+    board: { digest: await katBoardDigest(file.board), hash: 'SHA-256' },   // S3
     exportedAt: file.exportedAt,
     format: file.format,
     kdf: { hash: 'SHA-256', iterations: 500, name: 'PBKDF2', salt: file.identity.kdf.salt },
@@ -1316,6 +1548,7 @@ test('a swapped space id is refused on the way IN as well as on the way out', as
   const key = await deriveBackupKey('pw', salt, file.identity.kdf.iterations);
   const aad = utf8(JSON.stringify({
     _README_de: file._README_de, _README_en: file._README_en, app: file.app,
+    board: { digest: await katBoardDigest(file.board), hash: 'SHA-256' },   // S3
     exportedAt: file.exportedAt, format: file.format,
     kdf: { hash: 'SHA-256', iterations: file.identity.kdf.iterations, name: 'PBKDF2', salt: file.identity.kdf.salt },
     memberId: file.identity.memberId, v: file.v,
@@ -1349,4 +1582,182 @@ test('exportBackup refuses to guess the day, the app version or the member', asy
   await assert.rejects(() => exportBackup(board, m.identity, m.spaces, null, { exportedAt: 'heute', app: APP }), /exportedAt/);
   await assert.rejects(() => exportBackup(board, m.identity, m.spaces, null, { exportedAt: DAY }), /app/);
   await assert.rejects(() => exportBackup(board, {}, m.spaces, null, { exportedAt: DAY, app: APP }), /memberId/);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 12. S7 — the passphrase floor, and S8 — the ring that does not cover 1..e
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('S7 — `passphraseStrength` has an opinion about every passphrase in C2d, and the two controls pass', () => {
+  // The row that used to say „**SUCCEEDED** — there is no floor" (M-B2) is inverted in
+  // `tests/attack/crypto-member-backup.test.js`; this is the same domain measured positively.
+  // Written as the ENUMERATION, not as five `assert`s, so a floor that is changed later is
+  // changed against a list of inputs rather than against a list of branches.
+  const rows = [
+    ['', 'empty', ['empty']],
+    ['   ', 'empty', ['empty']],
+    ['1', 'weak', ['too-short', 'too-few-distinct', 'digits-only']],
+    ['a', 'weak', ['too-short', 'too-few-distinct']],
+    ['1234', 'weak', ['too-short', 'too-few-distinct', 'digits-only']],
+    ['passwort', 'weak', ['too-short']],
+    ['        x', 'weak', ['too-short', 'too-few-distinct']],
+    ['aaaaaaaaaaaaaaaa', 'weak', ['too-few-distinct', 'one-character-repeated']],
+    ['Kirschbaum-Sonntag-Regenschirm-41', 'ok', []],
+    ['Schlüsselbund-2026', 'ok', []],
+  ];
+  for (const [pw, code, reasons] of rows) {
+    const s = passphraseStrength(pw);
+    assert.equal(s.code, code, `${JSON.stringify(pw)} → ${s.code} (${s.reasons.join(', ')})`);
+    assert.equal(s.weak, code !== 'ok', JSON.stringify(pw));
+    assert.deepEqual([...s.reasons], reasons, JSON.stringify(pw));
+    assert.equal(s.say === null, code === 'ok');
+    if (s.say) { assert.ok(s.say.de.length > 0 && s.say.en.length > 0); }
+  }
+  // Not a string is not a passphrase, and must not throw on the way to saying so.
+  for (const junk of [null, undefined, 42, {}, []]) assert.equal(passphraseStrength(junk).code, 'empty');
+  // Code POINTS, not UTF-16 units: an emoji is one character to the user.
+  assert.equal(passphraseStrength('👩‍👩‍👧‍👦').chars < 12, true);
+  assert.equal(passphraseStrength('Kirschbaum-Sonntag-Regenschirm-41').chars, 33);
+  // NFD and NFC are the same passphrase — the same normalisation `passphraseBytes` applies.
+  assert.deepEqual(passphraseStrength('Schlüsselbund-2026'), passphraseStrength('Schlüsselbund-2026'));
+});
+
+test('S7 — the floor is SOFT, it is named, and making it hard is one line', async () => {
+  // THE DECISION, PINNED. A hard refusal on this artefact pushes the user onto „Nur Einträge
+  // sichern" — trading a weak passphrase for NO recovery artefact at all — which is strictly
+  // worse. So a weak passphrase EXPORTS, and the weakness is surfaced instead. If the PO rules
+  // the other way, `PASSPHRASE_FLOOR.hard` and the C2d rows in `tests/helpers/crypto-domains.js`
+  // are the two places it lands, and this row is the one that goes red.
+  assert.equal(PASSPHRASE_FLOOR.hard, false);
+  assert.equal(PASSPHRASE_FLOOR.minChars, 12);
+  assert.equal(PASSPHRASE_FLOOR.minDistinct, 5);
+  assert.ok(BACKUP_ERROR_CODES.includes('passphrase-too-weak'), 'the hard-floor code must exist unused');
+
+  const m = await makeMember();
+  for (const weak of ['1', 'a', '1234', 'passwort', '        x']) {
+    const seen = [];
+    const f = await exportBackup(makeBoard(m.memberId), m.identity, m.spaces, weak,
+      { exportedAt: DAY, app: APP, ...FAST, onWeakPassphrase: (s) => seen.push(s) });
+    assert.equal(inspectBackup(f).hasIdentity, true, `${JSON.stringify(weak)} was refused`);
+    // …and the caller was TOLD, once, with the reasons. This is what makes „the sheet forgot to
+    // ask" a testable condition rather than a review comment.
+    assert.equal(seen.length, 1, `${JSON.stringify(weak)} exported in silence`);
+    assert.equal(seen[0].weak, true);
+    assert.ok(seen[0].reasons.length > 0);
+  }
+  // A real passphrase does not fire the port at all.
+  const quiet = [];
+  await exportBackup(makeBoard(m.memberId), m.identity, m.spaces, 'Kirschbaum-Sonntag-Regenschirm-41',
+    { exportedAt: DAY, app: APP, ...FAST, onWeakPassphrase: (s) => quiet.push(s) });
+  assert.deepEqual(quiet, []);
+  // An EMPTY one is still a refusal — that is the one rule that was already there and stays.
+  await assert.rejects(
+    () => exportBackup(makeBoard(m.memberId), m.identity, m.spaces, '   ', { exportedAt: DAY, app: APP, ...FAST }),
+    (e) => e.code === 'passphrase-empty'
+  );
+});
+
+test('S7 — the copy the floor is explained with exists in both languages, before anything is typed', () => {
+  const p = EXPORT_SHEET_COPY.passphrase;
+  for (const part of ['hint', 'weak', 'weakAnyway']) {
+    assert.ok(p[part].de.length > 0, `${part}.de`);
+    assert.ok(p[part].en.length > 0, `${part}.en`);
+    assert.notEqual(p[part].de, p[part].en);
+  }
+  // Not a wall: the confirm button offers the weak passphrase anyway, and says so.
+  assert.ok(p.weakAnyway.de.includes('Trotzdem'));
+  // Concrete rather than a rule — „mindestens 12 Zeichen" with a red border produces a sticky note.
+  assert.ok(p.hint.de.includes('drei Wörter'));
+  assert.ok(LIMITS.passphraseFloor.de.includes('600 000'));
+  assert.ok(LIMITS.passphraseFloor.en.includes('600 000'));
+});
+
+test('S8 — a ring that does not cover 1..e imports, and SAYS which epochs are missing', async () => {
+  // The wrapping side refuses a partial ring loudly; the restoring side accepted one in silence,
+  // so a restored Mac could not read epochs 1-3 and reported nothing. Reported, not refused: a
+  // restore that recovers everything from epoch 4 onward is worth having on a Mac whose owner may
+  // have nothing else left, and §7.3 step 6 already says what happens to the rest („Schlüssel
+  // ausstehend", parked, not lost).
+  const key = async () => aesKey(true);
+  const ringOf = async (ns) => {
+    const map = new Map();
+    for (const n of ns) map.set(n, await key());
+    return map;
+  };
+  const rows = [
+    { epochs: [1, 2, 3, 4], epoch: 4, missing: undefined, code: 'identity-restored' },
+    { epochs: [4], epoch: 4, missing: [1, 2, 3], code: 'identity-restored-keys-pending' },
+    { epochs: [1, 3], epoch: 3, missing: [2], code: 'identity-restored-keys-pending' },
+    { epochs: [2, 3], epoch: 3, missing: [1], code: 'identity-restored-keys-pending' },
+    { epochs: [1], epoch: 1, missing: undefined, code: 'identity-restored' },
+    // NO `epoch` field: the ring is complete for everything it CLAIMS to cover. Inventing a
+    // higher `e` here would report a gap only the server can know about (§4.4 parks that).
+    { epochs: [1, 2], epoch: undefined, missing: undefined, code: 'identity-restored' },
+    { epochs: [2], epoch: undefined, missing: [1], code: 'identity-restored-keys-pending' },
+    // …and an `epoch` AHEAD of the ring is a gap at the top, which is the shape §7.3 step 6 is
+    // literally about: the family rotated while this Mac was gone.
+    { epochs: [1, 2], epoch: 4, missing: [3, 4], code: 'identity-restored-keys-pending' },
+  ];
+  for (const row of rows) {
+    const m = await makeMember();
+    const family = { id: mkSpaceId('family'), epochs: await ringOf(row.epochs) };
+    if (row.epoch !== undefined) family.epoch = row.epoch;
+    const file = roundTripped(await exportBackup(makeBoard(m.memberId), m.identity,
+      { personal: { id: mkSpaceId('personal'), epochs: await ringOf([1]) }, family },
+      'pw', { exportedAt: DAY, app: APP, ...FAST }));
+    const r = await importBackup(file, 'pw', memKeyStore(), { deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
+
+    assert.equal(r.identityRestored, true, JSON.stringify(row));
+    const got = r.spaces.family.missingEpochs;
+    if (row.missing === undefined) {
+      assert.equal('missingEpochs' in r.spaces.family, false,
+        `${JSON.stringify(row)} reported a gap it does not have`);
+    } else {
+      assert.deepEqual([...got], row.missing, JSON.stringify(row));
+    }
+    assert.equal(r.consequence.code, row.code, JSON.stringify(row));
+    // The keys that ARE there are usable — reporting a gap must not cost the rest.
+    assert.deepEqual([...r.spaces.family.epochs.keys()].sort((a, b) => a - b), [...row.epochs]);
+  }
+
+  // The PERSONAL bundle is measured by the same rule, and it is the same field.
+  const m = await makeMember();
+  const file = roundTripped(await exportBackup(makeBoard(m.memberId), m.identity,
+    { personal: { id: mkSpaceId('personal'), epoch: 3, epochs: await ringOf([3]) } },
+    'pw', { exportedAt: DAY, app: APP, ...FAST }));
+  const r = await importBackup(file, 'pw', memKeyStore(), { deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
+  assert.deepEqual([...r.spaces.personal.missingEpochs], [1, 2]);
+  assert.equal(r.spaces.family, null);
+  assert.equal(r.consequence.code, 'identity-restored-keys-pending');
+});
+
+test('M-B6 — the Kreis binding is REPORTED as unverified on every family restore, and named', async () => {
+  // What this module cannot check, said rather than omitted. `family.id` is a payload field and
+  // the authority that could contradict it — §7.3 step 5's `POST /devices/adopt` — is not here.
+  // Deliberately UNCONDITIONAL: a file naming somebody else's Kreis is indistinguishable at this
+  // seam from one naming your own (`C2c-1` and `C2c-2` are literally the same input), so a
+  // warning that appeared only on the bad one would be a claim this module cannot make.
+  const m = await makeMember();
+  const FSP = mkSpaceId('family');
+  const file = roundTripped(await exportBackup(makeBoard(m.memberId), m.identity,
+    { personal: { id: mkSpaceId('personal'), epochs: new Map([[1, await aesKey(true)]]) },
+      family: { id: FSP, epoch: 1, epochs: new Map([[1, await aesKey(true)]]) } },
+    'pw', { exportedAt: DAY, app: APP, ...FAST }));
+  const r = await importBackup(file, 'pw', memKeyStore(), { deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
+  assert.equal(r.familyBinding.spaceId, FSP);
+  assert.equal(r.familyBinding.verified, false);
+  assert.ok(r.familyBinding.say.de.includes('nicht nachprüfen'));
+  assert.ok(r.familyBinding.say.en.includes('cannot'));
+
+  // No family bundle ⇒ nothing to say. `null`, not a warning about a Kreis that is not there.
+  const solo = roundTripped(await exportBackup(makeBoard(m.memberId), m.identity,
+    { personal: { id: mkSpaceId('personal'), epochs: new Map([[1, await aesKey(true)]]) } },
+    'pw', { exportedAt: DAY, app: APP, ...FAST }));
+  const s = await importBackup(solo, 'pw', memKeyStore(), { deviceId: mkDeviceId(), createdAt: DAY, ...FAST });
+  assert.equal(s.familyBinding, null);
+  // …and the board-only path has the field too, so a caller's `result.familyBinding` is never
+  // `undefined` on one branch and an object on the other.
+  const boardOnly = roundTripped(await exportBackup(makeBoard(m.memberId), m.identity, m.spaces, null,
+    { exportedAt: DAY, app: APP }));
+  assert.equal((await importBackup(boardOnly, null, memKeyStore(), {})).familyBinding, null);
 });
