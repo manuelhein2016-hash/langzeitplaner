@@ -21,3 +21,7 @@ dist/
 src-tauri/icons/
 src-tauri/dmg/
 build/
+
+# The dev sync host's store (server/dev-server.mjs over the file adapter). Real family
+# ciphertext from two local app windows; never committed, and never a stray file in the root.
+.lzp-dev-store/

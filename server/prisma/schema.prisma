@@ -1,0 +1,232 @@
+// server/prisma/schema.prisma
+//
+// The blind relay's storage.  ADR 003 §5.1 as refined by LZP-201; addendum §3; decision D2.
+//
+// REGION: eu-central-1 (Frankfurt).  Vercel spells the same datacentre `fra1` and pins it in
+// server/vercel.json; Prisma Postgres spells it `eu-central-1`. Neither name is a typo for the
+// other, both are Frankfurt, and the Datenschutz copy (21.3) names the region — so changing
+// either one without changing that copy makes the privacy text false. Decision D2.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHAT THIS SCHEMA CAN SEE — the whole list, and it is short
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// space ids and kinds; pseudonymous member ids; member colour refs; join and removal times;
+// device ids, shorts and PUBLIC keys; per-device read/write progress; epoch numbers and rotation
+// times; per-space op counts; padded envelope sizes; op ARRIVAL times; chain hashes; invite id
+// hashes, epochs and expiry.
+//
+// Nothing else. No entry text, no bar caption, no category, no scratchpad, no date, no display
+// name, no authoring time. Story 21.1.
+//
+// THE STRUCTURAL RULE, not a convention: every ciphertext-bearing column below is `Bytes`, and
+// `server/core/store-interface.js` REFUSES a String in any of them at the adapter boundary. The
+// column set is closed and is compared field-by-field against MODEL_COLUMNS by
+// `tests/server/store-contract.test.js`, so a new column cannot arrive here without arriving
+// there too — which is the only way "a future handler cannot store a readable note" stays true
+// after this file stops being read.
+//
+// The ONE deliberate plaintext String that is not an id: `Member.colorRef`. Story 15.3 needs
+// `@@unique([spaceId, colorRef])` server-side to stop two members choosing the same colour, and
+// that check cannot be done inside the ciphertext. It reveals one palette index per member and
+// it appears verbatim in the Datenschutz copy.
+//
+// TWO COLUMNS THE §3 SKETCH HAD AND THIS DOES NOT:
+//   · `Member.displayNameCipher` — display names travel as `member.set` ops inside the encrypted
+//     stream, so the relay holds strictly less.
+//   · `Op.ts` — authoring time lives inside the ciphertext (ADR 002 §5.1). The relay keeps
+//     `receivedAt`, which it cannot avoid knowing.
+// And one the ADR 002 §7.1 sketch had: `Invite.wrappedKeys`, removed by PO decision D9. An
+// invite carries no key material of any kind. There is no column to put it in.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SpaceKind {
+  PERSONAL
+  FAMILY
+}
+
+/// One family circle or one person's own space. `nextSeq` is the whole of ADR 003 §3.3.
+model Space {
+  id           String    @id
+  kind         SpaceKind
+  currentEpoch Int       @default(1)
+  /// RULE 2 — the per-space, row-locked, GAPLESS counter. Bumped by
+  /// `UPDATE "Space" SET "nextSeq" = "nextSeq" + $n WHERE id = $1 RETURNING "nextSeq"`.
+  /// NEVER a Postgres SERIAL: a global sequence leaves gaps when transactions commit out of
+  /// order, and `WHERE seq > cursor` can then skip an op that committed after a higher-numbered
+  /// one. It also leaks cross-family activity volume, which a per-space counter does not.
+  nextSeq      BigInt    @default(0)
+  /// ADR 002 §5.4 — the chain head. Opaque; diagnostic only.
+  headChain    Bytes?
+  createdAt    DateTime  @default(now())
+
+  members Member[]
+  ops     Op[]
+  invites Invite[]
+  epochs  Epoch[]
+  wraps   KeyWrap[]
+}
+
+/// Pseudonymous. There is no name column and no role column: the admin is resolved from the
+/// in-log admin chain (ADR 001 §4.1), never from a row the relay could edit.
+model Member {
+  id             String    @id
+  spaceId        String
+  /// THE ONE DELIBERATE PLAINTEXT LEAK — see the header. One palette index per member.
+  colorRef       String
+  /// 65-byte raw P-256 point. Verifies device attestations and POST /devices/adopt (ADR 002 §7.3).
+  recoveryPubSig Bytes
+  /// 65-byte raw P-256 point (RK_kex). A rotation wraps the epoch key to every device AND to
+  /// each member's recovery key (ADR 002 §4.2 step 2); without this column that wrap had no
+  /// public key to address. Closes finding E3-2.
+  recoveryPubKex Bytes
+  joinedAt       DateTime  @default(now())
+  removedAt      DateTime?
+
+  devices Device[]
+  space   Space     @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@unique([spaceId, colorRef])
+  @@index([spaceId, removedAt])
+}
+
+/// A device is a machine. `deviceShort` is the identity (ADR 001 §1.2 derives it from the
+/// signing key); `id` is a LABEL bound by nothing, and ADR 002 §2.3 forbids keying anything on
+/// it alone. That is why the op purge below is keyed on `deviceShort`.
+model Device {
+  id           String    @id
+  memberId     String
+  deviceShort  String    @unique
+  sigPubRaw    Bytes
+  kexPubRaw    Bytes
+  /// Signed by the owning member's recovery key. Opaque to the relay, which cannot verify it —
+  /// the four acceptance conditions are a client-side fold (ADR 002 §2.3).
+  attestation  Bytes
+  /// READ progress: the highest seq this device has folded. Reported as `ackSeq` on push.
+  lastSeenSeq  BigInt    @default(0)
+  /// WRITE progress: the space's seq high-water when this device last confirmed a DRAINED
+  /// outbox. Both gate tombstone GC, and read progress alone is unsafe — a device can be caught
+  /// up on reads and still hold a three-week-old unpushed edit that GC would resurrect.
+  lastPushedSeq BigInt   @default(0)
+  addedAt      DateTime  @default(now())
+  revokedAt    DateTime?
+
+  member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([memberId])
+}
+
+/// The append-only log. `envelope` is iv || ct || sig, padded to a 256-byte bucket. UNREADABLE.
+model Op {
+  spaceId     String
+  seq         BigInt
+  /// 22 b64url. The idempotency key: `@@unique([spaceId, opId])` is what makes a lost response
+  /// cost one retry and never a duplicate entry.
+  opId        String
+  epoch       Int
+  /// Needed to purge a removed member's ops (20.2) and to check `e.dv === auth.deviceShort`.
+  deviceShort String
+  witness     Bytes?
+  chain       Bytes
+  envelope    Bytes
+  /// ARRIVAL time. Not authoring time — that is inside the ciphertext and stays there.
+  receivedAt  DateTime @default(now())
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@id([spaceId, seq])
+  @@unique([spaceId, opId])
+  @@index([spaceId, seq])
+  @@index([spaceId, deviceShort])
+}
+
+/// First-writer-wins rotation (ADR 002 §4.2). The composite primary key IS the race resolution:
+/// a concurrent rotator gets a unique violation, which the handler answers as 409 epoch_taken.
+model Epoch {
+  spaceId   String
+  epoch     Int
+  createdAt DateTime @default(now())
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@id([spaceId, epoch])
+}
+
+/// One epoch key, wrapped to one recipient. `wrapped` is {salt,iv,ct} and is opaque.
+///
+/// `recipientId` is deliberately NOT a foreign key onto Device. It holds either a device id
+/// (`dev_…`) or the reserved recovery form `rec_<memberId>`, because ADR 002 §4.2 step 2 wraps
+/// to each member's RK_kex as well as to each device, and a recovery recipient has no Device
+/// row. Closes finding E3-4.
+model KeyWrap {
+  spaceId     String
+  epoch       Int
+  recipientId String
+  wrapped     Bytes
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@id([spaceId, epoch, recipientId])
+  @@index([recipientId])
+}
+
+/// An invite authorizes MEMBERSHIP and nothing else. It carries no key material — decision D9.
+/// The raw code never reaches the server: `id` is HKDF(code,…,'id') and `verifier` is the hash
+/// of HKDF(code,…,'verify').
+model Invite {
+  id        String    @id
+  spaceId   String
+  verifier  Bytes
+  wrapSalt  Bytes
+  epoch     Int
+  createdBy String
+  expiresAt DateTime
+  usedAt    DateTime?
+  revokedAt DateTime?
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@index([spaceId, usedAt, revokedAt])
+}
+
+/// ADR 002 §6.3. `rid` is HKDF of the 60-bit pairing code, so the relay never learns the code.
+/// The security argument is a 180-second TTL times a hard 5-attempt cap — `burnedAt` is a
+/// TOMBSTONE rather than a delete, because a row that a replayed pair/offer could re-create
+/// would reset the budget and make the code the security parameter after all.
+model PairSession {
+  rid       String    @id
+  boxA      Bytes?
+  boxB      Bytes?
+  delivery  Bytes?
+  attempts  Int       @default(0)
+  expiresAt DateTime
+  burnedAt  DateTime?
+
+  @@index([expiresAt])
+}
+
+/// The replay window (ADR 003 §2 step 3). Swept lazily on write; Hobby has no cron.
+model Nonce {
+  deviceShort String
+  nonce       String
+  expiresAt   DateTime
+
+  @@id([deviceShort, nonce])
+  @@index([expiresAt])
+}
+
+/// Every rate limit in ADR 003 §6.1 rides on this one table: push/pull per device, invite
+/// redemptions per IP per hour, pair sessions per member per hour, pair GETs per IP.
+/// `key` is composed of a route plus a device short or an IP — never of content.
+model RateBucket {
+  key         String   @id
+  count       Int
+  windowStart DateTime
+}

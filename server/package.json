@@ -1,0 +1,21 @@
+{
+  "name": "langzeitplaner-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "The blind relay for LangzeitPlaner v2. Stores end-to-end-encrypted operations and coordination data; never a readable note, bar, label, category or display name.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "test": "cd .. && npm run test:server"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.3"
+  },
+  "devDependencies": {
+    "prisma": "6.19.3"
+  }
+}
