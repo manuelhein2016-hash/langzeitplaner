@@ -65,6 +65,29 @@
 // re-anchor: the anchor is the chain value the relay itself served, and every op after it is
 // still bound.
 //
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHO CALLS THIS, AND WHAT THE CALLER IS ALLOWED TO DO WITH THE ANSWER (round 9, 2026-08-29)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `createChainWitness` had NO importer in `src/` for three rounds. Round 8 put the detector on the
+// product path by importing `verifyChain` — the leaf below — into `sync/personal.js`, and then
+// rebuilt, badly, the three things this wrapper already had:
+//
+//   · without `fresh`, the honest re-serve of a page whose cursor is held (F-6's first contact) was
+//     verified against an anchor INSIDE it and reported as `seq jumped from 1 to 1` — finding R8-1;
+//   · without the re-anchor and the dedupe, a member purge was re-derived as a fresh break on every
+//     pull, and because round 8 also made a break a PERMANENT cursor hold, the space wedged and
+//     every op above the hole was lost on an honest relay — finding R8-2, the failure this file's
+//     own header predicted in the paragraph above.
+//
+// `pullNow` now calls `observe()`, and the rule about the answer is written on both sides so the
+// two files cannot drift: **a finding is a diagnostic.** The caller may hold its cursor for the
+// pull that DISCOVERS a break — one honest round trip for a relay that truncated a page — and it
+// may not hold it after this witness has re-anchored, because a hole that cannot be filled is
+// exactly what the one legitimate destructive operation in the product leaves behind. What the
+// caller refuses unconditionally is a different claim entirely: a `nextCursor` past the last row
+// served (ADR 003 §3.3), which is not this file's business.
+//
 // PURE. No clock, no randomness, no I/O. `subtle` is a port.
 
 import { b64u, ub64, CodecError } from '../core/b64.js';
@@ -280,6 +303,16 @@ export function createChainWitness(ports = {}) {
      * way, can answer a `wit` cross-check with "I have never seen that". A device restored from a
      * cursor alone reports `unverifiableWitness` instead of accusing the relay of a fork it
      * cannot prove.
+     *
+     * **THE SECOND, LEGITIMATE CALLER: A MID-STREAM RE-ENTRY.** A client resuming at seq 40 with
+     * no stored head must not verify from genesis — `SHA-256(∅ ‖ oid₄₀)` cannot match, and
+     * reporting that as a fork accuses an honest relay on the first pull after an upgrade or a
+     * failed anchor write. Such a client `restore()`s THE FIRST ROW OF THE PAGE, with
+     * `fromGenesis: false`, and the links after it are checked. That is the same decision this
+     * file already makes for an anchor it cannot decode ("re-anchor on the next row rather than
+     * reporting a fork this device cannot prove"), one layer up, and it costs exactly the one row
+     * this device has no evidence about. It is a re-entry point, not a claim: `false` is what
+     * stops the restored head from being read as proof of anything.
      */
     restore(space, head, fromGenesis) {
       const s = slot(space);

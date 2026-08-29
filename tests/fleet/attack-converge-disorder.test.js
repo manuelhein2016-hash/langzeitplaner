@@ -85,6 +85,16 @@ async function run(seed, events, steps = 30) {
   /** The script's own answer, computed from the script and not from either Mac. */
   const expect = new Map([['seed', 'Anfang']]);
   const log = [];
+  // ── HOW MANY REFUSALS THE RUN REACHED, WHICH IS NOT HOW MANY IT ENDED WITH ─────────────────
+  //
+  // `sync.diagnostics().opsQuarantined` is the engine's own cumulative counter and it dies with
+  // the process, so a relaunch is banked before it is lost. This is §2's non-vacuity signal since
+  // round 9: a refusal that was later CURED is retracted from both the session map and the durable
+  // ledger (R8-4), and it must be, so the end state can no longer prove the tamperer ever fired.
+  /** @type {Map<Object, number>} refusals counted in that device's FINISHED sessions */
+  const banked = new Map();
+  const live = (dev) => dev.diagnostics().opsQuarantined || 0;
+  const bank = (dev) => banked.set(dev, (banked.get(dev) || 0) + live(dev));
 
   for (let i = 0; i < steps; i++) {
     const who = pick(['A', 'B']);
@@ -124,7 +134,7 @@ async function run(seed, events, steps = 30) {
       case 'sync': if (!d.isOffline) await d.sync(); break;
       case 'offline': d.offline(); break;
       case 'online': d.online(); break;
-      case 'quit': await d.relaunch(); break;
+      case 'quit': bank(d); await d.relaunch(); break;
       case 'compact': d.store._tailOverBytes = true; await d.persist(); break;
       case 'mutate-on':
         f.wire.hostile.onResponse = chainMutators(MUTATORS.shuffleOps(seed + i), MUTATORS.duplicateOps());
@@ -188,6 +198,8 @@ async function run(seed, events, steps = 30) {
     // once-per-session flag, which `_outboxHorizonCap()` sets when it stands the cap down.
     e52: !!(A.store._e52Warned || B.store._e52Warned),
     quarantined: [...A.quarantined(), ...B.quarantined()].map((q) => q.reason),
+    // Every refusal this run REACHED, cured or not. See `banked` above.
+    refusalsReached: [A, B].reduce((n, dev) => n + (banked.get(dev) || 0) + live(dev), 0),
     logQuarantine: [A, B].map((d) => d.storeDiagnostics().quarantine?.reason ?? null).filter(Boolean),
     outbox: A.outboxSize() + B.outboxSize(),
     status: [A.status().state, B.status().state],
@@ -301,7 +313,7 @@ describe('§2 · CLOSED (E5-2, L-4) · the same schedules with `compact` in the 
       + 'checkpoint that folds past its own outbox floor');
   });
 
-  test('SUCCEEDED · a QUARANTINE in the alphabet costs data — and never costs it SILENTLY', async () => {
+  test('CLOSED (R8-4) · a QUARANTINE in the alphabet is CURABLE — and never costs data silently', async () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════════
     // THE SIXTH EVENT, AND THE ONE THE PROPERTY ABOVE CANNOT SIMPLY ABSORB.
     //
@@ -322,9 +334,36 @@ describe('§2 · CLOSED (E5-2, L-4) · the same schedules with `compact` in the 
     const armed = rows.filter((r) => r.log.some((e) => e.endsWith(':tamper-on'))).length;
     assert.ok(armed >= WIDE_SEEDS.length * 0.9,
       `only ${armed}/${WIDE_SEEDS.length} scripts armed the tamperer — the alphabet is not armed`);
-    const refused = rows.filter((r) => r.quarantined.length > 0).length;
+    // ── NON-VACUITY, RE-BASED BY THE ROUND-9 INTEGRATION PASS ────────────────────────────────
+    //
+    // This used to read `rows.filter((r) => r.quarantined.length > 0).length > 0` — the refusals
+    // still STANDING at the end of the run — and it went red the moment R8-4's retraction landed.
+    // Measured over these same 128 seeds, before and after, with nothing else changed:
+    //
+    //     before:  quarantined-at-end 14 · durable ledger 17 · DIVERGED 0 · lost 0
+    //     after:   quarantined-at-end  0 · durable ledger  0 · DIVERGED 0 · lost 0
+    //
+    // Read that carefully, because it says something about the OLD build and not about the new
+    // one: every single one of those 17 durable refusals was about an op that had in fact
+    // ARRIVED. The tamperer flips one ciphertext byte per page; the op is refused, and a later
+    // page or a relaunch re-serves the same op untampered and it applies. Nothing was ever lost —
+    // `lost` is empty on both sides of the change — so the row's own title was overstated and its
+    // non-vacuity control was being satisfied by a stale record rather than by a real loss.
+    //
+    // So the honest signal is that a refusal was REACHED, not that one is still standing, and
+    // `refusalsReached` counts them across relaunches. The property below is untouched and is the
+    // one that matters: a run may not end divergent and quiet.
+    const refused = rows.filter((r) => r.refusalsReached > 0).length;
     assert.ok(refused > 0,
-      'no run produced a refusal at all, so this row is measuring the same thing as the one above');
+      'no run reached a refusal at all, so this row is measuring the same thing as the one above');
+    // And the cure is not the absence of the disease: a refusal that is retracted was retracted
+    // because the op APPLIED, so those runs must be the converged ones.
+    for (const r of rows.filter((x) => x.refusalsReached > 0 && x.quarantined.length === 0)) {
+      assert.equal(r.content, true,
+        `seed ${r.seed}: a refusal was withdrawn on a run that did NOT converge — the retraction `
+        + 'must only ever follow the op actually landing (R8-4), never hide a divergence');
+      assert.deepEqual(r.lost, [], `seed ${r.seed}: likewise, nothing the script performed is missing`);
+    }
 
     const silent = rows.filter((r) => !r.content && r.silent);
     assert.deepEqual(

@@ -430,7 +430,15 @@ describe('§5 · is solo mode heavier because family mode exists?', () => {
     // calling the finding fixed.
     const personal = repoFile('src/js/sync/personal.js');
     assert.match(personal, /from '\.\/chain\.js'/, 'the engine imports the chain witness …');
-    assert.match(personal, /await verifyChain\(/, '… and CALLS it — an import nothing calls is this finding');
+    // ROUND 9, ONE TOKEN: the call site moved from the LEAF to the WRAPPER in the same module.
+    // `pullNow` called `verifyChain` — a pure function over one contiguous run — and had to fake
+    // the memory it lacks; findings R8-1 and R8-2 are what that cost on an honest relay. It now
+    // calls `createChainWitness().observe()`, which is the stateful thing `chain.js` always
+    // shipped. The CLAIM this line makes is unchanged and is the whole point of the row: an
+    // import nothing calls is this finding. Both spellings are accepted so that neither the leaf
+    // nor the wrapper can be reverted to an unused import without this going red.
+    assert.match(personal, /await (verifyChain|witness\.observe)\(/,
+      '… and CALLS it — an import nothing calls is this finding');
     assert.match(personal, /from '\.\/outbox\.js'/, 'and the durable parking lot (P-8) the same way …');
     assert.match(personal, /await lot\.park\(/, '… called, not merely imported');
 

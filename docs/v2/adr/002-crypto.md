@@ -224,7 +224,17 @@ into a new blob or a new column:
 
 - the payload is signed by `RK_sig`, which is exactly the key that must vouch for `RK_kex`;
 - `parseAttestationBlob` **already tolerates extra fields**, deliberately, so a v2.0 client reads
-  a v2.1 blob unchanged, and those fields are **already covered by the signature**;
+  a v2.1 blob unchanged, and those fields are **already covered by the signature**.
+  **That tolerance is a property of the parser and of clients.** The relay's door is a CLOSED SET
+  (`assertAttestationClosed`, `server/core/handlers/devices.js`), because the relay PUBLISHES this
+  blob and cannot park what it must store; a new field is therefore added to the relay's
+  allow-list **one release BEFORE any client mints it** — ADR 003 §4's N−1 rule, in the
+  server-first direction. That is versioning, not negotiation: no round trip, nothing offered or
+  withdrawn, and the release order is the whole protocol. *(Amendment B-13, round 9. The finding
+  it closes is R8-7: the closed set had shipped on two of the four doors that persist a `Device`
+  row, so `POST /devices` and `/devices/adopt` stored a seventh field verbatim and
+  `GET /spaces/:id/members` published it — a free-text channel through a relay whose whole claim,
+  story 21.1, is that it holds none.)*;
 - the relay **already accepts** the field — it is the one entry on `assertAttestationClosed`'s
   optional list — and checks only its shape, because the binding is not the relay's to make;
 - a member attests every one of her own devices, so the binding is repeated once per device and

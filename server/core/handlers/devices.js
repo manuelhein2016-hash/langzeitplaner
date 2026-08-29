@@ -30,6 +30,14 @@
 //       never from the payload's self-declared one.
 //   S2  every field inside the signed payload equals the field presented in the request
 //       — §2.3 conditions (2) and (3), so the row the relay stores is the row the member signed.
+//   ID  `deviceId` is `dev_` + 22 b64url and nothing else — finding R8-7b, the OTHER thing these
+//       two doors admitted that `readDevice` has always refused. It is not a §2.3 condition
+//       either: it is what keeps `Device.id` out of `KeyWrap.recipientId`'s reserved `rec_`
+//       namespace. See `DEVICE_ID_RE` for the two attacks it was open to.
+//   C   the payload's field set is CLOSED — six names, one optional seventh, nothing else. Not a
+//       §2.3 acceptance condition at all: a story 21.1 one, because `GET /spaces/:id/members`
+//       publishes this blob. See "THE DOOR IS NOT A PARSER" at `assertAttestationClosed`, which
+//       is finding R8-7 and the reason this file gained a check that has nothing to do with keys.
 //
 // Condition (1) — `op.act === memberId` — is a log-level check and stays on the clients
 // (ADR 001 §4.0). The server never sees an op's author.
@@ -177,6 +185,46 @@ const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 export const DEVICE_SHORT_RE = /^[0123456789ABCDEFGHJKMNPQRSTVWXYZ]{16}$/;
 
 /**
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * `dev_` + 22 b64url IS THE ONLY SPELLING OF A DEVICE ID — finding R8-7b
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * The same value as `handlers/spaces.js`'s `DEVICE_ID_RE` and `src/js/core/entities.js`'s.
+ * Restated rather than imported: `spaces.js` imports its parser, its codec and its signature
+ * check FROM THIS FILE, so importing back would close a module cycle for one regex.
+ * `tests/server/blindness.test.js` §7b pins the two to the same source, so a drift is a red row.
+ *
+ * `POST /devices` and `POST /devices/adopt` used to take `deviceId` through `requireId`, which
+ * admits **128 characters of `[A-Za-z0-9_.:-]`**, while `readDevice` — the reader `POST /spaces`
+ * and `POST /invites/redeem` go through — has always pinned `dev_` + 22 b64url and says in as
+ * many words why: *"`KeyWrap.recipientId` admits a device id OR the reserved `rec_<memberId>`
+ * (extension E2-I5); a device allowed to name itself `rec_mem_…` could therefore be handed the
+ * wraps addressed to another member's recovery key … the two namespaces cannot meet."* On these
+ * two doors they met. Measured on the shipped router (`round8-seam.test.js` §3):
+ *
+ *   1. **The wraps.** A current member registers a device whose id is literally
+ *      `rec_<some OTHER member's id>`. `GET /spaces/:id/keys` answers
+ *      `getKeyWraps(spaceId, auth.deviceId)`, so it hands her that member's recovery wraps. They
+ *      stay ciphertext — they are sealed to a key she does not hold — so this is not a
+ *      confidentiality break, and it is still a member reading rows addressed to another member.
+ *   2. **The denial of service, which is the sharp half.** `POST /devices/revoke` calls
+ *      `deleteKeyWrapsForDevices(spaceId, [deviceId])`, and that store method matches on
+ *      `KeyWrap.recipientId`. So *register `rec_mem_MAMA` as a device, then revoke it* **deletes
+ *      Mama's recovery wraps for every epoch** — and ADR 002 §7.3 calls A2 recovery "the only
+ *      path that survives losing every device". One member, two ordinary requests, and another
+ *      member's last way back in is gone. Neither route ever needed the laxer alphabet.
+ *   3. **The free text.** `Device.id` is published verbatim by `GET /spaces/:id/members`
+ *      (`DEVICE_PROJECTION`) and `PLAINTEXT_STRINGS` justifies it as *"a label, not an
+ *      identity"*. A 128-character label a member chooses is the same story-21.1 channel R8-7
+ *      closed one field over, wearing a different name.
+ *
+ * `memberId` is deliberately NOT tightened the same way: an unknown, a malformed and a removed
+ * member must stay ONE answer (`not_a_member`, §4's `memberIn`), or this route becomes a member
+ * oracle. Shape-refusing it first would make a malformed id distinguishable from an absent one.
+ */
+export const DEVICE_ID_RE = /^dev_[A-Za-z0-9_-]{22}$/;
+
+/**
  * Crockford base32, MSB-first — byte-for-byte the encoder in `src/js/core/b64.js`.
  * Duplicated rather than imported because `server/core/` may import only from `server/core/`
  * (ADR 005 §2, enforced by `tests/helpers/purity.js`). The contract case below pins the two
@@ -251,6 +299,14 @@ export async function verifyP256(pubRaw, sig, payload) {
 /** The six fields `attestDevice` signs (`src/js/crypto/identity.js`). */
 export const ATTESTATION_FIELDS = Object.freeze(['memberId', 'deviceId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'createdAt']);
 
+/**
+ * The optional seventh — ADR 002 §2.3's `recoveryPubKex`, the binding that lifts §4.2 step 2's
+ * suspension (finding E2E3-8). It is allowed here BEFORE anything mints it, deliberately: the
+ * relay's allow-list has to ship first (see "THE DOOR IS NOT A PARSER" below), and shape-checking
+ * a field nobody sends yet costs nothing.
+ */
+export const ATTESTATION_OPTIONAL = Object.freeze(['recoveryPubKex']);
+
 const MAX_ATTESTATION_CHARS = 4096;
 
 /**
@@ -281,6 +337,110 @@ export function parseAttestationBlob(blob) {
   return { payload, sig, att };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE DOOR IS NOT A PARSER — finding R8-7, and the §2.3 design note round 8 left open
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `parseAttestationBlob` above TOLERATES extra fields and is right to. Round 8 then read that
+// tolerance as a property of the SYSTEM and shipped the closed-set check on `readDevice`
+// (`handlers/spaces.js`) only — so `POST /spaces` and `POST /invites/redeem` refused a seventh
+// field and `POST /devices` and `POST /devices/adopt`, the two routes whose entire job is
+// attaching a device, stored it verbatim. `GET /spaces/:id/members` publishes
+// `Device.attestation` (finding E2E3-6), so that was a free-text channel through a relay whose
+// whole promise is that it holds none: a member could POST „Großmutter Käthe" inside a payload
+// every field of which is otherwise honest, and the relay served the word back to the family.
+// Measured as row R8-7 in `tests/attack/round8-seam.test.js` §1; that row is now inverted.
+//
+// One rule, four doors. The check therefore lives HERE, in the file `spaces.js` already imports
+// `parseAttestationBlob`, `bytesToB64u` and `verifyDeviceClaim` from, and it runs inside
+// `verifyDeviceClaim` — which is the ONE thing all four doors that persist a `Device` row reach
+// (`spaces.js createSpace` and `invites.js redeemInvite` through `readDevice`/`readAttestedDevice`,
+// `registerDevice` and `adoptDevice` through `attachDevice`).
+// `tests/server/blindness.test.js` §7a enumerates those four doors and drives the corpus word at
+// each of them, and it also asserts that the set of handler files able to persist a device row is
+// exactly the three that exist — so a FIFTH door reddens a row instead of quietly reopening this.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE DECISION ROUND 8 DID NOT TAKE: a closed set at the door vs ADR 002 §2.3's tolerance rule
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Round 8 raised the objection and did not settle it: refusing an unknown field with `400` is
+// "negotiation, not versioning" pointing the other way, and a legitimate v2.1 attestation would
+// be REFUSED rather than parked. Settled here, and the reconciliation is that the two rules are
+// about two different actors:
+//
+//   · **A client** that meets a field it does not know PARKS it (ADR 003 §4's N+1 half, ADR 001
+//     §7.4). It can: an unknown field is inside a signature it can verify and inside a stream it
+//     can read, so "keep it, do not interpret it" is available and is the right answer.
+//   · **The relay** has no such option. It is not a reader of this blob, it is a PUBLISHER of it
+//     — an opaque column it stores in the clear and hands to every member of the space. "Park it"
+//     and "store it" are the same act here, so the only two answers a door has are *store the
+//     bytes* — which is the free-text channel — or *refuse them*. Story 21.1's claim is that the
+//     relay holds no free bits; a door that tolerates unknown fields makes that claim false.
+//
+// So the closed set is correct AND the forward-compatibility cost is real, and it is paid the
+// way ADR 003 §4 already pays every other one: **N−1, in the server-first direction.** The
+// relay's allow-list ships in the release BEFORE any client mints the field; `recoveryPubKex` is
+// already on it (E2E3-8's binding is a client-only change when it lands, exactly as designed).
+// This is versioning, not negotiation: there is no round trip, nothing is offered or withdrawn,
+// and the client never asks what the relay accepts — the release order is the whole protocol.
+//
+// > **OWED — ADR 002 §2.3 text amendment, reported as a cross-file need.** §2.3's bullet
+// > *"`parseAttestationBlob` already tolerates extra fields, deliberately, so a v2.0 client reads
+// > a v2.1 blob unchanged"* is offered there as a reason a seventh field is cheap. It is true of
+// > a CLIENT and false of the RELAY DOOR, which refuses one. The sentence to add, after that
+// > bullet: *"That tolerance is a property of the parser and of clients. The relay's door is a
+// > closed set (`assertAttestationClosed`), because the relay publishes this blob and cannot park
+// > what it must store; a new field is therefore added to the relay's allow-list one release
+// > BEFORE any client mints it — ADR 003 §4's N−1 rule, in the server-first direction."*
+
+/**
+ * ADR 002 §2.3's payload, as a CLOSED FIELD SET. Six required names, one optional, and nothing
+ * else — so every field of a blob the relay publishes is a value it already holds in a column
+ * (`memberId` → `Device.memberId`, `deviceId` → `Device.id`, `deviceShort`, `sigPubRaw`,
+ * `kexPubRaw` → the same columns, all four pinned field-by-field by S2 below) or a DAY, which is
+ * strictly coarser than the `Device.addedAt` millisecond the relay cannot avoid keeping. Zero
+ * free bits.
+ *
+ * **THE ONE COPY, AS OF THE ROUND-9 INTEGRATION PASS.** It used to be two — this one and a
+ * private twin in `handlers/spaces.js` — kept "byte-for-byte the same" by hand, and
+ * `blindness.test.js` §7a measured them already differing in one word after a single round. One
+ * rule with two implementations is a rule that drifts, and the drift is silent: each door goes on
+ * passing its own tests. `spaces.js` now imports THIS function, so all four doors that persist a
+ * `Device` row run the same bytes, and a door that were stricter than its sibling — the asymmetry
+ * R8-7 closed, pointing the other way — is no longer expressible.
+ *
+ * The error carries no caller-supplied text. `field` is a caller-chosen NAME, and it is the
+ * caller's job to have run it through `safeField` — every caller does, and `spaces.js`'s
+ * `readDevice` is why the parameter exists at all: its error bodies name the door
+ * (`device.attestation`, `devices[0].attestation`) and losing that would be a worse report for a
+ * client with several devices in one request. The REASON is an enum in both cases, so a refusal
+ * cannot echo the smuggled word back out (`blindness.test.js` §6 searches every error body for
+ * the corpus, and §7a walks all four doors with it).
+ *
+ * @param {Object} att the PARSED payload — never a re-serialisation
+ * @param {string} [field] the already-`safeField`ed name for the error body
+ * @throws {HttpError} 400
+ */
+export function assertAttestationClosed(att, field = 'attestation') {
+  for (const k of Object.keys(att)) {
+    if (!ATTESTATION_FIELDS.includes(k) && !ATTESTATION_OPTIONAL.includes(k)) {
+      throw fail('bad_request', { field, reason: 'attestation_unknown_field' });
+    }
+  }
+  // `createdAt` is the only required field not pinned to a column by S2, so it is the only one
+  // that could carry anything. ADR 002 §2.3 types it 'YYYY-MM-DD'.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(att.createdAt)) {
+    throw fail('bad_request', { field, reason: 'attestation_createdAt' });
+  }
+  if (att.recoveryPubKex !== undefined) {
+    const raw = b64uToBytes(att.recoveryPubKex);
+    if (!raw || raw.length !== P256_POINT_LEN) {
+      throw fail('bad_request', { field, reason: 'attestation_recoveryPubKex' });
+    }
+  }
+}
+
 /**
  * The whole server-side half of ADR 002 §2.3, in one place so neither `/devices` nor
  * `/devices/adopt` can drift from the other.
@@ -288,7 +448,7 @@ export function parseAttestationBlob(blob) {
  * @param {{member:Object, deviceId:string, deviceShort:string, sigPubRaw:Uint8Array,
  *          kexPubRaw:Uint8Array, attestation:string}} claim
  * @returns {Promise<{payload:Uint8Array, att:Object}>}
- * @throws {HttpError} 400 on P2, 401 `bad_signature` on S1/S2
+ * @throws {HttpError} 400 on P2 and on the closed field set (R8-7), 401 `bad_signature` on S1/S2
  */
 export async function verifyDeviceClaim(claim) {
   // P2 — the self-certifying half. Checked FIRST and independently of the signature, because it
@@ -302,6 +462,12 @@ export async function verifyDeviceClaim(claim) {
 
   const parsed = parseAttestationBlob(claim.attestation);
   if (!parsed) throw fail('bad_signature', { check: 'attestation_shape' });
+
+  // R8-7 — the CLOSED FIELD SET, before the signature and on every door. Before, because a
+  // smuggled field is a shape fault and not a forgery: the attacker signs it perfectly well with
+  // her own recovery key, so S1 can never be what catches it. `readDevice` runs the same rule at
+  // the same point on the other two doors, and running it twice on those is free.
+  assertAttestationClosed(parsed.att);
 
   // S1 — under the HOUSING member's recovery key, never the payload's self-declared memberId.
   const ok = await verifyP256(claim.member.recoveryPubSig, parsed.sig, parsed.payload);
@@ -384,7 +550,9 @@ async function attachDevice(req, ctx, mode) {
   const body = requireObject(req.body);
   const spaceId = requireId(body, 'spaceId');
   const memberId = requireId(body, 'memberId');
+  // R8-7b — one spelling of a device id, on this door as on the other two. See `DEVICE_ID_RE`.
   const deviceId = requireId(body, 'deviceId');
+  if (!DEVICE_ID_RE.test(deviceId)) throw fail('bad_request', { field: 'deviceId' });
   const deviceShort = body.deviceShort;
   if (typeof deviceShort !== 'string' || !DEVICE_SHORT_RE.test(deviceShort)) {
     throw fail('bad_request', { field: 'deviceShort' });

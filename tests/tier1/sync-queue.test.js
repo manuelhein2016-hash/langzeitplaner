@@ -430,12 +430,30 @@ describe('§2b · a cursor is monotone, canonical, and per space', () => {
     assert.equal(d.fromGenesis(SPACE), true);
   });
 
-  test('`fromGenesis` is sticky once true — one full pull earns it for good', async () => {
+  // ── R9-1 · INVERTED 2026-08-29 ─────────────────────────────────────────────────────────────
+  //
+  // This row read *"`fromGenesis` is sticky once true — one full pull earns it for good"* and it
+  // was green because `advance()` could raise the flag and never lower it. Round 9's chain-witness
+  // pass found that the flag is not a reward for a past pull; it is THE RIGHT TO CALL AN UNKNOWN
+  // `wit` A FORK, and `chain.js` gives that right up the instant a break makes verification
+  // unprovable from genesis. A ratchet hands the right back at the next launch, so the device
+  // accuses an honest relay of a fork it can no longer prove — the false positive ADR 002 §5.4
+  // forbids in one sentence. Now a boolean is WRITTEN in either direction; only omission carries
+  // the stored value forward. Mutant **M-H**.
+  test('R9-1 · `fromGenesis` is REPORTED, not ratcheted — a device may give the right up', async () => {
     const c = createCursors({});
     await c.load();
     await c.advance(SPACE, '5', { seq: '5', chain: 'a' }, async () => {}, { fromGenesis: true });
+    assert.equal(c.fromGenesis(SPACE), true, 'a pull from genesis earns it');
     await c.advance(SPACE, '6', { seq: '6', chain: 'b' }, async () => {}, { fromGenesis: false });
-    assert.equal(c.fromGenesis(SPACE), true);
+    assert.equal(c.fromGenesis(SPACE), false,
+      'and a break that makes it unprovable takes it away again — DURABLY, which is the point');
+    // Omission is not a claim in either direction: a caller with nothing to say changes nothing.
+    await c.advance(SPACE, '7', { seq: '7', chain: 'c' }, async () => {});
+    assert.equal(c.fromGenesis(SPACE), false);
+    await c.advance(SPACE, '8', { seq: '8', chain: 'd' }, async () => {}, { fromGenesis: true });
+    await c.advance(SPACE, '9', { seq: '9', chain: 'e' }, async () => {});
+    assert.equal(c.fromGenesis(SPACE), true, 'omission carries the STORED value, not `false`');
   });
 
   test('a hand-edited or truncated record degrades to 0 and warns, never throws', async () => {

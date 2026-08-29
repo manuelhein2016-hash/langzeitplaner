@@ -90,6 +90,21 @@ const OP_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 export const PARK_CAP = 10000;
 
 /**
+ * How many times a FRESH PROCESS may put a shelved envelope back into the replay set.
+ *
+ * A shelf entry is an envelope some ladder gave up on (see `createParkingLot`'s header, R8-4).
+ * Reviving it on relaunch is right — a relaunch is the only moment a new binary, a new key epoch
+ * or a newly arrived attestation can exist — and reviving it for ever is not: ADR 003 §8.2's
+ * "a permanently rejected op must never silently spin forever" is a rule about the LONG run, and
+ * an envelope nothing in the world will ever open would otherwise cost every launch a burst of
+ * futile `openOp` calls and one more quarantine sentence.
+ *
+ * Past this bound the envelope is KEPT and no longer replayed. That is not a drop: the bytes are
+ * on disk, `diagnostics().refused` counts them, and `shelved()` hands them back whole.
+ */
+export const PARK_REVIVALS = 3;
+
+/**
  * An in-memory store. Used until `store.js` binds the durable one; says so in diagnostics.
  *
  * It DEEP-copies in both directions. A shallow `slice()` would hand a caller the same row objects
@@ -355,6 +370,47 @@ export function createOutbox(ports = {}) {
  *
  * Both are re-evaluable, and both are re-evaluated: the client replays this lot after every pull.
  *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * THE TWO RULES ROUND 9 HAD TO ADD, BECAUSE ROUND 8's ADVERSARY BROKE THIS FILE'S OWN SENTENCE
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * `sync/personal.js`'s `PARK_HANDLING` states the rule this factory exists to make true:
+ *
+ *   > **a park is a deferral and it may never become a drop.**
+ *
+ * R8-4 and R8-5 measured it false, twice, and both times INSIDE this function:
+ *
+ * **R8-5 — `park()` reported success after a write that failed.** It ended
+ * `rows.push(…); await persist(); return true;` while `persist()` swallowed its own throw and
+ * returned `false` to nobody. `pullNow` calls it correctly (`if (!kept) holds.set(…)`, with a
+ * `catch` around it and the comment "an unwritable park is a stall"), so the entire defence was
+ * unreachable: on a disk that refused exactly the parked-envelope slot, the cursor was released
+ * over an envelope that existed only in RAM. **`park()` now RETURNS THE WRITE'S VERDICT.** A park
+ * that is not on disk is not a park, and the caller is told so in the one word it already reads.
+ *
+ * **R8-4 — `release()` destroyed the only copy.** `terminal()` in `pullNow` — the end of the
+ * five-pull deferral ladder — pushes the oid to `toRelease`, and `release()` deleted the
+ * envelope. `personal.js` argues that is survivable because "the store parked the line
+ * independently", and that argument is TRUE for an `applyRemote` refusal (the op was decrypted,
+ * so `oplog.park()` holds a line) and FALSE for a P1/P4 `openOp` park, which happens BEFORE the
+ * decrypt: no op, no line, and after the release no envelope either. **The lot now knows the
+ * difference, and it knows it from the caller's own words**:
+ *
+ *   · an oid this caller has just handed to `park()` (or `touch()`) is one it has JUST SAID it
+ *     could not open. Releasing it in the same breath is a ladder giving up, not an op landing;
+ *   · an oid released WITHOUT such a park is one that opened — the F-6 cure landing, or an
+ *     `applyRemote` refusal whose line the log holds. Destroying its bytes is correct.
+ *
+ * The first case is SHELVED instead of deleted: retained on disk, out of the replay set so
+ * nothing spins (ADR 003 §8.2), and put back by the next fresh process — a relaunch is exactly
+ * when a new binary, a new key ring or a new attestation may have arrived. `refuse()` is the same
+ * transition asked for explicitly, and it is what a caller should call; the guard in `release()`
+ * is what makes the rule true for a caller that does not.
+ *
+ * The direction of the residual error is the point. The guard can only ever RETAIN an envelope it
+ * could have destroyed — a few dead bytes under the cap — and it can never destroy one it should
+ * have kept.
+ *
  * @param {{storage?:Object, now?:() => number, warn?:(m:string)=>void, cap?:number}} ports
  */
 export function createParkingLot(ports = {}) {
@@ -363,20 +419,53 @@ export function createParkingLot(ports = {}) {
   const warn = typeof ports.warn === 'function' ? ports.warn : () => {};
   const cap = Number.isInteger(ports.cap) && ports.cap > 0 ? ports.cap : PARK_CAP;
 
-  /** @type {Array<{space:string, oid:string, env:Object, seq:string, reason:string, at:number, tries:number}>} */
+  /**
+   * @typedef {{space:string, oid:string, env:Object, seq:string, reason:string, at:number,
+   *   tries:number, refusals:number}} ParkRow
+   */
+  /** THE REPLAY SET — envelopes this device will hand `openOp` again. @type {ParkRow[]} */
   let rows = [];
+  /**
+   * THE SHELF — envelopes a ladder gave up on. Retained for ever, replayed by no pull in this
+   * session, and NEVER destroyed. `parked()`, `size()` and the cap all read `rows`, not this: a
+   * shelved envelope is not work outstanding, it is a copy kept because losing it is forbidden.
+   * @type {ParkRow[]}
+   */
+  let shelf = [];
   let loaded = false;
   let overflowed = 0;
-  const seen = new Set();
+  /** Persists that FAILED. Each one returned `false` from `park()` and stalled a cursor. */
+  let unwritable = 0;
+  /** Shelved envelopes this launch put back into the replay set. */
+  let revived = 0;
+  /**
+   * Oids this caller has parked or touched since its last `release()` — envelopes it has just
+   * told this lot it still cannot open. `release()` reads it and shelves rather than destroys.
+   *
+   * CLEARED ON EVERY `release()`, which is what scopes it to one pull: `pullNow` flushes its
+   * `toPark` list, then releases the ladder's casualties, then releases what it applied. A mark
+   * that is cleared too eagerly costs nothing — the next pull parks the row again and re-marks
+   * it — and a mark that survives too long can only cause a retention, never a deletion.
+   */
+  const unopened = new Set();
   const key = (space, oid) => `${space}\n${oid}`;
+  const at = (list, k) => list.findIndex((r) => key(r.space, r.oid) === k);
+
+  const record = (r, refused) => ({ ...r, env: { ...r.env }, refused });
 
   const persist = async () => {
     try {
-      await storage.saveRecords(rows.map((r) => ({ ...r, env: { ...r.env } })));
+      await storage.saveRecords([
+        ...rows.map((r) => record(r, false)),
+        ...shelf.map((r) => record(r, true)),
+      ]);
       return true;
     } catch (e) {
+      unwritable++;
       warn(`park: the parked envelopes could not be persisted (${e && e.message}). Until they are, `
-         + 'a quit loses them and the ops they carry are gone from this Mac (F-6).');
+         + 'a quit loses them and the ops they carry are gone from this Mac (F-6). The cursor is '
+         + 'held below them, so the relay is still the durable copy and sync has STALLED rather '
+         + 'than moved on.');
       return false;
     }
   };
@@ -390,14 +479,17 @@ export function createParkingLot(ports = {}) {
         warn(`park: the parked envelopes could not be read (${e && e.message}); starting empty`);
       }
       rows = [];
-      seen.clear();
+      shelf = [];
+      revived = 0;
+      unopened.clear();
+      const seen = new Set();
       if (Array.isArray(list)) {
         for (const r of list) {
           if (r === null || typeof r !== 'object' || typeof r.space !== 'string') continue;
           if (!isEnvelopeFor(r.env, r.space)) continue;
           if (seen.has(key(r.space, r.env.oid))) continue;
           seen.add(key(r.space, r.env.oid));
-          rows.push({
+          const row = {
             space: r.space,
             oid: r.env.oid,
             env: { ...r.env },
@@ -405,7 +497,24 @@ export function createParkingLot(ports = {}) {
             reason: typeof r.reason === 'string' ? r.reason : 'unknown',
             at: Number.isFinite(r.at) ? r.at : now(),
             tries: Number.isInteger(r.tries) ? r.tries : 0,
-          });
+            refusals: Number.isInteger(r.refusals) ? r.refusals : 0,
+          };
+          // ── THE REVIVAL, AND THE ONE THING IT IS NOT ────────────────────────────────────────
+          //
+          // A shelved envelope goes back into the replay set for a FRESH PROCESS and for nothing
+          // else. That is the whole cure condition: a relaunch is the moment a new binary, a
+          // newly fetched key epoch or a newly arrived attestation can exist, and it is the only
+          // moment at which re-running `openOp` over the same bytes can answer differently.
+          // `tries` restarts because the ladder it burned was a ladder in a world that has since
+          // changed; `refusals` does NOT, and it is what bounds this: after `PARK_REVIVALS`
+          // launches the envelope is kept and no longer replayed, so ADR 003 §8.2's "must never
+          // silently spin forever" holds across relaunches too, and the bytes still exist.
+          if (r.refused === true) {
+            if (row.refusals > PARK_REVIVALS) { shelf.push(row); continue; }
+            revived++;
+            row.tries = 0;
+          }
+          rows.push(row);
         }
       }
       loaded = true;
@@ -417,14 +526,18 @@ export function createParkingLot(ports = {}) {
     /**
      * Retain one envelope, unopened.
      *
-     * **RETURNS `false` AT THE CAP, AND THE CALLER MUST NOT ADVANCE THE CURSOR PAST IT.** That is
-     * the whole design of the bound: dropping the newest loses it, dropping the oldest loses that
-     * one, and both are the silent data loss ADR 002 §5.2.5 forbids. Refusing to take it and
-     * refusing to move the cursor means the pull STALLS — visibly, in the sync status, with a
-     * sentence — and nothing is lost. A stalled sync is a bad afternoon; a moved cursor is a
-     * missing appointment nobody will ever know about.
+     * **RETURNS `false` AT THE CAP AND ON A FAILED WRITE, AND THE CALLER MUST NOT ADVANCE THE
+     * CURSOR PAST IT.** That is the whole design of the bound: dropping the newest loses it,
+     * dropping the oldest loses that one, and both are the silent data loss ADR 002 §5.2.5
+     * forbids. Refusing to take it and refusing to move the cursor means the pull STALLS —
+     * visibly, in the sync status, with a sentence — and nothing is lost. A stalled sync is a bad
+     * afternoon; a moved cursor is a missing appointment nobody will ever know about.
      *
-     * @returns {Promise<boolean>} false when the lot is full
+     * A FAILED WRITE IS THE SAME ANSWER AS A FULL LOT, and R8-5 is what happens when it is not:
+     * an in-memory row is not a retention, so a `true` here would be this function telling its
+     * caller a fact about the disk that is false, and the caller releasing the cursor on it.
+     *
+     * @returns {Promise<boolean>} false when the lot is full, or when the write did not land
      */
     async park(space, env, seq, reason) {
       if (!isEnvelopeFor(env, space)) {
@@ -432,12 +545,16 @@ export function createParkingLot(ports = {}) {
         return true;                                  // not parkable, but not a reason to stall
       }
       const k = key(space, env.oid);
-      const at = rows.findIndex((r) => key(r.space, r.oid) === k);
-      if (at >= 0) {
-        rows[at] = { ...rows[at], reason: String(reason), tries: rows[at].tries + 1 };
-        await persist();
-        return true;
+      // The caller has just said it could not open this one. See `unopened` above.
+      unopened.add(k);
+      const live = at(rows, k);
+      if (live >= 0) {
+        rows[live] = { ...rows[live], reason: String(reason), tries: rows[live].tries + 1 };
+        return persist();
       }
+      // Already shelved: the bytes are retained, so this is not a stall — but it is not back in
+      // the replay set either, and only a relaunch puts it there. Nothing is lost either way.
+      if (at(shelf, k) >= 0) return true;
       if (rows.length >= cap) {
         overflowed++;
         warn(`park: the parking lot is full (${cap}). The cursor for ${space} will NOT advance past `
@@ -447,30 +564,86 @@ export function createParkingLot(ports = {}) {
       }
       rows.push({
         space, oid: env.oid, env: { ...env }, seq: String(seq),
-        reason: String(reason), at: now(), tries: 0,
+        reason: String(reason), at: now(), tries: 0, refusals: 0,
       });
-      seen.add(k);
-      await persist();
-      return true;
+      return persist();
     },
 
-    /** Everything parked for one space, oldest first — the replay order. */
+    /** Everything parked for one space, oldest first — the replay order. Never the shelf. */
     parked(space) {
       return rows.filter((r) => space === undefined || r.space === space)
         .map((r) => ({ space: r.space, oid: r.oid, env: { ...r.env }, seq: r.seq, reason: r.reason, tries: r.tries }));
     },
 
-    /** Remove the ones that opened. */
+    /** The retained-but-not-replayed envelopes — what a ladder gave up on and did not destroy. */
+    shelved(space) {
+      return shelf.filter((r) => space === undefined || r.space === space)
+        .map((r) => ({
+          space: r.space, oid: r.oid, env: { ...r.env }, seq: r.seq,
+          reason: r.reason, tries: r.tries, refusals: r.refusals,
+        }));
+    },
+
+    /**
+     * Remove the ones that OPENED.
+     *
+     * THE ONE PATH IN THIS FILE THAT DESTROYS BYTES, and it destroys them only where destroying
+     * them is safe: the op is in the log, or the log has parked a line for it. An oid the caller
+     * parked or touched since its last release is neither — it is a hold this caller has just
+     * said it still cannot open — so that one is SHELVED, and `release()` reports it as released
+     * because from the caller's side it is: it has left the replay set. See the header (R8-4).
+     *
+     * @returns {Promise<number>} how many rows left the replay set
+     */
     async release(space, oids) {
       const gone = new Set(Array.isArray(oids) ? oids : [oids]);
-      const before = rows.length;
-      rows = rows.filter((r) => {
-        const drop = r.space === space && gone.has(r.oid);
-        if (drop) seen.delete(key(r.space, r.oid));
-        return !drop;
-      });
-      if (rows.length !== before) await persist();
-      return before - rows.length;
+      const keep = [];
+      const shelved = [];
+      for (const r of rows) {
+        if (r.space !== space || !gone.has(r.oid)) { keep.push(r); continue; }
+        if (unopened.has(key(r.space, r.oid))) shelved.push(r);
+      }
+      const n = rows.length - keep.length;
+      unopened.clear();
+      if (n === 0) return 0;
+      rows = keep;
+      for (const r of shelved) shelf.push({ ...r, tries: 0, refusals: r.refusals + 1 });
+      if (shelved.length) {
+        warn(`park: ${shelved.length} held change(s) were given up on without ever being opened. `
+           + 'The sealed envelope is KEPT — a park may never become a drop — and this Mac will try '
+           + 'it once more the next time the app starts.');
+      }
+      await persist();
+      return n;
+    },
+
+    /**
+     * A hold that has ENDED without the op ever opening: the ladder gave up, or the caller has
+     * decided it will not try again this session. The envelope is retained, not destroyed.
+     *
+     * This is what `sync/personal.js`'s `terminal()` should call instead of `release()`. Until it
+     * does, `release()`'s guard reaches the same state; this is the same transition said out loud.
+     *
+     * @returns {Promise<number>} how many rows moved to the shelf
+     */
+    async refuse(space, oids, reason) {
+      const names = new Set(Array.isArray(oids) ? oids : [oids]);
+      const keep = [];
+      let n = 0;
+      for (const r of rows) {
+        if (r.space !== space || !names.has(r.oid)) { keep.push(r); continue; }
+        n++;
+        shelf.push({
+          ...r,
+          reason: reason === undefined ? r.reason : String(reason),
+          tries: 0,
+          refusals: r.refusals + 1,
+        });
+      }
+      if (n === 0) return 0;
+      rows = keep;
+      await persist();
+      return n;
     },
 
     /** Note one more failed replay, so `tries` can be reported without re-parking. */
@@ -480,6 +653,7 @@ export function createParkingLot(ports = {}) {
       rows = rows.map((r) => {
         if (r.space !== space || !bump.has(r.oid)) return r;
         n++;
+        unopened.add(key(r.space, r.oid));
         return { ...r, tries: r.tries + 1, reason: reason === undefined ? r.reason : String(reason) };
       });
       if (n > 0) await persist();
@@ -496,9 +670,14 @@ export function createParkingLot(ports = {}) {
     /** How many envelopes the cap has refused. Non-zero means sync is stalled by design. */
     get overflowed() { return overflowed; },
 
+    /** How many writes did not land. Non-zero means `park()` answered `false` and held a cursor. */
+    get unwritable() { return unwritable; },
+
     diagnostics() {
       const byReason = {};
       for (const r of rows) byReason[r.reason] = (byReason[r.reason] || 0) + 1;
+      const shelvedByReason = {};
+      for (const r of shelf) shelvedByReason[r.reason] = (shelvedByReason[r.reason] || 0) + 1;
       return {
         loaded,
         durable: storage.durable !== false,
@@ -506,6 +685,15 @@ export function createParkingLot(ports = {}) {
         cap,
         overflowed,
         byReason,
+        // ── WHAT A LADDER GAVE UP ON, AND WHAT IT DID NOT DESTROY ────────────────────────────
+        // `refused` is the count of envelopes retained after a hold ended: they are on disk, they
+        // are not replayed this session, and the next launch puts the first `PARK_REVIVALS` of
+        // them back. `unwritable` is the count of writes that did not land — every one of them
+        // returned `false` from `park()` and therefore stalled a cursor rather than losing an op.
+        refused: shelf.length,
+        refusedByReason: shelvedByReason,
+        revived,
+        unwritable,
       };
     },
   };

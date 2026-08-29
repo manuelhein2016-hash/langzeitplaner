@@ -75,7 +75,7 @@ import { clientIp, rateKey, enforceFor } from '../limits.js';
 // `POST /devices/adopt`, `POST /spaces` and `POST /invites/redeem` cannot drift from each other.
 // The import runs spaces → devices, the same direction `keys.js` already imports in; devices.js
 // imports only `errors.js` and `limits.js`, so there is no cycle.
-import { parseAttestationBlob, verifyDeviceClaim } from './devices.js';
+import { parseAttestationBlob, verifyDeviceClaim, assertAttestationClosed } from './devices.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 0. What this handler needs from `ctx` that docs/v2/contracts/server.contract.js §1 does not
@@ -542,7 +542,7 @@ export function readDevice(raw, where) {
   const parsed = parseAttestationBlob(out.attestationBlob);
   if (!parsed) throw fail('bad_request', { field: safeField(`${where}.attestation`), reason: 'attestation_shape' });
   const a = parsed.att;
-  assertAttestationClosed(a, where);
+  assertAttestationClosed(a, safeField(`${where}.attestation`));
   // S2 without the member clause. Every field the relay is about to STORE must be the field the
   // member SIGNED — otherwise the row and the blob describe two different devices, and the blob
   // is the half every client verifies.
@@ -555,62 +555,29 @@ export function readDevice(raw, where) {
   return out;
 }
 
-/**
- * ─────────────────────────────────────────────────────────────────────────────────────────────
- * THE ATTESTATION PAYLOAD IS A CLOSED FIELD SET — and this is what makes publishing it free
- * ─────────────────────────────────────────────────────────────────────────────────────────────
- *
- * `parseAttestationBlob` deliberately TOLERATES extra fields, and it is right to: a v2.1
- * attestation must stay readable by a v2.0 client, and those extra fields are covered by the
- * signature, so re-serialising the six known ones would drop them and fail every future blob.
- * That tolerance is a property of the PARSER. It must not become a property of the DOOR.
- *
- * The reason is story 21.1. `Device.attestation` is now published (`GET /spaces/:id/members`,
- * finding E2E3-6), so anything a client can put inside the blob is a readable string the relay
- * stores in the clear and hands to every member — which is precisely the channel
- * `FORBIDDEN_COLUMN_TOKENS`, `MODEL_COLUMNS` and `readObject`'s closed field set exist to close
- * everywhere else. `tests/server/blindness.test.js` used to smuggle „Großmutter Käthe" into an
- * attestation to prove the relay never echoes it; before this check, publication would have made
- * that test's premise false.
- *
- * With the set closed, **every field of a published blob is a value the relay already holds in a
- * column**: `memberId` → `Device.memberId`, `deviceId` → `Device.id`, `deviceShort`, `sigPubRaw`
- * and `kexPubRaw` → the same columns (all four pinned field-by-field above), and `createdAt` → a
- * DAY, strictly coarser than the `Device.addedAt` timestamp the relay keeps to the millisecond.
- * Zero free bits. That is why the publication costs 21.1 nothing, and it is checkable rather
- * than argued (`rotation-wire.test.js` §5).
- *
- * `recoveryPubKex` is the ONE optional field, and it is allowed here BEFORE anything mints it:
- * ADR 002 §2.3 specifies it as the binding that finding E2E3-8 is open on, and the relay
- * accepting it in advance is what lets that binding land as a client-only change. It is
- * shape-checked, not trusted — the relay does not read it, and a client must still bind it to
- * `Member.recoveryPubKex` itself.
- *
- * Forward compatibility is therefore EXPLICIT rather than automatic: a v2.1 field must be added
- * to this list, exactly as a new column must be added to `MODEL_COLUMNS`. ADR 003 §4's N−1 rule
- * governs the rollout.
- *
- * @param {Object} att the parsed payload @param {string} where
- */
-const ATTESTATION_REQUIRED = Object.freeze(['memberId', 'deviceId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'createdAt']);
-const ATTESTATION_OPTIONAL = Object.freeze(['recoveryPubKex']);
-
-function assertAttestationClosed(att, where) {
-  const field = safeField(`${where}.attestation`);
-  for (const k of Object.keys(att)) {
-    if (!ATTESTATION_REQUIRED.includes(k) && !ATTESTATION_OPTIONAL.includes(k)) {
-      throw fail('bad_request', { field, reason: 'attestation_unknown_field' });
-    }
-  }
-  // `createdAt` is the only required field not pinned to a column above, so it is the only one
-  // that could carry anything. ADR 002 §2.3 types it 'YYYY-MM-DD'; that is now enforced.
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(att.createdAt)) {
-    throw fail('bad_request', { field, reason: 'attestation_createdAt' });
-  }
-  if (att.recoveryPubKex !== undefined) {
-    b64uToBytes(att.recoveryPubKex, `${where}.attestation.recoveryPubKex`, { len: P256_RAW_LEN });
-  }
-}
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE ATTESTATION PAYLOAD IS A CLOSED FIELD SET — and it is `devices.js`'s copy of the rule
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `assertAttestationClosed` USED TO LIVE HERE, as a private twin of the one in
+// `handlers/devices.js`, and the pair was kept "byte-for-byte the same" by hand. Round 8 shipped
+// the rule on this file's two doors only, so `POST /devices` and `POST /devices/adopt` stored a
+// seventh field verbatim and `GET /spaces/:id/members` published it (R8-7). Round 9 put the rule
+// where all four doors reach it — inside `verifyDeviceClaim` — and left the twin here.
+//
+// The twin is now gone, because within ONE ROUND the two copies had already drifted: they
+// disagreed on the `recoveryPubKex` refusal reason (`wrong_length` here, `attestation_recoveryPubKex`
+// there), which `tests/server/blindness.test.js` §7a caught and characterized. A rule with two
+// implementations drifts silently — each door goes on passing its own tests — and the failure
+// mode of THIS rule drifting is a free-text channel through a relay whose whole promise (story
+// 21.1) is that it has none. So there is one function, in the file this one already imports
+// `parseAttestationBlob` and `verifyDeviceClaim` from, and this door passes its own `field` name
+// so a client with several devices in one request is still told WHICH one was refused.
+//
+// The reasoning that made the set closed in the first place is unchanged and lives with the
+// function: `parseAttestationBlob` tolerates extra fields, that tolerance is a property of the
+// PARSER and of CLIENTS, and the relay — which publishes this blob and cannot park what it must
+// store — pays forward compatibility as ADR 003 §4's N−1 rule, server-first.
 
 /** The blob, as a bounded ASCII string. @param {Object} d @param {string} where @returns {string} */
 function readAttestationBlob(d, where) {

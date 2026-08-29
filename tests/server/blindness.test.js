@@ -59,6 +59,8 @@ import { createHandlers, handlers, HANDLER_OWNERS, REQUIRED_CTX_NAMES } from '..
 import { authenticate, assertMember, b64u } from '../../server/core/auth.js';
 import { LIMITS, createLog, LOG_FIELD_NAMES, LOG_FIELDS, LOG_ROUTES } from '../../server/core/limits.js';
 import { DEVICE_PROJECTION, MEMBER_PROJECTION } from '../../server/core/handlers/members.js';
+import { DEVICE_ID_RE as DEVICE_ID_RE_DEVICES } from '../../server/core/handlers/devices.js';
+import { DEVICE_ID_RE as DEVICE_ID_RE_SPACES } from '../../server/core/handlers/spaces.js';
 import { attestDevice, buildDeviceAttestation } from '../../src/js/crypto/identity.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -858,6 +860,363 @@ test('§2 an attestation cannot carry a note — the corpus word is REFUSED at t
   });
   assert.equal(res2.status, 400);
   assert.equal(res2.body.reason, 'attestation_createdAt');
+});
+
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §7a  EVERY DOOR THAT CAN PERSIST AN ATTESTATION — the enumeration finding R8-7 forced
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// The row above was true, and it was true of ONE DOOR. `assertAttestationClosed` lived in
+// `handlers/spaces.js`'s `readDevice`, reached by `POST /spaces` and `POST /invites/redeem`;
+// `POST /devices` and `POST /devices/adopt` — the two routes whose entire job is attaching a
+// device to an existing space — ran `verifyDeviceClaim`, which is the SIGNATURE half, and stored
+// the blob verbatim. Round 8's adversary minted a third Mac with the shipped generator, signed a
+// seventh field `note: "Großmutter Käthe"` under the member's own recovery key, got a 200, and
+// read the word back out of `GET /spaces/:id/members`. Finding **R8-7**, measured in
+// `tests/attack/round8-seam.test.js` §1, which is now inverted.
+//
+// A test that drives the door somebody happened to think of is how that happened. So this section
+// is an ENUMERATION, in the discipline §2 uses for columns: the doors are DATA, the payload
+// mutations are DATA, and every door is required to answer every mutation the same way. A door
+// added later that does not appear here fails the completeness row by name — the assertion is
+// over the domain, so a case nobody thought of is still covered.
+
+/** The four routes that end in `tx.addDevice(...)`, and the reader each of them goes through. */
+const ATTESTATION_DOORS = Object.freeze([
+  { route: 'POST /spaces',         file: 'spaces.js',  via: 'readAttestedDevice → readDevice' },
+  { route: 'POST /invites/redeem', file: 'invites.js', via: 'readDevice (spaces.js)' },
+  { route: 'POST /devices',        file: 'devices.js', via: 'attachDevice → verifyDeviceClaim' },
+  { route: 'POST /devices/adopt',  file: 'devices.js', via: 'attachDevice → verifyDeviceClaim' },
+]);
+
+test('§7a the handler files that can persist a Device row are exactly the three §7a drives', () => {
+  // The completeness half, and the reason this section cannot rot into "four cases somebody
+  // wrote down". A FIFTH door — a new handler file, or a new `addDevice` call site in an existing
+  // one — reddens this row and names the file, instead of silently reopening R8-7.
+  const dir = path.join(REPO, 'server', 'core', 'handlers');
+  const writers = [];
+  for (const f of fs.readdirSync(dir).filter((n) => n.endsWith('.js')).sort()) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    if (/\baddDevice\s*\(/.test(src)) writers.push(f);
+  }
+  assert.deepEqual(writers, ['devices.js', 'invites.js', 'spaces.js'],
+    'a handler file gained the power to write a Device row. Add its route to ATTESTATION_DOORS '
+    + 'and make it answer every case below, or R8-7 is open again on the new door.');
+  assert.deepEqual([...new Set(ATTESTATION_DOORS.map((d) => d.file))].sort(), writers);
+
+  // …and every one of those files reaches the closed-set rule, rather than merely existing. The
+  // rule has ONE definition, in `handlers/devices.js`, which `spaces.js` already imports its
+  // parser and its signature check from; `invites.js` reaches it through `spaces.js`'s reader.
+  for (const f of writers) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    assert.ok(/assertAttestationClosed|readDevice\s*\(|verifyDeviceClaim\s*\(/.test(src),
+      `${f} writes a Device row without going through a reader that closes the field set`);
+  }
+});
+
+const newSpaceId = () => `fsp_${b64u(globalThis.crypto.getRandomValues(new Uint8Array(16)))}`;
+const wrapsFor = (p) => [
+  { recipientId: p.deviceId, epoch: 1, wrapped: b64u(new Uint8Array(156)) },
+  { recipientId: `rec_${p.memberId}`, epoch: 1, wrapped: b64u(new Uint8Array(156)) },
+];
+
+/** The six ADR 002 §2.3 fields of a person's own device, before a mutation is applied. */
+const sixOf = (p) => ({
+  memberId: p.memberId, deviceId: p.deviceId, deviceShort: p.deviceShort,
+  sigPubRaw: p.sigPubRaw, kexPubRaw: p.kexPubRaw, createdAt: '2026-08-29',
+});
+
+/**
+ * `b64u(payload) + '.' + b64u(sig)`, signed by the HOUSING member's recovery key. Hand-rolled
+ * rather than taken from `attestDevice`, precisely because `attestDevice` can only mint the six
+ * fields: a smuggler does not use the shipped generator, and a test that could not express the
+ * seventh field could not have found R8-7.
+ */
+async function mintBlob(recSigPriv, payloadObject) {
+  const payload = TE.encode(JSON.stringify(payloadObject));
+  const sig = new Uint8Array(await S.sign({ name: 'ECDSA', hash: 'SHA-256' }, recSigPriv, payload));
+  return `${b64u(payload)}.${b64u(sig)}`;
+}
+
+/**
+ * The wire half of a mutated payload. S2 — on every door — requires the row the relay stores to
+ * be the row the member signed, so a mutation of `deviceId` has to be presented on the wire too
+ * or the answer under test is a 401 cross-check failure instead of the shape refusal. Only the
+ * fields the ADR pins to a column can travel; `note` and `createdAt` have no wire field, which is
+ * exactly why they are the smuggling channel.
+ */
+const WIRE_FIELDS = Object.freeze(['deviceId', 'deviceShort', 'sigPubRaw', 'kexPubRaw']);
+const onWire = (att) => Object.fromEntries(
+  WIRE_FIELDS.filter((f) => typeof att[f] === 'string').map((f) => [f, att[f]]));
+
+/** A SECOND Mac of a member who already exists — what `/devices` and `/devices/adopt` attach. */
+async function newDeviceOf() {
+  const sig = await keypair('sig');
+  const kex = await keypair('kex');
+  const sigPubRaw = await rawOf(sig.publicKey);
+  return {
+    deviceId: `dev_${b64u(globalThis.crypto.getRandomValues(new Uint8Array(16)))}`,
+    deviceShort: await shortOf(sigPubRaw),
+    sigPubRaw: b64u(sigPubRaw),
+    kexPubRaw: b64u(await rawOf(kex.publicKey)),
+  };
+}
+
+/** The router lets an `HttpError` out; every door below is meant to throw one in four cases of five. */
+const attemptWith = (call) => async (...a) => {
+  try { return await call(...a); } catch (e) { return { status: e.status, body: { error: e.code, ...(e.extra || {}) } }; }
+};
+
+/**
+ * Drive one door with one payload mutation. Returns the response AND the store, so a refusal can
+ * be checked twice over: the answer on the wire, and the absence of a row behind it. "Stored but
+ * never served" stopped being a defence the moment `GET /members` began publishing the column.
+ *
+ * @param {string} route @param {(six:Object)=>Object} mutate
+ */
+async function driveDoor(route, mutate) {
+  const { call, store, ctx } = serverOnly(ADAPTERS[0].make);
+  const attempt = attemptWith(call);
+  const papa = await person('gruen');
+  const spaceId = newSpaceId();
+
+  if (route === 'POST /spaces') {
+    const att = mutate(sixOf(papa));
+    const blob = await mintBlob(papa.recSigPriv, att);
+    const res = await attempt(papa, 'POST', '/spaces', {}, {
+      spaceId, kind: 'FAMILY', colorRef: papa.colorRef,
+      member: wireMember(papa),
+      device: { ...wireDevice(papa), ...onWire(att), attestation: blob },
+      wraps: wrapsFor(papa),
+    });
+    return { res, store, ctx, spaceId, reader: papa };
+  }
+
+  // Every other door needs a space that already exists, created honestly.
+  const created = await attempt(papa, 'POST', '/spaces', {}, {
+    spaceId, kind: 'FAMILY', colorRef: papa.colorRef,
+    member: wireMember(papa), device: wireDevice(papa), wraps: wrapsFor(papa),
+  });
+  assert.equal(created.status, 200, `setup: ${JSON.stringify(created.body)}`);
+
+  if (route === 'POST /invites/redeem') {
+    const code = b64u(globalThis.crypto.getRandomValues(new Uint8Array(8)));
+    const proof = new Uint8Array(await S.digest('SHA-256', TE.encode(`verify|${code}`)));
+    const verifier = new Uint8Array(await S.digest('SHA-256', proof));
+    const inviteId = b64u(new Uint8Array(await S.digest('SHA-256', TE.encode(`id|${code}`))).subarray(0, 16));
+    assert.equal((await attempt(papa, 'POST', '/invites', {}, {
+      spaceId, inviteId, verifier: b64u(verifier),
+    })).status, 200);
+    const joiner = await person('blau');
+    const att = mutate(sixOf(joiner));
+    const blob = await mintBlob(joiner.recSigPriv, att);
+    const res = await attempt(joiner, 'POST', '/invites/redeem', {}, {
+      inviteId, proof: b64u(proof), colorRef: joiner.colorRef,
+      member: wireMember(joiner),
+      device: { ...wireDevice(joiner), ...onWire(att), attestation: blob },
+    });
+    return { res, store, ctx, spaceId, reader: papa };
+  }
+
+  // `POST /devices` and `POST /devices/adopt` — the two doors R8-7 was open on. Both attach a
+  // SECOND Mac to a member who already exists, and both are authorized by exactly one thing: a
+  // signature under `Member.recoveryPubSig`. So the smuggler here is the member herself, every
+  // key is honest, and only the payload is not.
+  const path2 = route === 'POST /devices' ? '/devices' : '/devices/adopt';
+  const second = await newDeviceOf();
+  const att = mutate({ ...sixOf(papa), ...second });
+  const blob = await mintBlob(papa.recSigPriv, att);
+  const res = await attempt(papa, 'POST', path2, {}, {
+    spaceId, memberId: papa.memberId,
+    deviceId: second.deviceId, deviceShort: second.deviceShort,
+    sigPubRaw: second.sigPubRaw, kexPubRaw: second.kexPubRaw,
+    ...onWire(att),
+    attestation: blob,
+  });
+  return { res, store, ctx, spaceId, reader: papa };
+}
+
+/**
+ * The mutations. Three refusals and two admissions — the admissions are what stop this section
+ * from being satisfiable by a door that refuses everything, which would be a worse bug than the
+ * one it is here to close (it would make `POST /devices` unusable and `POST /spaces` unreachable).
+ */
+const CLOSED_SET_CASES = Object.freeze([
+  {
+    name: 'a seventh field carrying a family word',
+    mutate: (six) => ({ ...six, note: 'Großmutter Käthe' }),
+    status: 400, reason: 'attestation_unknown_field',
+  },
+  {
+    name: 'a `createdAt` that is prose rather than a day',
+    mutate: (six) => ({ ...six, createdAt: 'Zahnarzt Mama 14:30' }),
+    status: 400, reason: 'attestation_createdAt',
+  },
+  {
+    // ONE WORD ON ALL FOUR DOORS, since the round-9 integration pass deleted `spaces.js`'s
+    // private twin of the rule. This was a two-valued assertion for exactly as long as there
+    // were two implementations; see the note where the characterization row used to be.
+    name: 'the optional `recoveryPubKex`, holding text rather than a P-256 point',
+    mutate: (six) => ({ ...six, recoveryPubKex: b64u(TE.encode('Einkaufszettel: Milch, Brot')) }),
+    status: 400, reason: 'attestation_recoveryPubKex',
+  },
+  {
+    name: 'the six honest fields',
+    mutate: (six) => six,
+    status: 200,
+  },
+  {
+    name: 'the optional `recoveryPubKex`, holding a real 65-byte point (ADR 002 §2.3)',
+    mutate: (six) => ({ ...six, recoveryPubKex: b64u(new Uint8Array([4, ...new Uint8Array(64)])) }),
+    status: 200,
+  },
+]);
+
+for (const door of ATTESTATION_DOORS) {
+  for (const c of CLOSED_SET_CASES) {
+    test(`§7a ${door.route} · ${c.name} → ${c.status}`, async () => {
+      const { res, store, spaceId, reader } = await driveDoor(door.route, c.mutate);
+      assert.equal(res.status, c.status,
+        `${door.route} (${door.via}) answered ${res.status}: ${JSON.stringify(res.body)}`);
+      if (c.reason) {
+        const allowed = Array.isArray(c.reason) ? c.reason : [c.reason];
+        assert.ok(allowed.includes(res.body.reason),
+          `${door.route} answered ${JSON.stringify(res.body.reason)}; one rule, one answer, four `
+          + 'doors — a door with its own vocabulary is a door that drifted, and drift is what '
+          + 'R8-7 was');
+      }
+
+      // Nothing the relay is holding, on any door, in either outcome, is a word a family typed.
+      // This is §3's walk, applied to the store one door left behind.
+      const found = [];
+      for (const [where, value] of scalarsOf(ADAPTERS[0].raw(store), [])) {
+        for (const w of hits(value)) found.push({ where, word: w, value });
+      }
+      assert.deepEqual(found, [],
+        `${door.route} left family plaintext in the store — every entry above names the place. `
+        + 'A door that refuses on the wire and writes the row anyway is R8-7 with a nicer status '
+        + 'code, so this walk is over the STORE and not over the response.');
+
+      // …nor in what it said back. A refusal that quotes the smuggled field is the same leak
+      // through a smaller hole (§6 makes this point for every other error body).
+      for (const [, value] of scalarsOf(res.body, [])) {
+        assert.deepEqual(hits(value), [], `${door.route} echoed a corpus word in its answer`);
+      }
+
+      // The device population is the other half of "no row": on a refusal the space is left with
+      // exactly the devices it had, and on an admission with one more.
+      if (door.route !== 'POST /spaces') {
+        const devices = await store.listDevices(spaceId);
+        assert.equal(devices.length, c.status === 200 ? 2 : 1,
+          `${door.route}: the refused device was written anyway`);
+      } else if (c.status !== 200) {
+        assert.equal((await store.getSpace(spaceId)), null, 'the refused space was created anyway');
+      }
+      void reader;
+    });
+  }
+}
+
+// ── §7a's CHARACTERIZATION ROW, AND WHY IT IS NOT HERE ANY MORE ──────────────────────────────
+//
+// A row stood here reading *"the two copies of the closed-set rule differ in one word, and only
+// one"*. R8-7's fix had put `assertAttestationClosed` in `handlers/devices.js` and wired it into
+// `verifyDeviceClaim` so all four doors reach it, while `handlers/spaces.js` kept its own private
+// copy — a second owner's file, and one owner per file is not negotiable inside a round. Two
+// implementations of one rule is exactly the shape R8-7 WAS, so the round measured the duplication
+// instead of assuming it harmless, and it was right to: within that single round the two copies
+// already disagreed on one word (`wrong_length` here, `attestation_recoveryPubKex` there).
+//
+// The row named its own inversion — *"when `spaces.js` deletes its copy and imports
+// `assertAttestationClosed`, this row goes RED; delete it and put the single reason back into
+// `CLOSED_SET_CASES`"* — the round-9 integration pass landed that import, the row went red on cue,
+// and this is that instruction carried out. The claim it made is not lost: `CLOSED_SET_CASES` now
+// asserts ONE reason, driven at all four doors, so a second implementation reappearing anywhere
+// reddens three rows per door rather than a footnote. Mutant **M-J**.
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §7b  THE ID NAMESPACE — the SECOND thing the §7a enumeration found on the same two doors
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Finding R8-7b. `readDevice` pins `deviceId` to `dev_` + 22 b64url and says why in its own
+// comment — *"`KeyWrap.recipientId` admits a device id OR the reserved `rec_<memberId>` … the two
+// namespaces cannot meet"*. `POST /devices` and `POST /devices/adopt` took it through `requireId`
+// instead: 128 characters of `[A-Za-z0-9_.:-]`. Two doors of four, again, and the same two doors.
+//
+// It matters here, in the blindness file, for the story-21.1 reason: `Device.id` is published
+// verbatim by `GET /spaces/:id/members` and `PLAINTEXT_STRINGS` justifies it as "a label, not an
+// identity". A 128-character label a member chooses is a free-text channel wearing a name. The
+// sharper consequence — that revoking a device called `rec_mem_MAMA` deletes Mama's recovery
+// wraps, because `deleteKeyWrapsForDevices` matches on `KeyWrap.recipientId` — is attacked in
+// `tests/attack/round8-seam.test.js` §3, which is where an availability attack belongs.
+
+test('§7b one spelling of a device id, and the two definitions of it are the same regex', () => {
+  // `server/core/` may not import `src/js/core/`, so the shape lives in two files. That is a
+  // permitted duplication and an unpinned one is how R8-7b happened: pin it.
+  assert.equal(DEVICE_ID_RE_DEVICES.source, DEVICE_ID_RE_SPACES.source);
+  assert.equal(DEVICE_ID_RE_DEVICES.flags, DEVICE_ID_RE_SPACES.flags);
+  const entities = fs.readFileSync(path.join(REPO, 'src', 'js', 'core', 'entities.js'), 'utf8');
+  assert.match(entities, /const DEVICE_ID_RE = new RegExp\(`\^dev_\$\{B22\}\$`\)/,
+    'and the client derives the same shape from its own B22 — three files, one spelling');
+});
+
+for (const door of ATTESTATION_DOORS) {
+  test(`§7b ${door.route} · a device id in the reserved \`rec_\` namespace → 400`, async () => {
+    const victim = `mem_${b64u(globalThis.crypto.getRandomValues(new Uint8Array(16)))}`;
+    const { res } = await driveDoor(door.route, (six) => ({ ...six, deviceId: `rec_${victim}` }));
+    assert.equal(res.status, 400,
+      `${door.route} let a device name itself a key-wrap recipient: ${JSON.stringify(res.body)}`);
+  });
+
+  test(`§7b ${door.route} · a device id that is prose → 400, and it is not published`, async () => {
+    const chatty = 'Grossmutter-Kaethe.wohnt:in-Kiel_seit_1998';
+    const { res, store } = await driveDoor(door.route, (six) => ({ ...six, deviceId: chatty }));
+    assert.equal(res.status, 400, `${door.route}: ${JSON.stringify(res.body)}`);
+    assert.equal(JSON.stringify(res.body).includes('Kiel'), false, 'and the refusal does not echo it');
+    assert.equal(JSON.stringify(scalarsOf(ADAPTERS[0].raw(store), [])).includes('Kiel'), false,
+      'nor is it in the store to be served back by GET /spaces/:id/members');
+  });
+}
+
+test('§7a the roster a successful door leaves behind publishes six pinned fields and nothing else', async () => {
+  // The end-to-end statement, on the door R8-7 was open on: attach a second Mac through
+  // `POST /devices`, then read `GET /spaces/:id/members` as a member and decode every published
+  // attestation. This is the §7 measurement above, made of rows `POST /devices` wrote — which is
+  // exactly the population it was NOT true of.
+  const { call, store } = serverOnly(ADAPTERS[0].make);
+  const attempt = attemptWith(call);
+  const papa = await person('gruen');
+  const spaceId = newSpaceId();
+  assert.equal((await attempt(papa, 'POST', '/spaces', {}, {
+    spaceId, kind: 'FAMILY', colorRef: papa.colorRef,
+    member: wireMember(papa), device: wireDevice(papa), wraps: wrapsFor(papa),
+  })).status, 200);
+
+  const second = await newDeviceOf();
+  const blob = await mintBlob(papa.recSigPriv, { ...sixOf(papa), ...second });
+  assert.equal((await attempt(papa, 'POST', '/devices', {}, {
+    spaceId, memberId: papa.memberId,
+    deviceId: second.deviceId, deviceShort: second.deviceShort,
+    sigPubRaw: second.sigPubRaw, kexPubRaw: second.kexPubRaw, attestation: blob,
+  })).status, 200);
+
+  const roster = await attempt(papa, 'GET', `/spaces/${spaceId}/members`, {});
+  assert.equal(roster.status, 200, JSON.stringify(roster.body));
+  const devices = roster.body.members.flatMap((m) => m.devices);
+  assert.equal(devices.length, 2, 'the bootstrap Mac and the one `POST /devices` attached');
+  for (const d of devices) {
+    const payload = JSON.parse(new TextDecoder().decode(
+      Uint8Array.from(atob(d.attestation.split('.')[0].replace(/-/g, '+').replace(/_/g, '/')), (ch) => ch.charCodeAt(0))));
+    assert.deepEqual(Object.keys(payload).sort(),
+      ['createdAt', 'deviceId', 'deviceShort', 'kexPubRaw', 'memberId', 'sigPubRaw']);
+    assert.equal(payload.deviceId, d.deviceId);
+    assert.equal(payload.deviceShort, d.deviceShort);
+    assert.equal(payload.sigPubRaw, d.sigPubRaw);
+    assert.equal(payload.kexPubRaw, d.kexPubRaw);
+    assert.match(payload.createdAt, /^\d{4}-\d{2}-\d{2}$/);
+  }
+  assert.deepEqual(scalarsOf(ADAPTERS[0].raw(store), []).flatMap(([, v]) => hits(v)), []);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════

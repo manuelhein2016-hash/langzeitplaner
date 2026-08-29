@@ -231,6 +231,7 @@ export async function createFleet(opts) {
   const d0 = await addDevice(fleet, {
     name: names[0], tag, keys: primary, ring: ring0, maxDeferrals: opts.maxDeferrals,
   });
+  fleet.spaceKey = spaceKey;
   await createSpaceOnRelay(fleet, d0, spaceKey);
 
   for (const name of names.slice(1)) {
@@ -409,6 +410,16 @@ function makeDevice(fleet, { name, tag, keys, ring, sigPubRaw, kexPubRaw, maxDef
   const disk = createDisk();
   const short = keys.forStore.deviceShort;
   const st = { store: null, sync: null, online: true, skewMs: 0, publisher: null, persistOwed: false };
+  /**
+   * Every status the ENGINE PUSHED, in order.
+   *
+   * `family/mount.js:78` wires `onStatus: () => refreshSyncChrome()`, so this — not a synchronous
+   * poll of `status()` — is how the toolbar actually learns anything. A fact the engine discovers
+   * a microtask after launch reaches the user through here and through nothing else, which is why
+   * R8-6 needs it to be observable. Emissions are collected per OPEN and reset by `open()`.
+   * @type {Array<Object>}
+   */
+  let statuses = [];
 
   /** The shape `deviceTransport` and `POST /devices` both want. */
   const wire = {
@@ -516,6 +527,7 @@ function makeDevice(fleet, { name, tag, keys, ring, sigPubRaw, kexPubRaw, maxDef
         await store.persistNow();
         clearTimeout(store._saveTimer);
 
+        statuses = [];
         st.sync = createPersonalSync({
           store,
           transport,
@@ -527,6 +539,7 @@ function makeDevice(fleet, { name, tag, keys, ring, sigPubRaw, kexPubRaw, maxDef
           attestation: keys.attestation,
           now: () => fleet.clock.now(),
           isOnline: () => st.online,
+          onStatus: (v) => statuses.push(v),
           schedule: () => null,
           unschedule: () => {},
           // P-8's durable park, on THIS device's disk, so a relaunch reads back what the previous
@@ -651,6 +664,16 @@ function makeDevice(fleet, { name, tag, keys, ring, sigPubRaw, kexPubRaw, maxDef
     outboxSize() { return st.store.outboxSize(); },
     diagnostics() { return st.sync.diagnostics(); },
     status() { return st.sync.status(); },
+    /**
+     * `attach()` — the mount-time wiring, opt-in rather than automatic.
+     *
+     * `open()` deliberately does NOT call it: attaching subscribes to the store and starts the
+     * engine's own launch-time reads, and a row that is measuring a pull should not have those
+     * happening underneath it. A row that is measuring what the CHROME sees calls this.
+     */
+    attach() { return st.sync.attach(); },
+    /** What the engine has PUSHED since this device was opened. See `statuses` above. */
+    get statuses() { return [...statuses]; },
     deferredOps() { return st.sync.deferredOps(); },
     quarantined() { return st.sync.quarantined(); },
     /**
@@ -705,6 +728,83 @@ function makeDevice(fleet, { name, tag, keys, ring, sigPubRaw, kexPubRaw, maxDef
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Sync everybody until nothing moves. Push first, then pull-and-push, so one round covers each edge. */
+/**
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ * A SECOND MEMBER, THROUGH THE REAL INVITE HANDLERS — so `POST /members/remove` has a target
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `createFleet` builds ONE member with N paired Macs, which is M1 („Zwei Macs") and is what
+ * almost every fleet row needs. It cannot express the one destructive operation in the product:
+ * story 20.2's `POST /members/remove` removes SOMEBODY ELSE, and `purgeMember` deletes that
+ * member's `Op` rows in the same transaction (ADR 003 §6.3) — the only way a hole appears in an
+ * honest relay's log, and therefore the input the chain witness has to survive without wedging
+ * anybody. A test that reaches for `store.deleteOpsByDevices` directly is testing the client
+ * against its own idea of what a removal does; this reaches it through `POST /invites`,
+ * `POST /invites/redeem` and `POST /members/remove`, which is the whole point.
+ *
+ * The new member is a FULL device: her own recovery identity, her own self-attestation, her own
+ * store and engine, her own disk. She authors real ops, seals them under the real space key, and
+ * the existing Macs open them through `openOp` with no special case anywhere.
+ *
+ * TWO THINGS THIS DELIBERATELY DOES NOT MODEL, stated rather than hidden:
+ *
+ *   1. **The key hand-over is E2E, not a rotation.** She is handed the space key directly, the
+ *      same way `pairInNewMac` hands a paired Mac the personal ring. The honest path for a JOIN
+ *      is ADR 002 §4.1's rotation to `e+1` with a wrap for every recipient, which this harness
+ *      already records as undischarged in `fleet.owed`. Nothing about a purge depends on which
+ *      epoch the ops were sealed under.
+ *   2. **The space is `psp_`.** `createFleet` mints a personal space and every route on this path
+ *      — `createInvite`, `redeemInvite`, `removeMember`, `purgeMember` — is blind to the kind:
+ *      each one gates on membership, never on `space.kind`. A family space would exercise the
+ *      same four handlers with the same arguments.
+ *
+ * @param {Object} fleet @param {{name:string, colorRef?:string, today?:string}} opts
+ * @returns {Promise<Object>} the new device, already opened
+ */
+export async function joinNewMember(fleet, { name, colorRef = 'blau', today } = {}) {
+  const day = today || fleet.today;
+  const keys = await mintPrimary({ today: day });
+
+  // The ring, E2E. See note 1 above.
+  const ring = createKeyRing([[fleet.spaceId, 1, fleet.spaceKey]]);
+  const dev = await addDevice(fleet, { name, tag: fleet.tag, keys, ring });
+
+  // ── POST /invites, from a device that is already a member ────────────────────────────────
+  const host = fleet.all.find((d) => d !== dev);
+  const proof = crypto.getRandomValues(new Uint8Array(32));
+  const verifier = new Uint8Array(await crypto.subtle.digest('SHA-256', proof));
+  const inviteId = b64u(crypto.getRandomValues(new Uint8Array(16)));
+  const mk = await host.run(() => host.transport.request('POST', '/api/v1/invites', undefined, {
+    spaceId: fleet.spaceId, inviteId, verifier: b64u(verifier),
+  }));
+  if (mk.status !== 200) throw new Error(`fleet: POST /invites -> ${mk.status} ${JSON.stringify(mk.json)}`);
+
+  // ── POST /invites/redeem, signed by the NEW device (the bootstrap ladder, ADR 003 §2) ─────
+  const redeemBody = {
+    inviteId,
+    proof: b64u(proof),
+    colorRef,
+    member: {
+      memberId: keys.forStore.memberId,
+      recoveryPubSig: b64u(await exportRawPublic(keys.recovery.recSig.publicKey)),
+      recoveryPubKex: b64u(await exportRawPublic(keys.recovery.recKex.publicKey)),
+    },
+    device: {
+      deviceId: keys.forStore.deviceId,
+      deviceShort: keys.forStore.deviceShort,
+      sigPubRaw: dev.wire.sigPubRaw,
+      kexPubRaw: dev.wire.kexPubRaw,
+      attestation: keys.blob,
+    },
+  };
+  const red = await dev.run(() => dev.transport.request('POST', '/api/v1/invites/redeem', undefined, redeemBody));
+  if (red.status !== 200) throw new Error(`fleet: POST /invites/redeem -> ${red.status} ${JSON.stringify(red.json)}`);
+
+  // Her own board, not a copy of anyone else's — a joiner arrives with what she had.
+  await dev.open({ seed: false });
+  return dev;
+}
+
 export async function settle(fleet, rounds = 3) {
   const report = [];
   for (let r = 0; r < rounds; r++) {

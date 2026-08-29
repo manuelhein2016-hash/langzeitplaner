@@ -3903,6 +3903,45 @@ class Store {
   }
 
   /**
+   * ── R8-4's OTHER HALF · A CURED REFUSAL IS RETRACTED ─────────────────────────────────────────
+   *
+   * The refusal ledger was built for a refusal that is FINAL: a bad signature, a failed AEAD, an
+   * op nothing will ever be able to open. The cursor is released past it, the relay will never
+   * offer it again, and the record is the only thing left — so it is durable, and durable is
+   * right.
+   *
+   * Round 9 made one class of refusal survivable and the ledger did not notice. The parking lot's
+   * ladder gives up on an envelope whose attestation had not landed within `maxDeferrals` pulls;
+   * `refuse()` now SHELVES those bytes instead of destroying them, and the next launch revives
+   * them. When one of those revivals opens, the divergence the ledger reports has HEALED — and
+   * without this the Mac keeps saying `error` about it for the rest of the device's life, which
+   * is round 8's own failure (`healthy` while wrong) pointing the other way. An indicator that
+   * cannot go out is an indicator nobody reads.
+   *
+   * Retraction is by `oid` and it is not a lie about history: the op is in the log, folded into
+   * the registers, and `checkpoint().seqs` says so. Nothing else can call this — `sync/personal.js`
+   * calls it only for oids the STORE itself reported in `applyRemote(…).applied`, so a hostile
+   * relay cannot clear a verdict by asserting one.
+   *
+   * @param {string|string[]} oids the op ids that have now applied
+   * @returns {number} how many ledger rows were retracted
+   */
+  retractSyncRefusal(oids) {
+    if (!Array.isArray(this.syncRefusals) || this.syncRefusals.length === 0) return 0;
+    const cured = new Set(Array.isArray(oids) ? oids : [oids]);
+    const before = this.syncRefusals.length;
+    this.syncRefusals = this.syncRefusals.filter((r) => !(r && cured.has(r.oid)));
+    const n = before - this.syncRefusals.length;
+    if (n > 0) {
+      this._warn(
+        `sync: ${n} change${n === 1 ? '' : 's'} that an earlier session had given up on `
+        + `${n === 1 ? 'has' : 'have'} now arrived and been applied. The earlier refusal is `
+        + 'withdrawn — nothing is diverged (R8-4).');
+    }
+    return n;
+  }
+
+  /**
    * ── L-1, THE OTHER HALF: READ THE LEDGER BACK ────────────────────────────────────────────────
    *
    * Called from `init()` with the checkpoint that was actually adopted, and ONLY then. A

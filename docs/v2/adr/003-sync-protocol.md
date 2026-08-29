@@ -334,6 +334,35 @@ matters, because desktops update on their own schedule (F22, 22.5).
 **CI (LZP-206):** the fleet suite runs twice — once with every device at `PROTO_MAX`, once with
 half the fleet at `PROTO_MAX − 1` — asserting round-trip and convergence in both.
 
+**Forward compatibility at the RELAY's doors (the N−1 half, server-first) — amendment, round 9.**
+The N+1 rule above is about a CLIENT meeting something it does not know, and a client can park:
+the unknown field is inside a signature it can verify and a stream it can read, so *"keep it, do
+not interpret it"* is available and is the right answer. **The relay has no such option for the
+device attestation.** It is not a reader of that blob, it is a PUBLISHER of it — an opaque column
+it stores in the clear and hands to every member of the space (`GET /spaces/:id/members`). "Park
+it" and "store it" are the same act at a door, so a door has exactly two answers: store the bytes,
+which is a free-text channel through a relay whose whole claim (story 21.1) is that it holds none,
+or refuse them. `server/core/handlers/devices.js assertAttestationClosed` refuses them, on all four
+doors that persist a `Device` row.
+
+The forward-compatibility cost is real and is paid **N−1, in the server-first direction: the
+relay's allow-list ships one release BEFORE any client mints the field.** `recoveryPubKex` is on it
+today, which is exactly what lets ADR 002 §2.3's binding land as a client-only change. This is
+versioning, not negotiation — no round trip, nothing offered or withdrawn, and the release order is
+the whole protocol. See ADR 002 §2.3 and finding R8-7.
+
+**⚠ OPEN — a client cannot re-ask for ONE seq, and R8-2's bound makes that visible.**
+`GET /api/v1/ops` can only be asked *"everything after `since`"*. Since round 9, a chain-witness
+finding holds the cursor for the pull that discovers it and not after (ADR 002 §5.4 forbids the
+witness blocking sync, and a permanent hold on a hole a member removal made unfillable wedges the
+space — finding R8-2). The residual: a relay that withholds a row in the middle of a page and keeps
+withholding it consumes that row on the second poll — permanently, one-sidedly, and LOUDLY.
+Closing it needs either a bounded re-ask (`since = hole − 1`, ladder-bounded exactly as
+`maxDeferrals` bounds a park — already permitted by this protocol and described by no ADR) or a
+way to request one seq range. **Neither is chosen here: the retry count is a privacy trade as much
+as a cadence, so it is a decision, not an implementation.** Recorded as FINDINGS §4.8 and pinned by
+`tests/fleet/attack-converge-relay.test.js` §6b, which asserts the loss.
+
 ---
 
 ## 5. The server: models and what it can see

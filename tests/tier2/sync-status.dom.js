@@ -539,10 +539,14 @@ test('unmounting removes the glyph, the subscription and the timer', () => {
  * `apply`, `txn`, `persistNow`, `replaceAll`. The chrome cannot write to the board, and cannot
  * grow the ability by accident.
  */
-function makeStore(sync = {}, warnings = []) {
+function makeStore(sync = {}, warnings = [], quarantine = null) {
   const warnListeners = new Set();
   let diag = {
     warnings: [...warnings],
+    // TOP-LEVEL, like `warnings`, and present-and-null in the ordinary case — which is what the
+    // real `store.diagnostics()` publishes. `sync/status.js`'s `quarantine` row (R8-8) reads it,
+    // and a fixture that omitted it would report a BLIND SPOT rather than the state under test.
+    quarantine,
     sync: {
       armed: true, personalSpaceId: 'psp_x', logWritable: true, outbox: 0, cursor: '7',
       rejoin: false, pendingRetractions: 0, parked: 0, refused: 0, lost: 0, chain: null, ...sync,
@@ -653,6 +657,34 @@ test('E5-2 / P-4 — a folded-away line and a forked chain are both errors, and 
   }
 });
 
+test('R8-8 — a QUARANTINED log is an enumerated observable, and still does not light the toolbar', () => {
+  // The state in which the app has decided it cannot trust its own history: `init()` refused the
+  // checkpoint, the log is moved aside, and `board.json` alone is authoritative. Round 8 measured
+  // `SYNC_OBSERVABLES` with no row for it, so the only thing keeping a quarantined launch from
+  // asserting 19.3's promise was somebody having written a sentence into `store.warnings` — a
+  // MIXED prose channel that also carries repairs and cures. "There is nothing to tell you" may
+  // not rest on that.
+  const engine = makeEngine({ state: 'healthy' });
+  const store = makeStore({}, [], { at: 1, reason: 'unreadable-log', detail: 'SyntaxError', movedAside: true });
+  const c = mount(engine, { store: store.port });
+  settle(c);
+
+  const s = status.syncStatusState();
+  assert.equal(s.observables.map((o) => o.id).join(), 'quarantine', 'the fold does not see it');
+  assert.equal(s.observables[0].row, 'S4-untrusted');
+  assert.deepEqual([...s.blind], [], 'and it is a row this build can ANSWER');
+  assert.equal(s.silent, false, 'a Mac that refused its own history claimed there is nothing to tell');
+
+  // AND THE TOOLBAR STAYS QUIET, deliberately. ADR 006 §9.3 makes a quarantine "a VISIBLE,
+  // REPORTED, CONVERGING event, never a quiet one" — the board is intact, the Mac re-publishes,
+  // the family converges, and nothing is asked of the person. `attack-converge-rejoin.test.js`
+  // §2 pins the same thing end-to-end. A row that lit the dot here would be the failure round 8
+  // walked into in the other direction: an app that shows a fault for ever.
+  assert.equal(s.state, 'healthy', 'a converging quarantine lit the indicator');
+  assert.equal(glyph(), null, 'and drew a glyph for it');
+  unmount();
+});
+
 test('F-8 — `store.warnings` finally has a consumer, and a warning between redraws moves the glyph', () => {
   // `_warn` has fired for every refusal, every park, every coercion and every quarantine since
   // LZP-30x; `subscribeWarnings()` has been the seam the whole time; NOTHING HAS EVER SUBSCRIBED.
@@ -706,7 +738,7 @@ test('silence is EARNED: a store that cannot answer, or that throws, is not heal
   mount(engine, { store: old });
   let s = status.syncStatusState();
   assert.equal(s.state, 'healthy', 'a blind spot is not by itself a fault');
-  assert.deepEqual([...s.blind], ['parked', 'refused', 'lost', 'chain']);
+  assert.deepEqual([...s.blind], ['quarantine', 'parked', 'refused', 'lost', 'chain']);
   assert.equal(s.silent, false, 'a build that has not looked claimed there is nothing to tell');
   unmount();
 
@@ -714,7 +746,7 @@ test('silence is EARNED: a store that cannot answer, or that throws, is not heal
   const broken = { diagnostics() { throw new Error('disk'); }, subscribeWarnings: () => () => {} };
   mount(engine, { store: broken });
   s = status.syncStatusState();
-  assert.equal(s.blind.length, 6);
+  assert.equal(s.blind.length, 7);
   assert.equal(s.silent, false);
   unmount();
 

@@ -175,7 +175,8 @@ export function createCursors(ports = {}) {
      * @param {string} seq the new cursor — the seq of the last op ACTUALLY RECEIVED
      * @param {{seq:string, chain:string}|null} head the chain head to persist beside it
      * @param {() => Promise<void>} commit
-     * @param {{fromGenesis?:boolean}} [opts]
+     * @param {{fromGenesis?:boolean}} [opts] omit `fromGenesis` to carry the stored value
+     *   forward; pass a boolean to WRITE it, in either direction (R9-1)
      * @returns {Promise<boolean>} true when the cursor moved
      */
     async advance(space, seq, head, commit, opts = {}) {
@@ -200,10 +201,25 @@ export function createCursors(ports = {}) {
       }
       await commit();                                   // ← ORDER. The whole file is about this line.
 
+      // ── R9-1 · `fromGenesis` IS A REPORT, NOT A RATCHET ──────────────────────────────────────
+      //
+      // This used to be `opts.fromGenesis === true ? true : prev.fromGenesis` — it could raise the
+      // flag and could never lower it, on the reasoning that "one full pull earns it for good".
+      // That reasoning is wrong in exactly one direction, and it is the direction that matters:
+      // `fromGenesis` is the RIGHT TO CALL AN UNKNOWN `wit` A FORK (`chain.js`), and `chain.js`
+      // gives that right up the moment a break makes verification unprovable-from-genesis —
+      // `s.fromGenesis = false` beside `s.broken = true`. A record that keeps `true` hands the
+      // right back at the next launch, and the device then accuses the relay of a fork it can no
+      // longer prove. That is the false positive ADR 002 §5.4 spends its one sentence forbidding.
+      //
+      // Unreachable TODAY — this engine seals `wit: ''` on every push, so `UNKNOWN_WITNESS` cannot
+      // fire — and a durable lie waiting for the day `wit` is populated is still a durable lie.
+      // An OMITTED `fromGenesis` still carries the stored value forward, so a caller that has
+      // nothing to say about it (the family engine's own `advance`) changes nothing.
       const rec = {
         seq: String(next),
         chain: head && typeof head.chain === 'string' ? head.chain : prev.chain,
-        fromGenesis: opts.fromGenesis === true ? true : prev.fromGenesis,
+        fromGenesis: opts.fromGenesis === undefined ? prev.fromGenesis : opts.fromGenesis === true,
       };
       cur.set(space, rec);
       try {

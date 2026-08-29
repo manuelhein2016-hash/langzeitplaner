@@ -111,6 +111,37 @@
 // replaces it and `tests/tier1/sync-personal.test.js` §4b asserts the two agree.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
+// R8-1 / R8-2 — THE CHAIN WITNESS IS A DIAGNOSTIC, AND IT IS THE WRAPPER
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// P-4 put ADR 002 §5.4's detector on this path by importing `verifyChain`, which is the LEAF of
+// `sync/chain.js`: a pure function over one contiguous run, with no memory of what this device has
+// already folded. Everything the leaf lacked, the wrapper beside it already had — and the round
+// compensated for the missing mechanism by giving the leaf a power the ADR forbids in one
+// sentence: *"it NEVER BLOCKS SYNC in v2 (a false positive that broke a family's board would be
+// far worse than the attack)"*. Two failures fell out of that, and both were on an HONEST relay:
+//
+//   · **R8-1.** `chainAnchor` advanced whenever a PAGE verified; the CURSOR advanced only when
+//     nothing in the page was held. F-6's first contact is exactly where those differ, so the
+//     honest re-serve of a held page was verified against an anchor inside itself and reported as
+//     `seq jumped from 1 to 1`. Its durable form was worse: the record persisted beside the cursor
+//     took `seq` from the commit and `chain` from the last row of the page, so the value the relay
+//     was accused of forging was the value this device had stored as its own anchor.
+//   · **R8-2.** One member removal (ADR 003 §6.3, story 20.2) leaves a hole nothing can ever fill.
+//     A permanent cursor hold on an unfillable hole is a wedge: the cursor never moved again and
+//     every op above it was unreachable, across relaunches, for ever.
+//
+// The rule now, stated once here and once in `chain.js`:
+//
+//   **A CHAIN FINDING MAY HOLD THE CURSOR FOR THE PULL THAT DISCOVERS IT, AND NOT AFTER.**
+//
+// One honest round trip for a relay that truncated a page; then the witness re-anchors on the row
+// it was served, does not re-report the break, and sync continues — with the finding standing in
+// `store.syncChain` and the state at `error` until positive evidence arrives. The claim check
+// below (`nextCursor` past the last row served) is a different mechanism and is NOT bounded: it is
+// derived from a claim the relay repeats on every page, so it is re-armed on every page.
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
 // PURITY (ADR 005 §2, `tests/helpers/purity.js` PURE_DIRS)
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -126,7 +157,15 @@ import { spaceKindOf, isSpaceId } from '../crypto/spacekeys.js';
 // P-4 — ADR 002 §5.4's chain witness. It shipped with E5 and `src/` imported it from NOWHERE, so
 // the client verified no chain at all and a relay that withheld, reordered or renumbered was
 // undetectable BY CONSTRUCTION. `pullNow` is the only call site the design ever named for it.
-import { verifyChain } from './chain.js';
+//
+// **R8-1/R8-2 — THE WRAPPER, NOT THE LEAF.** Round 8 imported `verifyChain`, which is a pure
+// function over ONE contiguous run and knows nothing about what this device has already folded.
+// `createChainWitness` is the stateful wrapper in the same file, and every piece round 8 then had
+// to fake is already inside it: the `fresh` filter that drops rows at or below the verified head
+// (without which the honest re-serve of a held page is reported as `seq jumped from 1 to 1`), the
+// per-break dedupe, the `broken` flag, the re-anchor that makes a member purge survivable, and
+// `fromGenesis` so an unprovable claim is reported as unprovable rather than as a fork.
+import { createChainWitness } from './chain.js';
 // P-8's third axis — the DURABLE park for a sealed envelope. See `lot` below for why this is not
 // `core/oplog.js`'s park and why the module it lives in is a defence rather than a dead engine.
 import { createParkingLot } from './outbox.js';
@@ -173,6 +212,16 @@ export const CADENCE = Object.freeze({
   pendingAfterMs: 20000,
   statusDebounceMs: 2000,
 });
+
+/**
+ * How many `seq → chain` pairs one session remembers, so the anchor persisted beside the cursor
+ * can be the chain of THE COMMITTED ROW rather than of whatever row the page ended on (R8-1b).
+ *
+ * Four pages' worth. The map is a convenience with a safe miss — an unknown seq stores no anchor
+ * and the next page re-anchors — so the bound may be small, and it must be bounded: a relay that
+ * serves pages for a week must not be able to grow a client's heap one row at a time.
+ */
+const CHAIN_SEQ_MEMORY = 4 * LIMITS.opsPerPull;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 0. Errors and the refusal taxonomy
@@ -573,7 +622,11 @@ export function createPersonalSync(deps) {
     } catch { /* the lot warns for itself; a pull may not die here */ }
     try {
       await cursors.load();
-      chainAnchor = cursors.head(spaceId);
+      // The head AND what this device may claim about it. `fromGenesis` is the difference between
+      // "a peer committed to a chain I have never been served" (a fork) and "a peer committed to a
+      // chain outside my window" (not evidence) — `chain.js` will not let this device make the
+      // first claim unless it earned it, and a restored record is where that right is carried.
+      witness.restore(spaceId, cursors.head(spaceId), cursors.fromGenesis(spaceId));
     } catch { /* likewise: with no anchor this session re-anchors on its first page */ }
     for (const row of lot.parked(spaceId)) {
       if (deferred.has(row.oid)) continue;
@@ -600,18 +653,47 @@ export function createPersonalSync(deps) {
   /** Chain-witness verdicts already reported, so a wedged relay writes one sentence, not one a pull. */
   const warnedChain = new Set();
   /**
-   * P-4 — the last row of this space whose chain link this device has verified, `{seq, chain}`.
+   * P-4 · R8-1 · R8-2 — ADR 002 §5.4's witness, ONE PER ENGINE, holding the verified head of
+   * this space and the bounded memory the `wit` cross-check needs.
    *
-   * PER SESSION, deliberately and reportedly. A durable anchor would let this device detect a
-   * relay that forks the stream ACROSS a relaunch, and there is nowhere to put one: the anchor
-   * belongs beside the cursor in `checkpoint().cursors`, and `core/oplog.js`'s cursor map holds a
-   * seq and nothing else. What the session anchor DOES catch is every fork inside one run — the
-   * gap, the mismatch, and the page whose `nextCursor` runs past the last row it served — and
-   * after a relaunch it re-anchors on the first page it verifies rather than accusing anybody.
-   * **Owed: `core/oplog.js` — one chain value beside each cursor.**
-   * @type {{seq:string, chain:string}|null}
+   * Round 8 kept a bare `chainAnchor` here and called `verifyChain` on it. That is the leaf of
+   * this module, and a leaf has no memory: it cannot know that a row it is being shown has
+   * already been folded, so the honest re-serve of a page whose cursor is held — F-6's ordinary
+   * first contact — was verified a second time against an anchor INSIDE it and reported as a hole
+   * between a seq and itself (R8-1). The wrapper's first act is `rows.filter(above the head)`.
+   *
+   * It is also the thing that makes ADR 003 §6.3's member purge survivable: it re-anchors on the
+   * row the relay served, reports the break ONCE with its `benignCause`, and keeps verifying
+   * afterwards. Round 8's `verifyChain` re-derived the same break on every pull for ever (R8-2).
    */
-  let chainAnchor = null;
+  const witness = createChainWitness(ports);
+  /**
+   * seq → the chain value the relay served for THAT seq, for the rows seen this session.
+   *
+   * R8-1b's fix. `cursor.js advance(space, seq, head, …)` persists `{seq, chain: head.chain}`, and
+   * round 8 handed it the commit point for `seq` and the LAST ROW OF THE PAGE for `chain` — two
+   * different rows in one record, so the next launch anchored on a chain value that never belonged
+   * to the seq it was stored against and accused an honest relay of forging its own log. The
+   * record has to be ONE ROW, so the chain persisted beside the cursor is looked up BY the commit
+   * seq here; when it is not known the anchor is cleared rather than paired with the wrong row
+   * (`''`, which `cursor.js head()` reads as "no anchor" and `pullNow` answers by re-anchoring on
+   * the next page — the honest degradation, measured in `attack-converge-relay.test.js` §5).
+   * @type {Map<string, string>}
+   */
+  const chainBySeq = new Map();
+  /**
+   * The seqs a chain finding said this device was owed, still unserved.
+   *
+   * A verdict about the relay may only be cleared by POSITIVE EVIDENCE, and after the witness
+   * re-anchors past a break there are two shapes of it, not one: a page of FRESH rows that
+   * verifies, and — the one round 8 could not express — THE MISSING ROW ARRIVING. A transient
+   * withhold heals by re-serving the row below this device's head, where the witness (correctly)
+   * has nothing to say about it, so without this the indicator would stay red for ever after a
+   * lie the relay had already stopped telling. It is emptied by delivery and by nothing else: a
+   * relay cannot clear its own verdict by repeating a page it has already served.
+   * @type {Set<string>}
+   */
+  const chainOwed = new Set();
   /**
    * The durable home for that anchor.
    *
@@ -851,20 +933,54 @@ export function createPersonalSync(deps) {
     //
     // TWO CHECKS, and they catch different halves:
     //
-    //   1. `verifyChain` over the served rows, anchored on the last row this session verified.
-    //      Catches a hole INSIDE a page, a re-ordering, and a fabricated `chain` value.
+    //   1. THE WITNESS — `createChainWitness().observe(space, rows)`, which folds the page into
+    //      the head this device has verified. Catches a hole INSIDE a page, a re-ordering, a
+    //      fabricated `chain` value, and a stream re-chained across a relaunch.
     //   2. THE PAGE CLAIM. `server/core/handlers/ops.js` is explicit that "`nextCursor` is the seq
     //      of the last op ACTUALLY RETURNED, and when the page is empty it is `since`". A
     //      `nextCursor` past the last row served is the relay telling this device to step over
     //      rows it never sent — which is the withhold that leaves no hole to find, because the
     //      hole is at the END of the page. That is the shape `S4-diverged` measures, and it is
     //      the ONLY one of the two that can also cause a loss, so it is the only one that touches
-    //      the cursor.
+    //      the cursor UNCONDITIONALLY.
     //
     // NEITHER CHECK REFUSES THE OPS. The rows that did arrive are authentic and applying them
     // loses nothing; refusing them would hand a hostile relay a way to wedge the device with one
-    // bad `chain` byte. What the finding does is stop the cursor and light `error` — the op is
-    // held by the RELAY (ADR 006 §9.1 W1), which is the durable copy while the cursor is below it.
+    // bad `chain` byte.
+    //
+    // ── R8-1 / R8-2 · WHAT A CHAIN FINDING IS ALLOWED TO DO TO THE CURSOR ────────────────────
+    //
+    // ADR 002 §5.4 spends one sentence on this and round 8 crossed it: the witness is
+    // "detection-only, best-effort, and it NEVER BLOCKS SYNC in v2 (a false positive that broke a
+    // family's board would be far worse than the attack)". Round 8 turned every finding into a
+    // PERMANENT cursor hold, and a permanent hold on an unfillable hole is a wedge: after the one
+    // legitimate destructive operation in the product — `POST /members/remove`, which purges the
+    // removed member's op rows (ADR 003 §6.3, story 20.2) — the rows the hold waits for are gone
+    // BY DESIGN, so the cursor stopped at the hole for ever and every op above it was lost on an
+    // honest relay (R8-2).
+    //
+    // The rule now is the one `chain.js` was built around, and it is a rule about WHO OWNS THE
+    // HOLD rather than about which findings are believed:
+    //
+    //   · a NEW break holds the cursor for the pull that found it, and for that pull only. That
+    //     is one honest round trip in which a relay that truncated a page, raced a write or
+    //     re-ordered two pages can serve what it says it owes — and it is what keeps a withheld
+    //     op below the cursor while the relay is still lying (`fleet-harness.test.js` §2a);
+    //   · the witness then RE-ANCHORS on the row it was served and the break is not re-armed:
+    //     the same rows re-served are at or below the head, `observe`'s `fresh` filter drops them,
+    //     and no second finding is manufactured. So sync resumes, which is what the ADR requires
+    //     and what makes a purge survivable rather than terminal;
+    //   · the FINDING outlives the hold. `store.syncChain` carries it, the witness is `broken`
+    //     for the rest of the space's life, and detection continues from the new anchor — the
+    //     honest ceiling `chain.js`'s header names: "provable since the last anchor".
+    //
+    // What this costs against a relay that withholds one row in the MIDDLE of a page and keeps
+    // withholding it: it consumes that row on the second poll rather than never. The alternative
+    // is the wedge above, and the protocol offers no third option — `GET /ops` can only be asked
+    // "everything after `since`", so "keep asking for the hole" and "block every later op" are the
+    // same request. **Reported: ADR 003 §4 needs a way to re-request one seq.** The end-withhold,
+    // which is the shape that can also move the cursor by a LIE rather than by a gap, is still
+    // refused unconditionally by check 2 below on every pull, for ever.
     const rows = [];
     for (const e of page) {
       if (e && typeof e.oid === 'string' && e.seq !== undefined) {
@@ -873,49 +989,67 @@ export function createPersonalSync(deps) {
     }
     // WHERE THE VERIFICATION STARTS, AND WHY IT IS NOT ALWAYS ROW ZERO.
     //
-    // `verifyChain(rows, null)` means "verify from the space's GENESIS" — it computes
-    // `SHA-256(∅ ‖ oid)` for the first row. That is right for a device pulling from `since = 0`
-    // and WRONG for every other page: a device resuming at seq 40 is handed a row whose chain is
+    // A witness with no head verifies from the space's GENESIS — it computes `SHA-256(∅ ‖ oid)`
+    // for the first row. That is right for a device pulling from `since = 0` and WRONG for every
+    // other page: a device resuming at seq 40 is handed a row whose chain is
     // `SHA-256(chain₃₉ ‖ oid₄₀)`, which cannot match, and reporting a fork there would accuse an
     // honest relay on the first pull after every relaunch. `chain.js`'s own answer to an anchor it
     // cannot use is "re-anchor on the next row rather than reporting a fork this device cannot
-    // prove", and this is the same rule one layer up: with no anchor and a page that does not
-    // start at genesis, the FIRST row is adopted as the anchor and the links after it are checked.
+    // prove", and this is the same rule one layer up: with no head and a page that does not start
+    // at genesis, the FIRST row is RESTORED as the head — the witness's own re-entry point — and
+    // the links after it are checked.
     //
     // What that costs is exactly one unverifiable row per session, and it is the row the device
-    // has no evidence about — which is what the missing durable anchor means. It is not a hole a
-    // relay can widen: every LATER row in the page and in the session is checked against it.
-    let chainVerified = false;
-    /** The first seq of each run the relay did not serve. Turned into cursor holds below. */
+    // has no evidence about. It is not a hole a relay can widen: every LATER row in the page and
+    // in the session is checked against it, and `restore(…, false)` withholds the right to call an
+    // unknown witness a fork, because this device has not pulled from genesis.
+    if (witness.head(spaceId) === null && rows.length && (toSeq(since) ?? 0n) !== 0n) {
+      witness.restore(spaceId, { seq: rows[0].seq, chain: rows[0].chain }, false);
+    }
+    const headBefore = witness.head(spaceId);
+    /** The first seq of each run the relay did not serve. Turned into ONE cursor hold below. */
     const chainHoles = [];
-    let anchor = chainAnchor;
-    let toCheck = rows;
-    if (anchor === null && rows.length && (toSeq(since) ?? 0n) !== 0n) {
-      anchor = { seq: rows[0].seq, chain: rows[0].chain };
-      toCheck = rows.slice(1);
+    let found = [];
+    try {
+      found = await witness.observe(spaceId, rows);
+    } catch (err) {
+      // `chain.js` promises never to throw, and a promise is not a proof: a broken `subtle` port
+      // reaches it through `digest`. A detector that dies takes the pull with it, so it is caught
+      // and reported as what it is — something this device could not check, not a fork.
+      found = [{ kind: 'unreadable', detail: `${err.name}: ${err.message}` }];
     }
-    if (toCheck.length) {
-      let w;
-      try {
-        w = await verifyChain(toCheck, anchor, ports);
-      } catch (err) {
-        w = { ok: false, head: null, findings: [{ kind: 'unreadable', detail: `${err.name}: ${err.message}` }] };
-      }
-      if (w.ok) chainAnchor = w.head ?? chainAnchor;
-      else noteChain('chain', w.findings);
-      chainVerified = w.ok === true;
-      // A GAP finding carries the seq the counter jumped FROM, so the first row the relay owes is
-      // the next one. Anything else the witness reports (a mismatch, an unreadable chain value)
-      // is a statement about a row that WAS served, and the cursor is left to the ordinary rule.
-      for (const fi of w.findings || []) {
-        const from = fi && fi.from !== undefined ? toSeq(fi.from) : null;
-        if (from !== null) chainHoles.push(from + 1n);
-      }
-    } else if (rows.length) {
-      // A single row adopted as the anchor: nothing was checked, but the anchor is now set, so
-      // the next page IS checked. `chainVerified` stays false — nothing was proved here.
-      chainAnchor = anchor ?? chainAnchor;
+    const headAfter = witness.head(spaceId);
+    // POSITIVE EVIDENCE means rows this device had never folded were folded and verified. A page
+    // whose every row is at or below the head proves nothing new — it is the honest re-serve of a
+    // held page (R8-1a), and treating it as proof would let a relay clear a verdict by repeating
+    // itself. So the head must have MOVED.
+    const foldedFresh = headAfter !== null
+      && (headBefore === null || (toSeq(headAfter.seq) ?? 0n) > (toSeq(headBefore.seq) ?? 0n));
+    // THE SECOND SHAPE OF POSITIVE EVIDENCE: a row this device was told it was owed has arrived.
+    // A withhold that heals delivers the missing row BELOW the head the witness re-anchored to, so
+    // the witness says nothing about it and `foldedFresh` cannot see it. Delivery is still proof —
+    // the accusation was "this row is missing" and the row is here.
+    let owedFilled = false;
+    for (const r of rows) {
+      if (chainOwed.delete(r.seq)) owedFilled = true;
     }
+    const chainVerified = (foldedFresh || owedFilled) && found.length === 0;
+    if (found.length) noteChain('chain', found);
+    // A GAP finding carries the seq the counter jumped FROM, so the first row the relay owes is
+    // the next one. Anything else the witness reports (a mismatch, an unreadable chain value) is a
+    // statement about a row that WAS served, and the cursor is left to the ordinary rule.
+    for (const fi of found) {
+      const from = fi && fi.from !== undefined ? toSeq(fi.from) : null;
+      if (from === null) continue;
+      chainHoles.push(from + 1n);
+      chainOwed.add(String(from + 1n));
+      while (chainOwed.size > CHAIN_SEQ_MEMORY) chainOwed.delete(chainOwed.values().next().value);
+    }
+    // The chain values, by the seq they belong to, so the durable anchor is ONE ROW (R8-1b).
+    for (const r of rows) {
+      if (typeof r.chain === 'string' && r.chain !== '') chainBySeq.set(r.seq, r.chain);
+    }
+    while (chainBySeq.size > CHAIN_SEQ_MEMORY) chainBySeq.delete(chainBySeq.keys().next().value);
     // The page claim. `served` is the last row the relay actually handed over; `claimed` is where
     // it says the cursor may go. On an honest relay these are equal, or the page is empty and
     // `claimed === since`, so this never fires — measured by every green fleet row.
@@ -971,7 +1105,20 @@ export function createPersonalSync(deps) {
     const holds = new Map();
     /** What this pull owes the DURABLE park, flushed once below rather than inside the loop. */
     const toPark = [];
-    const toRelease = [];
+    /**
+     * The holds that ENDED without the op ever opening — the ladder's casualties and every other
+     * `terminal()`. R8-4's closing move: these go to `lot.refuse()`, which SHELVES the bytes, and
+     * not to `lot.release()`, which destroys them.
+     *
+     * `release()`'s own `unopened` guard reaches the same state, and it reaches it by inference —
+     * it works because `pullNow` flushes `toPark` before it releases, so an envelope this pull
+     * parked is still marked unopened when the release walks past it. That coupling is invisible
+     * at the two flush sites and would break silently if they were ever reordered. `refuse()` says
+     * the transition out loud instead, so the guard is a belt behind braces rather than the only
+     * thing standing between a ladder and a drop.
+     * @type {Array<{oid:string, reason:string}>}
+     */
+    const toRefuse = [];
     // ── P-4 · THE HOLE THE WITNESS FOUND, AS A CURSOR HOLD ───────────────────
     //
     // Naming the fork is not enough on its own: `seq` is gapless per space (ADR 003 §3.3), so a
@@ -984,6 +1131,15 @@ export function createPersonalSync(deps) {
     // the commit stops strictly below it. The ops that DID arrive are still applied: ADR 002 §8.6
     // and ADR 003 §10.6 keep the witness diagnostic-only in v2, and this respects that — nothing
     // is refused on the witness's word. Only the cursor waits.
+    //
+    // ⚠ AND IT WAITS FOR ONE PULL, NOT FOR EVER — R8-2. `chainHoles` now carries only what the
+    // WITNESS reported as NEW on this page: a break it had not already seen and re-anchored past.
+    // That is the whole difference between a hold and a wedge. A relay that is still lying is
+    // still owed the row on the next poll, which is what `fleet-harness.test.js` §2a measures; a
+    // hole that cannot be filled because a member removal deleted the rows (ADR 003 §6.3) is
+    // re-anchored past instead of waited on for the rest of the family's life. The page-claim
+    // hold below is NOT part of this and does not expire: it is derived from a claim the relay
+    // repeats on every page, so it is re-armed on every page.
     for (const chainHole of chainHoles) holds.set(chainHole, 'withheld');
 
     for (const item of work) {
@@ -1053,6 +1209,22 @@ export function createPersonalSync(deps) {
       // several pulls, which is the F-6 cure landing.
       for (const id of applied) deferred.delete(id);
       stats.opsApplied += applied.length;
+      // ── R8-4 · A CURED REFUSAL IS RETRACTED, IN THE SESSION AND ON DISK ─────────────────────
+      //
+      // The ladder gives up on an envelope whose attestation had not landed in `maxDeferrals`
+      // pulls; `terminal()` above records that as a refusal and `lot.refuse()` shelves the bytes,
+      // and the NEXT LAUNCH revives them — so the op that was reported as permanently diverged
+      // arrives after all. Round 8's failure was reporting `healthy` while wrong; leaving the
+      // ledger to say `error` for the rest of the device's life is the same failure with the sign
+      // flipped, and an indicator that cannot go out is one nobody reads.
+      //
+      // Only the STORE's own `applied` list can clear it (`retractSyncRefusal`'s docblock says
+      // why), so this is not a channel a relay can reach: it would have to make the op apply,
+      // which is the cure.
+      for (const id of applied) quarantined.delete(id);
+      if (applied.length && typeof store.retractSyncRefusal === 'function') {
+        try { store.retractSyncRefusal(applied); } catch { /* diagnostics may never break a pull */ }
+      }
     }
 
     // ── THE DURABLE PARK IS WRITTEN BEFORE THE CURSOR MOVES ──────────────────
@@ -1069,7 +1241,19 @@ export function createPersonalSync(deps) {
       catch { kept = false; }                 // the lot warns; an unwritable park is a stall
       if (!kept) holds.set(p.seq, `park-full:${p.reason}`);
     }
-    if (toRelease.length) { try { await lot.release(spaceId, toRelease); } catch { /* next pull */ } }
+    // A hold that ended without the op opening RETAINS the envelope (R8-4).
+    //
+    // ⚠ NO REASON IS PASSED, AND THAT IS THE WHOLE CARE IN THIS LINE. `refuse(space, oids, reason)`
+    // overwrites the shelved row's reason, and the shelf's reason is not prose for a human — it is
+    // the ENUM the next launch re-judges the envelope by: `loadLot()` reads it back through
+    // `parkHandlingOf(row.reason)` to decide `curedBy`, and `pullNow` warns about a reason this
+    // build does not recognise. `terminal()`'s reason is a sentence ("still attestation after 5
+    // attempts"), so writing it here would turn a revived `ENVELOPE_PARK.ATTESTATION` into an
+    // unknown park on the very launch that was supposed to cure it. The sentence belongs in the
+    // refusal LEDGER, where a human reads it, and `store.syncRefusals` already has it.
+    for (const r of toRefuse) {
+      try { await lot.refuse(spaceId, [r.oid]); } catch { /* next pull */ }
+    }
 
     // ── W1: persist BEFORE the cursor moves ──────────────────────────────────
     if (applied.length) await store.persistNow();
@@ -1108,10 +1292,20 @@ export function createPersonalSync(deps) {
       // costs a re-pull (idempotent, ADR 001 §6) and never a cursor ahead of what was folded.
       // `store.noteCursor` inside the commit keeps the AUTHORITATIVE cursor exactly where W1 put
       // it: in the log, written by `_persistOps`, below the board.
+      //
+      // R8-1b — THE RECORD IS ONE ROW. `advance` writes `{seq, chain: head.chain}` and does not
+      // check that the two are the same row; round 8 handed it the commit point and the chain of
+      // the LAST ROW OF THE PAGE, which are the same row only when nothing in the page was held.
+      // One parked op — F-6's ordinary first contact — was enough to persist a chain value for a
+      // seq that never had it, and the next launch then accused an honest relay of forging the
+      // value this device had invented. So the chain is looked up BY the commit seq, and when
+      // this device does not hold one for that row it stores NO anchor rather than a wrong one:
+      // `''` reads back as "no head" and the next page re-anchors, which accuses nobody.
+      const anchorAt = chainBySeq.get(String(commit)) ?? '';
       await cursors.advance(
-        spaceId, String(commit), chainAnchor,
+        spaceId, String(commit), { seq: String(commit), chain: anchorAt },
         async () => { store.noteCursor(spaceId, String(commit)); },
-        { fromGenesis: (toSeq(since) ?? 0n) === 0n && chainVerified },
+        { fromGenesis: witness.snapshot()[spaceId]?.fromGenesis === true },
       );
     }
 
@@ -1257,7 +1451,13 @@ export function createPersonalSync(deps) {
       deferred.delete(oid);
       // A terminal is FINAL, so the retained bytes are no longer a deferral and must not be
       // replayed on every launch for ever. The RECORD of the refusal replaces them, below.
-      toRelease.push(oid);
+      //
+      // R8-4 — AND "not replayed" IS NOT "destroyed". The ladder's own casualty is the op whose
+      // attestation had not landed within `maxDeferrals` pulls, and the attestation lands minutes
+      // later on an ordinary honest relay. `refuse()` takes it out of the replay set and keeps the
+      // sealed bytes on the shelf, where the next launch gives it `PARK_REVIVALS` more chances.
+      // The refusal below is still recorded, and it is retracted if the revival ever applies.
+      toRefuse.push({ oid, reason });
       quarantined.set(oid, { seq: String(item.seq), reason });
       stats.opsQuarantined += 1;
       // ── L-1 · THE RECORD OF A REFUSAL OUTLIVES THE REFUSAL ───────────────────────────────────
@@ -1336,12 +1536,29 @@ export function createPersonalSync(deps) {
       store.syncChain = { ok: false, kind, findings: findings || [], at: d.now() };
       if (typeof store._warn === 'function' && !warnedChain.has(kind)) {
         warnedChain.add(kind);
-        store._warn(
-          'sync: the server\'s record of this board does not add up — it served a page that skips '
-          + 'or re-orders changes this device has not seen (ADR 002 §5.4). Nothing here was '
-          + 'changed and nothing was accepted on its word; the cursor is held so those changes '
-          + 'are still owed. If this persists after a member was removed from a shared board it '
-          + 'is expected; otherwise the two devices may not be seeing the same board.');
+        // ── TWO FINDINGS, TWO SENTENCES, BECAUSE THEY PROMISE DIFFERENT THINGS (R8-2) ─────────
+        //
+        // `withheld` is the page claim: the relay asked this device to step over rows it never
+        // sent, the cursor refuses, and the changes ARE still owed — by a relay that still holds
+        // them. Saying so is true and it is the sentence a user can act on.
+        //
+        // A chain break is not that. It is a hole this device cannot fill by waiting, because the
+        // most likely cause is the one legitimate destructive operation in the product: a member
+        // removal purges that member's op rows (ADR 003 §6.3) and every chain after it becomes
+        // unrecomputable BY ANYONE, for ever. Round 8 told the user those changes were "still
+        // owed" while holding the cursor below rows that had been deleted on purpose — a promise
+        // nothing could keep. So this half says what happened, says sync continues, and does not
+        // promise a delivery.
+        store._warn(kind === 'withheld'
+          ? 'sync: the server\'s record of this board does not add up — it asked this device to '
+            + 'skip over changes it never sent (ADR 002 §5.4). Nothing here was changed and '
+            + 'nothing was accepted on its word; the cursor is held so those changes are still '
+            + 'owed. If this persists, the two devices may not be seeing the same board.'
+          : 'sync: this device can no longer check the server\'s record of this board against '
+            + 'itself — one stretch of the history does not hash together (ADR 002 §5.4). If '
+            + 'somebody was removed from a shared board, that is expected and nothing is wrong: '
+            + 'their changes were deleted with them. Syncing continues either way, checking '
+            + 'resumes from here, and nothing on this board was changed on the server\'s word.');
       }
     }
   }
@@ -1452,6 +1669,27 @@ export function createPersonalSync(deps) {
     });
     stats.rejoin = !!(store.diagnostics && store.diagnostics().sync?.rejoin);
     emitStatus();
+    // ── R8-6 · A DURABLY HELD OP IS VISIBLE FROM THE FIRST STATUS, NOT FROM THE FIRST PULL ────
+    //
+    // `loadLot()` is what reads the durable park back and re-arms `deferred` from it, and it was
+    // called from `pullNow()` and `heldEnvelopes()` and nowhere else. So between a launch and its
+    // first successful pull — up to a whole `pullIntervalMs`, and for ever on a Mac that opens the
+    // lid in a tunnel — `deferred` was empty, `status()` read `pending === 0`, and the indicator
+    // said the quiet thing about a board with a held change on the disk beside it. That is
+    // round 8's own failure (`healthy` while wrong) in the one window nobody was looking at.
+    //
+    // It cannot be `await`ed: `attach()` is called synchronously from the mount and returns
+    // `detach`, and making it async would move a `store.subscribe` behind a microtask. So the read
+    // is started here and the status is re-emitted when it lands — the same shape as any other
+    // late-arriving fact, and `attached` is re-checked because a detach may have won the race.
+    //
+    // The other half — `store.diagnostics().sync.parked`, which counts `_log.parkedOps()` and can
+    // never see the lot — is `src/js/store.js`'s and is deliberately NOT reached for from here:
+    // this engine's own `deferred` is the honest source for its own held envelopes, and two files
+    // answering one question is how they drift.
+    loadLot()
+      .then(() => { if (attached) emitStatus(); })
+      .catch(() => {});
     return detach;
   }
 

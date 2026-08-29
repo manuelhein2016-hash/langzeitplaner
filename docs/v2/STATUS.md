@@ -1,6 +1,14 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-29 · **Stopped at:** **round 8 — the OP LIFECYCLE, enumerated, and E5's
+**Last session:** 2026-08-29 · **Stopped at:** **round 9 — the adversary's verdict, closed.** A
+fresh adversary read round 8's work and returned *"E6 cannot safely be built on this sync engine as
+it stands."* It is closed: `pullNow` uses `createChainWitness` rather than the raw `verifyChain`
+leaf, the cursor hold moved behind the witness's re-anchor where ADR 002 §5.4 put it, a park is
+never a drop, and every door that persists a device row runs one closed-set rule.
+**Start at the round-9 addendum at the bottom of this file, then FINDINGS §3d, §7a-round9 and
+§4.8.** The two headline checks the verdict set as the bar are `tests/fleet/round9-headline.test.js`.
+
+**The previous session** was **round 8 — the OP LIFECYCLE, enumerated, and E5's
 two adversaries answered.** M1 „Zwei Macs" was demonstrated; two adversaries then attacked it and
 found **no confidentiality break** — 21.1 and 21.2 both held — but found that **the engine lost ops
 silently and reported `healthy` while doing it**. Four fixers worked in parallel against
@@ -48,13 +56,16 @@ register blocking a family-mode release: finding E3-1**, and it is an input to *
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-# CURRENT — re-measured 2026-08-29 at the close of the ROUND-8 integration pass. ALL SIX GREEN.
-npm test              # tier 1, pure logic          → 1929 pass / 0 fail
-npm run test:attack   # adversarial corpus          →  706 pass / 0 fail
+# CURRENT — re-measured 2026-08-29 at the close of the ROUND-9 integration pass. ALL SIX GREEN.
+npm test              # tier 1, pure logic          → 1932 pass / 0 fail
+npm run test:attack   # adversarial corpus          →  714 pass / 0 fail
 npm run test:property # property harness + domains  →   85 pass / 0 fail   ← sync-domains: 0 UNEXPECTED, 0 STALE
-npm run test:server   # the sync server             →  815 pass / 0 fail
-npm run test:fleet    # two Macs, real handlers     →  103 pass / 0 fail
+npm run test:server   # the sync server             →  846 pass / 0 fail
+npm run test:fleet    # two and three Macs, real handlers → 131 pass / 0 fail
 npm run test:dom      # real headless WKWebView     → 26 files, tier 2 PASS
+
+# 2026-08-29, the ROUND-8 integration pass — superseded
+npm test → 1929 · test:attack → 706 · test:property → 85 · test:server → 815 · test:fleet → 103
 ```
 
 **tier 1 went 1956 → 1929 and that is a DELETION, not a regression.**
@@ -933,3 +944,155 @@ lifecycle whose every cell is decided, and fourteen mutants each naming the row 
   two real disks over the real handlers — it is not two real machines. §7d-2's method makes that a
   much smaller gap than it was, but it is not zero.
 
+
+---
+
+# Round-9 addendum — 2026-08-29 · **THE ADVERSARY'S VERDICT, CLOSED**
+
+A fresh adversary read round 8's own work and returned one sentence:
+
+> **E6 cannot safely be built on this sync engine as it stands.**
+
+This round closes that. Three fixers worked in parallel; one integration pass landed the
+cross-file work, built the two headline checks the verdict set as the bar, and ran the mutation
+table. **All six suites are green.**
+
+## The root cause, in one line — and it was already diagnosed, not re-derived
+
+> `pullNow` uses `verifyChain` where it must use `createChainWitness`, and it turned a diagnostic
+> into a cursor hold.
+
+Round 8's own closing lesson — *a module is not dead because nothing imports it; it is dead because
+nothing NEEDS it* — was applied to the FILE and not to the FUNCTION inside it. Round 8 imported the
+leaf, left the mechanism behind, and then compensated for the missing mechanism by giving the leaf
+a power ADR 002 §5.4 forbids in one sentence: *"it NEVER BLOCKS SYNC in v2 (a false positive that
+broke a family's board would be far worse than the attack)."*
+
+**`createChainWitness` now has a real importer** — `src/js/sync/personal.js:168`, one instance per
+engine at `:669`, on the product's only pull path. **The only `verifyChain` CALL anywhere in `src/`
+is `chain.js:370`, the witness's own use of its own leaf.** No raw `verifyChain` decides sync
+behaviour.
+
+## What was closed
+
+| id | severity | what it was |
+|---|---|---|
+| **R8-2** | CRITICAL | One legitimate member removal WEDGED THE SPACE, for ever. `POST /members/remove` purges the removed member's op rows (ADR 003 §6.3), which makes every later `chain` unrecomputable by anyone; round 8 held the cursor below that hole on every pull, unconditionally, so every op above it was unreachable across relaunches on an honest relay. The hold now lasts for the pull that DISCOVERS a break and not after — moved behind the witness's re-anchor, **not deleted**. |
+| **R8-4** | CRITICAL | The ladder DESTROYED the only copy. `release()` shelves what the caller has just said it cannot open, the shelf is on disk, out of the replay set, and revived by the next launch (bounded, `PARK_REVIVALS = 3`). `terminal()` now calls `refuse()`, which says the transition out loud. **And the refusal is retracted when the revival lands** — a durable ledger that cannot retract is a permanently red indicator. |
+| **R8-1** | HIGH | An HONEST relay accused, twice over: the re-serve of a held page read as `seq jumped from 1 to 1`, and a persisted anchor that paired one row's seq with another row's chain. Both were missing pieces of the wrapper. |
+| **R8-5** | HIGH | `park()` reported success after a failed write. `pullNow`'s `if (!kept) holds.set(…)` was correct, documented and unreachable. |
+| **R8-7** | MEDIUM | The attestation's CLOSED FIELD SET ran on two doors of four, so `POST /devices` and `/devices/adopt` stored a smuggled seventh field and `GET /spaces/:id/members` published it. One rule, four doors — and round 9 also deleted the private twin `spaces.js` had kept, which had **already drifted in one word within a single round**. |
+| **R8-7b** | MEDIUM→HIGH (availability) | A `deviceId` could name a key-wrap recipient. Register `rec_mem_MAMA` as a device, then revoke it, and `deleteKeyWrapsForDevices` deletes that member's recovery wraps for every epoch — ADR 002 §7.3's last resort. Two ordinary requests, one current member, no forgery. |
+| **R8-6(a)** | MEDIUM | A durably held op was invisible for the whole launch. `attach()` now reads the park and re-emits; the toolbar is push-fed (`family/mount.js:78`), so it lands with no pull, no network and no timer. |
+| **R8-8** | MEDIUM | A log quarantine is an enumerated observable now, and `fieldValue()` no longer hard-codes one field — that hard-coded branch WAS the finding. Half closed; the loud half needs `store.js`. |
+| **R9-1** | LOW, durable | **NEW, found landing a cross-file item.** `cursor.js advance()` could raise `fromGenesis` and never lower it. It is not a reward for a past pull; it is the RIGHT TO CALL AN UNKNOWN `wit` A FORK, and `chain.js` gives that right up when a break makes it unprovable. A ratchet hands it back at the next launch. |
+
+## The two headline checks — `tests/fleet/round9-headline.test.js`
+
+The adversary set the bar itself: *the detector must not cry wolf on the happy path, and a
+legitimate member removal must not wedge anyone.*
+
+**(a) FIRST CONTACT — §1.** A peer's op overtakes its attestation, the relay honestly re-serves the
+held page on every poll for the whole of `MAX_DEFERRALS`, and then the ladder ends the hold. Across
+all six pulls: no chain finding, nothing written to `store.syncChain`, **not one word to the user**,
+and `pending` throughout — never `error`, never `healthy`. Then the attestation lands, the shelf is
+revived, the entry arrives and the refusal is withdrawn. Round 8 said the server's record did not
+add up from the SECOND pull onwards. A **CONTROL** row drives one rewritten chain value through the
+same held state and requires it still to be caught, so "quiet on the happy path" cannot be
+satisfied by deleting the detector.
+
+**(b) A MEMBER REMOVAL — §2a and §2b, and it is two rows for a reason worth reading.**
+`createPersonalSync` refuses a non-`psp_` space in its first line (story 21.2), and in a personal
+space ADR 001 §4 rejects another member's op as `notMyAct` before the witness sees it — measured,
+by writing the row the naive way first. **There is no family sync client yet; that is E6.** So the
+halves are driven separately and joined **by measurement, not assumption**:
+
+- **§2a — the server half, fully real.** A second member joins through `POST /invites` and
+  `POST /invites/redeem`, authors ops interleaved with a survivor's, and is removed through
+  `POST /members/remove` — all over `router.js` and `adapters/memory.js`. The row **captures the
+  store call `purgeMember` actually makes** by wrapping the transaction handle (a spy on the bare
+  store method is never called — the purge and the membership write are one transaction), and
+  asserts it is `deleteOpsByDevices(spaceId, [herShorts])`, once.
+- **§2b — the client half, fully real.** Three Macs, a two-row page so the log is many pages long,
+  and §2a's captured call on the same shipped adapter. **B is OFFLINE throughout, so its cursor is
+  below the hole when the purge lands** — the Mac that was shut while the family removed somebody,
+  which is the only position where the wedge exists. Both remaining Macs keep the cursor moving,
+  reach every entry that still exists, quarantine nothing, and read `healthy` — over several pages
+  and across a relaunch. Nobody is told that deleted rows are "still owed".
+
+One thing §2b measures that the naive version would have missed: A and B do **not** end identical,
+and that is ADR 002 §7.4 rather than a defect — A had already been served the purged entries and
+still holds them (`alreadyDeliveredIsIrrevocable: true`, asserted in §2a). The row asserts the true
+property instead: **B is missing nothing, and the only difference is exactly the four purged
+entries.**
+
+## Suites
+
+```bash
+# CURRENT — re-measured 2026-08-29 at the close of the ROUND-9 integration pass. ALL SIX GREEN.
+npm test              # tier 1, pure logic          → 1932 pass / 0 fail
+npm run test:attack   # adversarial corpus          →  714 pass / 0 fail
+npm run test:property # property harness + domains  →   85 pass / 0 fail   ← 0 UNEXPECTED, 0 STALE
+npm run test:server   # the sync server             →  846 pass / 0 fail
+npm run test:fleet    # two and three Macs, real handlers → 131 pass / 0 fail
+npm run test:dom      # real headless WKWebView     → 26 files, tier 2 PASS
+```
+
+`test:server` moved 815 → 846: +32 for `blindness.test.js` §7a/§7b's door enumeration, −1 for the
+characterization row that named its own inversion and got it. `test:fleet` moved 103 → 131:
+round 8's two adversary files, round 9's headline file, and the rows added around them.
+
+## Mutation testing — eighteen mutants, and one survivor stated rather than hidden
+
+The full table is `FINDINGS.md` **§7a-round9**. The two the brief named by hand:
+
+- **the `fresh` filter is load-bearing, and it lives IN THE WITNESS.** Removing it from `chain.js`
+  kills five row groups; adding a duplicate at the `pullNow` call site kills nothing. R8-1 is
+  closed by the wrapper, not by a compensating guard.
+- **the hold MOVED, and both directions are pinned.** Deleting it reddens the withhold defence;
+  making it permanent again reddens the removal rows. A fix that survived only one of those two
+  mutants would be the other failure.
+
+**One mutant survived** — `terminal()` calling `release()` instead of `refuse()` — because under
+today's flush order the two coincide. It is recorded in §7b-round9 with what was done about it: the
+DIFFERENCE was given a row of its own (`round8-park` §6.2b), so the choice is a tested property of
+`outbox.js` rather than a preference at the call site.
+
+**Process:** the scratch tree was copied with `tar`, never with `git stash`. Several agents shared
+this working tree and two files were observed reverting to `HEAD` mid-session when one of them
+stashed. Anyone doing a scratch-tree mutation pass here should copy, not stash.
+
+## One measurement that corrected an earlier row
+
+Over the 128-seed tamper sweep, before and after R8-4's retraction with nothing else changed:
+
+```
+before:  quarantined-at-end 14 · durable ledger 17 · DIVERGED 0 · lost 0
+after:   quarantined-at-end  0 · durable ledger  0 · DIVERGED 0 · lost 0
+```
+
+Every one of those 17 durable refusals was about an op that had in fact ARRIVED. So
+`attack-converge-disorder.test.js` §2's second row was overstated — *"a QUARANTINE in the alphabet
+costs data"* — and its non-vacuity control was being satisfied by a stale record rather than by a
+real loss. It is renamed **CLOSED (R8-4)**, re-based on refusals the run REACHED, and given a new
+assertion forbidding the retraction from following anything but the op actually landing.
+
+## What E6 starts on top of, and what it still owes
+
+**Answered:** the witness is a diagnostic again, the hold is where ADR 002 §5.4 put it, a member
+removal costs one pull and a sentence, a park is never a drop, and every door that persists a
+device row runs one closed-set rule.
+
+**Owed, and all four of the first group are `src/js/store.js`** (FINDINGS §8, *Owed by round 9*):
+`syncChain` must ride in the checkpoint (R8-3 — a fork detected before a quit is still forgotten
+after it); `sync.parked` must count the engine's held envelopes (R8-6b); `diagnostics().quarantine`
+must say what it discarded (R8-8's loud half). Plus **FINDINGS §4.8, which is a DECISION and not an
+implementation**: a client cannot re-ask for one seq, so a relay that withholds a row in the middle
+of a page and keeps withholding it consumes it on the second poll — loudly, one-sidedly, and
+permanently. Closing it needs a bounded re-ask or a seq-range request, and the retry count is a
+privacy trade as much as a cadence. `attack-converge-relay.test.js` §6b asserts that loss and must
+be inverted the day somebody closes it.
+
+**And E6's own first obligation is written into `round9-headline.test.js` §2b's closing
+assertion:** the day the fleet mints a family space, §2a and §2b collapse into one row, and the
+seam between them is exactly what E6 closes.

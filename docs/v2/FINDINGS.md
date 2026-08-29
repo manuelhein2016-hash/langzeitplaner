@@ -1696,6 +1696,197 @@ reports as "it works" on most runs. That is why the headline runs at 128.
 
 ---
 
+### 3d. Round 9 — THE WITNESS, AND THE VERDICT IT WAS CLOSING
+
+*Ran:* 2026-08-29, immediately after round 8. A fresh adversary read round 8's own work and
+returned one sentence: **"E6 cannot safely be built on this sync engine as it stands."** This
+round closes that verdict. Three fixers worked in parallel; one integration pass landed the
+cross-file work, built the two headline checks and ran the mutation table.
+
+**The root cause was already diagnosed and was not re-derived:**
+
+> `pullNow` uses `verifyChain` where it must use `createChainWitness`, and it turned a diagnostic
+> into a cursor hold.
+
+Round 8's own closing lesson — *a module is not dead because nothing imports it; it is dead
+because nothing NEEDS it* — was applied to the FILE and not to the FUNCTION inside it. The round
+imported the leaf, left the mechanism behind, and then compensated for the missing mechanism by
+giving the leaf a power ADR 002 §5.4 forbids in one sentence: *"it NEVER BLOCKS SYNC in v2 (a
+false positive that broke a family's board would be far worse than the attack)."*
+
+`createChainWitness` now has **a real importer**: `src/js/sync/personal.js:168`, one instance per
+engine at `:669`, on the product's only pull path. **The only `verifyChain` CALL left anywhere in
+`src/` is `chain.js:370` — the witness's own use of its own leaf.** No raw `verifyChain` decides
+sync behaviour.
+
+#### R8-1 — an honest relay accused, and a durable record that was two rows · HIGH · **CLOSED**
+
+*Owner:* `src/js/sync/personal.js`, `src/js/sync/chain.js`. *Rows:* `tests/fleet/round8-chain.test.js`
+§1a/§1b/§1c, **inverted**.
+
+Two shapes, both on a completely honest relay. **(a)** `chainAnchor` advanced whenever a PAGE
+verified; the CURSOR advanced only when nothing in the page was held. F-6's first contact — a
+peer's content op overtaking its attestation — is exactly where those differ, so the honest
+re-serve of a held page was verified a second time against an anchor taken from INSIDE it and
+reported as `seq jumped from 1 to 1`. **(b)** Its durable form was worse: `cursor.js advance()`
+persists `{seq, chain}` and does not check the two are the same row, and round 8 handed it the
+COMMIT POINT for `seq` and the LAST ROW OF THE PAGE for `chain`. The next launch anchored on a
+value that had never belonged to that seq and accused the relay of forging what this device had
+invented.
+
+**Fix.** `observe()`'s `fresh` filter drops rows at or below the verified head before any check
+runs — a row this device has already folded is evidence about the CALLER, not about the relay.
+And the persisted record is looked up BY the commit seq (`chainBySeq`), storing `''` — which
+`cursor.js head()` reads as "no anchor" — rather than a chain belonging to a later row.
+
+#### R8-2 — one member removal wedged the space, for ever · CRITICAL · **CLOSED**
+
+*Owner:* `src/js/sync/personal.js`. *Rows:* `round8-chain.test.js` §2 **inverted**, plus a new
+CONTROL; `tests/fleet/round9-headline.test.js` §2a/§2b.
+
+`POST /members/remove` purges the removed member's `Op` rows in the same transaction as the
+membership write (ADR 003 §6.3, story 20.2). `Op.chain` is a hash chain in insertion order, so
+deleting rows makes every later `chain` **unrecomputable by anyone, for ever**. Round 8 turned
+every chain finding into a permanent cursor hold, so after the one legitimate destructive
+operation in the product the cursor stopped at the hole and every op above it was unreachable,
+across relaunches, on a relay that had done exactly what it was asked.
+
+**The rule now, and it is a rule about who owns the hold rather than about which findings are
+believed:** *a chain finding may hold the cursor for the pull that discovers it, and not after.*
+One honest round trip for a relay that truncated a page; then the witness re-anchors on the row it
+was served, does not re-report the break, and sync continues — with the finding standing in
+`store.syncChain`. **The hold was moved, not deleted**: mutant M-B1 (delete it) still reddens the
+withhold defence, and M-B2 (make it permanent again) reddens the removal rows. Both halves are
+pinned.
+
+`noteChain` also gained a second sentence. `withheld` still promises the changes are "still owed",
+which is true — the relay holds them. A chain break no longer does: round 8 promised a delivery of
+rows that had been deleted on purpose.
+
+#### R8-4 — the ladder destroyed the only copy · CRITICAL · **CLOSED**
+
+*Owner:* `src/js/sync/outbox.js`, `src/js/sync/personal.js`, `src/js/store.js`.
+
+`release()` is now the APPLIED path and the only path in the file that destroys bytes. An oid the
+caller parked or touched since its last release is one it has just said it cannot open, so it is
+SHELVED — on disk, out of the replay set so nothing spins, revived by the next `load()` with
+`tries` reset, bounded by `PARK_REVIVALS = 3`. `terminal()` calls the new `refuse()` rather than
+`release()`, which says the transition out loud instead of inferring it from flush order.
+
+**And the refusal is RETRACTED when the revival lands** (`store.retractSyncRefusal`, round 9). The
+durable ledger was built for a refusal that is final; one class of refusal is now survivable, and a
+ledger that cannot retract is a permanently red indicator — round 8's `healthy`-while-wrong with
+the sign flipped. Only the store's own `applied` list can clear it, so a relay cannot clear its own
+verdict without making the op apply, which is the cure.
+
+**A measurement worth recording, because it corrects an earlier row.** Over the 128-seed tamper
+sweep (`attack-converge-disorder.test.js` §2), before and after the retraction with nothing else
+changed:
+
+```
+before:  quarantined-at-end 14 · durable ledger 17 · DIVERGED 0 · lost 0
+after:   quarantined-at-end  0 · durable ledger  0 · DIVERGED 0 · lost 0
+```
+
+Every one of those 17 durable refusals was about an op that had in fact ARRIVED — the tamperer
+flips one ciphertext byte per page, and a later page or a relaunch re-serves the op untampered.
+Nothing was ever lost on either side of the change. So that row's title (*"a QUARANTINE in the
+alphabet costs data"*) was overstated and its non-vacuity control was being satisfied by a stale
+record rather than by a real loss. The row is renamed **CLOSED (R8-4)**, its non-vacuity is
+re-based on `refusalsReached` — refusals the run REACHED, banked across relaunches — and a new
+assertion forbids the retraction from ever following anything but the op actually landing.
+
+#### R8-5 — `park()` reported success after a failed write · HIGH · **CLOSED**
+
+Both exits of `createParkingLot.park()` return `persist()` instead of `await persist(); return
+true;`. `pullNow`'s `if (!kept) holds.set(…)` was correct, documented and unreachable; it now
+fires, and an unwritable park is the stall its own docblock always claimed it was.
+
+#### R8-6 — a durably held op is invisible for the whole launch · MEDIUM · **HALF CLOSED**
+
+*Row:* `round8-park.test.js` §3, now two rows.
+
+**(a) CLOSED.** `attach()` did not read the durable park at all, so between a launch and its first
+successful pull the engine had no idea it was holding anything — for ever, on a Mac that opens its
+lid in a tunnel. `attach()` now starts `loadLot()` and RE-EMITS the status when it lands. It
+cannot `await`: `attach()` is called synchronously from the mount and returns `detach`, and an
+async `attach` would move a `store.subscribe` behind a microtask. It does not have to, because
+`family/mount.js:78` wires `onStatus: () => refreshSyncChrome()` — the toolbar is PUSH-fed.
+
+**(b) STILL OPEN**, and owned by `src/js/store.js`: `diagnostics().sync.parked` is
+`_log.parkedOps().length`, the LOG's park, which can never count the lot's. It is why a SYNCHRONOUS
+poll of `status()` at the instant of launch still reads `healthy`. `sync/status.js` cannot help:
+the field exists and answers `0`, so `blindSpots()` has nothing to catch.
+
+#### R8-7 — the closed field set ran on two doors of four · MEDIUM · **CLOSED**
+
+*Owner:* `server/core/handlers/devices.js`. *Row:* `tests/attack/round8-seam.test.js` §1, **inverted**.
+
+`assertAttestationClosed` moved down into `devices.js` and is called inside `verifyDeviceClaim`,
+BEFORE the signature — a smuggled field is a shape fault and never a forgery, so S1 could not have
+been what caught it. All four doors that persist a `Device` row now reach it.
+`tests/server/blindness.test.js` §7a enumerates the doors as data × mutations as data and asserts
+the set of handler files able to persist a Device row is exactly three, so a fifth door reddens a
+row instead of quietly reopening this.
+
+**And the twin is gone.** Round 8's fix left a private copy in `handlers/spaces.js` (one owner per
+file), which §7a characterized as *"the two copies of the closed-set rule differ in one word"* —
+within a single round they had already drifted on the `recoveryPubKex` refusal reason. The
+round-9 integration pass deleted the twin and pointed `spaces.js` at the one function, passing its
+own `safeField`ed name so a client with several devices in one request is still told which. That
+characterization row named its own inversion, went red on cue, and was carried out.
+
+#### R8-7b — a device id could name a key-wrap recipient · MEDIUM→HIGH on availability · **CLOSED**
+
+`POST /devices` and `/devices/adopt` took `deviceId` through `requireId` — 128 chars of
+`[A-Za-z0-9_.:-]` — where `readDevice` has always pinned `dev_` + 22 b64url. Measured on the
+shipped router before the fix: `deviceId: 'rec_mem_…'` → **200**, served back verbatim by
+`GET /spaces/:id/members`. The sharp half is availability: `POST /devices/revoke` calls
+`deleteKeyWrapsForDevices`, which matches on `KeyWrap.recipientId`, so *register `rec_mem_MAMA`,
+then revoke it* deletes that member's recovery wraps for every epoch — ADR 002 §7.3's "the only
+path that survives losing every device". Two ordinary requests, one current member, no forgery.
+
+Fixed by `DEVICE_ID_RE` on both doors. `memberId` is deliberately NOT tightened — unknown,
+malformed and removed must stay one answer or the route becomes a member oracle.
+
+#### R8-8 — a log quarantine is not an observable · MEDIUM · **HALF CLOSED**
+
+`sync/status.js` gained a `quarantine` row and `fieldValue()` no longer hard-codes
+`if (field === 'warnings')` — that hard-coded branch WAS the finding. The row is `state: healthy`
+deliberately: making it `error` was measured turning `attack-converge-rejoin.test.js` §2 red (ADR
+006 §9.3's converging re-join reaches this exact state), which is round 8's opposite failure and
+the control caught it. What it buys is that `silent` is now false from SHARP evidence rather than
+from a sentence happening to be in the mixed `warnings` prose channel. The loud half needs
+`store.diagnostics().quarantine` to say what the quarantine DISCARDED; still open, `store.js`'s.
+
+#### R9-1 — `fromGenesis` was a ratchet, and it is a report · LOW, durable · **CLOSED**
+
+*Found by:* the round-9 integration pass, landing the chain-witness owner's cross-file item.
+*Owner:* `src/js/sync/cursor.js`. *Row:* `tests/tier1/sync-queue.test.js`, **inverted** — it read
+*"`fromGenesis` is sticky once true — one full pull earns it for good"*.
+
+`advance()` could raise the flag and never lower it. But `fromGenesis` is not a reward for a past
+pull; it is **the right to call an unknown `wit` a fork**, and `chain.js` gives that right up the
+instant a break makes verification unprovable from genesis (`s.fromGenesis = false` beside
+`s.broken = true`). A ratchet hands the right back at the next launch, and the device then accuses
+an honest relay of a fork it can no longer prove — the false positive ADR 002 §5.4 forbids.
+Unreachable today (this engine seals `wit: ''` on every push, so `UNKNOWN_WITNESS` cannot fire) and
+a durable lie waiting for the day `wit` is populated. An OMITTED `fromGenesis` still carries the
+stored value forward, so a caller with nothing to say changes nothing.
+
+#### What round 9 did NOT close, and where each row is
+
+| # | still open | why, and who owns it |
+|---|---|---|
+| **R8-3** | `chain` is declared `durable: true` and persisted nowhere — a fork detected before a quit is forgotten by the next launch | `round8-chain.test.js` §3 still asserts the defect. `store.syncChain` needs to ride in `checkpoint().lzp` exactly as `refusals` already does. Owner: `src/js/store.js`. |
+| **R8-6(b)** | `diagnostics().sync.parked` counts the LOG's park and can never count the lot's | `round8-park.test.js` §3 row 1. Owner: `src/js/store.js`. |
+| **R8-8 loud half** | `diagnostics().quarantine` does not say what was discarded | Owner: `src/js/store.js`, same fix as `_restoreSyncLedger` preserving the ledger. |
+| **§7c-R9** | a relay that withholds a row in the MIDDLE of a page and keeps withholding it consumes that row on the second poll | `attack-converge-relay.test.js` §6b, RESIDUAL — it ASSERTS a loss and must be inverted when closed. See §4.8. |
+| **E6's own** | there is no family-space sync client, so a member removal cannot be driven end-to-end in one row | `round9-headline.test.js` §2a/§2b, joined by a measured store call rather than by assumption. |
+
+
+---
+
 ---
 
 ## 4. Needs a decision — a PO must choose, not an engineer
@@ -1955,6 +2146,39 @@ R5-2e resolved it in code *and in the ADRs*: §12 rule 6 is amended to "a precon
 not an instruction to try", ADR 006 gains §7.1 stating the two rules and why §12.6 loses, and **ADR
 001 §1.3/§7.4 is untouched** — the rule protecting something real was kept and the rule asking for
 the impossible was the one that gave. See R5-2e's MEDIUM narrative. Nothing is owed to a PO here.
+
+### 4.8 R9-6b — how does a client re-ask for ONE seq?  · **OPEN, and it is a CADENCE decision**
+
+*Opened by:* round 9's closure of R8-2. *Owner:* ADR 003 §4 / §8.2 — the protocol, not the witness.
+*Pinned by:* `tests/fleet/attack-converge-relay.test.js` §6b, which ASSERTS the residual loss.
+
+R8-2's bound — *a chain finding may hold the cursor for the pull that discovers it, and not after*
+— is what makes a member removal survivable. It has one cost, and it is exactly one: a relay that
+withholds a row in the MIDDLE of a page and keeps withholding it consumes that row on the second
+poll. The loss is permanent, one-sided, and REPORTED (`error`, plus a gap finding that never
+clears) — not silent, which is the property the whole round is about.
+
+**The client cannot simply keep asking**, and this is the part that makes it a decision rather than
+a bug. `GET /api/v1/ops` can only be asked *"everything after `since`"*. So "keep asking for the
+hole" and "block every op above it" are the SAME REQUEST, and blocking every op above it for ever
+is the wedge R8-2 just closed. The protocol offers no third option today.
+
+Two ways out, neither of them in scope for round 9, and the choice between them is a cadence
+question:
+
+**(a) A bounded RE-ASK.** `since = hole − 1`, N times, ladder-bounded exactly as `maxDeferrals`
+bounds a park. The protocol already permits it — it is an ordinary `GET /ops` — and no ADR
+describes it. Unbounded, it re-fetches pages for the life of a purged space; bounded, it still
+loses to a patient relay. It costs bandwidth and no new endpoint.
+
+**(b) A seq RANGE request.** One new query parameter, and the client can ask for exactly the row it
+is owed. It is a protocol change, an ADR amendment and a relay release, and it makes the "which
+rows have you not got" question answerable — which is a metadata question, so 21.1 has to be
+re-asked about it before it is designed.
+
+Round 9 deliberately added neither: an unbounded re-ask is a worse failure than the one it fixes,
+and a bounded one is a number nobody has chosen. **A PO or the protocol owner picks; an engineer
+should not pick a retry count that is really a privacy trade.**
 
 ## 5. What was attacked and held — recorded so it is not re-attacked
 
@@ -2246,6 +2470,75 @@ is as load-bearing as the first.
 applied as `if (false)` and changes the source TEXT those rows count. It is a property of the
 mutation's form, not evidence about the fix.
 
+### 7a-round9. Round 9 — eighteen mutants, in one clean scratch tree
+
+Every row below was applied to a **fresh copy of the whole tree** at the round-9 head
+(`…/scratchpad/mut`, never in the repo, every file restored between rows) and the named suites
+re-run. **Baseline in that copy: 0 fail in every suite**, except the scratch-copy-only row
+*"the frozen v1 store is the baseline commit, byte for byte"*, which re-derives its fixture from
+`.git` and cannot pass in a copy that has none — it appears in three rows below purely for that
+reason and is not evidence about those mutants.
+
+The tree was copied with `tar`, never with `git stash`: several agents shared this working tree
+this round and two files were observed reverting to `HEAD` mid-session when one of them stashed.
+
+| # | mutation | the first rows that die |
+|---|---|---|
+| **M-A** | `chain.js observe()` — the `fresh` filter removed | `round8-chain` §2 and §1; `attack-converge-relay` §5 and §6; `fleet-harness` §2a; `sync-personal` §4c |
+| **M-B1** | `pullNow` — the `chainHoles → holds` line DELETED | `attack-converge-relay` §6; `fleet-harness` §2a; `round8-chain` §2 **and §4 "a withheld op still stops the cursor"**; `sync-personal` §4c |
+| **M-B2** | `pullNow` — the hold made PERMANENT again (round 8's behaviour, via the witness's dedupe) | `attack-converge-relay` §6; `round8-chain` §2; **`round9-headline` §2b**; `sync-personal` §4c |
+| **M-C** | `pullNow` — the anchor taken from the PAGE HEAD again, not the committed row | `round8-chain` §1; `sync-personal` §4c |
+| **M-D** | `pullNow` — a delivered OWED row is no longer positive evidence | `fleet-harness` §2a |
+| **M-E** | `pullNow` — the mid-stream re-anchor removed | `attack-converge-relay` §5 (round 8's M13, still pinned) |
+| **M-F** | `loadLot` — the durable anchor is loaded and never restored into the witness | `attack-converge-relay` §5 (round 8's M14, still pinned) |
+| **M-G** | `outbox release()` — the `unopened` shelve guard removed | `round8-park` §6 |
+| **M-H** | `outbox park()` — reports success without the write landing (R8-5) | `round8-park` §2 and §6 |
+| **M-I** | `outbox load()` — a shelved envelope is never revived | `round8-park` §1 and §6; **`round9-headline` §1** |
+| **M-J** | `cursor.js` — `fromGenesis` back to a RATCHET (R9-1) | `sync-queue` §2b |
+| **M-K** | `terminal()` — `lot.release()` again instead of `lot.refuse()` | **SURVIVED — see §7b-round9 below** |
+| **M-L** | a cured refusal is never retracted (R8-4's other half) | `round8-park` §1; **`round9-headline` §1** |
+| **M-M** | `attach()` — the durable park is not read until the first pull (R8-6a) | `round8-park` §3 |
+| **M-N** | `devices.js` — the closed-set call removed from `verifyDeviceClaim` | `blindness` §7a ×6 (both device doors); `round8-seam` §1 |
+| **M-O** | `devices.js` — the `DEVICE_ID_RE` pin removed | `blindness` §7b ×4; `round8-seam` §3 |
+| **M-P** | `spaces.js` — its door stops running the closed set at all | `blindness` §7a ×3 (`POST /invites/redeem`) |
+
+**The two the brief named by hand, answered directly.**
+
+- **M-A** — the `fresh` filter is load-bearing and it lives IN THE WITNESS. Removing it from
+  `chain.js` kills five row groups. Adding a duplicate filter in `pullNow` kills nothing, which is
+  the point: R8-1 is closed by the wrapper itself, not by a compensating guard at the call site.
+- **M-B1 / M-B2** — the hold **moved**, and both directions are pinned. Deleting it reddens the
+  withhold defence (`fleet-harness` §2a, `attack-converge-relay` §6, `round8-chain` §4). Making it
+  permanent again reddens the removal rows (`round8-chain` §2, `round9-headline` §2b). A fix that
+  only survived one of those two mutants would be the other failure.
+
+### 7b-round9. The one that survived, and what was done about it
+
+**M-K survived: `terminal()` calling `lot.release()` instead of `lot.refuse()` kills no row.**
+
+That is not a broken fix; it is a fix with no behavioural difference **under the current flush
+order**, and saying so is the point. `release()`'s guard works by INFERENCE — it retains an oid the
+caller has parked or touched since its last release — and in `pullNow` that holds only because
+`toPark` is flushed before anything is released. The coupling is invisible at the two flush sites
+and would break silently if they were ever swapped, and the failure would be a park becoming a
+drop, which is the whole of R8-4.
+
+`refuse()` says the transition out loud instead of inferring it, so the coupling disappears. What
+was done about the surviving mutant is **the difference was given a row of its own**:
+`round8-park.test.js` §6.2b drives a lot with no `unopened` memory of an oid — a fresh process, or
+a release earlier in the same pull, both of which clear it — and measures that `release()`
+DESTROYS and `refuse()` KEEPS. The choice is now a tested property of `outbox.js` rather than a
+preference at the call site.
+
+**One integration bug this pass found in its own edit, recorded because it is the interesting
+kind.** The first version passed `terminal()`'s reason through to `refuse(space, oids, reason)`.
+That overwrites the shelved row's reason — and the shelf's reason is not prose for a human, it is
+the ENUM the next launch re-judges the envelope by (`loadLot()` reads it back through
+`parkHandlingOf`). Writing `"still attestation after 5 attempts"` there would turn a revived
+`ENVELOPE_PARK.ATTESTATION` into an unknown park on the very launch that was supposed to cure it.
+`round8-park` §1 caught it immediately. The sentence belongs in the refusal LEDGER, where a human
+reads it, and `store.syncRefusals` already had it.
+
 ### 7b. The one that survived, and what was done about it
 
 Row 23 is a correction, not a fix. The A3-H3 pass wrapped `this._clock.observe(op.ts)` and
@@ -2338,6 +2631,10 @@ asserting `_persistOps()` never appends, which A3-M5's closure made false, and i
 | R5-5b | `round5-authority.test.js` | a field `board.json` cannot express at all is invisible to both halves | R5-5b / F-5 |
 | ~~R5-7b~~ | `round5-attestation.test.js` | ONE well-formed op mutes a named device, permanently | **INVERTED 2026-08-28 · I-3 closed** |
 | R5-7c | `round5-attestation.test.js` | **P2 does not close it** — `sigPubRaw` is public | **STILL TRUE, AND KEPT** — it is why §4.5 (a) was needed |
+| **R9-6b** | `attack-converge-relay.test.js` §6b | **RESIDUAL, round 9.** A relay that withholds a row in the MIDDLE of a page and KEEPS withholding it consumes that row on the second poll. The loss is permanent, REPORTED (`error` plus a gap finding that never clears) and one-sided. It is the price of R8-2's bound: the hold lasts one honest round trip instead of for ever, and the alternative is the wedge. The row ASSERTS the loss and must be inverted the day it is closed. See §4.8 for the two protocol moves that would close it. | §4.8 |
+| **R9-3** | `round8-chain.test.js` §3 | `store.syncChain` is declared `durable: true` and persisted nowhere: a fork this device detected before a quit is `silent: true` after it | R8-3, `store.js` |
+| **R9-6b2** | `round8-park.test.js` §3 row 1 | `diagnostics().sync.parked` counts the LOG's park, so a synchronous `status()` poll at launch reads `healthy` while a held envelope sits on the disk beside it | R8-6(b), `store.js` |
+| **R9-8** | `round8-park.test.js` §5 | a quarantined log takes the durable refusal record with it | R8-8 loud half, `store.js` |
 | ~~R5-7d~~ | `round5-attestation.test.js` | `authz.js` rules this trade out for the LABEL and ships it for the SHORT | **INVERTED 2026-08-28** — it is now refused for both |
 | R5-11g | `round5-coercion.test.js` | an edge sorting INSIDE the alphabet has no faithful v2 date | **§4.6** |
 
@@ -2596,6 +2893,41 @@ touched.** These are the items that need one of those files, or a file no one ow
    worth writing.
 7. **`ctx.myDevices` should be derived, not plumbed** — `attestationOf` filtered by `memberId`,
    once A3-H4 lands. That removes the `act === me` degradation A3-H4 flags as a WP-8 blocker.
+
+### Owed by round 9, to whoever picks up next
+
+**All four of these are `src/js/store.js`.** Round 9 could not take them — `store.js` was another
+owner's file for most of the round and the four are one pass, not four.
+
+1. **`store.syncChain` must ride in `checkpoint().lzp`** (R8-3), exactly as `refusals` already
+   does through `_stampedCheckpoint` and `_restoreSyncLedger`. Today `sync/status.js` declares the
+   `chain` row `durable: true` and it is persisted nowhere, so a fork this device DID detect is
+   `silent: true` after the next quit. `round8-chain.test.js` §3 asserts the defect and goes red
+   the day it lands.
+2. **`diagnostics().sync.parked` must count the engine's held envelopes as well as the log's
+   parked lines** (R8-6b). `round8-park.test.js` §3 row 1 asserts the defect. Half (a) is closed —
+   `attach()` re-emits — so what is left is only the SYNCHRONOUS poll at the instant of launch.
+3. **`diagnostics().quarantine` must say what the quarantine DISCARDED** — refusals, parked lines,
+   cursors (R8-8's loud half). That is the signal that would let `sync/status.js`'s `quarantine`
+   row be `error` for a launch that threw a divergence record away while staying quiet for an ADR
+   006 §9.3 re-join. It is the same fix as `_restoreSyncLedger` preserving the ledger.
+4. **`_syncLostOps()` and `retractSyncRefusal` should share one retraction path.** Round 9 added
+   the second; the first still derives its answer fresh each call. Nothing is wrong today.
+
+**And two that are not `store.js`:**
+
+5. **ADR 002 §2.3 — the text amendment `devices.js` quotes verbatim at its own `:387`.** §2.3's
+   bullet *"`parseAttestationBlob` already tolerates extra fields, deliberately, so a v2.0 client
+   reads a v2.1 blob unchanged"* is true of a CLIENT and false of the RELAY DOOR, which refuses
+   one. Applied to the ADR in §6 of this register by round 9; if the ADR text is ever rewritten,
+   the sentence to keep is the one in the source.
+6. **`server/core/store-interface.js` / the adapters — `deleteKeyWrapsForDevices` matches a device
+   id against `KeyWrap.recipientId`.** That is the mechanism R8-7b exploited. The registration door
+   is closed now, so no `rec_`-prefixed device row can be born — but the store method is still a
+   purge keyed on a namespace it does not own. Whoever owns that file should decide whether it must
+   refuse a `rec_`-prefixed argument outright. `revokeDevice` was deliberately left on plain
+   `requireId`: a malformed id there matches no row and answers the same `not_a_member` as an
+   unknown one, and a shape 400 would make malformed distinguishable from absent.
 
 ### Owed by round 8, to whoever picks up next
 

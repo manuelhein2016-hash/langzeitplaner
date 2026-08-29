@@ -1108,6 +1108,192 @@ describe('§4b P-8 — the park domain, decided rather than branched', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
+// §4c  R8-1 / R8-2 — THE CHAIN WITNESS IS THE WRAPPER, AND WHAT IT IS ALLOWED TO DO
+//
+// Round 8 put ADR 002 §5.4's detector on the product path by importing `verifyChain`, the LEAF of
+// `sync/chain.js` — a pure function over one contiguous run, with no memory of what this device
+// has already folded — and then compensated for the missing memory by giving it a power the ADR
+// forbids in one sentence: "it NEVER BLOCKS SYNC in v2 (a false positive that broke a family's
+// board would be far worse than the attack)".
+//
+// Two failures fell out of that, both on an HONEST relay:
+//
+//   R8-1  the second pull of a HELD page — F-6's ordinary first contact — was verified against an
+//         anchor inside itself and reported as `seq jumped from 1 to 1`, and the record persisted
+//         beside the cursor paired the commit seq with the LAST ROW OF THE PAGE's chain, so the
+//         next launch accused the relay of forging a value this device had written itself;
+//   R8-2  a member removal (ADR 003 §6.3) leaves a hole nothing can fill, and a permanent cursor
+//         hold on an unfillable hole is a wedge: every op above it was unreachable for ever.
+//
+// `pullNow` now folds each page through `createChainWitness()`, which is the wrapper the same file
+// always shipped: `fresh` (rows at or below the head are already folded), the per-break dedupe,
+// the re-anchor, `broken`, and `fromGenesis`. The three rows below pin the three consequences at
+// the unit level; `tests/fleet/round8-chain.test.js` is the same three through two whole Macs.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('§4c R8-1/R8-2 — a chain finding is a diagnostic, and the anchor is one row', () => {
+  let relay;
+  let F;
+
+  beforeEach(async () => {
+    F = FLEET;
+    relay = makeRelay();
+    await seedRelay(relay, F);
+    await bootMac(F.B, F);
+    await bootMac(F.A, F, { peers: false });     // A does not know B yet — F-6's first contact
+  });
+
+  /** An in-memory `chainStore`, so the record `cursor.js` persists can be read back here. */
+  const heads = () => {
+    let held = {};
+    return {
+      durable: true,
+      async loadCursors() { return JSON.parse(JSON.stringify(held)); },
+      async saveCursors(all) { held = JSON.parse(JSON.stringify(all)); },
+      get value() { return held; },
+    };
+  };
+
+  /** The engine, with one hostile hand on the wire: `mutate(ops) => ops`. */
+  function engineWithWire(mac, mutate, extra = {}) {
+    const cfg = {
+      origin: ORIGIN,
+      deviceShort: mac.id.forStore.deviceShort,
+      sign: mac.id.sign,
+      clientVersion: '2.0.0',
+      now: () => relay.ctx.now(),
+      random: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+      subtle: S,
+    };
+    const base = loopbackTransport(relay, cfg);
+    const transport = {
+      origin: ORIGIN,
+      async request(method, path, query, body, headers) {
+        const res = await base.request(method, path, query, body, headers);
+        if (method !== 'GET' || path !== '/api/v1/ops' || res.status !== 200) return res;
+        return { ...res, json: { ...res.json, ops: mutate(res.json.ops || []) } };
+      },
+    };
+    return engineFor(mac, F, relay, { transport, ...extra });
+  }
+
+  test('a HELD page re-served is silent — the witness knows what it has already folded', async () => {
+    // The exact input R8-1 named: A cannot apply B's op yet (`notMyDevice`), so the cursor is held
+    // and the honest relay re-serves the same row on the next pull. With `verifyChain` that second
+    // page was checked against an anchor INSIDE it and reported as a hole between a seq and
+    // itself; with the witness the row is at or below the head and is dropped before any check.
+    const eA = engineFor(F.A, F, relay);
+    const eB = engineFor(F.B, F, relay);
+    await on(F.B, () => {
+      F.B.store.apply('createNotePopover', { id: 'nHalt', date: '2026-09-09', text: 'gehalten', categoryId: 'c1' });
+    });
+    await on(F.B, () => eB.pushNow());
+
+    for (let i = 0; i < 4; i += 1) {
+      await on(F.A, () => eA.pullNow());
+      assert.equal(F.A.store.syncChain, null,
+        `pull ${i + 1}: an honest re-serve of a held page is not evidence about the relay`);
+      assert.equal(eA.status().state, 'pending', `pull ${i + 1}: a hold is work outstanding, not a fault`);
+      assert.equal(F.A.store.cursor(F.spaceId), '0', `pull ${i + 1}: and the cursor is still held`);
+    }
+    assert.equal(F.A.store.warnings.some((w) => /does not add up/.test(w)), false,
+      'and the user is told nothing at all, because nothing happened');
+  });
+
+  test('the record persisted beside the cursor is the chain OF THE COMMITTED ROW', async () => {
+    // R8-1b. `cursor.js advance(space, seq, head, …)` writes `{seq, chain: head.chain}` and cannot
+    // check that the two are one row — so the caller must hand it one. B authors two ops; A can
+    // apply neither, so nothing commits; then A learns about B and applies both.
+    const store = heads();
+    const eB = engineFor(F.B, F, relay);
+    await on(F.B, () => {
+      F.B.store.apply('createNotePopover', { id: 'nEins', date: '2026-09-09', text: 'eins', categoryId: 'c1' });
+      F.B.store.apply('createNotePopover', { id: 'nZwei', date: '2026-09-10', text: 'zwei', categoryId: 'c1' });
+    });
+    await on(F.B, () => eB.pushNow());
+    // THE PAGE MUST END ABOVE THE COMMIT, or the two values coincide and the row proves nothing.
+    // The LAST row is served under an envelope version this build cannot read — `ENVELOPE_PARK`'s
+    // `VERSION`, held rather than dropped (§4b) — so the page verifies to its end while the cursor
+    // stops at the row before it. That is F-6's shape and it is where round 8's record went wrong.
+    const eA = engineWithWire(
+      F.A,
+      (ops) => ops.map((o, i) => (i === ops.length - 1 && ops.length > 1 ? { ...o, v: 2 } : o)),
+      { chainStore: store },
+    );
+    await on(F.A, async () => {
+      F.A.store._peerDevices.add(F.B.id.forStore.deviceId);
+      await eA.pullNow();
+    });
+    assert.equal(eA.deferredOps().length, 1, 'the last row of the page is HELD, so the commit is below it');
+
+    const rec = store.value[F.spaceId];
+    assert.ok(rec, 'the anchor is persisted at all (P-4)');
+    assert.equal(rec.seq, F.A.store.cursor(F.spaceId), 'beside the cursor it belongs to');
+    const page = await loopbackTransport(relay, {
+      origin: ORIGIN,
+      deviceShort: F.A.id.forStore.deviceShort,
+      sign: F.A.id.sign,
+      clientVersion: '2.0.0',
+      now: () => relay.ctx.now(),
+      random: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+      subtle: S,
+    }).request('GET', '/api/v1/ops', { space: F.spaceId, since: '0', limit: '500' }, null, {});
+    const row = page.json.ops.find((o) => String(o.seq) === rec.seq);
+    assert.equal(rec.chain, row.chain,
+      'ONE ROW, ONE RECORD: the chain stored is the chain the relay served for THAT seq. Round 8 '
+      + 'stored `w.head.chain` — the last row of the page — beside a commit that could be lower, '
+      + 'and the next launch could not verify anything against it, ever again.');
+  });
+
+  test('a hole holds the cursor for the pull that finds it, and then the witness re-anchors', async () => {
+    // BOTH HALVES OF THE TRADE IN ONE ROW. Half one: a withheld row is not stepped over on the
+    // pull that discovers it — deleting the hold outright would redden this. Half two: the hold is
+    // not re-armed once the witness has folded past the break — keeping it, as round 8 did, is
+    // what wedged a device for ever after a member purge, whose hole is this shape exactly and
+    // cannot be filled by anybody (R8-2).
+    await on(F.A, () => { F.A.store._peerDevices.add(F.B.id.forStore.deviceId); });
+    const eB = engineFor(F.B, F, relay);
+    await on(F.B, () => {
+      for (const [id, day] of [['nA', '2026-09-09'], ['nB', '2026-09-10'], ['nC', '2026-09-11']]) {
+        F.B.store.apply('createNotePopover', { id, date: day, text: id, categoryId: 'c1' });
+      }
+    });
+    await on(F.B, () => eB.pushNow());
+
+    // Whatever the relay serves, the SECOND row of the log is never in it. That is a censored op
+    // and a purged one at once: nothing on this device can tell them apart, which is the point.
+    let hidden = null;
+    const eA = engineWithWire(F.A, (ops) => {
+      if (hidden === null && ops.length > 1) hidden = ops[1].oid;
+      return ops.filter((o) => o.oid !== hidden);
+    });
+
+    await on(F.A, () => eA.pullNow());
+    const held = F.A.store.cursor(F.spaceId);
+    assert.equal(F.A.store.syncChain?.findings?.[0]?.kind, 'gap', 'the hole is named …');
+    assert.equal(F.A.store.syncChain.findings[0].benignCause, 'member-purge',
+      '… with the benign cause the client may not ignore (ADR 003 §6.3)');
+    assert.equal(eA.status().state, 'error', 'and it is reported');
+    assert.equal(BigInt(held) < 2n, true,
+      'THE CURSOR STOPPED BELOW THE MISSING ROW — one honest round trip for a relay that '
+      + 'truncated a page. Round 8 was right about this half.');
+    assert.equal(F.A.store.state.notes.some((n) => n.id === 'nC'), true,
+      'and the rows that DID arrive were applied: nothing is refused on the witness\'s word '
+      + '(ADR 002 §8.6, ADR 003 §10.6)');
+
+    await on(F.A, () => eA.pullNow());
+    assert.equal(BigInt(F.A.store.cursor(F.spaceId)) > 2n, true,
+      'AND ON THE NEXT PULL IT MOVES. The witness re-anchored on the row it was served, so the '
+      + 'same break is not re-reported and is not re-armed as a hold. This is the line between a '
+      + 'diagnostic and a wedge, and R8-2 is the wedge.');
+    assert.equal(F.A.store.syncChain?.findings?.[0]?.kind, 'gap',
+      'THE FINDING OUTLIVES THE HOLD: sync continues and the verdict stands, because only positive '
+      + 'evidence clears it and the row this relay was accused of holding never arrived.');
+    assert.equal(eA.status().state, 'error', 'so the loss is loud rather than silent (E5-2)');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
 // §5  F-7 — THE `local` SPACE NEVER LEAVES AND NEVER LANDS  (ADR 001 §3.3, story 17.7)
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 

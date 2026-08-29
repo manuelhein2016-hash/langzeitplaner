@@ -45,7 +45,7 @@ import '../helpers/env.js';
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createFleet, boardsAgree, MUTATORS, chainMutators, simClock } from '../helpers/fleet.js';
+import { createFleet, boardsAgree, MUTATORS, chainMutators, simClock, MINUTE } from '../helpers/fleet.js';
 import { reachableFrom, pathToPrefix } from '../helpers/importgraph.js';
 
 const BOARD = () => ({
@@ -438,6 +438,132 @@ describe('§5 · the chain anchor is durable, and a missing one accuses nobody',
     assert.equal(B.storeDiagnostics().sync.chain, null);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 6. THE SHAPE OF THE HOLD, AFTER R8-2 — WHAT A WITHHOLD COSTS, STATED EXACTLY
+//
+// Round 8 made every chain finding a PERMANENT cursor hold, and that is what R8-2 killed: after
+// `POST /members/remove` purges a member's rows (ADR 003 §6.3) the hole can never be filled, so
+// the cursor stopped there for ever and an honest relay lost the family every op above it. ADR 002
+// §5.4 had already ruled on the trade — the witness "NEVER BLOCKS SYNC in v2 (a false positive
+// that broke a family's board would be far worse than the attack)".
+//
+// So the hold moved BEHIND the witness's re-anchor decision, and the two rows here are the two
+// halves of what that bought and what it cost. They are the honest statement of a residual, not a
+// defence of it: §6b asserts a LOSS, and it must be inverted the day somebody closes it.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('§6 · the end-withhold is refused for ever; the mid-page withhold is refused once', () => {
+  test('§6a · a relay that keeps claiming a cursor past what it served never moves this one', async () => {
+    // THE HALF THAT DID NOT MOVE, and the reason deleting the hold outright would be a regression
+    // rather than a simplification. `nextCursor` past the last row served is not a hole in a hash
+    // chain — it is a CLAIM, repeated on every page, and it is checked on every page. No amount of
+    // re-serving makes it sound, so no amount of patience gets the cursor over it.
+    const f = await twoMacs();
+    const A = f.device('A');
+    const B = f.device('B');
+    await f.settle();
+    await A.apply('createNotePopover', { id: 'e1', date: '2027-06-07', text: 'eins', categoryId: 'c1' });
+    await A.apply('createNotePopover', { id: 'e2', date: '2027-06-08', text: 'zwei', categoryId: 'c1' });
+    await A.push();
+
+    // Hide the LAST row of every page and leave `nextCursor` where it was: the withhold that
+    // leaves no hole to find, because the hole is at the end.
+    f.wire.hostile.onResponse = (res, req, who) => {
+      if (who !== B.short || req.method !== 'GET' || req.path !== '/api/v1/ops' || res.status !== 200) return res;
+      const ops = (res.body.ops || []).slice(0, -1);
+      return { ...res, body: { ...res.body, ops } };
+    };
+    const before = B.cursor();
+    for (let i = 0; i < 6; i++) { f.clock.advance(MINUTE); await B.pull(); }
+    assert.equal(B.storeDiagnostics().sync.chain.kind, 'withheld', 'the claim is judged, every time');
+    assert.equal(B.status().state, 'error', 'and it is reported, every time');
+    assert.equal(BigInt(B.cursor()) < await lastSeq(f, A), true,
+      'SIX PULLS AND THE CURSOR IS STILL BELOW THE WITHHELD ROW. This hold is derived from a claim '
+      + 'the relay repeats, so it is re-armed on every page — unlike a chain break, which the '
+      + 'witness folds past once it has re-anchored.');
+
+    f.wire.honest();
+    await B.catchUp(8);
+    assert.equal(B.state.notes.some((n) => n.id === 'e2'), true,
+      'and when the lying stops, the op arrives: nothing was consumed');
+    assert.equal(boardsAgree([A, B]).equal, true, boardsAgree([A, B]).detail);
+  });
+
+  test('§6b · RESIDUAL · a relay that withholds a row in the MIDDLE for ever takes it, loudly', async () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // THIS ROW ASSERTS A LOSS. It is the price of R8-2's fix and it is written down rather than
+    // discovered later. A hole in the middle of a page is indistinguishable, at the client, from
+    // the hole a member removal leaves — the same gap, the same benign cause, the same relay
+    // answers. `GET /api/v1/ops` can only be asked "everything after `since`", so "keep asking for
+    // the hole" and "block every op above it" are the SAME REQUEST, and blocking is what wedged a
+    // family for ever in `round8-chain.test.js` §2.
+    //
+    // What the client does instead: hold for the one pull that discovers the hole — an honest
+    // relay that truncated a page gets its round trip — then re-anchor and move on, with the
+    // finding standing. So the loss is REPORTED, permanently: `state: 'error'` and the gap in
+    // `diagnostics().sync.chain` do not clear, because the verdict is only cleared by positive
+    // evidence and the missing row never arrives.
+    //
+    // TO CLOSE IT, and the reason it is not closed here: the client would have to keep ASKING
+    // without keeping the cursor down — a bounded re-pull from below the hole, `since = hole - 1`,
+    // some fixed number of times, which the protocol already permits and which no ADR describes.
+    // That is a new mechanism with its own failure modes (a purge would re-fetch pages for the
+    // rest of the space's life unless the ladder bounds it), and it belongs to whoever owns the
+    // cadence — ADR 003 §8.2. Until then, this is the shape of the residual.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    const f = await twoMacs();
+    const A = f.device('A');
+    const B = f.device('B');
+    await f.settle();
+    for (const id of ['w1', 'w2', 'w3']) {
+      await A.apply('createNotePopover', { id, date: `2027-06-0${id[1]}`, text: id, categoryId: 'c1' });
+    }
+    await A.push();
+    const owed = (await B.run(() => B.transport.request(
+      'GET', '/api/v1/ops', { space: f.spaceId, since: B.cursor(), limit: '500' }, null, {}))).json.ops[1];
+    f.wire.hostile.onResponse = MUTATORS.withholdOps((o) => o.oid === owed.oid);
+
+    f.clock.advance(MINUTE);
+    await B.pull();
+    const held = B.cursor();
+    assert.equal(BigInt(held) < BigInt(owed.seq), true,
+      'THE ONE ROUND TRIP: the pull that finds the hole stops the cursor BELOW the missing row — '
+      + `it is at ${held} and the relay owes ${owed.seq}. The rows above the hole were applied all `
+      + 'the same: ADR 002 §8.6 keeps the witness diagnostic-only and nothing is refused on it.');
+    assert.equal(B.storeDiagnostics().sync.chain.findings[0].kind, 'gap');
+
+    f.clock.advance(MINUTE);
+    await B.pull();
+    assert.equal(BigInt(B.cursor()) > BigInt(owed.seq), true,
+      'RESIDUAL: the relay re-served the same page, the witness had already re-anchored past the '
+      + 'break, and the cursor moved. Round 8 stopped here for ever — and so did every family that '
+      + 'had ever removed a member (R8-2).');
+
+    f.wire.honest();
+    await B.catchUp(8);
+    assert.equal(B.state.notes.some((n) => n.id === 'w2'), false,
+      'and the op is GONE from this Mac: `since` is past its seq, so an honest relay has no reason '
+      + 'to offer it again. This is the loss.');
+    assert.equal(B.state.notes.some((n) => n.id === 'w3'), true, 'the rows above it did arrive');
+    assert.equal(boardsAgree([A, B]).equal, false,
+      'the two Macs DO diverge — which is exactly why the next two assertions matter');
+    assert.equal(B.status().state, 'error',
+      'IT IS NOT SILENT. E5-2 was a loss that reported `healthy`; this one reports `error` and '
+      + 'keeps reporting it, because a verdict is cleared only by positive evidence and the row '
+      + 'the relay was accused of holding never arrives.');
+    assert.equal(B.storeDiagnostics().sync.chain.findings[0].kind, 'gap',
+      'and the store can name the seq the relay never served');
+  });
+});
+
+/** The highest seq the relay actually holds for this space. */
+async function lastSeq(f, dev) {
+  const page = await dev.run(() => dev.transport.request(
+    'GET', '/api/v1/ops', { space: f.spaceId, since: '0', limit: '500' }, null, {}));
+  const ops = page.json.ops;
+  return BigInt(ops[ops.length - 1].seq);
+}
 
 /** A syntactically valid, wrong, base64url chain value — 32 bytes, distinct per row. */
 function b64uOfIndex(i) {

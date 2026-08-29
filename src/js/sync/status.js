@@ -103,9 +103,13 @@ export const SYNC_ERROR_KINDS = Object.freeze(
 /**
  * @typedef {Object} SyncObservable
  * @property {string} id      stable; quote it in a fix, a commit, a row.
- * @property {string} field   the `store.diagnostics().sync` key that carries it. `'outbox'` and
+ * @property {string} field   the `store.diagnostics()` key that carries it. `'outbox'` and
  *   `'warnings'` already exist; `parked`, `refused`, `lost` and `chain` are what S4 requires and
  *   `store.diagnostics()` now supplies.
+ * @property {'sync'|'root'} at  WHERE the field lives — under `diagnostics().sync`, or at the top
+ *   of `diagnostics()` itself. Recorded per row rather than special-cased in the reader, because
+ *   the reader special-casing ONE top-level field (`warnings`) is what made a second one
+ *   (`quarantine`) unreachable for a whole round — R8-8.
  * @property {'count'|'flag'|'list'} shape  how the field reports "present".
  * @property {string} state   the `SYNC_STATE` this observable forces AT LEAST. Never lower.
  * @property {?string} errorKind  the i18n sentence to prefer, or null for the generic one.
@@ -116,18 +120,77 @@ export const SYNC_ERROR_KINDS = Object.freeze(
  */
 
 /**
- * S4's seven rows, minus the two controls (`S4-quiet` is the empty case, and it is the DEFAULT of
- * the fold rather than a row — which is the only way silence stays free).
+ * S4's rows, minus the two controls (`S4-quiet` is the empty case, and it is the DEFAULT of the
+ * fold rather than a row — which is the only way silence stays free).
  *
  * ORDER IS SIGNIFICANT and it is the order `tests/property/sync-domains.test.js`'s
  * `storeReportsOf` reads the fields in: the first present observable is the one a one-line report
  * names. It runs strongest-evidence-first — a held op is a specific line you can point at, a
  * warning is a sentence — so the report is as sharp as the evidence allows.
+ *
+ * `quarantine` (R8-8) is FIRST, ahead of every sharp row, because it is the row that says the
+ * evidence the others are reading has itself been refused by this launch. When it is present the
+ * honest one-line report is not "one op was refused"; it is "this Mac does not trust its own
+ * history", and the rows below are answering off a record that has just been thrown away.
  */
 export const SYNC_OBSERVABLES = Object.freeze([
   Object.freeze({
+    id: 'quarantine',
+    field: 'quarantine',
+    at: 'root',
+    shape: 'flag',
+    // ── WHY THIS ROW IS `healthy` — THE SAME ARGUMENT `warnings` MAKES, AND THE CONTROL ──────
+    //
+    // A quarantine is ADR 006 §9.3's "a VISIBLE, REPORTED, CONVERGING event, never a quiet one",
+    // and the operative word for the INDICATOR is `converging`: the log is moved aside, the board
+    // is intact and authoritative, the Mac re-publishes, and the family ends up agreeing. Nothing
+    // failed that the person can act on. `tests/fleet/attack-converge-rejoin.test.js` §2 pins
+    // exactly that — "the INDICATOR stays quiet, deliberately" — and it is one of the controls
+    // against the failure round 8 walked into in the other direction: a fix that shows a fault
+    // for ever. Making this row `error` was MEASURED turning that control red.
+    //
+    // It still counts, and that is the whole of R8-8. A present row makes `silent` false, puts
+    // the state in `observables` for the settings sheet, and — the part that matters — makes the
+    // claim SHARP: before this row, the only thing keeping a quarantined launch from asserting
+    // 19.3's promise was somebody having written a sentence into the mixed `warnings` prose
+    // channel. "There is nothing to tell you" may not rest on that.
+    //
+    // ⚠ THE LOUD HALF IS NOT THIS FILE'S. What round 8 measured was a quarantine ERASING the
+    // durable refusal ledger: `store.js` restores `syncRefusals` only from the checkpoint it
+    // adopted, so `sync.refused` drops from 1 to 0 and the permanent divergence L-1 exists to
+    // remember stops being reportable. That is a loss of EVIDENCE, and it is `store.js`'s to
+    // preserve — the honest signal for it would be `diagnostics().quarantine` saying what the
+    // quarantine discarded, at which point this row can distinguish a converging re-join from a
+    // launch that threw a divergence record away, and be `error` for the second. Reported, not
+    // guessed at: a row that lit for every quarantine would break the control above.
+    state: SYNC_STATE.healthy,
+    errorKind: 'quarantine',
+    durable: true,
+    row: 'S4-untrusted',
+    // ── R8-8 · THE LOUDEST THING THAT CAN HAPPEN TO A LOG, AND IT WAS NOT A ROW ──────────────
+    //
+    // FIRST in the enumeration, and that is the finding stated as an ordering. A quarantine is not
+    // one held line or one refused op — it is the app having decided it cannot trust its OWN
+    // HISTORY, refusing the checkpoint and rebuilding from `board.json` alone. Round 8 measured
+    // what that costs the rows below it: `store.js` restores the durable refusal ledger only from
+    // the checkpoint it ADOPTED, so a quarantine takes `sync.refused` to zero with it, and the
+    // one permanent divergence L-1 exists to remember stops being reportable at the exact moment
+    // the app is least able to vouch for itself. Every sharp row underneath can be zeroed this
+    // way; this row cannot, because it IS the zeroing.
+    //
+    // It is bounded and therefore not the "reports errors for ever" failure `S4-quiet` guards
+    // against: `store.init()` nulls `this.quarantine` on every launch and only a launch that
+    // refuses its log again sets it. A log moved aside is a clean next launch and silence returns.
+    why: 'this launch refused its own op log — `store.diagnostics().quarantine` is non-null. The '
+      + 'board is intact (ADR 006: `board.json` is the content authority) and nothing the user can '
+      + 'see is wrong, which is exactly why it must be SAID: the history, the cursors, the parked '
+      + 'lines and the durable refusal ledger are all gone with it, so every other row in this '
+      + 'enumeration is answering from a record this launch has just declared untrustworthy.',
+  }),
+  Object.freeze({
     id: 'parked',
     field: 'parked',
+    at: 'sync',
     shape: 'count',
     state: SYNC_STATE.pending,
     errorKind: null,
@@ -140,6 +203,7 @@ export const SYNC_OBSERVABLES = Object.freeze([
   Object.freeze({
     id: 'refused',
     field: 'refused',
+    at: 'sync',
     shape: 'count',
     state: SYNC_STATE.error,
     errorKind: 'quarantine',
@@ -153,6 +217,7 @@ export const SYNC_OBSERVABLES = Object.freeze([
   Object.freeze({
     id: 'lost',
     field: 'lost',
+    at: 'sync',
     shape: 'count',
     state: SYNC_STATE.error,
     errorKind: null,
@@ -165,6 +230,7 @@ export const SYNC_OBSERVABLES = Object.freeze([
   Object.freeze({
     id: 'chain',
     field: 'chain',
+    at: 'sync',
     shape: 'flag',
     state: SYNC_STATE.error,
     errorKind: null,
@@ -178,6 +244,7 @@ export const SYNC_OBSERVABLES = Object.freeze([
   Object.freeze({
     id: 'outbox',
     field: 'outbox',
+    at: 'sync',
     shape: 'count',
     state: SYNC_STATE.pending,
     errorKind: null,
@@ -190,6 +257,7 @@ export const SYNC_OBSERVABLES = Object.freeze([
   Object.freeze({
     id: 'warnings',
     field: 'warnings',
+    at: 'root',
     shape: 'list',
     // ── THE ONE OBSERVABLE THAT DOES NOT RAISE THE INDICATOR, AND WHY ────────────────────────
     //
@@ -223,22 +291,34 @@ export const SYNC_OBSERVABLES = Object.freeze([
  * The four fields a fix has to ADD to `store.diagnostics().sync`, in the product's own
  * vocabulary. Exported so the store seam and this enumeration cannot drift: a field renamed on
  * one side and not the other is a test failure, not a silent `undefined` that reads as healthy.
+ *
+ * `quarantine` is not in this list and does not need to be: it is a TOP-LEVEL field `store.js`
+ * has always published. R8-8 was never a missing field — it was a missing ROW.
  */
 export const SYNC_DIAGNOSTIC_FIELDS = Object.freeze(['parked', 'refused', 'lost', 'chain']);
 
-/** Every field this module reads off `diagnostics().sync`, including the two that predate it. */
+/** Every field this module reads, `sync`-scoped and root-scoped alike, in enumeration order. */
 export const SYNC_OBSERVABLE_FIELDS = Object.freeze(SYNC_OBSERVABLES.map((o) => o.field));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. Reading the enumeration off a diagnostics blob
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** `warnings` lives at the top of `diagnostics()`; everything else lives under `sync`. */
-function fieldValue(diag, field) {
+/**
+ * Where the row says its field lives. `at: 'root'` reads the top of `diagnostics()`, `'sync'`
+ * reads `diagnostics().sync`.
+ *
+ * THIS USED TO BE `if (field === 'warnings')`, and R8-8 is what that cost: the ONE top-level
+ * field anybody had thought of was hard-coded here, so the second one — `quarantine`, the state
+ * in which the app has refused its own history — could not be enumerated at all. A row now
+ * carries its own scope, which is the same rule the rest of this module lives by: the domain is
+ * data, and reading it is a fold, not a branch somebody has to remember to extend.
+ */
+function fieldValue(diag, obs) {
   if (!diag || typeof diag !== 'object') return undefined;
-  if (field === 'warnings') return diag.warnings;
+  if (obs.at === 'root') return diag[obs.field];
   const s = diag.sync;
-  return s && typeof s === 'object' ? s[field] : undefined;
+  return s && typeof s === 'object' ? s[obs.field] : undefined;
 }
 
 /**
@@ -252,7 +332,7 @@ function fieldValue(diag, field) {
  * @returns {{count:number, unknown:boolean}}
  */
 function presenceOf(obs, diag) {
-  const v = fieldValue(diag, obs.field);
+  const v = fieldValue(diag, obs);
   if (v === undefined) return { count: 0, unknown: true };
   if (obs.shape === 'list') return { count: Array.isArray(v) ? v.length : 0, unknown: false };
   if (obs.shape === 'flag') return { count: v === null || v === false ? 0 : 1, unknown: false };
