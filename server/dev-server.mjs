@@ -28,15 +28,41 @@
 //   · `x-real-ip` is set from the socket, so per-IP limiters have something to key on other than
 //     the shared `'?'` bucket. `req.clientIp` carries the same value and outranks every header.
 //   · `ctx.sha256` is supplied (CTX_EXTENSIONS E2-C1) — without it `POST /invites/redeem` 500s.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// `--demo` — WHY A JSON API HOST SERVES TWO STATIC FILES, AND WHY IT IS NOT CORS
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The E2 verification has to show TWO REAL BROWSER CLIENTS syncing through this API. A browser
+// client is subject to the same-origin policy, and this server deliberately sends **no**
+// `Access-Control-Allow-Origin` — story 21.5, and `.github/scripts/check-server-config.mjs`
+// FAILS the deploy if one ever appears in `vercel.json`. So a page served by the app host on
+// :4173 cannot read a response from :8787, and the honest fix is not to weaken the control: it
+// is to serve the demonstration page from the SAME ORIGIN as the API it drives.
+//
+// `--demo` therefore adds one read-only static lane, off by default:
+//
+//   GET /_dev/two-client.html   `server/dev/two-client.html`
+//   GET /_dev/two-client.js     `server/dev/two-client.js`
+//   GET /src/js/**.js           the repository's REAL client modules, unmodified
+//
+// The last one is the point. The page imports `src/js/crypto/envelope.js`,
+// `src/js/crypto/spacekeys.js` and `src/js/crypto/identity.js` as they ship — no copy, no shim —
+// so what the demonstration proves is the shipped crypto against the shipped handlers over real
+// HTTP. `docs/v2/E2-VERIFICATION.md` §2 records the run.
+//
+// The lane is GET-only, extension-allowlisted, resolved with `path.resolve` and refused unless
+// the result is inside the repository, and it is not reachable at all without the flag. It shares
+// nothing with `server/core/`, which still knows nothing about this file.
 
 import http from 'node:http';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROUTE_NAMES, matchRoute } from './core/router.js';
 import { toResponse, fail } from './core/errors.js';
 import { LIMITS, createLog } from './core/limits.js';
 import { versionHeaders } from './core/version.js';
-import { handlers, createHandlers } from './core/handlers/index.js';
+import { handlers, createHandlers, assertCtx } from './core/handlers/index.js';
 import { authenticate, assertMember } from './core/auth.js';
 import { fileStore, STORE_FILENAME } from './adapters/file.js';
 
@@ -50,9 +76,39 @@ function arg(name, fallback) {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The `--demo` static lane. See the header for why it exists at all.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REPO = path.resolve(HERE, '..');
+const DEMO_TYPES = Object.freeze({ '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' });
+
+/**
+ * Resolve a demo URL path to a file inside the repository, or null.
+ *
+ * Two allowlists, both closed: the URL prefix and the file extension. `path.resolve` collapses
+ * every `..` before the containment check, so the check is on the RESOLVED path and cannot be
+ * walked past — which is the same rule `router.js:segmentsOf` applies to API paths, applied here
+ * because this lane does not go through the router.
+ *
+ * @param {string} urlPath @returns {string|null}
+ */
+function demoFile(urlPath) {
+  let rel;
+  if (urlPath === '/_dev/two-client.html') rel = 'server/dev/two-client.html';
+  else if (urlPath === '/_dev/two-client.js') rel = 'server/dev/two-client.js';
+  else if (urlPath.startsWith('/src/js/')) rel = urlPath.slice(1);
+  else return null;
+  if (!Object.prototype.hasOwnProperty.call(DEMO_TYPES, path.extname(rel))) return null;
+  const abs = path.resolve(REPO, rel);
+  if (abs !== REPO && !abs.startsWith(REPO + path.sep)) return null;
+  return abs;
+}
+
 async function main() {
   const port = Number(arg('port', '8787'));
   const dir = path.resolve(arg('dir', path.join(HERE, '..', '.lzp-dev-store')));
+  const demo = process.argv.includes('--demo');
 
   const limits = LIMITS;
   const store = fileStore(dir);
@@ -74,6 +130,13 @@ async function main() {
     limits,
   };
 
+  // `REQUIRED_CTX`'s own docblock names this file as one of the two deployment checklists it
+  // exists for, and `adapters/vercel.js` was calling it while this host was not — so the dev host
+  // could boot with a `ctx` the production host would have refused, and the difference would
+  // surface as a 500 on one endpoint months later. `ctx.sha256` is the sharp case: only
+  // `redeemInvite` reads it, so every smoke test passes and the first joining family member 500s.
+  assertCtx(ctx);
+
   const server = http.createServer(async (req, res) => {
     const started = Date.now();
     const url = new URL(req.url, 'http://localhost');
@@ -89,6 +152,28 @@ async function main() {
       try {
         if (size > limits.bytesPerRequest) throw fail('payload_too_large');
         const rawBody = new Uint8Array(Buffer.concat(chunks));
+        // The `--demo` lane, before anything else, and only ever for GET. It writes its own
+        // response and returns, so a static file never enters the JSON envelope below.
+        const file = demo && req.method === 'GET' ? demoFile(url.pathname) : null;
+        if (file !== null) {
+          let body;
+          try { body = fs.readFileSync(file); } catch { body = null; }
+          if (body === null) { res.writeHead(404, { 'Content-Type': 'text/plain' }); res.end('not found'); }
+          else {
+            res.writeHead(200, {
+              'Content-Type': DEMO_TYPES[path.extname(file)],
+              'Content-Length': body.length,
+              'Cache-Control': 'no-store',
+              'X-Content-Type-Options': 'nosniff',
+            });
+            res.end(body);
+          }
+          // Deliberately NOT written through `ctx.log`. `LOG_ROUTES` is a closed allowlist of the
+          // 23 route names plus `unmatched` and `health` (ADR 003 §6.2), and widening a security
+          // allowlist so a dev-only file server can announce itself is the wrong direction. The
+          // API calls this page then makes are logged like any other, which is what matters.
+          return;
+        }
         if (url.pathname === '/_dev/health') {
           routeName = 'health';
           out = {
@@ -161,6 +246,10 @@ async function main() {
     console.log(`  routes: ${wired} of ${ROUTE_NAMES.length} wired`);
     const v = versionHeaders();
     console.log(`  protocol: ${v['X-LZP-Min-Protocol']}..${v['X-LZP-Protocol']}  (N-1 rule, version.js)`);
+    if (demo) {
+      console.log(`  demo:   http://127.0.0.1:${port}/_dev/two-client.html?role=A   (and ?role=B in a second tab)`);
+      console.log('          SAME-ORIGIN on purpose: this API sends no Access-Control-Allow-Origin (21.5).');
+    }
     if (wired < ROUTE_NAMES.length) {
       console.log(`  WARNING: ${ROUTE_NAMES.length - wired} route(s) unwired — handlers/index.js should have refused to build.`);
     }

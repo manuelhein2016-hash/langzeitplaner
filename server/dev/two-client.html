@@ -1,0 +1,67 @@
+<!doctype html>
+<!--
+  server/dev/two-client.html — the E2 headline demonstration.  LZP-207.
+
+  TWO REAL BROWSER CLIENTS, ONE FAMILY, ONE RELAY. Open this page twice:
+
+      http://127.0.0.1:8787/_dev/two-client.html?role=A     (Papa — creates the circle)
+      http://127.0.0.1:8787/_dev/two-client.html?role=B     (Mama — joins it)
+
+  and press Start in both. Everything on the wire is real: the ADR 003 §2 signed request, the
+  23-route table in server/core/router.js, the handlers that will run in Frankfurt, and the
+  UNMODIFIED src/js/crypto/ modules imported straight from the repository.
+
+  It is served by `node server/dev-server.mjs --demo`, from the SAME ORIGIN as the API, because
+  this API deliberately sends no Access-Control-Allow-Origin (story 21.5). See that file's header.
+
+  Not a product surface. Not shipped. `server/dev/` is a development directory.
+-->
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>LangzeitPlaner — E2 two-client demonstration</title>
+<style>
+  :root { color-scheme: light dark; --ink: #16121f; --bg: #fbfaff; --line: #ddd6ee;
+          --ok: #1d7a3e; --bad: #a3243c; --dim: #6a6180; --chip: #efeaff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #ece8f6; --bg: #16131d; --line: #38314a; --ok: #6ede97; --bad: #ff97ac;
+            --dim: #a49bbd; --chip: #262034; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  header { padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  .who { background: var(--chip); padding: 2px 8px; border-radius: 4px; }
+  .dim { color: var(--dim); }
+  main { padding: 14px 18px; }
+  button { font: inherit; padding: 6px 14px; border: 1px solid var(--line); background: var(--chip);
+           color: var(--ink); border-radius: 5px; cursor: pointer; }
+  button:disabled { opacity: .45; cursor: default; }
+  #log { margin-top: 14px; border-top: 1px solid var(--line); }
+  .row { padding: 6px 0; border-bottom: 1px solid var(--line); display: grid;
+         grid-template-columns: 26px 1fr; gap: 10px; align-items: start; }
+  .n { color: var(--dim); text-align: right; }
+  .t { white-space: pre-wrap; word-break: break-word; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  .hi { background: var(--chip); padding: 0 4px; border-radius: 3px; }
+  #verdict { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px;
+             white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>LangzeitPlaner · E2 two-client demonstration</h1>
+  <span class="who" id="role">…</span>
+  <span class="dim" id="ident">…</span>
+  <button id="start">Start</button>
+</header>
+<main>
+  <div class="dim">
+    real HTTP · <span class="hi">server/core/router.js</span> · <span class="hi">src/js/crypto/*</span> unmodified · file adapter
+  </div>
+  <div id="log"></div>
+  <div id="verdict" class="dim">not run yet</div>
+</main>
+<script type="module" src="/_dev/two-client.js"></script>
+</body>
+</html>

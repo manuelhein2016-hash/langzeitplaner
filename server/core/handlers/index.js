@@ -35,6 +35,7 @@
 
 import { createRouter, ROUTE_NAMES } from '../router.js';
 import { withVersionGate } from '../version.js';
+import { withLimits, RATE_COVERAGE } from '../limits.js';
 import { HttpError } from '../errors.js';
 
 import { meta } from './meta.js';
@@ -180,6 +181,29 @@ export function assertCtx(ctx) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * The five routes `withLimits` would actually wrap, and the name it gives the wrapper.
+ *
+ * BOTH ARE DERIVED BY ASKING `limits.js`, NOT COPIED FROM IT. `withLimits` wraps a handler only
+ * when `RATE_COVERAGE[name].pre` is non-empty, and names the wrapper itself; hardcoding either
+ * fact here would make this check silently stop working the day `limits.js` renamed its wrapper
+ * or declared a sixth pre-auth rule — which is precisely the day it would matter. So the probe
+ * below runs the real `withLimits` over a stub and reads back what it produced.
+ *
+ * There is no build step in this project (ADR 005 — the app is served as raw ES modules), so
+ * `Function.prototype.name` survives to production unmangled.
+ */
+const PRE_AUTH_ROUTES = Object.freeze(
+  ROUTE_NAMES.filter((n) => ((RATE_COVERAGE[n] && RATE_COVERAGE[n].pre) || []).length > 0));
+
+const LIMIT_WRAPPER_NAME = (() => {
+  const probe = PRE_AUTH_ROUTES[0];
+  if (probe === undefined) return null;                     // no pre-auth rule declared at all
+  const stub = async function unwrapped() { return { status: 200, body: null }; };
+  const wrapped = withLimits({ [probe]: stub })[probe];
+  return wrapped === stub ? null : wrapped.name;            // null ⇒ withLimits wrapped nothing
+})();
+
+/**
  * Integration decision 1, made structural.
  *
  * `limits.js` says there is no correct third option between "converge the handlers onto
@@ -188,6 +212,14 @@ export function assertCtx(ctx) {
  * the first person who reads `withLimits`'s own JSDoc, which shows the other composition. So the
  * factory takes the registry it is handed and refuses to accept a wrapper it did not build.
  *
+ * WHAT DOUBLE-COMPOSING WOULD ACTUALLY COST, so the refusal is not read as fussiness: every
+ * pre-auth budget would be charged twice per request and the PUBLISHED number would silently
+ * halve — `invitesPerIpHour` 10 becomes 5, `pairGetPerIpHour` 20 becomes 10, `spacesPerIpHour` 5
+ * becomes 2. Nothing errors. A family onboarding two people from one household hits a limit that
+ * ADR 003 §6.1 says is twice as generous as it is, and the only symptom is a 429 nobody can
+ * explain. `invites.js` already carries this warning in prose at its `enforceFor` call; this is
+ * the half of it that runs.
+ *
  * @param {Object<string, Function>} registry
  */
 function assertComposition(registry) {
@@ -195,6 +227,11 @@ function assertComposition(registry) {
   for (const n of names) {
     if (!ROUTE_NAMES.includes(n)) throw new HttpError(500, 'internal', { unknownHandler: n });
     if (typeof registry[n] !== 'function') throw new HttpError(500, 'internal', { notAFunction: n });
+  }
+  if (LIMIT_WRAPPER_NAME !== null) {
+    const doubled = PRE_AUTH_ROUTES.filter(
+      (n) => typeof registry[n] === 'function' && registry[n].name === LIMIT_WRAPPER_NAME);
+    if (doubled.length > 0) throw new HttpError(500, 'internal', { doubleCharged: doubled });
   }
   // Every route bound. `createRouter` tolerates a partial registry (501 not_implemented) because
   // that is what made LZP-201 shippable before the handlers existed; at the composition site the
