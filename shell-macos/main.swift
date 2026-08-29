@@ -1557,6 +1557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         return false
     }
     func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !isHeadless else { return false }   // no Dock tile in a test run, so nothing to reopen
         window.makeKeyAndOrderFront(nil)
         return true
     }

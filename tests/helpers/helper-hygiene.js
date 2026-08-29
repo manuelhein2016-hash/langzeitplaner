@@ -55,3 +55,39 @@ export function helperSelfDescriptions() {
       marker: reconstructionMarkerIn(readFileSync(path.join(HELPERS_DIR, name), 'utf8')),
     }));
 }
+
+// ── the headless-shell guard ────────────────────────────────────────────────
+// `npm run test:dom` launches the shell once per test file. If those launches
+// present a window or take focus, a full run flashes 26 windows across whatever
+// the human is doing — and a suite that is unpleasant to run gets run less,
+// which is a correctness problem and not only an ergonomic one.
+
+export const SHELL_SWIFT = fileURLToPath(new URL('../../shell-macos/main.swift', import.meta.url));
+
+export function shellSource() {
+  return readFileSync(SHELL_SWIFT, 'utf8');
+}
+
+/** Lines that present UI, with whether each is guarded by `isHeadless`. */
+export function presentationSites(src = shellSource()) {
+  const lines = src.split('\n');
+  return lines
+    .map((line, i) => ({ n: i + 1, line: line.trim() }))
+    .filter(({ line }) =>
+      !line.startsWith('//') &&
+      (/\bmakeKeyAndOrderFront\b/.test(line) ||
+        /NSApp\.activate\(/.test(line) ||
+        /setActivationPolicy\(/.test(line)))
+    .map((row) => ({
+      ...row,
+      // Guarded on the line itself, or by an `isHeadless` early-return within the
+      // preceding few lines — `guard !isHeadless else { return }` at the top of a
+      // function protects every call in it, and reading only the call's own line
+      // would report those as unguarded.
+      guarded:
+        /isHeadless/.test(row.line) ||
+        lines
+          .slice(Math.max(0, row.n - 7), row.n - 1)
+          .some((l) => /isHeadless/.test(l) && /\breturn\b|\bguard\b/.test(l)),
+    }));
+}
