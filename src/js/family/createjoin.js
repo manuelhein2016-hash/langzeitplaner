@@ -1,0 +1,1715 @@
+// src/js/family/createjoin.js — LZP-601 / LZP-602. Deliverables 14 and 15.
+// Stories 15.1, 15.2, 15.3, 15.4, 20.5, 20.6 · ADR 002 §7.1 · PO decision D9.
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// THE TWO SCREENS, AND WHICH ONE THE EPIC IS JUDGED ON
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// CREATE (15.2, 20.6) is a form: a name, my name, my colour, and a code comes back. It is the
+// admin's screen and it is met once.
+//
+// JOIN (15.3) is the product's first impression for somebody who was told "it's just a
+// calendar". The addendum's design note is unusually specific about it — *"design it for her:
+// one screen, huge paste field, name + colour picker, done"* — so this file spends its budget
+// there: one surface, one field she pastes into, two choices, one button. No email, no password,
+// no registration form, and nothing that has to be read twice.
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// THE WAITING STATE IS PART OF THE JOIN SCREEN. IT IS NOT AN ERROR PATH.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// PO decision D9: an invite carries NO key material. `server/core/handlers/invites.js` is built
+// around that and computes `pendingKeys` rather than asserting it, so the fact this screen
+// branches on is the relay's own key-ring state.
+//
+// What that means at the keyboard is that Mom's join SUCCEEDS and her board stays empty for a
+// while. `DESIGN-DECISIONS.md` § D9 lists four required behaviours and this screen owes all
+// four; each one is a line of code here, marked D9-1 … D9-4:
+//
+//   D9-1  she is IMMEDIATELY a member — the redemption returns the member list and this screen
+//         renders it, so "am I in?" is answered on screen and not by waiting.
+//   D9-2  an explicit, calm waiting state, ONE German-first line, no spinner. `renderJoined()`
+//         has no timer, no progress element and no `busy` styling; 19.3's "silence is the
+//         design" governs here too.
+//   D9-3  it resolves itself. The copy says the entries arrive when ANY other Mac in the circle
+//         next syncs — not the admin's, per ADR 002 §7.1 step 4 and D9's 2026-08-27 correction —
+//         and it never tells her to go and ask somebody to open a laptop. `WAITING_COPY` is
+//         asserted against that sentence in `tests/tier2/family-createjoin.dom.js` §5.
+//   D9-4  it is never an error. The panel's title is „Du bist dabei.", there is no retry button,
+//         nothing on it is red, and the word „Fehler" does not appear. The one control is
+//         „Fertig".
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 15.1 — THIS FILE IS BEHIND THE ONE DOOR, AND IT MUST STAY THERE
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Principle 7: *"Nothing in solo mode gets heavier, slower, or more networked because family
+// mode exists."* `family/mount.js` is the only dynamic `import()` out of the boot graph
+// (`tests/tier1/network-scope.test.js` §2) and this module is reached from
+// `family/familysettings.js`, i.e. from behind it. Two consequences that constrain what may be
+// imported here:
+//
+//   · every `crypto/` module this file names must ALREADY be in the set
+//     `tests/attack/privacy-e5-silence.test.js` §5 pins for a solo ⚙ — backup, envelope,
+//     identity, pairing, probe, spacekeys, suite. `identity.js`, `spacekeys.js`, `probe.js` and
+//     `suite.js` are the four used below and all four are in it, so the measured cost of this
+//     epic to a solo user who opens the settings sheet is ZERO new modules.
+//   · nothing here runs at render time. `probeCrypto()` runs on a click, key generation runs on
+//     a click, and the transport is built on a click. Drawing the section costs one `<div>` and
+//     two buttons.
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 20.5 — THE ADMIN MANAGES THE SPACE, NEVER THE PEOPLE
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// *"Even as admin, I structurally cannot see other members' private entries … enforced by
+// encryption, not by policy."* The create screen says that out loud (`circleAdminFraming`),
+// because the moment somebody is told "you are the admin" is the moment they form a belief
+// about what that means. No copy in this file implies otherwise, and there is no control here
+// that reads another member's anything: the only member data this module ever holds is the
+// pseudonymous roster the relay publishes — ids, palette indices and public keys. Names live in
+// the encrypted op stream (ADR 003 §5.1) and this file cannot read them, which is why the join
+// panel says the names arrive with the entries instead of showing blanks.
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// WHAT IS OWED BY OTHER OWNERS — read this before concluding the feature is broken
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+//   1. `familysettings.js` must call `buildFamilyCircleSection()`. Until it does, this module is
+//      unreachable from the UI and 15.1 is satisfied trivially. One import, one line.
+//   2. `Device.deviceShort` is GLOBALLY unique on the relay (server finding E2-203-1), so a Mac
+//      that already has a personal space cannot create or join a family one. This module refuses
+//      that case with a named, calm sentence (`circleErrDeviceRegistered`) rather than a 400 the
+//      user cannot act on — but the fix is the server's.
+//   3. Family-space ops. `store.js` has `_familySpaceId` and no `useFamilySpace()`, so the
+//      display name and the circle's name are persisted LOCALLY here and do not yet enter the
+//      op stream as `member.set`. 15.4's names and 15.6's propagation land with that.
+//   4. The board's own one-line waiting state (19.3's chrome) is `syncstatus.js`'s to draw.
+//      `familyWaitingState()` below is the fact and the sentence it needs; this file draws it on
+//      its own screen and never on the board.
+//
+// CSS OWNERSHIP. `src/css/app.css` is the v1 DOM layer's and this package does not own it, so
+// the styles are injected once as a `<style id="lzp-circle-css">`, exactly as `pairingui.js`
+// does and for the same reason. Every token used is one `app.css` already defines. When the CSS
+// owner next opens that file, `CIRCLE_CSS` moves there verbatim and `ensureCss()` is deleted.
+
+import { el, toast } from '../ui.js';
+import { t, getLang, setLang } from '../i18n.js';
+import { store } from '../store.js';
+import { PALETTE, colorOf, paletteName } from '../palette.js';
+import { b64u, crockNormalize, crock32, CROCKFORD_ALPHABET } from '../core/b64.js';
+import { spaceId as mintSpaceId } from '../core/ids.js';
+import { createFetchTransport, normalizeOrigin, insecureOriginMessage, NetError } from '../platform/net.js';
+import { chooseKeyStore } from '../platform/keystore.js';
+import { openDeviceIdentity, selfAttest, IdentityUnavailableError } from '../platform/device-identity.js';
+import { exportRawPublic, signBytes, importKexPublic } from '../crypto/identity.js';
+import { createSpaceKey, wrapSpaceKey, encodeWrap } from '../crypto/spacekeys.js';
+import { hkdf, INFO, NO_SALT, KDF, HASH } from '../crypto/suite.js';
+import { probeCrypto, isSuiteAvailable, unavailableMessage } from '../crypto/probe.js';
+
+const TE = new TextEncoder();
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 1. Parameters
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ADR 002 §7.1's invite row, as display and generation parameters.
+ *
+ * `codeChars` is 12 Crockford characters = 60 bits, shown `XXXX-XXXX-XXXX`. `ttlDays` is the
+ * relay's (`INVITE_TTL_MS` in `server/core/handlers/invites.js`) and is shown, never enforced
+ * here: two clocks that both enforce a TTL disagree, and the one that matters is the server's.
+ */
+export const INVITE_UI = Object.freeze({
+  codeChars: 12,
+  codeGroup: 4,
+  ttlDays: 7,
+  /** 15.2's name and 15.3's display name. Bounded so a name cannot become a payload. */
+  maxCircleName: 40,
+  maxDisplayName: 24,
+});
+
+/** The protocol version string the relay sees in `X-LZP-Client`, mirroring `engine.js`. */
+const CLIENT_V = '2.0.0';
+
+/**
+ * The settings keys one Familienkreis occupies. `pref.set` is a LOCAL-space op and settings are
+ * never synced (store.js rule U6), so these are per-Mac facts and not shared state.
+ *
+ * They are deliberately NOT merged into `engine.js`'s `FAMILY_PREFS`: that triple
+ * (`syncEnabled` / `syncOrigin` / `personalSpaceId`) arms the PERSONAL space at boot, and a
+ * family space id written into `personalSpaceId` would arm the engine into a space whose ops it
+ * has no key for. The origin is shared, because there is one relay.
+ */
+export const CIRCLE_PREFS = Object.freeze({
+  origin: 'syncOrigin',
+  space: 'familySpaceId',
+  name: 'familyName',
+  role: 'familyRole',
+  member: 'familyMemberId',
+  display: 'familyDisplayName',
+  color: 'familyColorRef',
+  pending: 'familyKeysPending',
+  joinedAt: 'familyJoinedAt',
+});
+
+/** The two roles 20.1 knows. There is exactly one admin at a time and the role is transferable. */
+export const CIRCLE_ROLE = Object.freeze({ admin: 'admin', member: 'member' });
+
+/** The screens this file draws. `null` when neither is open. */
+export const CIRCLE_SCREEN = Object.freeze({ create: 'create', join: 'join' });
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 2. The ports — everything that is not a pixel
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Clock, randomness, the key store and the transport, injectable so
+ * `tests/tier2/family-createjoin.dom.js` can drive the whole flow against a fake relay in a real
+ * engine. The defaults are the product's.
+ *
+ * `transport(origin, deviceShort, sign)` returns something with
+ * `request(method, path, query, body) => {status, json}` — `platform/net.js`'s Transport port,
+ * and the only shape this file knows about the network.
+ */
+const DEFAULT_PORTS = Object.freeze({
+  now: () => Date.now(),
+  today: () => new Date().toISOString().slice(0, 10),
+  random: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+  subtle: () => globalThis.crypto.subtle,
+  schedule: (ms, fn) => setTimeout(fn, ms),
+  unschedule: (h) => clearTimeout(h),
+  invoke: () => globalThis.window?.__TAURI__?.core?.invoke,
+  transport: (origin, deviceShort, sign) => createFetchTransport({
+    origin,
+    deviceShort,
+    sign,
+    clientVersion: CLIENT_V,
+    now: () => Date.now(),
+    schedule: (ms, fn) => setTimeout(fn, ms),
+    unschedule: (h) => clearTimeout(h),
+  }),
+  /** The durable device identity, minted on the click and never at render. */
+  openIdentity: async (today, invoke) => {
+    const { store: ks, kind: custody } = chooseKeyStore({ invoke });
+    const opened = await openDeviceIdentity(ks, { today, custody, allowMemoryCustody: false });
+    const mine = await selfAttest(ks, opened.forStore, opened.recovery.recSig.privateKey, { createdAt: today });
+    return { ...opened, blob: mine.blob, attestation: mine.attestation };
+  },
+  /** `board.json` is the truth and this store was `init()`ed without a space — ADR 006 §9.4. */
+  reload: () => globalThis.location?.reload?.(),
+  clipboard: (text) => globalThis.navigator?.clipboard?.writeText?.(text),
+});
+
+let ports = { ...DEFAULT_PORTS };
+
+/**
+ * Mount (or, with no arguments, reset) the create/join flows.
+ *
+ * @param {Partial<typeof DEFAULT_PORTS>} [deps]
+ */
+export function initCreateJoin(deps = {}) {
+  closeCircleScreen({ silent: true });
+  probePromise = null;
+  ports = { ...DEFAULT_PORTS, ...deps };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 3. The persisted circle — 20.6's "at most ONE"
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What this Mac knows about its Familienkreis, or `null`.
+ *
+ * 20.6 is enforced here rather than at the relay, and that is the honest place for it: the
+ * server has no notion of "this person", only of members and spaces, so "one circle per user" is
+ * a statement about one installation. Both entry points ask this function first, so neither
+ * screen can be opened onto a second circle.
+ *
+ * @returns {{spaceId:string, name:string, role:string, memberId:string|null,
+ *            displayName:string, colorRef:string, keysPending:boolean,
+ *            origin:string, joinedAt:string|null}|null}
+ */
+export function familyCircle() {
+  const s = (store.state && store.state.settings) || {};
+  const spaceId = s[CIRCLE_PREFS.space];
+  if (typeof spaceId !== 'string' || !spaceId.startsWith('fsp_')) return null;
+  return Object.freeze({
+    spaceId,
+    name: typeof s[CIRCLE_PREFS.name] === 'string' ? s[CIRCLE_PREFS.name] : '',
+    role: s[CIRCLE_PREFS.role] === CIRCLE_ROLE.admin ? CIRCLE_ROLE.admin : CIRCLE_ROLE.member,
+    memberId: typeof s[CIRCLE_PREFS.member] === 'string' ? s[CIRCLE_PREFS.member] : null,
+    displayName: typeof s[CIRCLE_PREFS.display] === 'string' ? s[CIRCLE_PREFS.display] : '',
+    colorRef: typeof s[CIRCLE_PREFS.color] === 'string' ? s[CIRCLE_PREFS.color] : PALETTE[0].ref,
+    keysPending: s[CIRCLE_PREFS.pending] === true,
+    origin: typeof s[CIRCLE_PREFS.origin] === 'string' ? s[CIRCLE_PREFS.origin] : '',
+    joinedAt: typeof s[CIRCLE_PREFS.joinedAt] === 'string' ? s[CIRCLE_PREFS.joinedAt] : null,
+  });
+}
+
+/**
+ * D9's waiting state as a FACT plus the sentence that states it, so `syncstatus.js` can render
+ * one calm line on the board without owning the copy or re-deriving the condition.
+ *
+ * `pending` is `false` on a Mac with no circle, which is the answer solo mode needs: a board
+ * that has never joined anything has nothing to wait for and must show nothing.
+ *
+ * @returns {{pending:boolean, line:string, calm:string}}
+ */
+export function familyWaitingState() {
+  const c = familyCircle();
+  return Object.freeze({
+    pending: !!(c && c.keysPending),
+    line: t('circleWaiting'),
+    calm: t('circleWaitingCalm'),
+  });
+}
+
+/** Write the circle to `board.json`, then flush — this is a fact a relaunch must not lose. */
+async function rememberCircle(patch) {
+  store.setSettings(patch);
+  if (typeof store.persistNow === 'function') await store.persistNow();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 4. The code — display, parsing, generation, derivation
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `XXXX-XXXX-XXXX` from anything a human has typed or pasted so far.
+ *
+ * `crockNormalize` is imported rather than re-implemented for the reason `pairingui.js` gives at
+ * length: it folds case and maps I/L → 1 and O → 0 and deliberately does NOT map `U`, and two
+ * spellings of "what did the user type" would be two answers the derivation cannot both accept.
+ *
+ * @param {string} raw @returns {string}
+ */
+export function formatInviteCode(raw) {
+  let norm;
+  try {
+    norm = crockNormalize(String(raw ?? ''));
+  } catch {
+    return '';
+  }
+  let kept = '';
+  for (const ch of norm) {
+    if (CROCKFORD_ALPHABET.includes(ch)) kept += ch;
+    if (kept.length === INVITE_UI.codeChars) break;
+  }
+  const g = INVITE_UI.codeGroup;
+  const parts = [];
+  for (let i = 0; i < kept.length; i += g) parts.push(kept.slice(i, i + g));
+  return parts.join('-');
+}
+
+/** The 12 characters with the separators removed — the ONE form the derivation ever sees. */
+export const inviteCodeChars = (formatted) => String(formatted ?? '').split('-').join('');
+
+/**
+ * One token's canonical 12 characters, or `null` if it is not a code at all.
+ *
+ * The alphabet check is applied to the WHOLE token rather than used as a filter: a filter turns
+ * „Du bist eingeladen" into `DB1STE1NGE1A`, which is twelve perfectly valid Crockford
+ * characters and a code nobody minted. A token either is a code or it is a word.
+ */
+function codeToken(raw) {
+  let norm;
+  try {
+    norm = crockNormalize(String(raw ?? ''));
+  } catch {
+    return null;
+  }
+  if (norm.length !== INVITE_UI.codeChars) return null;
+  for (const ch of norm) if (!CROCKFORD_ALPHABET.includes(ch)) return null;
+  return norm;
+}
+
+/**
+ * Read a whole pasted invitation, not just a code.
+ *
+ * WHY THIS EXISTS, AND WHY IT IS NOT SCOPE CREEP. The relay has no default address (ADR 003 §1
+ * names `https://<vercel-app>.vercel.app` and no such app exists), so a code alone is not enough
+ * to reach anything. Story 15.3 promises Mom is in "within a minute" with "no registration
+ * form", and asking her to find and type a URL is the registration form wearing a hat. So the
+ * one big field accepts the whole thing she was sent — the address and the code, in any order,
+ * with any words around them — and fills both fields out of it.
+ *
+ * Open question 4 in the addendum ("code only, or also a `langzeitplaner://` invite link?") is
+ * NOT answered here: no scheme is invented and no link is registered. This reads plain text, and
+ * a bare code still works exactly as specified when the address is already known.
+ *
+ * D9 is untouched: an invitation carries an address and a code, and neither is key material.
+ *
+ * THE THREE CASES, IN THE ORDER THEY ARE TRIED, because getting this wrong is the difference
+ * between a field that works and a field that eats what somebody is typing into it:
+ *
+ *   1. a whole invitation — several words. A token shaped `XXXX-XXXX-XXXX` wins, then any token
+ *      that IS twelve Crockford characters. Prose loses, because a word is not a token that
+ *      normalises to exactly twelve.
+ *   2. a bare code, pasted or typed to the end — one token, and it is a code.
+ *   3. a code being typed — one token and not yet twelve characters. It is passed through the
+ *      formatter so the groups appear as she types, and it is NOT discarded.
+ *
+ * `found` is what the caller needs to decide whether it may rewrite the field:
+ * `'code'` a whole code was recognised · `'partial'` one unfinished token · `'none'` prose, and
+ * the text must be left alone.
+ *
+ * @param {string} raw @returns {{code:string, origin:string|null, found:'code'|'partial'|'none'}}
+ */
+export function parseInvitePaste(raw) {
+  const text = String(raw ?? '');
+  let origin = null;
+  const url = text.match(/https?:\/\/[^\s"'<>]+/i);
+  if (url) {
+    try {
+      origin = new URL(url[0]).origin;
+    } catch {
+      origin = null;
+    }
+  }
+  // The code is read from what is left after the URL, so a `https://…/ABCDEFGHJKMN` path
+  // segment can never be mistaken for the code.
+  const rest = url ? text.replace(url[0], ' ') : text;
+  const hit = (c) => ({ code: formatInviteCode(c), origin, found: 'code' });
+
+  // Case 0 — the field holds nothing but the code, however the sender spaced it out.
+  // `crockNormalize` strips `-`, space, non-breaking space and tab, which is exactly the set of
+  // things people put between the groups.
+  const whole = codeToken(rest);
+  if (whole) return hit(whole);
+
+  const tokens = rest.split(/[^0-9A-Za-z-]+/).filter(Boolean);
+  // Case 1a — the canonical shape inside a sentence. Preferred over a bare twelve-letter word.
+  for (const tok of tokens) {
+    if (!tok.includes('-')) continue;
+    const c = codeToken(tok);
+    if (c) return hit(c);
+  }
+  // Case 1b — twelve Crockford characters standing on their own inside a sentence.
+  for (const tok of tokens) {
+    const c = codeToken(tok);
+    if (c) return hit(c);
+  }
+  // Case 2 — one token and it is not finished yet. Passed through the formatter so the groups
+  // appear as she types, and never discarded.
+  if (tokens.length <= 1) {
+    return { code: formatInviteCode(tokens[0] || ''), origin, found: 'partial' };
+  }
+  // Case 3 — prose with no code in it. The truthful answer is "no code", and the caller must
+  // leave the text on screen alone.
+  return { code: '', origin, found: 'none' };
+}
+
+/**
+ * A fresh invite code: 12 Crockford characters, 60 bits, uniform.
+ *
+ * `crock32` over 10 random bytes yields 16 characters of which the first 12 are taken — every
+ * character is 5 bits of `getRandomValues` output, so there is no modulo bias and no rejection
+ * loop to get wrong. The code NEVER leaves this Mac except into the human's clipboard: the relay
+ * is told `inviteId` and `verifier`, and can reconstruct neither.
+ *
+ * @returns {string} formatted `XXXX-XXXX-XXXX`
+ */
+export function newInviteCode() {
+  return formatInviteCode(crock32(ports.random(10)).slice(0, INVITE_UI.codeChars));
+}
+
+/**
+ * ADR 002 §7.1's two derived values, from the 12 canonical characters.
+ *
+ *   inviteId = b64u(HKDF(code, '', 'lzp/v2/invite/id', 16))        → 22 b64url chars
+ *   proof    = HKDF(code, '', 'lzp/v2/invite/verify', 32)          → PRESENTED at redemption
+ *   verifier = SHA-256(proof)                                       → STORED by the relay
+ *
+ * The raw code never reaches the server and the stored verifier is not sufficient to redeem — a
+ * database dump yields `SHA-256(proof)`, and inverting it is the whole point.
+ *
+ * **The input is the normalised, separator-free, upper-case form and nothing else.** Two
+ * spellings of the input are two different keys, and the symptom three layers away is „der Code
+ * passt nicht" on a correctly typed code. `inviteCodeChars(formatInviteCode(x))` is the only way
+ * in, on both sides, and it is applied here rather than trusted from the caller.
+ *
+ * @param {string} anyForm @returns {Promise<{code:string, inviteId:string, proof:string, verifier:string}>}
+ */
+export async function deriveInvite(anyForm) {
+  const code = inviteCodeChars(formatInviteCode(anyForm));
+  if (code.length !== INVITE_UI.codeChars) {
+    throw new NetError('config', `deriveInvite: a code is ${INVITE_UI.codeChars} Crockford characters`);
+  }
+  const subtle = ports.subtle();
+  const ikm = await subtle.importKey('raw', TE.encode(code), KDF.name, false, ['deriveBits']);
+  const idBits = await subtle.deriveBits(hkdf(NO_SALT, INFO.inviteId), ikm, 16 * 8);
+  const proofBits = await subtle.deriveBits(hkdf(NO_SALT, INFO.inviteVerify), ikm, 32 * 8);
+  const proof = new Uint8Array(proofBits);
+  const verifier = new Uint8Array(await subtle.digest(HASH, proof));
+  // Two labels, and there is no place for a third: `suite.hkdf` refuses any string outside
+  // `INFO`, and it throws BY NAME on the retired `lzp/v2/invite/wrap`. That is D9's structural
+  // guard rather than a convention — a future agent who reintroduces the seven-day read window
+  // meets an exception here, in this function, rather than shipping it.
+  return { code, inviteId: b64u(new Uint8Array(idBits)), proof: b64u(proof), verifier: b64u(verifier) };
+}
+
+/**
+ * The clipboard artifact the admin hands over. Two lines, no ceremony, and NO KEY MATERIAL —
+ * an address and a code, which is exactly what §7.1 permits an invitation to carry.
+ *
+ * @param {{origin:string, code:string, name:string}} spec @returns {string}
+ */
+export function invitationText({ origin, code, name }) {
+  return [
+    t('circleInviteLine1', name || t('circleSectionTitle')),
+    '',
+    code,
+    origin,
+    '',
+    t('circleInviteLine2'),
+  ].join('\n');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 5. Member colours — the same ten tones, a separate namespace (F15 design note)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Which palette refs the circle's members already hold.
+ *
+ * The roster is the pseudonymous one the relay publishes — `colorRef` is the ONE deliberately
+ * readable string a client may write (ADR 003 §5.2) — so this works before any key has arrived,
+ * which is precisely the moment the join screen needs it.
+ *
+ * A REMOVED member does not hold a colour: `Member.removedAt` is set and `colorFree` on the
+ * relay agrees, so a colour freed by 20.2 becomes available again rather than being retired.
+ *
+ * @param {Array<{colorRef?:string, removedAt?:string|null}>} members
+ * @returns {string[]} sorted, unique
+ */
+export function takenColorRefs(members) {
+  const out = new Set();
+  for (const m of Array.isArray(members) ? members : []) {
+    if (!m || typeof m.colorRef !== 'string') continue;
+    if (m.removedAt !== null && m.removedAt !== undefined) continue;
+    out.add(m.colorRef);
+  }
+  return [...out].sort();
+}
+
+/**
+ * The first tone nobody in the circle holds. Falls back to the first tone rather than to `null`
+ * so the picker always has a selection — with ten tones and at most eight members (§9's fixed
+ * constraint) the fallback is unreachable, and a picker with nothing selected is worse than one
+ * showing a colour the server will refuse and this screen will then re-offer.
+ *
+ * @param {string[]} taken @returns {string}
+ */
+export function firstFreeColorRef(taken) {
+  const used = new Set(taken || []);
+  return (PALETTE.find((p) => !used.has(p.ref)) || PALETTE[0]).ref;
+}
+
+/**
+ * 15.4's initial. The first grapheme of the display name, upper-cased — „M" for Mama, and the
+ * right character for a name that starts with an emoji or a combining mark, which `name[0]`
+ * would cut in half.
+ *
+ * @param {string} name @returns {string}
+ */
+export function memberInitial(name) {
+  const first = [...String(name ?? '').trim()][0];
+  return first ? first.toLocaleUpperCase() : '·';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 6. The capability gate — `crypto/probe.js`, on the click and never at render
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `probe.js`'s own header names three moments it must run at: „Familienkreis erstellen",
+// „Familienkreis beitreten" and „Gerät koppeln". The first two are THIS FILE, and until now the
+// second had no call site anywhere in the product. Memoised on the PROMISE so two fast clicks
+// cannot start two probes; a failure is not memoised, because "insecure context" is exactly the
+// kind of thing a reload fixes.
+
+let probePromise = null;
+
+/** @returns {Promise<boolean>} false means the caller has already been told. */
+async function assertSuiteAvailable() {
+  if (!probePromise) probePromise = probeCrypto();
+  let result;
+  try {
+    result = await probePromise;
+  } catch (e) {
+    probePromise = null;
+    console.warn('[circle] the crypto probe itself failed', e);
+    return false;
+  }
+  if (isSuiteAvailable(result)) return true;
+  // ADR 002 §1: one plain sentence, and it is the module's rather than this file's — a person
+  // cannot act on „ECDH fehlt".
+  toast(say(unavailableMessage(result)));
+  return false;
+}
+
+/** Whichever of a `{de, en}` pair the screen is currently speaking. */
+const say = (pair) => (getLang() === 'en' ? pair.en : pair.de);
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 7. The relay calls
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Open this Mac's durable identity and build a transport signed by it.
+ *
+ * Both flows need exactly this and they need it at the same point — after the human has pressed
+ * the button and before anything is sent — so it is one function. `openIdentity` is where key
+ * generation happens, which ADR 002 §2.4 restricts to "the family opt-in moment and nowhere
+ * else": a click on „Familienkreis erstellen" or on „Beitreten" IS that moment.
+ *
+ * @param {string} origin @returns {Promise<{id:Object, transport:Object}>}
+ */
+async function armForRelay(origin) {
+  const id = await ports.openIdentity(ports.today(), ports.invoke());
+  const transport = ports.transport(
+    origin,
+    id.forStore.deviceShort,
+    (bytes) => signBytes(id.identity.devSig.privateKey, bytes),
+  );
+  return { id, transport };
+}
+
+/**
+ * The transport half of `armForRelay`, for the modules that manage a circle that already exists.
+ *
+ * `adminpanel.js` needs a signed transport and nothing else — no `selfAttest`, no device body, no
+ * keygen — and had open-coded the same three steps. Two spellings of "open this Mac's identity
+ * and sign with it" is the failure mode `suite.js` §4 names for the HKDF labels: they agree until
+ * one of them is edited. So the identity is opened HERE, once, and the lifecycle modules borrow
+ * the result.
+ *
+ * Note this still goes through `ports.openIdentity`, so a test that injected an identity into
+ * `initCreateJoin` reaches the admin panel's calls too — which is the second reason to share it.
+ *
+ * @param {string} origin @returns {Promise<{request:Function}>}
+ */
+export async function circleTransport(origin) {
+  const { transport } = await armForRelay(origin);
+  return transport;
+}
+
+/** The device block both `POST /spaces` and `POST /invites/redeem` read. */
+async function deviceBody(id) {
+  return {
+    deviceId: id.forStore.deviceId,
+    deviceShort: id.forStore.deviceShort,
+    sigPubRaw: b64u(await exportRawPublic(id.identity.devSig.publicKey)),
+    kexPubRaw: b64u(await exportRawPublic(id.identity.devKex.publicKey)),
+    // THE RAW BLOB STRING, not base64url of it. `readAttestedDevice` (finding E2E3-7) verifies
+    // P2 + S1 + S2 over `b64u(payload).b64u(sig)` on BOTH endpoints now; a base64url wrapping
+    // of the same value is refused with `attestation/bad_shape`.
+    attestation: id.blob,
+  };
+}
+
+/** The member block: the two recovery public keys, which is all the relay may ever hold. */
+async function memberBody(id) {
+  return {
+    memberId: id.forStore.memberId,
+    recoveryPubSig: b64u(await exportRawPublic(id.recovery.recSig.publicKey)),
+    recoveryPubKex: b64u(await exportRawPublic(id.recovery.recKex.publicKey)),
+  };
+}
+
+/**
+ * LZP-601 — create the family space, become its first member, and mint the first invite.
+ *
+ * The order is a dependency order and the settings write is LAST, exactly as `mount.js` argues
+ * for the personal opt-in: the settings are the flag a relaunch reads, so writing them before
+ * the relay has accepted the space would leave a Mac configured into a circle nobody has heard
+ * of.
+ *
+ *   1. epoch-1 space key, drawn (barrier 1 — no parent key, no KDF)
+ *   2. `POST /spaces { kind: 'FAMILY' }` with the epoch-1 wrap to my own device
+ *   3. the key ring to disk, so the next launch can read what this one writes
+ *   4. `POST /invites` with the derived id and verifier — the code stays here
+ *   5. the settings
+ *
+ * **The wrap set is the device only.** `requiredRecipients(…, 'FAMILY')` deliberately does NOT
+ * require `rec_<memberId>` (server finding E2E3-8): `recoveryPubKex` is unsigned, so a relay
+ * that swapped it would be handed the family key silently. Permitted, not required, and this
+ * client does not send it until the attestation binds it.
+ *
+ * @returns {Promise<{spaceId:string, code:string, memberId:string}>}
+ */
+async function createCircleOnRelay(origin, colorRef) {
+  const spaceId = mintSpaceId('family', ports.random);
+  const { id, transport } = await armForRelay(origin);
+
+  const spaceKey = await createSpaceKey({ subtle: ports.subtle(), random: ports.random });
+  const wrapped = await wrapSpaceKey(
+    spaceKey,
+    id.identity.devKex.privateKey,
+    await importKexPublic(await exportRawPublic(id.identity.devKex.publicKey)),
+    { spaceId, epoch: 1, subtle: ports.subtle(), random: ports.random },
+  );
+
+  const created = await transport.request('POST', '/api/v1/spaces', undefined, {
+    spaceId,
+    kind: 'FAMILY',
+    colorRef,
+    member: await memberBody(id),
+    device: await deviceBody(id),
+    wraps: [{ recipientId: id.forStore.deviceId, epoch: 1, wrapped: encodeWrap(wrapped) }],
+  });
+  if (created.status !== 200) throw relayError(created, 'POST /spaces');
+
+  saveRing(spaceId, 1, b64u(new Uint8Array(await ports.subtle().exportKey('raw', spaceKey))));
+
+  const code = newInviteCode();
+  const invite = await deriveInvite(code);
+  const minted = await transport.request('POST', '/api/v1/invites', undefined, {
+    spaceId, inviteId: invite.inviteId, verifier: invite.verifier,
+  });
+  // A circle with no invite is still a circle: the code can be re-minted from the section. So a
+  // failure here is reported and does NOT unwind the space, which cannot be undone anyway.
+  if (minted.status !== 200) console.warn('[circle] the space exists but the first invite failed', minted.json);
+
+  return { spaceId, code: minted.status === 200 ? code : '', memberId: id.forStore.memberId };
+}
+
+/**
+ * LZP-602 — redeem an invite and become a member. Returns no key material, by design (D9).
+ *
+ * A `colorRef` the relay refuses as taken rolls the WHOLE redemption back — `invites.js` places
+ * the colour check inside the transaction for exactly this reason — so the same code may be
+ * presented again with a different colour. That is the one retry this screen performs, and it is
+ * not an error path: see `renderJoinForm`'s colour handling.
+ *
+ * @returns {Promise<{spaceId:string, memberId:string, members:Array<Object>, keysPending:boolean}>}
+ */
+async function redeemOnRelay(origin, anyCodeForm, colorRef) {
+  const invite = await deriveInvite(anyCodeForm);
+  const { id, transport } = await armForRelay(origin);
+  const res = await transport.request('POST', '/api/v1/invites/redeem', undefined, {
+    inviteId: invite.inviteId,
+    proof: invite.proof,
+    colorRef,
+    member: await memberBody(id),
+    device: await deviceBody(id),
+  });
+  if (res.status !== 200) throw relayError(res, 'POST /invites/redeem');
+  const body = res.json || {};
+  return {
+    spaceId: body.spaceId,
+    memberId: id.forStore.memberId,
+    members: Array.isArray(body.members) ? body.members : [],
+    // D9's designed waiting state, driven by the relay's own key-ring state rather than by an
+    // assumption this client makes about it.
+    keysPending: body.pendingKeys !== false,
+  };
+}
+
+/** Mint one more invite for a circle that already exists — 15.5's "the admin can invite". */
+async function mintInviteOnRelay(origin, spaceId) {
+  const { transport } = await armForRelay(origin);
+  const code = newInviteCode();
+  const invite = await deriveInvite(code);
+  const res = await transport.request('POST', '/api/v1/invites', undefined, {
+    spaceId, inviteId: invite.inviteId, verifier: invite.verifier,
+  });
+  if (res.status !== 200) throw relayError(res, 'POST /invites');
+  return code;
+}
+
+/**
+ * The key ring, per space, exactly where `family/engine.js` keeps the personal one. **Owed to
+ * `storage.js`'s owner**, with the same note `engine.js` already carries: three named slots, so
+ * a Tauri build writes them beside `board.json` instead of into the WebView's storage.
+ */
+function saveRing(spaceId, epoch, rawB64u) {
+  const key = `langzeitplaner.ring.${spaceId}`;
+  try {
+    const cur = JSON.parse(localStorage.getItem(key) || '{}');
+    cur[String(epoch)] = rawB64u;
+    localStorage.setItem(key, JSON.stringify(cur));
+  } catch {
+    // A full disk is not a crash. The space exists on the relay and the key can be re-wrapped;
+    // a thrown exception here would leave the user looking at a failure that already succeeded.
+    console.warn('[circle] the epoch key could not be written to local storage');
+  }
+}
+
+/**
+ * Turn a relay refusal into something a person can act on.
+ *
+ * The `code` is what the screens branch on; `message` is only ever a fallback. Two of these are
+ * named because they are the ones a real family will actually meet:
+ * `invite_used` (15.5's single use, and the difference between "you were too late" and "you
+ * typed it wrong") and `device_registered` (server finding E2-203-1 — a Mac that already has a
+ * personal space on this relay).
+ */
+function relayError(res, where) {
+  // `server/core/errors.js`'s `toResponse` is the ONLY function that builds a failure body, and
+  // its shape is `{ error: <code>, ...extra }` — flat, with `field` and `reason` at the top
+  // level. Reading a nested `detail` would be reading a shape this relay does not have.
+  const body = (res && res.json) || {};
+  const reason = body.reason || '';
+  const field = body.field || '';
+  let code = body.error || `http_${res.status}`;
+  if (field === 'colorRef' && reason === 'taken') code = 'color_taken';
+  // `deviceId` AND `deviceShort`: the relay refuses on whichever it checks first, and E6's
+  // end-to-end run met the `deviceId` spelling, not the `deviceShort` one this line originally
+  // matched. Both are the same event for the person in front of it — this Mac is already known
+  // to this relay — so both get the same sentence rather than one of them falling through to a
+  // raw 400 body. The second spelling was found by LEAVING a circle and trying to create
+  // another: the device row survives the leave (revoked, not deleted) and its id is globally
+  // unique, so the Mac is refused. See FINDINGS E6-3.
+  if (/device(Id|Short)$/.test(String(field)) && reason === 'registered') code = 'device_registered';
+  if (String(field).endsWith('memberId') && reason === 'exists') code = 'member_exists';
+  const err = new Error(`${where} → ${res.status} ${JSON.stringify(body)}`);
+  err.code = code;
+  err.status = res.status;
+  return err;
+}
+
+/** The sentence for a failure, chosen by code. Never a stack trace, never a status number alone. */
+function sentenceFor(e) {
+  const code = (e && e.code) || '';
+  if (code === 'invite_invalid') return t('circleErrInviteInvalid');
+  if (code === 'invite_used') return t('circleErrInviteUsed');
+  if (code === 'rate_limited' || e?.status === 429) return t('circleErrTooMany');
+  if (code === 'device_registered') return t('circleErrDeviceRegistered');
+  if (code === 'member_exists') return t('circleErrMemberExists');
+  // `platform/net.js`'s own vocabulary — `transport`, `timeout`, `blocked` — rather than a
+  // guess at one. `blocked` is the CSP refusing the origin, which from the user's chair is the
+  // same event as no connection and needs the same sentence.
+  if (code === 'transport' || code === 'timeout' || code === 'blocked') return t('circleErrOffline');
+  // Two cases the sync section already has the right words for. Reusing them is not laziness:
+  // one product should not have two sentences for "this Mac may no longer talk to the relay".
+  if (code === 'bad_auth' || code === 'not_a_member' || code === 'device_revoked') return t('syncErrAuth');
+  if (code === 'protocol_too_old') return t('syncErrProtocol');
+  if (e instanceof IdentityUnavailableError) return t('circleErrNoKeystore');
+  return t('familyFailed', String((e && e.message) || e));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 8. The surface
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// NOT a sheet, for `pairingui.js`'s reason: `closeTopSheet()` (which `main.js` binds to Escape)
+// removes the scrim without calling `spec.onClose`, and a join flow that vanished on Escape
+// while a redemption was in flight would leave a member on the relay and no record of it on this
+// Mac. This is an opaque surface with its own captured key handler, and it is also the right
+// register — deliverables 14 and 15 say "flow" and "screen", and the join screen is the one
+// moment this product gets to introduce itself to somebody who did not choose it.
+
+let layer = null;
+let keyHandler = null;
+let lastFocus = null;
+
+/** Everything the open screen holds. Replaced wholesale on every transition. */
+let view = null;
+
+export const circleScreenOpen = () => (layer ? layer.dataset.screen : null);
+
+/** Exported for the DOM test: what the screen believes, without reading the DOM. */
+export function circleScreenState() {
+  if (!view) return null;
+  return Object.freeze({
+    screen: view.screen,
+    step: view.step,
+    busy: view.busy,
+    code: view.code,
+    origin: view.origin,
+    circleName: view.circleName,
+    displayName: view.displayName,
+    colorRef: view.colorRef,
+    taken: [...view.taken],
+    members: view.members.length,
+    keysPending: view.keysPending,
+    notice: view.notice,
+    problem: view.problem,
+  });
+}
+
+/**
+ * Open one of the two screens.
+ *
+ * 20.6 is checked HERE and not only in the section, because the section is not the only possible
+ * caller and "one Familienkreis per user" must not depend on which button a future menu item is
+ * wired to.
+ *
+ * @param {{screen:'create'|'join'}} spec
+ */
+export function openCircleScreen({ screen } = {}) {
+  if (layer) return layer;
+  if (screen !== CIRCLE_SCREEN.create && screen !== CIRCLE_SCREEN.join) {
+    throw new Error(`openCircleScreen: screen must be 'create' or 'join', got ${JSON.stringify(screen)}`);
+  }
+  if (familyCircle()) { toast(t('circleErrAlready')); return null; }
+
+  ensureCss();
+  lastFocus = document.activeElement;
+  const s = (store.state && store.state.settings) || {};
+  view = {
+    screen,
+    step: 'form',
+    busy: false,
+    origin: typeof s[CIRCLE_PREFS.origin] === 'string' ? s[CIRCLE_PREFS.origin] : '',
+    originFromPaste: false,
+    code: '',
+    circleName: '',
+    displayName: '',
+    colorRef: PALETTE[0].ref,
+    taken: new Set(),
+    members: [],
+    keysPending: true,
+    spaceId: null,
+    notice: null,       // calm, expected, not a failure — e.g. a colour somebody else holds
+    problem: null,      // an actual refusal, said in one sentence
+  };
+
+  layer = el('div', 'circle');
+  layer.setAttribute('role', 'dialog');
+  layer.setAttribute('aria-modal', 'true');
+  layer.dataset.screen = screen;
+
+  keyHandler = (e) => {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      e.preventDefault();
+      // Escape closes and nothing else. There is no protocol session to refuse here — unlike
+      // pairing — so leaving is exactly as consequential as not having started.
+      closeCircleScreen();
+      return;
+    }
+    if (e.key === 'Tab') {
+      const f = focusables();
+      if (!f.length) return;
+      const i = f.indexOf(document.activeElement);
+      const next = e.shiftKey ? (i <= 0 ? f.length - 1 : i - 1) : (i === f.length - 1 ? 0 : i + 1);
+      f[next].focus();
+      e.preventDefault();
+    }
+  };
+  window.addEventListener('keydown', keyHandler, true);
+
+  document.body.appendChild(layer);
+  document.body.classList.add('circle-on');
+  render();
+  return layer;
+}
+
+/** @param {{silent?:boolean}} [opts] */
+export function closeCircleScreen(opts = {}) {
+  if (!layer) return false;
+  if (keyHandler) window.removeEventListener('keydown', keyHandler, true);
+  keyHandler = null;
+  layer.remove();
+  layer = null;
+  document.body.classList.remove('circle-on');
+  const finished = view && view.step === 'done';
+  view = null;
+  try { lastFocus?.focus?.(); } catch { /* the node may be gone */ }
+  lastFocus = null;
+  // A completed create or join needs the store re-derived into the space it now belongs to —
+  // `usePersonalSpace()` and its family twin may not be called after `init()` (ADR 006 §9.4),
+  // and `board.json` is the truth, so re-deriving costs nothing. It is the one place in this
+  // flow that asks for a reload, and it never happens on a screen somebody merely closed.
+  if (finished && !opts.silent) ports.reload();
+  return true;
+}
+
+const focusables = () => (layer
+  ? [...layer.querySelectorAll('button:not([disabled]), input:not([disabled]), [tabindex="0"]:not([disabled])')]
+  : []);
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 9. Rendering
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+function render() {
+  if (!layer || !view) return null;
+  const keep = document.activeElement?.id || null;
+  const caret = document.activeElement?.selectionStart ?? null;
+  layer.textContent = '';
+  const card = el('div', 'circle-card');
+  card.appendChild(head());
+  card.appendChild(body());
+  layer.appendChild(card);
+  layer.setAttribute('aria-label', titleText());
+  restoreFocus(keep, caret);
+  return layer;
+}
+
+/**
+ * Re-rendering must not steal the caret out of the field somebody is typing into. Fields carry
+ * stable ids for exactly this; a control that has gone away simply does not get focus back.
+ */
+function restoreFocus(id, caret) {
+  if (!id) {
+    const first = focusables()[0];
+    try { first?.focus?.(); } catch { /* nothing focusable yet */ }
+    return;
+  }
+  const node = layer.querySelector(`#${CSS.escape(id)}`);
+  if (!node) return;
+  try {
+    node.focus();
+    if (caret != null && typeof node.setSelectionRange === 'function') node.setSelectionRange(caret, caret);
+  } catch { /* a disabled control is not focusable */ }
+}
+
+function titleText() {
+  if (view.step === 'done') {
+    return view.screen === CIRCLE_SCREEN.create ? t('circleCreatedTitle', view.circleName) : t('circleJoinedTitle');
+  }
+  return view.screen === CIRCLE_SCREEN.create ? t('circleCreateTitle') : t('circleJoinTitle');
+}
+
+function head() {
+  const top = el('header', 'circle-top');
+  top.appendChild(el('p', 'circle-kicker', t('circleKicker')));
+  const acts = el('div', 'circle-top-acts');
+  // 13.7 — the toggle travels with the screen. A reader who cannot read this screen cannot
+  // reach Settings to change the language, which is the whole argument.
+  const lang = el('button', 'circle-lang');
+  lang.type = 'button';
+  lang.id = 'circle-lang';
+  lang.textContent = getLang() === 'de' ? 'English' : 'Deutsch';
+  lang.addEventListener('click', () => { setLang(getLang() === 'de' ? 'en' : 'de'); render(); });
+  acts.appendChild(lang);
+  const x = el('button', 'circle-x', '✕');
+  x.type = 'button';
+  x.id = 'circle-x';
+  x.title = t('close');
+  x.setAttribute('aria-label', t('close'));
+  x.addEventListener('click', () => closeCircleScreen());
+  acts.appendChild(x);
+  top.appendChild(acts);
+  return top;
+}
+
+function body() {
+  if (view.step === 'done') {
+    return view.screen === CIRCLE_SCREEN.create ? renderCreated() : renderJoined();
+  }
+  return view.screen === CIRCLE_SCREEN.create ? renderCreateForm() : renderJoinForm();
+}
+
+// ── 9.1 shared bits ──────────────────────────────────────────────────────────────────────────
+
+function labelled(id, labelText, node, hint) {
+  const f = el('div', 'circle-field');
+  const l = el('label', null, labelText);
+  l.htmlFor = id;
+  f.appendChild(l);
+  f.appendChild(node);
+  if (hint) f.appendChild(el('p', 'circle-hint', hint));
+  return f;
+}
+
+function textField(id, value, placeholder, maxLength, onInput) {
+  const i = el('input');
+  i.type = 'text';
+  i.id = id;
+  i.className = 'circle-input';
+  i.value = value;
+  i.placeholder = placeholder;
+  i.maxLength = maxLength;
+  i.autocomplete = 'off';
+  i.spellcheck = false;
+  i.addEventListener('input', () => onInput(i.value));
+  return i;
+}
+
+/**
+ * The colour picker — F15's design note: *"the join flow prevents picking a colour already taken
+ * by another member"*.
+ *
+ * WHAT "PREVENTS" CAN HONESTLY MEAN HERE, AND WHY IT IS TWO MECHANISMS. A joiner is not yet a
+ * member, and `GET /spaces/:id/members` requires an active membership, so before redemption
+ * there is no way to learn the roster — the relay is right to refuse it, and any endpoint that
+ * did not would turn an invite id into a roster oracle. So:
+ *
+ *   · a tone known to be taken is DISABLED here, not merely marked: it cannot be chosen at all,
+ *     which is what the note asks for;
+ *   · knowledge comes from the redemption itself. `invites.js` puts the colour check inside the
+ *     transaction and rolls the whole redemption back, so a collision costs one round trip, the
+ *     code still works, and the tone joins `view.taken` — after which it is disabled like any
+ *     other. The create screen has the same picker with an empty `taken` set, because the
+ *     founder is the first member.
+ *
+ * The refusal is rendered as a NOTICE and not as a problem: somebody else liking green is not a
+ * failure, and calling it one would be the join flow's first impression.
+ */
+function colorPicker(selected, taken, onPick) {
+  const row = el('div', 'circle-colors');
+  row.setAttribute('role', 'radiogroup');
+  row.setAttribute('aria-label', t('circleColorLabel'));
+  for (const tone of PALETTE) {
+    const isTaken = taken.has(tone.ref);
+    const chosen = tone.ref === selected;
+    const b = el('button', 'circle-color' + (chosen ? ' on' : '') + (isTaken ? ' taken' : ''));
+    b.type = 'button';
+    b.id = `circle-color-${tone.ref}`;
+    b.dataset.ref = tone.ref;
+    b.style.setProperty('--tone', colorOf(tone.ref));
+    b.disabled = isTaken;
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', String(chosen));
+    const name = paletteName(tone.ref, getLang());
+    b.setAttribute('aria-label', isTaken ? `${name} — ${t('circleColorTaken')}` : name);
+    b.title = b.getAttribute('aria-label');
+    // HUE IS NEVER THE ONLY CHANNEL — `palette.js` says so about the board and it is true here
+    // too. The chosen tone carries a tick and the taken ones a stroke, so the two states survive
+    // a colour-blind reader, a bad monitor and a screenshot in grey.
+    if (chosen) b.appendChild(el('span', 'circle-color-mark', '✓'));
+    else if (isTaken) b.appendChild(el('span', 'circle-color-mark', '╱'));
+    if (!isTaken) b.addEventListener('click', () => onPick(tone.ref));
+    row.appendChild(b);
+  }
+  return row;
+}
+
+/**
+ * The relay address, shown ONLY when there is not one already.
+ *
+ * On the join screen it is usually absent, because `parseInvitePaste` lifts it out of whatever
+ * Mom pasted. That is the difference between "one screen" and "one screen plus a URL she has to
+ * find", and it is the whole reason the paste field parses rather than filters.
+ */
+function originField() {
+  if (view.origin && !view.originFromPaste) return null;
+  const node = textField('circle-origin', view.origin, 'https://…', 200, (v) => {
+    view.origin = v.trim();
+    view.originFromPaste = false;
+  });
+  // An address lifted out of the invitation still gets a field, so a typo in the invitation is
+  // fixable — but not the long explanation, because the line above the field has just said
+  // where the value came from and two sentences about one field is where a form starts to feel
+  // like a form.
+  return labelled('circle-origin', t('circleRelayLabel'), node,
+    view.originFromPaste ? null : t('circleRelayHint'));
+}
+
+function notices(parent) {
+  if (view.notice) parent.appendChild(el('p', 'circle-notice', view.notice));
+  if (view.problem) {
+    const p = el('p', 'circle-problem');
+    p.setAttribute('role', 'alert');
+    p.textContent = view.problem;
+    parent.appendChild(p);
+  }
+}
+
+function submitRow(id, label, onClick) {
+  const acts = el('div', 'circle-acts');
+  const b = el('button', 'circle-go', view.busy ? t('circleWorking') : label);
+  b.type = 'button';
+  b.id = id;
+  b.disabled = view.busy;
+  b.addEventListener('click', onClick);
+  acts.appendChild(b);
+  return acts;
+}
+
+// ── 9.2 create — LZP-601, deliverable 14 ─────────────────────────────────────────────────────
+
+function renderCreateForm() {
+  const b = el('div', 'circle-body');
+  b.appendChild(el('h1', 'circle-title', t('circleCreateTitle')));
+  b.appendChild(el('p', 'circle-lead', t('circleCreateLead')));
+
+  // 20.5 and 20.6, at the moment somebody is told they are the admin — which is the moment a
+  // belief about what "admin" means gets formed. Said as a plain fact, not as a disclaimer.
+  const framing = el('p', 'circle-framing', t('circleAdminFraming'));
+  b.appendChild(framing);
+
+  const originRow = originField();
+  if (originRow) b.appendChild(originRow);
+
+  b.appendChild(labelled(
+    'circle-name',
+    t('circleNameLabel'),
+    textField('circle-name', view.circleName, t('circleNamePlaceholder'), INVITE_UI.maxCircleName,
+      (v) => { view.circleName = v; }),
+  ));
+
+  b.appendChild(labelled(
+    'circle-display',
+    t('circleYourNameLabel'),
+    textField('circle-display', view.displayName, t('circleYourNamePlaceholder'), INVITE_UI.maxDisplayName,
+      (v) => { view.displayName = v; }),
+  ));
+
+  b.appendChild(labelled(
+    `circle-color-${view.colorRef}`,
+    t('circleColorLabel'),
+    colorPicker(view.colorRef, view.taken, (ref) => { view.colorRef = ref; render(); }),
+  ));
+
+  notices(b);
+  b.appendChild(submitRow('circle-create-go', t('circleCreateSubmit'), submitCreate));
+  b.appendChild(el('p', 'circle-foot', t('circleCreateFoot')));
+  return b;
+}
+
+async function submitCreate() {
+  if (view.busy) return;
+  view.problem = null;
+  view.notice = null;
+  const name = view.circleName.trim();
+  const display = view.displayName.trim();
+  if (!view.origin) { fail(t('familyNeedRelay')); return; }
+  try {
+    normalizeOrigin(view.origin);
+  } catch (e) {
+    fail(e instanceof NetError && schemeOf(view.origin) === 'http:'
+      ? say(insecureOriginMessage())
+      : t('familyNeedRelay'));
+    return;
+  }
+  if (!name) { fail(t('circleNeedName')); return; }
+  if (!display) { fail(t('circleNeedYourName')); return; }
+  // The probe, before the identity is minted and before the relay is addressed: an engine that
+  // cannot do ECDH must meet one sentence, not a TypeError four steps in.
+  if (!(await assertSuiteAvailable())) return;
+
+  view.busy = true;
+  render();
+  try {
+    const out = await createCircleOnRelay(view.origin, view.colorRef);
+    await rememberCircle({
+      [CIRCLE_PREFS.origin]: view.origin,
+      [CIRCLE_PREFS.space]: out.spaceId,
+      [CIRCLE_PREFS.name]: name,
+      [CIRCLE_PREFS.role]: CIRCLE_ROLE.admin,
+      [CIRCLE_PREFS.member]: out.memberId,
+      [CIRCLE_PREFS.display]: display,
+      [CIRCLE_PREFS.color]: view.colorRef,
+      // The founder holds epoch 1 already — there is nothing to wait for, which is the shape of
+      // D9 seen from the other side.
+      [CIRCLE_PREFS.pending]: false,
+      [CIRCLE_PREFS.joinedAt]: ports.today(),
+    });
+    view.busy = false;
+    view.circleName = name;
+    view.displayName = display;
+    view.spaceId = out.spaceId;
+    view.code = out.code;
+    view.step = 'done';
+    render();
+  } catch (e) {
+    view.busy = false;
+    fail(sentenceFor(e));
+    console.warn('[circle] create failed', e);
+  }
+}
+
+function renderCreated() {
+  const b = el('div', 'circle-body');
+  b.appendChild(el('h1', 'circle-title', t('circleCreatedTitle', view.circleName)));
+  b.appendChild(el('p', 'circle-lead', t('circleCreatedLead')));
+
+  // The one member there is, so deliverable 25's "fresh Familienkreis with one member" is a
+  // designed state rather than an empty list.
+  b.appendChild(memberStrip([{ me: true, colorRef: view.colorRef, name: view.displayName }]));
+
+  if (view.code) {
+    b.appendChild(el('p', 'circle-label', t('circleCodeLabel')));
+    const code = el('p', 'circle-code', view.code);
+    code.id = 'circle-code';
+    b.appendChild(code);
+    b.appendChild(el('p', 'circle-hint', t('circleCodeTtl', INVITE_UI.ttlDays)));
+    b.appendChild(el('p', 'circle-hint', t('circleCodeShare')));
+  } else {
+    b.appendChild(el('p', 'circle-notice', t('circleNoCodeYet')));
+  }
+
+  notices(b);
+
+  const acts = el('div', 'circle-acts');
+  if (view.code) {
+    const copy = el('button', 'circle-ghost', t('circleCopyInvite'));
+    copy.type = 'button';
+    copy.id = 'circle-copy';
+    copy.addEventListener('click', async () => {
+      try {
+        await ports.clipboard(invitationText({
+          origin: view.origin, code: view.code, name: view.circleName,
+        }));
+        toast(t('circleCopied'));
+      } catch {
+        // Not a failure worth a red line: the code is on screen and can be read out loud.
+        toast(t('circleCopyFailed'));
+      }
+    });
+    acts.appendChild(copy);
+  }
+  const done = el('button', 'circle-go', t('circleDone'));
+  done.type = 'button';
+  done.id = 'circle-done';
+  done.addEventListener('click', () => closeCircleScreen());
+  acts.appendChild(done);
+  b.appendChild(acts);
+
+  // D9 from the admin's side: nothing is asked of him, and nothing will be.
+  b.appendChild(el('p', 'circle-foot', t('circleCreatedD9')));
+  return b;
+}
+
+// ── 9.3 join — LZP-602, deliverable 15. The screen this epic is judged on. ────────────────────
+
+function renderJoinForm() {
+  const b = el('div', 'circle-body');
+  b.appendChild(el('h1', 'circle-title', t('circleJoinTitle')));
+  b.appendChild(el('p', 'circle-lead', t('circleJoinLead')));
+
+  // THE HUGE PASTE FIELD. One field, and it takes whatever she was sent: a bare code, a code
+  // with dashes, a code inside a sentence, or the whole invitation with the address in it.
+  const paste = el('input');
+  paste.type = 'text';
+  paste.id = 'circle-code-in';
+  paste.className = 'circle-paste';
+  paste.value = view.code;
+  paste.placeholder = t('circleCodePlaceholder');
+  paste.autocomplete = 'off';
+  paste.spellcheck = false;
+  paste.setAttribute('aria-label', t('circleCodeInputLabel'));
+  // ⚠ THE FIELD IS AN `<input>`, AND AN `<input>` STRIPS NEWLINES — it does not turn them into
+  // spaces, it deletes them (HTML "value sanitization algorithm"). So the ONE gesture this screen
+  // is designed around — select the whole invitation mail, paste — arrives here as
+  // „…diesen Code ein:J17Z-XSXN-7CSQServer: http://…", with the code welded to the next word.
+  // `parseInvitePaste` then correctly reports NO CODE, because a 20-character token is not a
+  // code and it refuses to go fishing inside one (see its own case 1b comment: a filter would
+  // read twelve valid characters out of „Du bist eingeladen").
+  //
+  // The function was right and the plumbing was wrong, so the fix is in the plumbing: on a real
+  // paste the ORIGINAL string is still intact on the clipboard event, before the field ever
+  // sanitises it. Parse that. `input` stays as it is for typing, where there are no newlines to
+  // lose. Found by pasting a whole invitation into the real field in a real browser; the tier-2
+  // test exercised the pure function, which passes either way.
+  const readFrom = (raw) => {
+    const parsed = parseInvitePaste(raw);
+    const changedOrigin = parsed.origin && parsed.origin !== view.origin;
+    view.code = parsed.code;
+    if (parsed.origin) {
+      view.origin = parsed.origin;
+      view.originFromPaste = true;
+    }
+    // NORMALISE IN PLACE — but never take away text this function did not understand. `found`
+    // is exactly that permission: a whole code becomes the code, an unfinished token gets its
+    // groups, and prose is left as it was written. Silently emptying a field somebody is typing
+    // into is the worst thing a "helpful" input can do.
+    if (parsed.found !== 'none' && paste.value !== parsed.code) paste.value = parsed.code;
+    // Re-render only when something structural changed, so the caret does not jump while she is
+    // still typing the last group.
+    if (changedOrigin) render();
+  };
+  const readPaste = () => readFrom(paste.value);
+  paste.addEventListener('input', readPaste);
+  paste.addEventListener('paste', (e) => {
+    const raw = e.clipboardData && e.clipboardData.getData('text');
+    if (!raw) { setTimeout(readPaste, 0); return; }   // no clipboard access: the old path
+    e.preventDefault();                                // we are writing the field ourselves
+    readFrom(raw);
+    if (!paste.value) paste.value = raw;               // understood nothing: leave her text alone
+  });
+  b.appendChild(labelled('circle-code-in', t('circleCodeInputLabel'), paste,
+    view.originFromPaste ? t('circleCodeFromPaste', view.origin) : null));
+
+  const originRow = originField();
+  if (originRow) b.appendChild(originRow);
+
+  b.appendChild(labelled(
+    'circle-display',
+    t('circleYourNameLabel'),
+    textField('circle-display', view.displayName, t('circleJoinNamePlaceholder'), INVITE_UI.maxDisplayName,
+      (v) => { view.displayName = v; }),
+  ));
+
+  b.appendChild(labelled(
+    `circle-color-${view.colorRef}`,
+    t('circleColorLabel'),
+    colorPicker(view.colorRef, view.taken, (ref) => { view.colorRef = ref; render(); }),
+  ));
+
+  notices(b);
+  b.appendChild(submitRow('circle-join-go', t('circleJoinSubmit'), submitJoin));
+  b.appendChild(el('p', 'circle-foot', t('circleJoinFoot')));
+  return b;
+}
+
+async function submitJoin() {
+  if (view.busy) return;
+  view.problem = null;
+  const display = view.displayName.trim();
+  if (inviteCodeChars(view.code).length !== INVITE_UI.codeChars) { fail(t('circleNeedCode')); return; }
+  if (!view.origin) { fail(t('circleNeedRelayForJoin')); return; }
+  try {
+    normalizeOrigin(view.origin);
+  } catch (e) {
+    fail(e instanceof NetError && schemeOf(view.origin) === 'http:'
+      ? say(insecureOriginMessage())
+      : t('circleNeedRelayForJoin'));
+    return;
+  }
+  if (!display) { fail(t('circleNeedYourName')); return; }
+  if (!(await assertSuiteAvailable())) return;
+
+  view.busy = true;
+  view.notice = null;
+  render();
+  try {
+    const out = await redeemOnRelay(view.origin, view.code, view.colorRef);
+    await rememberCircle({
+      [CIRCLE_PREFS.origin]: view.origin,
+      [CIRCLE_PREFS.space]: out.spaceId,
+      // The circle's name lives in the encrypted stream, which this Mac cannot read yet. An
+      // empty string is the truthful value; the section shows „Familienkreis" until the name
+      // arrives, rather than inventing one.
+      [CIRCLE_PREFS.name]: '',
+      [CIRCLE_PREFS.role]: CIRCLE_ROLE.member,
+      [CIRCLE_PREFS.member]: out.memberId,
+      [CIRCLE_PREFS.display]: display,
+      [CIRCLE_PREFS.color]: view.colorRef,
+      [CIRCLE_PREFS.pending]: out.keysPending,
+      [CIRCLE_PREFS.joinedAt]: ports.today(),
+    });
+    view.busy = false;
+    view.displayName = display;
+    view.spaceId = out.spaceId;
+    view.members = out.members;
+    view.keysPending = out.keysPending;
+    view.step = 'done';
+    render();
+  } catch (e) {
+    view.busy = false;
+    if (e && e.code === 'color_taken') {
+      // NOT A FAILURE, and it must not read as one. The invite was rolled back, so the same
+      // code still works; the tone is now known to be taken, the picker disables it, and a free
+      // one is offered by name. One extra click at worst.
+      view.taken.add(view.colorRef);
+      const next = firstFreeColorRef([...view.taken]);
+      view.colorRef = next;
+      view.notice = t('circleColorTakenSwap', paletteName(next, getLang()));
+      view.problem = null;
+      render();
+      return;
+    }
+    fail(sentenceFor(e));
+    console.warn('[circle] join failed', e);
+  }
+}
+
+/**
+ * D9's designed screen. Read the four marked lines against `DESIGN-DECISIONS.md` § D9.
+ *
+ * There is no timer here, no progress element, no polling and no retry control. The panel is
+ * the same whether the keys arrive in four seconds or tomorrow morning, because from Mom's chair
+ * those are the same event: something that happens without her.
+ */
+function renderJoined() {
+  const b = el('div', 'circle-body');
+  // D9-4 — the title of the waiting state is an arrival, not a wait.
+  b.appendChild(el('h1', 'circle-title', t('circleJoinedTitle')));
+  b.appendChild(el('p', 'circle-lead', t('circleJoinedLead')));
+
+  // D9-1 — she is IMMEDIATELY a member, and the member list says so (15.4). The roster is
+  // pseudonymous until the keys arrive, so it shows what it honestly has: how many people are in
+  // the circle, in their colours, with her own marked. Inventing names would be worse than
+  // saying when the names come.
+  const rows = [{ me: true, colorRef: view.colorRef, name: view.displayName }];
+  for (const m of view.members) {
+    if (!m || m.memberId === (familyCircle()?.memberId)) continue;
+    if (m.removedAt) continue;
+    rows.push({ me: false, colorRef: typeof m.colorRef === 'string' ? m.colorRef : PALETTE[9].ref, name: '' });
+  }
+  b.appendChild(memberStrip(rows));
+  b.appendChild(el('p', 'circle-hint', t('circleJoinedMembers', rows.length)));
+
+  if (view.keysPending) {
+    const wait = el('div', 'circle-wait');
+    // D9-2 — ONE calm German-first line. No spinner, nothing animated, nothing red.
+    const line = el('p', 'circle-wait-line', t('circleWaiting'));
+    line.id = 'circle-waiting';
+    wait.appendChild(line);
+    // D9-3 — it resolves itself, and nobody is asked to do anything about it.
+    wait.appendChild(el('p', 'circle-hint', t('circleWaitingCalm')));
+    b.appendChild(wait);
+  } else {
+    b.appendChild(el('p', 'circle-wait-line', t('circleKeysHere')));
+  }
+
+  const acts = el('div', 'circle-acts');
+  const done = el('button', 'circle-go', t('circleDone'));
+  done.type = 'button';
+  done.id = 'circle-done';
+  done.addEventListener('click', () => closeCircleScreen());
+  acts.appendChild(done);
+  b.appendChild(acts);
+
+  // 20.5 / principle 8, said once at the moment it matters most: joining changed nothing about
+  // what anybody can see of her.
+  b.appendChild(el('p', 'circle-foot', t('circleJoinedPrivacy')));
+  return b;
+}
+
+/** The member list of 15.4: colour, initial, name — and no more than the roster actually holds. */
+function memberStrip(rows) {
+  const strip = el('div', 'circle-members');
+  strip.id = 'circle-members';
+  for (const r of rows) {
+    const chip = el('div', 'circle-member' + (r.me ? ' me' : ''));
+    const dot = el('span', 'circle-dot', r.name ? memberInitial(r.name) : '');
+    dot.style.setProperty('--tone', colorOf(r.colorRef));
+    chip.appendChild(dot);
+    chip.appendChild(el('span', 'circle-member-name', r.name || t('circleMemberUnnamed')));
+    if (r.me) chip.appendChild(el('span', 'circle-you', t('circleYou')));
+    strip.appendChild(chip);
+  }
+  return strip;
+}
+
+/** One sentence, in the problem slot, and a re-render. Never a toast for something on screen. */
+function fail(sentence) {
+  view.problem = sentence;
+  render();
+}
+
+/** The scheme a person actually typed, or `''` when what they typed is not a URL at all. */
+function schemeOf(raw) {
+  try {
+    return new URL(String(raw)).protocol;
+  } catch {
+    return '';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 10. The settings entry point — story 15.1
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * „Familienkreis" — the ONLY place in the product where family sharing exists before somebody
+ * asks for it.
+ *
+ * Story 15.1: *"the family features exist only behind an explicit 'Familienkreis erstellen /
+ * beitreten' entry point in settings."* This is that entry point, and it is two buttons and a
+ * sentence. Nothing is probed, no key is minted and no request is made by drawing it — see
+ * `assertSuiteAvailable`, which runs on the click.
+ *
+ * Once a circle exists the section becomes facts and one control: 20.6 means there is no second
+ * circle to create and none to join, so both buttons are gone rather than disabled. Leaving
+ * (20.3), removal (20.2), rename and delete (20.1/20.4) are LZP-603…607 and belong to the admin
+ * panel, not here.
+ *
+ * @param {HTMLElement} body the settings sheet body
+ * @param {{rebuild:Function, close:Function}} api
+ */
+export function buildFamilyCircleSection(body, api) {
+  body.appendChild(el('div', 'section-title', t('circleSectionTitle')));
+  const circle = familyCircle();
+
+  if (circle) {
+    body.appendChild(el('p', 'hint', circle.name
+      ? t('circleMemberOf', circle.name)
+      : t('circleMemberOfUnnamed')));
+    body.appendChild(el('p', 'hint', circle.role === CIRCLE_ROLE.admin
+      ? t('circleYouAdmin')
+      : t('circleYouMember')));
+    body.appendChild(memberStrip([{ me: true, colorRef: circle.colorRef, name: circle.displayName }]));
+    if (circle.keysPending) {
+      // The same calm line the join screen showed, in the place somebody goes looking when they
+      // wonder. Still not an error, still nothing to do.
+      body.appendChild(el('p', 'hint', t('circleWaiting')));
+    }
+    if (circle.role === CIRCLE_ROLE.admin) {
+      const acts = el('div', 'circle-row');
+      const invite = el('button', 'btn-ghost', t('circleNewInvite'));
+      invite.type = 'button';
+      invite.addEventListener('click', async () => {
+        if (!(await assertSuiteAvailable())) return;
+        invite.disabled = true;
+        try {
+          const code = await mintInviteOnRelay(circle.origin, circle.spaceId);
+          await ports.clipboard(invitationText({ origin: circle.origin, code, name: circle.name }));
+          toast(t('circleNewInviteCopied', code));
+        } catch (e) {
+          toast(sentenceFor(e));
+        } finally {
+          invite.disabled = false;
+        }
+      });
+      acts.appendChild(invite);
+      body.appendChild(acts);
+    }
+    body.appendChild(el('p', 'hint', t('circleOneOnly')));
+    return;
+  }
+
+  const row = el('div', 'circle-row');
+  const open = (screen) => {
+    // The sheet must go: the screen replaces the view, and a scrim behind it would be visible
+    // through nothing at all.
+    try { api?.close?.(); } catch { /* an already-closed sheet is fine */ }
+    openCircleScreen({ screen });
+  };
+  const create = el('button', 'btn-primary', t('circleCreateBtn'));
+  create.type = 'button';
+  create.addEventListener('click', () => open(CIRCLE_SCREEN.create));
+  const join = el('button', 'btn-ghost', t('circleJoinBtn'));
+  join.type = 'button';
+  join.addEventListener('click', () => open(CIRCLE_SCREEN.join));
+  row.appendChild(create);
+  row.appendChild(join);
+  body.appendChild(row);
+  body.appendChild(el('p', 'hint', t('circleSectionHint')));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 11. The styles — see the file header on why they live here for now
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The `<style>` id, exported so a test can assert exactly one of them exists. */
+export const CIRCLE_CSS_ID = 'lzp-circle-css';
+
+/**
+ * Every token here is one `app.css` already defines. The screens borrow the unlock screen's and
+ * the pairing screen's material — `--chrome` ground, `--surface` cards, the ink hierarchy, no
+ * shadow, no motion — because they are the same kind of moment: rare, consequential, met once.
+ *
+ * The paste field is the largest input in the product. That is the point: it is the one thing on
+ * Mom's screen she has to do, and it should be impossible to miss and impossible to mis-hit.
+ */
+export const CIRCLE_CSS = `
+.circle {
+  position: fixed; inset: 0; z-index: 86; overflow-y: auto;
+  background: var(--chrome); padding: 40px 24px 56px;
+  -webkit-font-smoothing: antialiased;
+}
+body.circle-on { overflow: hidden; }
+.circle-card { width: 100%; max-width: 640px; margin: 0 auto; }
+
+.circle-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 24px; }
+.circle-kicker { margin: 0; font: 500 10px var(--font); letter-spacing: .8px; text-transform: uppercase; color: var(--ink-4); }
+.circle-top-acts { display: flex; align-items: center; gap: 8px; }
+.circle-lang {
+  font: 500 11px var(--font); color: var(--ink-2); border: 1px solid var(--field-border);
+  border-radius: 5px; background: var(--surface); height: 22px; padding: 0 9px;
+}
+.circle-lang:hover { background: var(--hover); color: var(--ink-1); }
+.circle-x { font: 400 13px var(--font); color: var(--ink-3); height: 22px; width: 22px; border-radius: 5px; }
+.circle-x:hover { background: var(--hover); color: var(--ink-1); }
+
+.circle-title { margin: 0 0 8px; font: 600 21px/1.3 var(--font); color: var(--ink-1); letter-spacing: -.2px; }
+.circle-lead { margin: 0 0 20px; font: 400 13.5px/1.65 var(--font); color: var(--ink-2); max-width: 58ch; }
+.circle-hint { margin: 6px 0 0; font: 400 11.5px/1.6 var(--font); color: var(--ink-3); max-width: 58ch; }
+.circle-foot { margin: 22px 0 0; font: 400 11.5px/1.6 var(--font); color: var(--ink-3); max-width: 58ch; }
+.circle-label { margin: 18px 0 6px; font: 500 11px var(--font); letter-spacing: .5px; text-transform: uppercase; color: var(--ink-4); }
+
+/* 20.5 — the admin framing. A quiet rule, not a warning box: it is a fact about the product,
+   and a coloured panel would make it read as a caveat. */
+.circle-framing {
+  margin: 0 0 22px; padding-left: 11px; border-left: 2px solid var(--line-1);
+  font: 400 12px/1.65 var(--font); color: var(--ink-2); max-width: 58ch;
+}
+
+.circle-field { margin: 0 0 16px; }
+.circle-field > label { display: block; margin: 0 0 6px; font: 500 11.5px var(--font); color: var(--ink-2); }
+.circle-input {
+  width: 100%; height: 38px; padding: 0 11px;
+  border: 1px solid var(--field-border); border-radius: 7px; background: var(--surface);
+  font: 400 13.5px var(--font); color: var(--ink-1);
+}
+.circle-input::placeholder { color: var(--ink-4); }
+.circle-input:focus { outline: 2px solid var(--ink-1); outline-offset: 1px; border-color: var(--ink-1); }
+
+/* THE HUGE PASTE FIELD (15.3). Deliberately the largest input in the product. */
+.circle-paste {
+  width: 100%; height: 68px; padding: 0 16px;
+  border: 1.5px solid var(--field-border); border-radius: 10px; background: var(--surface);
+  font: 600 26px/1 var(--mono); letter-spacing: 3px; color: var(--ink-1); text-align: center;
+}
+.circle-paste::placeholder { color: var(--ink-4); font-weight: 400; letter-spacing: 3px; }
+.circle-paste:focus { outline: 2px solid var(--ink-1); outline-offset: 1px; border-color: var(--ink-1); }
+
+/* the code the admin hands over — read across a room, typed on the other Mac */
+.circle-code {
+  font: 600 32px/1.2 var(--mono); letter-spacing: 3px; color: var(--ink-1);
+  background: var(--surface); border: 1px solid var(--line-1); border-radius: 9px;
+  padding: 18px 20px; text-align: center; margin: 0; user-select: all;
+}
+
+/* the ten tones — the same palette as categories, a separate namespace (F15) */
+.circle-colors { display: flex; flex-wrap: wrap; gap: 10px; }
+.circle-color {
+  width: 32px; height: 32px; border-radius: 50%; background: var(--tone);
+  border: 0; display: flex; align-items: center; justify-content: center;
+  color: #fff; font: 600 14px/1 var(--font);
+}
+/* The selection ring sits OUTSIDE the tone, so the tone itself is never altered by being
+   chosen — which is the whole point of a colour picker. */
+.circle-color.on { box-shadow: 0 0 0 2.5px var(--chrome), 0 0 0 4.5px var(--ink-1); }
+.circle-color.taken { cursor: default; opacity: .3; }
+.circle-color.taken .circle-color-mark { font-weight: 400; }
+.circle-color:focus-visible { outline: 2px solid var(--ink-1); outline-offset: 4px; }
+
+/* 15.4 — colour, initial, name */
+.circle-members { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 0; }
+.circle-member {
+  display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 11px 0 4px;
+  border: 1px solid var(--line-1); border-radius: 15px; background: var(--surface);
+  font: 400 12px var(--font); color: var(--ink-2);
+}
+.circle-member.me { border-color: var(--field-border); }
+.circle-dot {
+  width: 22px; height: 22px; border-radius: 50%; background: var(--tone); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font: 600 11px var(--font);
+}
+.circle-you { color: var(--ink-4); font-size: 11px; }
+
+/* D9 — the waiting state. A quiet panel, no border colour, no icon, nothing that moves. */
+.circle-wait { margin: 20px 0 0; padding: 14px 16px; background: var(--hover); border-radius: 9px; }
+.circle-wait-line { margin: 0; font: 400 13px/1.65 var(--font); color: var(--ink-1); max-width: 58ch; }
+.circle-wait .circle-hint { margin-top: 7px; }
+
+/* An expected outcome someone else caused — a colour already taken. Not red, not an alert. */
+.circle-notice { margin: 14px 0 0; font: 400 12.5px/1.6 var(--font); color: var(--ink-2); max-width: 58ch; }
+/* An actual refusal. One sentence, in the product's own restrained red. */
+.circle-problem { margin: 14px 0 0; font: 400 12.5px/1.6 var(--font); color: #A03A12; max-width: 58ch; }
+
+.circle-acts { margin-top: 22px; display: flex; gap: 10px; align-items: center; }
+.circle-go { height: 40px; padding: 0 22px; border-radius: 8px; border: 0; background: var(--ink-1); color: #fff; font: 600 13px var(--font); }
+.circle-go:hover:not(:disabled) { background: #4C2AA3; }
+.circle-go:disabled { background: var(--ink-4); cursor: default; }
+.circle-ghost {
+  height: 40px; padding: 0 18px; border-radius: 8px;
+  border: 1px solid var(--field-border); background: var(--surface); font: 500 13px var(--font); color: var(--ink-2);
+}
+.circle-ghost:hover { background: var(--hover); color: var(--ink-1); }
+.circle button:focus-visible { outline: 2px solid var(--ink-1); outline-offset: 2px; }
+
+/* the settings doorway */
+.circle-row { display: flex; gap: 8px; margin: 0 0 11px; flex-wrap: wrap; }
+
+@media (max-width: 700px) {
+  .circle { padding: 26px 16px 40px; }
+  .circle-paste { font-size: 20px; letter-spacing: 2px; height: 58px; }
+  .circle-code { font-size: 24px; letter-spacing: 2px; }
+}
+
+/* §10's motion budget is spent on the board's roll. Nothing here animates — least of all the
+   waiting state, where motion would turn "it happens by itself" into "something is loading". */
+@media (prefers-reduced-motion: reduce) {
+  .circle, .circle * { animation: none !important; transition: none !important; }
+}
+`;
+
+/** Idempotent. One `<style>`, injected on first open, never rebuilt. */
+function ensureCss() {
+  if (document.getElementById(CIRCLE_CSS_ID)) return;
+  const s = document.createElement('style');
+  s.id = CIRCLE_CSS_ID;
+  s.textContent = CIRCLE_CSS;
+  document.head.appendChild(s);
+}

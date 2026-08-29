@@ -38,6 +38,9 @@ import { createPairingFlow } from './pairflow.js';
 import { initPairingUI } from './pairingui.js';
 import { initSyncStatus, refreshSyncChrome } from './syncstatus.js';
 import { buildFamilySections } from './familysettings.js';
+import { initCreateJoin, familyCircle, circleTransport, CIRCLE_ROLE } from './createjoin.js';
+import { initMembersUI, renderFamilyLegend } from './membersui.js';
+import { initAdminPanel } from './adminpanel.js';
 import { createFetchTransport } from '../platform/net.js';
 import { exportRawPublic, signBytes } from '../crypto/identity.js';
 import { b64u } from '../core/b64.js';
@@ -98,10 +101,126 @@ export async function start(handle, hooks) {
  * `store.state.settings` which case they are in rather than being told twice.
  */
 function installSections(handle, hooks) {
-  setFamilySections((body, api) => buildFamilySections(body, api, {
-    onOptIn: (origin) => optIn(origin, hooks),
-  }));
+  setFamilySections((body, api) => {
+    syncCircleMounts(hooks);               // re-evaluated per sheet, see below
+    refreshRoster();                       // fire-and-forget
+    return buildFamilySections(body, api, {
+      onOptIn: (origin) => optIn(origin, hooks),
+    });
+  });
 }
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// E6 — THE FAMILIENKREIS MODULES, BEHIND THE SAME ONE DOOR
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// `createjoin.js`, `membersui.js` and `adminpanel.js` reach the network and the key store, so by
+// this file's own rule they may be imported only from here. They ship their own DEFAULT_PORTS
+// (the product's real clock, key store and transport), so `initCreateJoin()` and
+// `initAdminPanel()` are called with nothing: the defaults ARE the wiring, and calling them makes
+// the mount explicit and resets any state a previous mount left behind.
+//
+// `initMembersUI` is the one that needs a real port, because the member list is a join of two
+// sources that live in two different modules — see `MembersPort` in `membersui.js`.
+//
+// ⚠ `setProfile` IS DELIBERATELY ABSENT, and that is a report rather than an oversight. Writing
+// my own name and colour (15.6) needs a `member.set` entry in `core/ops.js`'s `MUTATIONS` table,
+// and that table is documented as "every v1 `store.mutate()` site, mapped — all 22 sites" with
+// `tests/tier1/core-ops.test.js` enumerating them independently. The op CONSTRUCTOR exists
+// (`memberSet`, `ops.js:651`); the mutation and the publish path do not. `membersui.js` reacts to
+// the absent port by disabling the two fields and saying so, which is the honest rendering. The
+// day the mutation lands, `setProfile` is one property here.
+
+/** The pseudonymous roster the relay publishes, cached because `membersUIState()` is sync. */
+let rosterCache = [];
+let rosterFor = null;
+
+/** What `syncCircleMounts` last mounted for, so a no-op sheet-open does not re-install. */
+let mountedFor = null;
+
+/**
+ * Mount the three circle modules — or UNMOUNT the member surfaces when there is no circle.
+ *
+ * ⚠ THE UNMOUNT IS THE WHOLE POINT, and it is a fix for a bug this wiring had for one revision.
+ * `membersSupported()` is `!!port`, so mounting a port unconditionally made „Familie" render in
+ * the settings sheet of a Mac that had never heard of a Familienkreis — a section, a heading and
+ * a member row, on a solo install. That is precisely what story 15.1 forbids, and it was
+ * invisible to `buildMembersSection`'s own guard because the guard asks whether a port exists,
+ * not whether a circle does. So the CIRCLE decides, and it decides on every sheet open rather
+ * than once at install: a Mac becomes a member in the middle of a session (that is the join
+ * flow), and a Mac stops being one in the middle of a session (that is 20.3).
+ *
+ * `initCreateJoin()` and `initAdminPanel()` are unconditional and that is correct — both draw
+ * from `familyCircle()` directly and are already silent without one, and `createjoin.js` must be
+ * armed BEFORE there is a circle, because it is what creates one.
+ */
+function syncCircleMounts(hooks) {
+  initCreateJoin();
+  initAdminPanel();
+  const circle = familyCircle();
+  const key = circle ? circle.spaceId : null;
+  if (key === mountedFor) return;
+  mountedFor = key;
+  if (!circle) { initMembersUI(); rosterCache = []; rosterFor = null; return; }
+  initMembersUI({
+    observe: true,
+    onChange: () => { try { hooks?.onChange?.(); } catch { /* a redraw that throws is not ours */ } },
+    port: {
+      me: () => familyCircle()?.memberId ?? null,
+      adminId: () => currentAdminId(),
+      keysPending: () => familyCircle()?.keysPending === true,
+      roster: () => rosterCache,
+    },
+  });
+}
+
+/**
+ * Who the circle's admin is, from the log — `space.set{admin}` folded into the `space:` register.
+ *
+ * NOT from `familyCircle().role`. That pref says what THIS Mac believes about ITSELF and would
+ * answer `null` for everyone on a member's Mac, so nobody but the admin would ever see the
+ * „Verwaltung" badge. The register is the circle's shared answer, which is the one 15.4 wants.
+ * It falls back to my own pref only when the log has not folded a chain yet — the minutes right
+ * after `POST /spaces`, when the only member IS me.
+ */
+function currentAdminId() {
+  const c = familyCircle();
+  if (!c) return null;
+  try {
+    const cells = store.registers().get(`space:${c.spaceId}`);
+    const admin = cells && cells.get('admin');
+    if (admin && typeof admin.value === 'string') return admin.value;
+  } catch { /* a store with no log yet is the fallback case below, not an error */ }
+  return c.role === CIRCLE_ROLE.admin ? c.memberId : null;
+}
+
+/**
+ * Refresh the roster from the relay, at most once per open sheet.
+ *
+ * This is the ONLY thing that makes D9's pre-wrap list render as colours instead of an empty
+ * panel: before any member device has wrapped the keys, the joiner can decrypt no `member.set`
+ * op at all, so the log knows nobody. `colorRef` is the one member fact `memberProjection`
+ * publishes in the clear, and `readMembers` treats it as a second opinion about colour only.
+ *
+ * Failure is silent on purpose. A roster we could not fetch means the list falls back to the log,
+ * which is the correct rendering and not an error worth a sentence (19.3).
+ */
+async function refreshRoster() {
+  const c = familyCircle();
+  if (!c || !c.origin) { rosterCache = []; rosterFor = null; return; }
+  try {
+    const transport = await circleTransport(c.origin);
+    const res = await transport.request('GET', `/api/v1/spaces/${c.spaceId}/members`, undefined, undefined);
+    if (res.status !== 200 || !res.json) return;
+    rosterCache = (res.json.members || []).map((m) => ({
+      memberId: m.memberId, colorRef: m.colorRef ?? null, removedAt: m.removedAt ?? null,
+    }));
+    rosterFor = c.spaceId;
+  } catch { /* see the doc comment: an unreachable relay is not a sentence */ }
+}
+
+/** Exported for the integration harness, which drives the roster without opening a sheet. */
+export { refreshRoster, currentAdminId, syncCircleMounts };
 
 /**
  * Mount the family settings AND the joiner half of pairing, on a Mac that has not opted in.
@@ -119,6 +238,26 @@ function installSections(handle, hooks) {
 export function mountSolo(hooks) {
   installSections(null, hooks);
   initPairingUI({ port: makeJoinerFlow(hooks), ...timerPorts() });
+}
+
+/**
+ * Mount the circle's BOARD surfaces at boot — the member legend (17.3) and the member list.
+ *
+ * Called by `main.js` only when `board.json` already names a `familySpaceId`, so a solo Mac
+ * never reaches it and Principle 7 is untouched. It exists because the two gates are not the
+ * same gate: `armFamilyMode()` opens on `syncEnabled && personalSpaceId`, which is story 19.4's
+ * PERSONAL space, and a Mac can be in a Familienkreis without ever having opted into own-device
+ * sync. Before this, such a Mac showed no member chips in its legend until somebody happened to
+ * open the settings sheet — the members were known, and simply not drawn.
+ *
+ * It arms no engine and sends nothing: the roster refresh is the one request, it is a GET, and
+ * it fails silently. The board is already on screen by the time this runs.
+ */
+export function mountCircleSurfaces(hooks) {
+  installSections(null, hooks);
+  syncCircleMounts(hooks);
+  renderFamilyLegend();
+  refreshRoster().then(() => renderFamilyLegend());
 }
 
 const timerPorts = () => {

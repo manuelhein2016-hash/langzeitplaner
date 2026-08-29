@@ -1,6 +1,47 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-29 · **Stopped at:** **round 10 — the E6 gate. The verdict is NO-GO,
+**Last session:** 2026-08-29 · **Stopped at:** **E6 — Familienkreis, integrated and driven** (the
+client half) and **round 10 — the E6 gate** (the engine half). The two passes ran in parallel and
+**reached the same wall from opposite sides**; read both, in that order.
+
+---
+
+## E6 — the client flows. LZP-601…607 wired, and the lifecycle driven.
+
+All six suites green: **1932 · 720 · 88 · 868 · 169 · 29 files.** Full record:
+`docs/v2/E6-VERIFICATION.md`; findings in `FINDINGS.md` §10.
+
+The whole membership lifecycle was driven against `node server/dev-server.mjs` with two independent
+Macs (two origins = two storage partitions = two durable identities): **create → invite → join →
+both members listed → rename → leave → delete**, every step a real signed round trip, with the
+relay's stored bytes inspected at each one. The relay holds **no display name and no circle name**,
+and the invite row carries **no key material** — D9 is a property of the stored bytes, not a comment.
+Solo mode is unchanged and measured: **36 modules, 0 from `family/`/`crypto/`/`sync/`, 0 requests**,
+DOMContentLoaded 127 ms; opening ⚙ adds 26 modules and still makes **no** request.
+
+**The one thing to read before anything else: `E6-VERIFICATION.md` §5.** D9's waiting state is
+demonstrated and machine-checked for its first three required behaviours — immediately a member, one
+calm line, no spinner, no error, and never an instruction to go wake anyone — and **its fourth cannot
+be demonstrated at all.** ADR 002 §7.1 steps 4–6 have **no implementation in the client**: nothing
+calls `GET /spaces/:id/keys`, nothing wraps the ring for a peer, and no route exists to push a wrap.
+Mom joins, is immediately a member, is told calmly that the entries arrive by themselves — and in
+this build they never do. **E6 built the membership half of the feature; the content half does not
+exist.** The same gap blocks **LZP-608**, whose rotation needs the same producer.
+
+**Five findings (`FINDINGS.md` §10).** The sharpest is **E6-2**: handing over the admin role was a
+**one-way demotion** — the relay records nothing by design, the `space.set{admin}` op has no client
+mutation, so the outgoing admin demoted himself, the successor was never promoted, and the circle
+ended with **no admin anywhere and no route back**. The control is now disabled behind one named
+constant with its reason in both languages. Also **E6-3**: leaving a circle bricks that Mac's family
+mode on that relay (`device.deviceId/registered`), which is server finding E2-203-1 met from a second
+direction. And **E6-4**: the huge paste field defeated its own parser, because an `<input>` strips
+newlines — the pure function passed either way, which is the seam a tier-2 row cannot see.
+
+---
+
+## Round 10 — the E6 gate, from the engine's side
+
+**Stopped at:** **round 10 — the E6 gate. The verdict is NO-GO,
 and it is not about the fork detector.**
 
 Round 10's adversary set a shortest path of nine items as the condition of a GO. All nine are

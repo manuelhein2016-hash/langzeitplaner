@@ -68,6 +68,9 @@ import { t, getLang } from '../i18n.js';
 import { store } from '../store.js';
 import { buildPairingSection } from './pairingui.js';
 import { buildSyncSection } from './syncstatus.js';
+import { buildFamilyCircleSection } from './createjoin.js';
+import { buildMembersSection } from './membersui.js';
+import { buildAdminSection } from './adminpanel.js';
 import { FAMILY_PREFS, CLIENT_VERSION } from './engine.js';
 import { probeCrypto, isSuiteAvailable, unavailableMessage } from '../crypto/probe.js';
 import { normalizeOrigin, insecureOriginMessage, NetError } from '../platform/net.js';
@@ -88,9 +91,22 @@ const say = (pair) => (getLang() === 'en' ? pair.en : pair.de);
  *        identity and the key ring. See `buildRecoverySection`.
  */
 export function buildFamilySections(body, api, hooks = {}) {
-  buildOptInSection(body, api, hooks);
-  buildPairingSection(body, api);
-  buildSyncSection(body, api);
+  // ── F15 / F20 · the Familienkreis, first ──────────────────────────────────────────────────
+  //
+  // ORDER IS THE ARGUMENT HERE. „Familienkreis" is story 15.1's one explicit entry point, and a
+  // person who opens ⚙ looking for family sharing must meet it before anything else, or the
+  // first thing they read is 19.4's server address and they conclude the feature is an
+  // infrastructure setting. All three of these draw NOTHING when this Mac is in no circle
+  // (`buildFamilyCircleSection` draws its two buttons, and only those), so on a solo Mac this
+  // reordering is invisible — which is the point of Principle 7.
+  buildFamilyCircleSection(body, api);   // 15.2 / 15.3 — create, join, and the D9 waiting line
+  buildMembersSection(body, api);        // 15.4 / 15.6 — who is in it, my name and my colour
+  buildAdminSection(body, api);          // F20 — rename, invites, and the three undoable things
+
+  // ── F19 · this Mac's own plumbing ─────────────────────────────────────────────────────────
+  buildOptInSection(body, api, hooks);   // 19.4 — the relay address and MY private space
+  buildPairingSection(body, api);        // 19.5
+  buildSyncSection(body, api);           // 19.3
   buildRecoverySection(body, api, hooks);
 }
 

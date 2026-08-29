@@ -165,8 +165,15 @@ const DE = {
   // ohne Hinsehen nimmt ihn weg. Kein Ausrufezeichen trotzdem: der Satz trägt
   // sich selbst.
   pairKicker: 'Geräte koppeln',
-  // ── F19 · der Familienkreis, die Tür (LZP-505 / A10) ────────────────────────
-  familySectionTitle: 'Familienkreis',
+  // ── F19 · dieser Mac und der Server (19.4) ──────────────────────────────────
+  //
+  // DIESER ABSCHNITT IST NICHT DER FAMILIENKREIS. Er war es einmal — als es
+  // noch keinen gab und „Familienkreis“ die einzige Tür ins Netz war. Seit
+  // LZP-601 gibt es den echten Kreis (F15), und zwei Abschnitte mit derselben
+  // Überschrift in einem Blatt sind keine Doppelung, sondern eine falsche
+  // Auskunft: hier stehen die Adresse des Servers und der PRIVATE Raum dieses
+  // Macs (19.4), also das, was nur mit den eigenen Geräten geteilt wird.
+  familySectionTitle: 'Server & eigene Geräte',
   familyRelay: 'Server',
   familySpace: 'Privater Raum',
   familyCreate: 'Einrichten',
@@ -176,7 +183,7 @@ const DE = {
   familyThisMac: (short) => `Dieser Mac: ${short}`,
   familySectionHint:
     'Ohne diesen Schritt bleibt alles auf diesem Mac und es geht nichts ins Netz. '
-    + 'Danach liegt Ihr Board verschlüsselt auf dem Server — lesen kann es nur, wer Ihre Schlüssel hat.',
+    + 'Danach liegt dein Board verschlüsselt auf dem Server — lesen kann es nur, wer deine Schlüssel hat.',
   pairSectionTitle: 'Meine Geräte',
   pairAddDevice: 'Zweiten Mac hinzufügen',
   pairHaveCode: 'Ich habe einen Code',
@@ -284,6 +291,145 @@ const DE = {
   syncSolo: 'Dieser Mac arbeitet allein. Es wird nichts übertragen.',
   syncNoButtonHint:
     'Einen Knopf zum Abgleichen gibt es nicht — das passiert von selbst, im Hintergrund.',
+
+  // ── F15 / F20 · 15.1–15.4, 20.5, 20.6 — Familienkreis (LZP-601/602) ───────
+  //
+  // DIE STIMME DIESER BLÖCKE. Der Beitritts-Bildschirm ist das erste, was ein
+  // Mensch von diesem Produkt sieht, der es sich nicht ausgesucht hat. Also:
+  // kurze Sätze, keine Fachwörter, kein Ausrufezeichen, nichts, was zweimal
+  // gelesen werden muss. „Verschlüsselung“ kommt genau einmal vor — in 20.5,
+  // wo es der Grund für eine Zusage ist und nicht eine Eigenschaft.
+  //
+  // WAS HIER NICHT STEHEN DARF (PO-Entscheidung D9, vier Punkte):
+  // kein „Fehler“, kein „erneut versuchen“, kein „bitte warten“, und niemals
+  // die Aufforderung, jemanden zu bitten, seinen Mac aufzuklappen.
+  circleKicker: 'Familienkreis',
+  circleSectionTitle: 'Familienkreis',
+  circleCreateBtn: 'Familienkreis erstellen',
+  circleJoinBtn: 'Einladungscode eingeben',
+  circleSectionHint:
+    'Ein gemeinsamer Kalender für die Familie. Solange du hier nichts einrichtest, bleibt '
+    + 'alles so, wie es ist — dieser Mac arbeitet weiter für sich allein.',
+  circleOneOnly: 'Du gehörst zu genau einem Familienkreis.',
+  circleMemberOf: (name) => `Du bist in „${name}“.`,
+  circleMemberOfUnnamed: 'Du bist in einem Familienkreis.',
+  circleYouAdmin: 'Du verwaltest diesen Kreis.',
+  circleYouMember: 'Du bist Mitglied.',
+  circleNewInvite: 'Neuen Einladungscode erzeugen',
+  circleNewInviteCopied: (code) => `Neuer Code: ${code} — Einladung ist kopiert.`,
+  circleErrAlready:
+    'Du bist schon in einem Familienkreis. Mehr als einen gibt es in dieser Version nicht.',
+
+  // — erstellen (15.2, 20.6, Lieferobjekt 14) —
+  circleCreateTitle: 'Einen Familienkreis einrichten',
+  circleCreateLead:
+    'Du gibst dem Kreis einen Namen und bekommst einen Einladungscode. Den schickst du an die '
+    + 'Person, die dazukommen soll. Mehr ist nicht zu tun.',
+  circleAdminFraming:
+    'Du verwaltest den Kreis: einladen, jemanden entfernen, den Kreis wieder auflösen. Was die '
+    + 'anderen für sich behalten, siehst du nicht — auch als Verwalter nicht. Das ist keine '
+    + 'Einstellung, die sich ändern ließe, sondern die Verschlüsselung selbst.',
+  circleRelayLabel: 'Server',
+  circleRelayHint:
+    'Die Adresse, über die eure Macs sich abgleichen. Der Server sieht nur verschlüsselte '
+    + 'Daten — lesen kann er sie nicht.',
+  circleNameLabel: 'Name des Familienkreises',
+  circleNamePlaceholder: 'Familie Weber',
+  circleYourNameLabel: 'Dein Name',
+  circleYourNamePlaceholder: 'Papa',
+  circleColorLabel: 'Deine Farbe',
+  circleColorTaken: 'schon vergeben',
+  circleCreateSubmit: 'Familienkreis erstellen',
+  circleCreateFoot:
+    'Auf deinem Board ändert sich dadurch nichts. Alles, was du bisher eingetragen hast, '
+    + 'bleibt privat, bis du einen Eintrag ausdrücklich teilst.',
+  circleNeedName: 'Der Kreis braucht noch einen Namen.',
+  circleNeedYourName: 'Wie sollen dich die anderen sehen?',
+  circleCreatedTitle: (name) => (name ? `„${name}“ ist eingerichtet.` : 'Der Familienkreis ist eingerichtet.'),
+  circleCreatedLead: 'Du verwaltest diesen Kreis.',
+  circleCodeLabel: 'Einladungscode',
+  circleCodeTtl: (days) =>
+    `Der Code gilt ${days} Tage und lässt sich genau einmal einlösen.`,
+  circleCodeShare:
+    'Schick ihn an die Person, die dazukommen soll — per Mail, per Nachricht, oder sag ihn '
+    + 'am Telefon. Im Code stecken keine Schlüssel: Wer ihn liest, kann nichts lesen.',
+  circleCopyInvite: 'Einladung kopieren',
+  circleCopied: 'Kopiert.',
+  circleCopyFailed: 'Kopieren ging nicht — der Code steht oben.',
+  circleNoCodeYet:
+    'Der Kreis steht. Den Einladungscode kannst du in den Einstellungen erzeugen.',
+  circleCreatedD9:
+    'Wer beitritt, ist sofort im Kreis. Die gemeinsamen Einträge bekommt er, sobald dein Mac '
+    + 'das nächste Mal abgleicht — dafür musst du nichts tun.',
+  circleDone: 'Fertig',
+  circleWorking: 'Einen Moment',
+  circleInviteLine1: (name) => `Du bist zu „${name}“ eingeladen.`,
+  circleInviteLine2:
+    'In LangzeitPlaner: Einstellungen → Familienkreis → „Einladungscode eingeben“, '
+    + 'und beides oben einfügen.',
+
+  // — beitreten (15.3, Lieferobjekt 15) —
+  circleJoinTitle: 'Einem Familienkreis beitreten',
+  circleJoinLead:
+    'Code einfügen, Namen und Farbe wählen, fertig. Kein Konto, kein Passwort, keine Anmeldung.',
+  circleCodeInputLabel: 'Einladungscode',
+  circleCodePlaceholder: 'XXXX-XXXX-XXXX',
+  circleCodeFromPaste: (origin) => `Server aus der Einladung übernommen: ${origin}`,
+  circleJoinNamePlaceholder: 'Mama',
+  circleJoinSubmit: 'Beitreten',
+  circleJoinFoot:
+    'Deine Einträge bleiben deine. Beim Beitritt wird nichts geteilt — was die anderen sehen, '
+    + 'entscheidest du später Eintrag für Eintrag.',
+  circleNeedCode: 'Der Code ist noch nicht vollständig — es sind zwölf Zeichen.',
+  circleNeedRelayForJoin:
+    'In der Einladung stand auch eine Serveradresse. Füge sie mit ein oder trag sie unten ein.',
+  circleColorTakenSwap: (name) =>
+    `Diese Farbe hat schon jemand im Kreis. ${name} ist frei — nimmst du die?`,
+
+  // — der Wartezustand (D9, Lieferobjekte 15 und 25) —
+  circleJoinedTitle: 'Du bist dabei.',
+  circleJoinedLead: 'Du gehörst jetzt zum Familienkreis.',
+  circleJoinedMembers: (n) =>
+    n === 1
+      ? 'Du bist die erste Person im Kreis.'
+      : `${n} Mitglieder. Die Namen erscheinen zusammen mit den Einträgen.`,
+  circleMemberUnnamed: 'Mitglied',
+  circleYou: 'du',
+  // DIE EINE ZEILE. Sie sagt, dass es passiert, nicht dass gewartet wird — und
+  // sie nennt „ein anderer Mac“, nicht eine Person: ADR 002 §7.1 Schritt 4 sagt
+  // ausdrücklich *irgendein* Gerät eines Mitglieds, nicht das des Verwalters.
+  circleWaiting:
+    'Die gemeinsamen Einträge erscheinen von selbst, sobald ein anderer Mac im Kreis das '
+    + 'nächste Mal abgleicht.',
+  circleWaitingCalm:
+    'Bis dahin bleibt dein Board genau so, wie es ist. Du musst nichts tun und niemanden fragen.',
+  circleKeysHere: 'Die gemeinsamen Einträge sind da.',
+  circleJoinedPrivacy:
+    'Deine eigenen Einträge bleiben privat. Der Beitritt hat daran nichts geändert, und auch '
+    + 'der Verwalter kann sie nicht sehen.',
+
+  // — was schiefgehen kann, in ganzen Sätzen —
+  circleErrInviteInvalid:
+    'Dieser Code passt nicht. Vielleicht ist ein Zeichen vertippt — oder er ist älter als '
+    + 'sieben Tage. Lass dir am besten einen neuen schicken.',
+  circleErrInviteUsed:
+    'Dieser Code ist schon eingelöst. Jeder Code gilt genau einmal; ein neuer ist schnell '
+    + 'gemacht.',
+  circleErrTooMany:
+    'Das waren zu viele Versuche in kurzer Zeit. In einer Stunde geht es wieder.',
+  // Zwei Ursachen, ein Satz: der Mac gleicht schon eigene Geräte ab (19.4), ODER er war
+  // einmal in einem Kreis und ist ausgetreten — sein Geräte-Eintrag bleibt auf dem Server
+  // bestehen. Für die Person davor ist das dasselbe Ereignis, und der Satz darf keine der
+  // beiden Ursachen behaupten, die gerade nicht zutrifft.
+  circleErrDeviceRegistered:
+    'Dieser Mac ist auf diesem Server schon eingetragen — aus einem früheren Kreis oder vom '
+    + 'Abgleich der eigenen Geräte. Ein zweites Mal geht es auf diesem Server zurzeit nicht.',
+  circleErrMemberExists: 'Dieser Mac gehört schon zu diesem Kreis.',
+  circleErrOffline:
+    'Keine Verbindung zum Server. Dein Board bleibt unverändert; später geht es weiter.',
+  circleErrNoKeystore:
+    'Auf diesem Mac lassen sich keine Schlüssel dauerhaft ablegen. Ohne das wäre der '
+    + 'Familienkreis nach dem nächsten Beenden weg.',
 
   more: 'weitere',
   lanesFull: 'weitere Balken',
@@ -442,8 +588,10 @@ const EN = {
   // Same register as the German: no password, no account, no wizard voice. The
   // only sentence allowed any weight is the one about the six digits.
   pairKicker: 'Pair devices',
-  // ── F19 · the Familienkreis, the door (LZP-505 / A10) ───────────────────────
-  familySectionTitle: 'Family circle',
+  // ── F19 · this Mac and the server (19.4) ────────────────────────────────────
+  // NOT the family circle — see the German block. This is the relay address and
+  // this Mac's own PRIVATE space, the one shared only with my own devices.
+  familySectionTitle: 'Server & my own devices',
   familyRelay: 'Server',
   familySpace: 'Private space',
   familyCreate: 'Set up',
@@ -552,6 +700,127 @@ const EN = {
   syncNever: 'Not synced yet',
   syncSolo: 'This Mac works on its own. Nothing is transmitted.',
   syncNoButtonHint: 'There is no sync button — it happens on its own, in the background.',
+
+  // ── F15 / F20 · 15.1–15.4, 20.5, 20.6 — family circle (LZP-601/602) ───────
+  // German is the original here; this is a translation and not a second draft.
+  // Where the German is shorter than English wants to be, the English is kept
+  // short too — the join screen is read by someone who did not ask for it.
+  circleKicker: 'Family circle',
+  circleSectionTitle: 'Family circle',
+  circleCreateBtn: 'Create a family circle',
+  circleJoinBtn: 'Enter an invite code',
+  circleSectionHint:
+    'A shared calendar for the family. Until you set something up here nothing changes — '
+    + 'this Mac carries on working on its own.',
+  circleOneOnly: 'You belong to exactly one family circle.',
+  circleMemberOf: (name) => `You are in “${name}”.`,
+  circleMemberOfUnnamed: 'You are in a family circle.',
+  circleYouAdmin: 'You manage this circle.',
+  circleYouMember: 'You are a member.',
+  circleNewInvite: 'Create a new invite code',
+  circleNewInviteCopied: (code) => `New code: ${code} — the invitation is on your clipboard.`,
+  circleErrAlready:
+    'You are already in a family circle. This version has room for exactly one.',
+
+  // — create (15.2, 20.6, deliverable 14) —
+  circleCreateTitle: 'Set up a family circle',
+  circleCreateLead:
+    'Give the circle a name and you get an invite code. Send it to whoever should join. '
+    + 'That is all there is to it.',
+  circleAdminFraming:
+    'You manage the circle: invite people, remove someone, dissolve it again. What the others '
+    + 'keep to themselves you cannot see — not as the admin either. That is not a setting that '
+    + 'could be changed; it is the encryption itself.',
+  circleRelayLabel: 'Server',
+  circleRelayHint:
+    'The address your Macs sync through. The server only ever sees encrypted data — it cannot '
+    + 'read any of it.',
+  circleNameLabel: 'Name of the family circle',
+  circleNamePlaceholder: 'The Webers',
+  circleYourNameLabel: 'Your name',
+  circleYourNamePlaceholder: 'Dad',
+  circleColorLabel: 'Your colour',
+  circleColorTaken: 'already taken',
+  circleCreateSubmit: 'Create the circle',
+  circleCreateFoot:
+    'Nothing on your board changes. Everything you have written stays private until you share '
+    + 'an entry on purpose.',
+  circleNeedName: 'The circle still needs a name.',
+  circleNeedYourName: 'How should the others see you?',
+  circleCreatedTitle: (name) => (name ? `“${name}” is set up.` : 'The family circle is set up.'),
+  circleCreatedLead: 'You manage this circle.',
+  circleCodeLabel: 'Invite code',
+  circleCodeTtl: (days) => `The code is valid for ${days} days and can be used exactly once.`,
+  circleCodeShare:
+    'Send it to whoever should join — by mail, by message, or read it out on the phone. There '
+    + 'are no keys in the code: whoever reads it cannot read anything.',
+  circleCopyInvite: 'Copy the invitation',
+  circleCopied: 'Copied.',
+  circleCopyFailed: 'Copying did not work — the code is above.',
+  circleNoCodeYet: 'The circle exists. You can create the invite code in settings.',
+  circleCreatedD9:
+    'Whoever joins is in the circle straight away. The shared entries reach them the next time '
+    + 'your Mac syncs — you do not have to do anything.',
+  circleDone: 'Done',
+  circleWorking: 'One moment',
+  circleInviteLine1: (name) => `You are invited to “${name}”.`,
+  circleInviteLine2:
+    'In LangzeitPlaner: Settings → Family circle → “Enter an invite code”, and paste both of '
+    + 'the lines above.',
+
+  // — join (15.3, deliverable 15) —
+  circleJoinTitle: 'Join a family circle',
+  circleJoinLead:
+    'Paste the code, pick a name and a colour, done. No account, no password, no sign-up.',
+  circleCodeInputLabel: 'Invite code',
+  circleCodePlaceholder: 'XXXX-XXXX-XXXX',
+  circleCodeFromPaste: (origin) => `Server taken from the invitation: ${origin}`,
+  circleJoinNamePlaceholder: 'Mom',
+  circleJoinSubmit: 'Join',
+  circleJoinFoot:
+    'Your entries stay yours. Joining shares nothing — what the others see is something you '
+    + 'decide later, entry by entry.',
+  circleNeedCode: 'The code is not complete yet — it is twelve characters.',
+  circleNeedRelayForJoin:
+    'The invitation also carried a server address. Paste it along with the code, or enter it '
+    + 'below.',
+  circleColorTakenSwap: (name) =>
+    `Someone in the circle already has that colour. ${name} is free — shall we take it?`,
+
+  // — the waiting state (D9, deliverables 15 and 25) —
+  circleJoinedTitle: 'You are in.',
+  circleJoinedLead: 'You now belong to the family circle.',
+  circleJoinedMembers: (n) =>
+    n === 1
+      ? 'You are the first person in the circle.'
+      : `${n} members. Their names appear together with the entries.`,
+  circleMemberUnnamed: 'Member',
+  circleYou: 'you',
+  circleWaiting:
+    'The shared entries appear by themselves, the next time another Mac in the circle syncs.',
+  circleWaitingCalm:
+    'Until then your board stays exactly as it is. There is nothing to do and nobody to ask.',
+  circleKeysHere: 'The shared entries are here.',
+  circleJoinedPrivacy:
+    'Your own entries stay private. Joining changed nothing about that, and the admin cannot '
+    + 'see them either.',
+
+  // — what can go wrong, in whole sentences —
+  circleErrInviteInvalid:
+    'That code does not match. Perhaps a character is mistyped — or it is more than seven days '
+    + 'old. Best to ask for a new one.',
+  circleErrInviteUsed:
+    'That code has already been used. Every code works exactly once; a new one is quick to make.',
+  circleErrTooMany: 'That was too many attempts in a short time. It works again in an hour.',
+  circleErrDeviceRegistered:
+    'This Mac is already registered on that server — from an earlier circle, or from syncing '
+    + 'your own devices. For now it cannot be set up there a second time.',
+  circleErrMemberExists: 'This Mac already belongs to that circle.',
+  circleErrOffline:
+    'No connection to the server. Your board is unchanged; it carries on later.',
+  circleErrNoKeystore:
+    'This Mac cannot store keys durably. Without that the family circle would be gone the next '
+    + 'time you quit.',
 
   more: 'more',
   lanesFull: 'more bars',

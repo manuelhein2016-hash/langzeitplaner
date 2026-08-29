@@ -163,10 +163,34 @@ async function armFamilyMode() {
 
 /** AFTER `init()`, and never awaited: the board is usable before a byte of sync is considered. */
 function startFamilyMode() {
-  if (!family || !familyMod) return;
-  familyMod.start(family, { onChange }).catch((e) => {
-    console.warn('[family] the engine did not start:', e);
-  });
+  if (family && familyMod) {
+    familyMod.start(family, { onChange }).catch((e) => {
+      console.warn('[family] the engine did not start:', e);
+    });
+    return;
+  }
+  mountCircleIfMember();
+}
+
+/**
+ * THE SECOND GATE, and the reason it is not the first one: a Mac can be in a Familienkreis
+ * without having opted into own-device sync.
+ *
+ * `armFamilyMode()` opens on `syncEnabled && personalSpaceId` — story 19.4's PERSONAL space. A
+ * member of a family circle has `familySpaceId` and may have none of those three, so the door
+ * stayed shut and her legend drew no member chips (17.3) until she happened to open ⚙. The
+ * members were known; they simply were not drawn.
+ *
+ * Gated on `familySpaceId` alone, so a solo Mac still reaches none of it — Principle 7 is a
+ * statement about a Mac that has opted into NOTHING, and this one has opted into a circle.
+ * Nothing here arms an engine or writes anything; the one request it makes is a roster GET.
+ */
+function mountCircleIfMember() {
+  const s = store.state && store.state.settings;
+  if (!s || typeof s.familySpaceId !== 'string' || !s.familySpaceId.startsWith('fsp_')) return;
+  openFamilyDoor()
+    .then((mod) => mod.mountCircleSurfaces({ onChange }))
+    .catch((e) => console.warn('[family] the circle surfaces could not be mounted:', e));
 }
 
 /**
