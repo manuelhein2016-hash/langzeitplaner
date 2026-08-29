@@ -1129,6 +1129,7 @@ final class StatusItemController {
     }
 
     @objc func focusWindow() {
+        guard !isHeadless else { return }   // the menu-bar item cannot summon a test run
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -1219,7 +1220,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         let hadSavedFrame = window.setFrameUsingName("LangzeitPlanerMain")
         window.setFrameAutosaveName("LangzeitPlanerMain")
         if !hadSavedFrame { window.center() }
-        window.makeKeyAndOrderFront(nil)
+        // A headless run (--test / --smoke) never shows a window. Ordering it front
+        // stole focus and flashed a window once PER TEST FILE — 26 of them per
+        // `npm run test:dom` — which made the suite genuinely unpleasant to run and
+        // therefore less likely to be run. WKWebView still lays out and evaluates
+        // JS in an unordered window, and tier 2 asserts on the DOM, classes and
+        // inline styles rather than on composited pixels, so nothing is lost.
+        if !isHeadless { window.makeKeyAndOrderFront(nil) }
 
         bridge.window = window
         bridge.printAction = { [weak self] in self?.printBoard(nil) }
@@ -1251,8 +1258,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         // pushes through set_shell_pref right after boot; no icon until then.
 
         NSApp.mainMenu = buildMenu()
-        NSApp.setActivationPolicy(.regular)
-        NSApp.activate(ignoringOtherApps: true)
+        // .prohibited in a headless run: no Dock tile, no menu bar, no window, and
+        // no focus stolen from whatever the human is actually doing. .regular is
+        // what makes this a visible app, and a test run is not one.
+        // .accessory, NOT .prohibited: no Dock tile, no menu bar and no focus stolen,
+        // but still a real GUI session. .prohibited denies the process the session
+        // context WebKit needs to reach the WebCrypto master key in the login
+        // Keychain, which broke crypto-keystore-phase1 outright (measured: 4/4 -> 1/4,
+        // KeyStoreUnavailableError). Engine-difference #8 in ADR 002 §1 is why.
+        NSApp.setActivationPolicy(isHeadless ? .accessory : .regular)
+        if !isHeadless { NSApp.activate(ignoringOtherApps: true) }
 
         webView.load(URLRequest(url: URL(string: "\(APP_SCHEME)://\(APP_HOST)/index.html")!))
     }
