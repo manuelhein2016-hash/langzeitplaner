@@ -100,10 +100,48 @@ model Member {
 /// A device is a machine. `deviceShort` is the identity (ADR 001 §1.2 derives it from the
 /// signing key); `id` is a LABEL bound by nothing, and ADR 002 §2.3 forbids keying anything on
 /// it alone. That is why the op purge below is keyed on `deviceShort`.
+///
+/// ─────────────────────────────────────────────────────────────────────────────────────────────
+/// THE `deviceShort` NAMESPACE IS PER SPACE — round 10 item 8, closing E2-203-1
+/// ─────────────────────────────────────────────────────────────────────────────────────────────
+/// It used to be `deviceShort String @unique`, globally. That was wrong in two directions and
+/// the second one is worse than the product bug that found it:
+///
+///   1. It BLOCKED THE PRODUCT. `IK_sig` is minted per DEVICE (ADR 002 §2.1), so a Mac has one
+///      `deviceShort` for life, while `Device.memberId` points at exactly one `Member`, which is
+///      per space. One Mac could therefore have a row in exactly ONE space — and 19.4 (personal)
+///      plus 15.2 (family) require it to be in two. Finding E2-203-1.
+///   2. IT MADE AN UNFORGEABLE IDENTITY INTO A CLAIMABLE NAME. `deviceShort` is a *function of a
+///      public key*, and `GET /spaces/:id/members` publishes `sigPubRaw` to every member of the
+///      space (`DEVICE_PROJECTION`). So any member of your circle could compute your short,
+///      register a row carrying it under her own member — `POST /devices` is authorized by an
+///      attestation she signs with her OWN recovery key, and P2 only checks that the short is
+///      derived from the presented key, which it is — and thereby take the ONE global slot your
+///      Mac would ever have. One request, and that Mac can never create a personal space or join
+///      another circle again. A uniqueness constraint on a value everyone can compute is not an
+///      identity check; it is a land grab with a queue.
+///
+/// The fix is the namespace, not a new check: `@@unique([spaceId, deviceShort])`. A squatted row
+/// is now local to the squatter's own circle and inert there — she cannot AUTHENTICATE as it
+/// (ADR 003 §2 step 5 needs the private key she does not have), and it denies the owner nothing
+/// anywhere else. The adversary's other option, "require a signature by the key being
+/// registered", is already enforced everywhere it can be (auth.js's bootstrap binding, and step
+/// 4b + step 5 on every later request); the one door it is NOT on is `POST /devices`, which is
+/// deliberately unauthenticated. See ADR 003 §5.1 for the residual that leaves and who owns it.
+///
+/// `spaceId` is DERIVED, not new knowledge: the relay already resolved a device's space through
+/// `Device.memberId -> Member.spaceId`, and `addDevice` refuses a row whose `spaceId` disagrees
+/// with its member's. It is here because the constraint needs a column to name, and because
+/// `(spaceId, deviceShort)` as the leading pair means a bare `WHERE deviceShort = ?` is not
+/// index-served. That is a speed bump for ad-hoc SQL and NOT a control against the operator, who
+/// can build any index they like — and who has `sigPubRaw`, a strictly better join key, anyway.
+/// The cross-space correlation this unblocks is stated in `docs/v2/server-metadata.md` §7.
 model Device {
   id           String    @id
+  /// The namespace of `deviceShort`. See the note above. Must equal `member.spaceId`.
+  spaceId      String
   memberId     String
-  deviceShort  String    @unique
+  deviceShort  String
   sigPubRaw    Bytes
   kexPubRaw    Bytes
   /// Signed by the owning member's recovery key. Opaque to the relay, which cannot verify it —
@@ -120,6 +158,11 @@ model Device {
 
   member Member @relation(fields: [memberId], references: [id], onDelete: Cascade)
 
+  /// Round 10 item 8. NOT `@@unique([memberId, deviceShort])` — that was E2-203-1's own proposal
+  /// and it is one notch too loose: two DIFFERENT members of the SAME circle could then register
+  /// the same short, and ADR 003 §2 step 4 would have two rows to choose between inside one
+  /// space with nothing to choose on. Per space, the resolution is exact.
+  @@unique([spaceId, deviceShort])
   @@index([memberId])
 }
 

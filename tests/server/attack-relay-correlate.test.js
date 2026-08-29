@@ -6,16 +6,19 @@
 //
 // The result is unusual and it is worth stating at the top, because a green suite hides it:
 //
-//   · **The device join does not work today, and it does not work because of a BUG.** Finding
-//     E2-203-1 (`server/core/handlers/spaces.js`, `HANDLER_FINDINGS[0]`) is that `deviceShort` is
-//     globally unique while `IK_sig` is per Mac, so one machine can have a `Device` row in
-//     exactly one space — which blocks the product's main flow and, as a side effect, denies T1
-//     its cheapest join column.
-//   · **E2-203-1's own proposed fix creates that column.** `@@unique([memberId, deviceShort])`
-//     puts one machine's identical `deviceShort` and identical `sigPubRaw` into a row in every
-//     space it belongs to, and the operator's query is then one equality on an indexed column.
-//     §2 below models the post-fix schema and runs that query, so the consequence is on the
-//     record BEFORE the schema changes rather than after.
+//   · **The device join WORKS as of round 10, and the trade was taken with its eyes open.** Until
+//     round 10 it did not, and it did not because of a BUG: finding E2-203-1 — `deviceShort` was
+//     globally unique while `IK_sig` is per Mac, so one machine could have a `Device` row in
+//     exactly one space. That blocked the product's main flow (19.4 + 15.2) and, as a side
+//     effect, denied T1 its cheapest join column. Item 8 fixed the flow by making the namespace
+//     the SPACE (`@@unique([spaceId, deviceShort])`), and §1 below — INVERTED, it used to read
+//     FAILED — is the same attack running green.
+//   · **No namespace choice could have avoided it.** The join is created by one Mac having a row
+//     in two spaces AT ALL, which is exactly what the product requires; and `Device.sigPubRaw` is
+//     a strictly stronger join than `deviceShort` — 65 exact bytes the relay must hold to verify
+//     a signature. Only a per-space device signing key would remove it (ADR 002 §2.1 mints
+//     `IK_sig` per DEVICE), and that is a client crypto change nobody has costed. §2 runs the
+//     operator's query on the real store and asserts BOTH columns join.
 //   · **The recovery key is already a latent join and nothing forbids it.** ADR 002 §2.1 mints
 //     `RK_sig`/`RK_kex` per MEMBER — "survives every device" — and no constraint anywhere stops
 //     the same 65-byte public point appearing in two spaces' `Member` rows. §3.
@@ -44,7 +47,7 @@ const A = ADAPTERS[0];
 // §1 The device join — refused today, and refused by a defect
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-test('FAILED — one Mac cannot appear in two spaces, so there is no device join column at all', async () => {
+test('SUCCEEDED (INVERTED round 10 — was FAILED) — one Mac in three spaces, and the join column is real', async () => {
   const clock = fakeClock(T0);
   const h = A.make(clock);
 
@@ -58,17 +61,16 @@ test('FAILED — one Mac cannot appear in two spaces, so there is no device join
   await h.store.addMember(fixtures.member({ id: secondMember, spaceId: FAMILY_A, colorRef: 'blau' }));
 
   // The same Mac, in the family space. `IK_sig` is per DEVICE (ADR 002 §2.1), so `deviceShort` is
-  // the same value for life — and the store refuses the second row outright.
-  await assert.rejects(
-    () => h.store.addDevice(fixtures.device({
-      id: deviceId(4242), memberId: secondMember, deviceShort: mac.deviceShort,
-      sigPubRaw: mac.sigPubRaw, kexPubRaw: mac.kexPubRaw,
-    })),
-    (err) => err instanceof StoreShapeError && /already registered/.test(err.message));
+  // the same value for life — and the store now ACCEPTS the second row, because the short's
+  // namespace is the space. This assertion used to be `assert.rejects`.
+  await h.store.addDevice(fixtures.device({
+    id: deviceId(4242), spaceId: FAMILY_A, memberId: secondMember, deviceShort: mac.deviceShort,
+    sigPubRaw: mac.sigPubRaw, kexPubRaw: mac.kexPubRaw,
+  }));
 
-  // …and the same refusal on the wire, with a named reason rather than a 500. This is the flow a
-  // real user takes: they already have a paired second Mac (so `psp_` exists) and now try to
-  // create a Familienkreis from that same machine.
+  // …and the same acceptance on the wire, which is the flow a real user takes: they already have
+  // a paired second Mac (so `psp_` exists) and now create a Familienkreis from that same machine.
+  // This request used to answer `400 { field: 'device.deviceShort', reason: 'registered' }`.
   const r = relay(h, clock);
   const res = await r.send({
     method: 'POST', path: '/api/v1/spaces', dev: mac, body: {
@@ -80,11 +82,6 @@ test('FAILED — one Mac cannot appear in two spaces, so there is no device join
       device: {
         deviceId: deviceId(4243), deviceShort: mac.deviceShort,
         sigPubRaw: b64u(mac.sigPubRaw), kexPubRaw: b64u(mac.kexPubRaw),
-        // A REAL attestation, minted with the shipping `buildDeviceAttestation`/`attestDevice`
-        // and signed by the very key this body declares as `recoveryPubSig`. Finding E2E3-7 made
-        // `POST /spaces` verify the blob, so 64 zero bytes now stops at the door — and stopping
-        // at the door would make this row prove the wrong refusal. The attack still has to reach
-        // the `deviceShort` uniqueness check, which is what it is about.
         attestation: await attestDevice(
           await buildDeviceAttestation(
             { memberId: memberId(4244), deviceId: deviceId(4243), createdAt: '2026-08-29' },
@@ -93,17 +90,28 @@ test('FAILED — one Mac cannot appear in two spaces, so there is no device join
           mac.pair.privateKey,
         ),
       },
-      wraps: [{ recipientId: deviceId(4243), epoch: 1, wrapped: b64u(new Uint8Array(156)) }],
+      wraps: [
+        { recipientId: deviceId(4243), epoch: 1, wrapped: b64u(new Uint8Array(156)) },
+        { recipientId: `rec_${memberId(4244)}`, epoch: 1, wrapped: b64u(new Uint8Array(156)) },
+      ],
     },
   });
-  assert.equal(res.status, 400, JSON.stringify(res.body));
-  assert.deepEqual(res.body, { error: 'bad_request', field: 'device.deviceShort', reason: 'registered' });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
 
-  // The finding is on the record in the handler, and it says exactly this.
+  // THE OPERATOR'S QUERY, on the real store rather than a model of one:
+  //   SELECT d.spaceId FROM Device d WHERE d.deviceShort = ?
+  const rows = await h.store.listDevicesByShort(mac.deviceShort);
+  assert.deepEqual(rows.map((d) => d.spaceId).sort(), [FAMILY_A, FAMILY_B, PERSONAL].sort(),
+    'one equality returns every circle this person is in');
+  assert.equal(new Set(rows.map((d) => d.memberId)).size, 3, 'three pseudonymous ids…');
+  assert.equal(new Set(rows.map((d) => Buffer.from(d.sigPubRaw).toString('base64'))).size, 1,
+    '…one machine, one public key — and the key is the join that survives every renaming of the short');
+
+  // The finding is CLOSED and says so, and its `fix` field now names the consequence of the fix.
   const f = HANDLER_FINDINGS.find((x) => x.id === 'E2-203-1');
-  assert.ok(f, 'E2-203-1 must still be declared');
-  assert.match(f.what, /one Mac can therefore have a Device row in exactly ONE space/i);
-  assert.match(f.fix, /@@unique\(\[memberId, deviceShort\]\)/);
+  assert.ok(f, 'E2-203-1 must still be declared — a closed finding is kept, never deleted');
+  assert.match(f.status, /^CLOSED round 10/);
+  assert.match(f.fix, /@@unique\(\[spaceId, deviceShort\]\)/);
 });
 
 test('FAILED — and the member id cannot span two spaces either: `Member.id` is a global primary key', async () => {
@@ -119,19 +127,17 @@ test('FAILED — and the member id cannot span two spaces either: `Member.id` is
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §2 The join E2-203-1's fix would create
+// §2 The join the fix created — and the one it did not touch
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-test('SUCCEEDED (LATENT — finding against E2-203-1; 21.3 now DOCUMENTED) — the proposed fix hands T1 a cross-space join key', async () => {
+test('SUCCEEDED (INVERTED round 10 — was LATENT; the schema now permits the rows) — deviceShort AND sigPubRaw both join', async () => {
   const clock = fakeClock(T0);
   const h = A.make(clock);
 
-  // Model the schema E2-203-1 proposes — `@@unique([memberId, deviceShort])` rather than a global
-  // `@unique` — by writing the rows the fixed store would hold. Nothing else about the row
-  // changes: same `deviceShort`, same `sigPubRaw`, which is the whole point, because both are
-  // functions of one Mac's `IK_sig` and ADR 002 §2.1 mints that per DEVICE and not per space.
+  // Real rows in the real store now, not a model of a proposed schema. Same `deviceShort`, same
+  // `sigPubRaw`, three circles — which is the whole point, because both are functions of one
+  // Mac's `IK_sig` and ADR 002 §2.1 mints that per DEVICE and not per space.
   const mac = await mintDevice('one Mac');
-  const state = h.dump();
   for (const [space, kind, mid, colour] of [
     [PERSONAL, 'PERSONAL', memberId(11), 'gruen'],
     [FAMILY_A, 'FAMILY', memberId(12), 'blau'],
@@ -139,42 +145,46 @@ test('SUCCEEDED (LATENT — finding against E2-203-1; 21.3 now DOCUMENTED) — t
   ]) {
     await h.store.createSpace(fixtures.space({ id: space, kind, createdAt: new Date(T0) }));
     await h.store.addMember(fixtures.member({ id: mid, spaceId: space, colorRef: colour }));
-    state.devices.set(`${space}:dev`, fixtures.device({
-      id: `dev_${space.slice(4)}`, memberId: mid, deviceShort: mac.deviceShort,
+    await h.store.addDevice(fixtures.device({
+      id: `dev_${space.slice(4)}`, spaceId: space, memberId: mid, deviceShort: mac.deviceShort,
       sigPubRaw: mac.sigPubRaw, kexPubRaw: mac.kexPubRaw, addedAt: new Date(T0),
     }));
   }
 
-  // THE OPERATOR'S QUERY, once the schema allows the rows:
-  //   SELECT m.spaceId FROM Device d JOIN Member m ON m.id = d.memberId WHERE d.deviceShort = ?
-  const spacesOf = (short) => [...state.devices.values()]
-    .filter((d) => d.deviceShort === short)
-    .map((d) => state.members.get(d.memberId).spaceId)
-    .sort();
-  assert.deepEqual(spacesOf(mac.deviceShort), [FAMILY_A, FAMILY_B, PERSONAL].sort(),
-    'one equality on an INDEXED column returns every circle this person is in');
+  const state = h.dump();
+  const spacesBy = (pred) => [...state.devices.values()].filter(pred).map((d) => d.spaceId).sort();
+
+  // JOIN 1 — the short. `@@unique([spaceId, deviceShort])` means a bare `WHERE deviceShort = ?`
+  // is not served by the leading column of any index, so this is a scan rather than a seek. That
+  // is a speed bump for ad-hoc SQL and NOT a control: the operator owns the database and can
+  // CREATE INDEX. The row measures the CAPABILITY, and the capability is unchanged by the index.
+  assert.deepEqual(spacesBy((d) => d.deviceShort === mac.deviceShort),
+    [FAMILY_A, FAMILY_B, PERSONAL].sort(),
+    'one equality on deviceShort returns every circle this person is in');
+
+  // JOIN 2 — the key, and this is the one that matters. It is 65 exact bytes the relay MUST hold
+  // to verify a signature (ADR 003 §2 step 5), it is identical across spaces for the same reason
+  // the short is, and no naming decision anywhere can take it away. Renaming or blinding
+  // `deviceShort` per space would leave this untouched.
+  const key = Buffer.from(mac.sigPubRaw).toString('base64');
+  assert.deepEqual(spacesBy((d) => Buffer.from(d.sigPubRaw).toString('base64') === key),
+    [FAMILY_A, FAMILY_B, PERSONAL].sort(),
+    'and so does one equality on the public key — the join that survives every namespace choice');
 
   // And the three pseudonymous member ids collapse into one human.
-  const people = [...state.devices.values()]
-    .filter((d) => d.deviceShort === mac.deviceShort).map((d) => d.memberId);
-  assert.equal(new Set(people).size, 3, 'three ids…');
   assert.equal(new Set([...state.devices.values()]
-    .filter((d) => d.deviceShort === mac.deviceShort)
-    .map((d) => Buffer.from(d.sigPubRaw).toString('base64'))).size, 1, '…one public key');
+    .filter((d) => d.deviceShort === mac.deviceShort).map((d) => d.memberId)).size, 3);
 
-  // THE FINDING, and it belongs to the schema owner rather than to a handler:
-  // E2-203-1's `fix` field describes the constraint change and the auth change. It says nothing
-  // about the consequence proved above — that the fixed schema makes `deviceShort` a global
-  // person-identifier across every household on the relay. Nor does server-metadata.md, whose §7
-  // dump list and §2 Device table are both written for the current, single-space world.
+  // THE FINDING, inverted. E2-203-1's `fix` field used to describe a constraint change and an
+  // auth change and to say NOTHING about this consequence; that silence was the finding, and the
+  // row asserted the silence. It is now closed in the other direction: the field names the
+  // correlation, names what would actually remove it, and refuses to claim the fix did.
   const f = HANDLER_FINDINGS.find((x) => x.id === 'E2-203-1');
-  assert.equal(/correlat|link|across spaces|privacy/i.test(f.fix + f.consequence), false,
-    'E2-203-1 now mentions the correlation consequence of its own fix — fold this into the finding '
-    + 'and rename this test');
-  // INVERTED — the CAPABILITY is unchanged; the SILENCE is what closed. `server-metadata.md` §7's
-  // fifth inference now says that three joins work across spaces and names `deviceShort` as the
-  // first of them. The finding against E2-203-1 stands (its `fix` field still does not mention
-  // the consequence of its own fix) and is asserted above; this half is 21.3's and is now met.
+  assert.match(f.fix, /CROSS-SPACE CORRELATION/);
+  assert.match(f.fix, /per-space device signing key/);
+  assert.match(f.fix, /correlation is NOT fixed/);
+
+  // 21.3's half, unchanged and still met.
   assertDocumented(assert, 'cross-space correlation by deviceShort', [
     'cross-space correlation',
     'across spaces',

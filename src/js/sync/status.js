@@ -39,6 +39,13 @@
 // `judgeSyncStatus` is a fold over it rather than a chain of `if`s. Adding a failure state is
 // adding a ROW; it can never again be adding a branch somebody forgets to add a report to.
 //
+// IT CARRIES EIGHT ROWS, NOT SEVEN. The eighth is `shelved`, and it is here rather than in S4
+// because it is a state the product can enter that the domain has no row for yet — a hold that
+// ENDED, with the bytes retained and nothing left that will ever open them. A state with no row
+// is exactly what this enumeration exists to make impossible, so it is enumerated where the fold
+// can see it, `S4-held` is named as the entry it belongs beside, and adding `S4-shelved` to
+// `tests/helpers/sync-domains.js` is reported as work for that file's owner.
+//
 // The consequence that matters is the direction of the default. `judgeSyncStatus` returns
 // `healthy` only when EVERY row of the enumeration is empty. Silence is no longer "none of the
 // four conditions I happened to check is true"; it is "the whole enumerated domain of things that
@@ -50,8 +57,9 @@
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
 // It is a LEAF: zero imports, no DOM, no clock, no network, no i18n. It is a pure function of two
-// plain objects — the engine's own reading and `store.diagnostics()` — so the same judgement can
-// be made by the engine (`sync/personal.js`'s `status()`), by the chrome
+// plain objects and one duck-typed port — the engine's own reading, `store.diagnostics()`, and a
+// parking lot that answers `shelved(space)` — so the same judgement can be made by the engine
+// (`sync/personal.js`'s `status()`), by the chrome
 // (`family/syncstatus.js`), by a support bundle and by a test, and they cannot disagree. Nothing
 // here decides what a state LOOKS like; `family/syncstatus.js` owns that, and 19.3's three rules
 // (healthy is nothing, pending is one hollow ring, never a spinner) live there.
@@ -106,14 +114,15 @@ export const SYNC_ERROR_KINDS = Object.freeze(
  * @property {string} field   the `store.diagnostics()` key that carries it. `'outbox'` and
  *   `'warnings'` already exist; `parked`, `refused`, `lost` and `chain` are what S4 requires and
  *   `store.diagnostics()` now supplies.
- * @property {'sync'|'root'} at  WHERE the field lives — under `diagnostics().sync`, or at the top
- *   of `diagnostics()` itself. Recorded per row rather than special-cased in the reader, because
- *   the reader special-casing ONE top-level field (`warnings`) is what made a second one
- *   (`quarantine`) unreachable for a whole round — R8-8.
+ * @property {'sync'|'root'|'held'} at  WHERE the evidence lives — under `diagnostics().sync`, at
+ *   the top of `diagnostics()` itself, or (`'held'`) handed in by the caller because the store
+ *   cannot see it. Recorded per row rather than special-cased in the reader, because the reader
+ *   special-casing ONE top-level field (`warnings`) is what made a second one (`quarantine`)
+ *   unreachable for a whole round — R8-8.
  * @property {'count'|'flag'|'list'} shape  how the field reports "present".
  * @property {string} state   the `SYNC_STATE` this observable forces AT LEAST. Never lower.
  * @property {?string} errorKind  the i18n sentence to prefer, or null for the generic one.
- * @property {boolean} durable  must the answer survive a quit-and-relaunch? True for all seven —
+ * @property {boolean} durable  must the answer survive a quit-and-relaunch? True for all eight —
  *   it is the whole point — and recorded per row so a partial fix is legible as a partial fix.
  * @property {string} row     the `tests/helpers/sync-domains.js` S4 entry this decides.
  * @property {string} why     one line, for a failure report and for the next reader.
@@ -186,6 +195,63 @@ export const SYNC_OBSERVABLES = Object.freeze([
       + 'see is wrong, which is exactly why it must be SAID: the history, the cursors, the parked '
       + 'lines and the durable refusal ledger are all gone with it, so every other row in this '
       + 'enumeration is answering from a record this launch has just declared untrustworthy.',
+  }),
+  Object.freeze({
+    id: 'shelved',
+    field: 'shelved',
+    at: 'held',
+    shape: 'list',
+    // ── R10-9 · THE HOLD THAT ENDED, AND THE ONE ROW WHOSE EVIDENCE IS NOT IN THE BLOB ───────
+    //
+    // AHEAD OF `parked`, and the ordering is the finding. A parked envelope is a hold that is
+    // still going: the next launch replays it, an attestation or a key can still cure it, and
+    // `pending` is the honest state. A SHELVED envelope is the same envelope after the ladder
+    // gave up — `outbox.js`'s `refuse()`/`release()` move it to the shelf past `PARK_REVIVALS`
+    // launches, and from that moment nothing in the product will ever open it again. The bytes
+    // are kept, deliberately ("a park may never become a drop"), and that retention is worth
+    // exactly nothing while no reader exists: a change somebody in the family made is on this
+    // Mac's disk, correctly stored, and the board will never show it.
+    //
+    // `error` and not `pending`, for the same reason `refused` is: there is no work outstanding
+    // here. Nothing is being waited for. `errorKind: null` — the generic sentence — because the
+    // vocabulary in `sync.contract.js` §4 has no word for "held, then given up on", and this
+    // module's rule is that a true generic sentence beats a false specific one. Inventing a kind
+    // here would also mean inventing an `i18n.js` string, and a row that cannot report until a
+    // second file lands is a row that reports nothing.
+    //
+    // ── `at: 'held'` — WHY THIS ONE ROW IS FED BY A PORT AND NOT BY `diagnostics()` ──────────
+    //
+    // Every other row names a field `store.diagnostics()` publishes, so an ABSENT field means
+    // "this build cannot answer the question" and `blindSpots()` says so out loud. The shelf has
+    // no such field and cannot get one from here: the retained envelopes live in the ENGINE's
+    // parking lot (`sync/outbox.js`, behind the `parkStore` port), which the store never sees —
+    // `diagnostics().sync.parked` counts `_log.parkedOps()` and structurally cannot count the
+    // lot's (R8-6b). So the caller reads the lot and hands the rows in, and `shelvedDetail()`
+    // below is the one reader.
+    //
+    // ⚠ THE HONEST CAUTION, STATED RATHER THAN BURIED. An omitted `held` is NOT counted as
+    // blindness, so a caller that never looks does not make `silent` false, and this row's
+    // silence is therefore weaker than the other six. That is a real weakening and it is bounded
+    // in two ways: `judgeSyncStatus` returns `unoffered`, which NAMES every row nobody handed
+    // evidence for, and `round8-park.test.js` §7 asserts — now as an INVERTED row — which
+    // callers in `src/` pass `held`. The obligation was `sync/personal.js`'s `status()`, and the
+    // round-10 integration pass closed it: it already held the lot, and it now hands it in.
+    state: SYNC_STATE.error,
+    errorKind: null,
+    durable: true,
+    // ⬆ `S4-shelved`, AND IT USED TO SAY `S4-held`, WHICH IS A DIFFERENT STATE. `S4-held` is a
+    // hold that is STILL GOING — `pending`, curable, replayed by the next launch. This row is the
+    // same envelope after the ladder gave up. They were pointed at one entry only because the
+    // enumeration had none for the second, which is the same defect one level up: a state the
+    // product can enter and cannot name. `tests/helpers/sync-domains.js` now carries `S4-shelved`
+    // and `tests/property/sync-domains.test.js` drives it through the real engine.
+    row: 'S4-shelved',
+    why: 'a held envelope was GIVEN UP ON and retained — past `PARK_REVIVALS` launches the '
+      + 'parking lot stops replaying it and keeps the bytes (R8-4: a park may never become a '
+      + 'drop). The retention is real and the recovery path is not: nothing opens it, no screen '
+      + 'shows it, and the family change inside it will never reach this board until something '
+      + 'reads the shelf. `outbox.js diagnostics().refused` counts them and a count is not a '
+      + 'report — ADR 002 §8.6\'s detail pane is what this row hands its rows to.',
   }),
   Object.freeze({
     id: 'parked',
@@ -297,8 +363,72 @@ export const SYNC_OBSERVABLES = Object.freeze([
  */
 export const SYNC_DIAGNOSTIC_FIELDS = Object.freeze(['parked', 'refused', 'lost', 'chain']);
 
-/** Every field this module reads, `sync`-scoped and root-scoped alike, in enumeration order. */
+/**
+ * Every field this module reads, `sync`-scoped, root-scoped and port-fed alike, in enumeration
+ * order. `shelved` is in here and is deliberately NOT in `SYNC_DIAGNOSTIC_FIELDS` above: that
+ * list is the store's contract, and `store.js` cannot answer for the engine's parking lot. A
+ * `shelved` added there would be a field the store publishes as `0` for ever, which is the exact
+ * arithmetic L-2 is about — "I cannot see it" written down as "there is none".
+ */
 export const SYNC_OBSERVABLE_FIELDS = Object.freeze(SYNC_OBSERVABLES.map((o) => o.field));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2b. THE DETAIL PANE'S READER — ADR 002 §8.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Read the parking lot's SHELF: the envelopes a hold gave up on and did not destroy.
+ *
+ * ── WHY THIS FUNCTION EXISTS AT ALL ─────────────────────────────────────────────────────────
+ *
+ * `sync/outbox.js` retains those bytes on purpose and says so in its own words — *"That is not a
+ * drop: the bytes are on disk, `diagnostics().refused` counts them, and `shelved()` hands them
+ * back whole."* Round 10 measured the other half of that sentence: **`shelved()` had no caller
+ * anywhere in `src/`.** The retention was real and the recovery path did not exist, so a change
+ * from a family member sat on the disk, correctly kept, and no screen, no diagnostic and no
+ * launch would ever surface it as anything but a number. That is the shape of every observability
+ * finding in this project — R8-5 (a durably held op invisible while the build said `silent:
+ * true`), R8-6 (`chain` declared `durable: true` and persisted nowhere), R8-8 (a log quarantine
+ * erasing the refusal ledger and not itself an observable) — and it is closed the same way: by
+ * something READING the state.
+ *
+ * ── WHAT IT MAY AND MAY NOT CARRY (21.3) ────────────────────────────────────────────────────
+ *
+ * The lot's own `shelved(space)` hands back the whole row INCLUDING `env` — the sealed envelope,
+ * with its `ct`, `iv` and `sig`. That is right for a recovery path (it is the only copy) and
+ * wrong for a REPORT, which ends up in a settings sheet, a screenshot and a support bundle. So
+ * this reader returns the same four facts `store.syncRefusals` already publishes about a refusal
+ * — an opId, a seq, the park reason and how many ladders it has burned — and never the bytes.
+ * `env` is dropped HERE rather than at the display, because a field that is dropped at the
+ * display is a field the next display forgets to drop.
+ *
+ * PURE, and the lot is a PORT, duck-typed: this module imports nothing and must not start with
+ * `outbox.js`. Anything with a `shelved(space)` method fits, which is what makes the same reader
+ * usable from the engine, from the chrome and from a test.
+ *
+ * @param {{shelved:(space:string)=>Array<Object>}|null} lot the parking lot, or null
+ * @param {string|string[]} spaces the space ids to ask about
+ * @returns {ReadonlyArray<{space:string, oid:string, seq:string, reason:string, refusals:number}>}
+ */
+export function shelvedDetail(lot, spaces) {
+  if (!lot || typeof lot.shelved !== 'function') return Object.freeze([]);
+  const list = Array.isArray(spaces) ? spaces : [spaces];
+  const out = [];
+  for (const space of list) {
+    if (typeof space !== 'string' || space === '') continue;
+    for (const r of lot.shelved(space) || []) {
+      if (!r || typeof r !== 'object') continue;
+      out.push(Object.freeze({
+        space: typeof r.space === 'string' ? r.space : space,
+        oid: typeof r.oid === 'string' ? r.oid : '',
+        seq: typeof r.seq === 'string' ? r.seq : String(r.seq ?? ''),
+        reason: typeof r.reason === 'string' ? r.reason : '',
+        refusals: Number.isFinite(r.refusals) ? r.refusals : 0,
+      }));
+    }
+  }
+  return Object.freeze(out);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. Reading the enumeration off a diagnostics blob
@@ -314,7 +444,10 @@ export const SYNC_OBSERVABLE_FIELDS = Object.freeze(SYNC_OBSERVABLES.map((o) => 
  * carries its own scope, which is the same rule the rest of this module lives by: the domain is
  * data, and reading it is a fold, not a branch somebody has to remember to extend.
  */
-function fieldValue(diag, obs) {
+function fieldValue(diag, obs, held) {
+  // `at: 'held'` does not read the blob at all — the evidence is handed in by the caller, who
+  // read it off the engine's parking lot with `shelvedDetail()`. See the `shelved` row.
+  if (obs.at === 'held') return held === null ? undefined : held;
   if (!diag || typeof diag !== 'object') return undefined;
   if (obs.at === 'root') return diag[obs.field];
   const s = diag.sync;
@@ -329,11 +462,22 @@ function fieldValue(diag, obs) {
  * folding that into `0` is precisely the move that turns "I cannot see a parked op" into
  * "there are no parked ops" — L-2 in one line of arithmetic. `unknown` below carries it out.
  *
- * @returns {{count:number, unknown:boolean}}
+ * A PORT-FED row (`at: 'held'`) that was offered nothing is reported as `unoffered` and NOT as
+ * `unknown`, and the difference is deliberate: `unknown` feeds `blind`, which feeds `silent`, and
+ * a row that made every launch un-silent until a second file wires it would break story 19.3 in
+ * the direction `S4-quiet` is the control against. It is not free either — `judgeSyncStatus`
+ * returns the `unoffered` list, so "nobody looked" is a fact the build states rather than one it
+ * omits. See the `shelved` row for the full argument and for who owes the wiring.
+ *
+ * @returns {{count:number, unknown:boolean, unoffered?:boolean}}
  */
-function presenceOf(obs, diag) {
-  const v = fieldValue(diag, obs);
-  if (v === undefined) return { count: 0, unknown: true };
+function presenceOf(obs, diag, held = null) {
+  const v = fieldValue(diag, obs, held);
+  if (v === undefined) {
+    return obs.at === 'held'
+      ? { count: 0, unknown: false, unoffered: true }
+      : { count: 0, unknown: true };
+  }
   if (obs.shape === 'list') return { count: Array.isArray(v) ? v.length : 0, unknown: false };
   if (obs.shape === 'flag') return { count: v === null || v === false ? 0 : 1, unknown: false };
   return { count: Number.isFinite(v) && v > 0 ? v : 0, unknown: false };
@@ -346,13 +490,15 @@ function presenceOf(obs, diag) {
  * says so rather than saying nothing. Returns the rows that are PRESENT, in enumeration order.
  *
  * @param {Object} diagnostics `store.diagnostics()`
+ * @param {?ReadonlyArray<Object>} [held] the shelf, as `shelvedDetail()` read it, or null when
+ *   the caller holds no parking lot to read
  * @returns {ReadonlyArray<{id:string, field:string, count:number, state:string,
  *   errorKind:?string, row:string, why:string}>}
  */
-export function observeSync(diagnostics) {
+export function observeSync(diagnostics, held = null) {
   const out = [];
   for (const obs of SYNC_OBSERVABLES) {
-    const { count, unknown } = presenceOf(obs, diagnostics);
+    const { count, unknown } = presenceOf(obs, diagnostics, held);
     if (unknown || count <= 0) continue;
     out.push(Object.freeze({
       id: obs.id, field: obs.field, count, state: obs.state,
@@ -377,6 +523,23 @@ export function blindSpots(diagnostics) {
   return Object.freeze(out);
 }
 
+/**
+ * The rows nobody handed evidence for — the PORT-FED ones this caller did not offer.
+ *
+ * Not the same claim as `blindSpots()` and kept apart from it on purpose. A blind spot is a
+ * build that cannot answer; an unoffered row is a CALL SITE that did not look. The first is a
+ * missing field and makes silence a lie; the second is a missing argument, and the honest thing
+ * to do with it is to name it — a settings sheet can say "the shelf was not read", and
+ * `round8-park.test.js` §7 asserts which call sites still owe the look.
+ *
+ * @param {?ReadonlyArray<Object>} held @returns {ReadonlyArray<string>} observable ids
+ */
+export function unofferedRows(held = null) {
+  const out = [];
+  for (const obs of SYNC_OBSERVABLES) if (presenceOf(obs, null, held).unoffered) out.push(obs.id);
+  return Object.freeze(out);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. The judgement
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,20 +548,24 @@ export function blindSpots(diagnostics) {
  * Merge the engine's own reading with the durable evidence in the store, and say plainly whether
  * silence is earned.
  *
- * @param {{engine?:Object, diagnostics?:Object}} input
+ * @param {{engine?:Object, diagnostics?:Object, held?:?ReadonlyArray<Object>}} input
  *   `engine` — whatever `sync.status()` returned, or null/undefined in solo mode. Its `state`,
  *   `errorKind` and counters are respected and never lowered; this function only ever ADDS.
  *   `diagnostics` — `store.diagnostics()`, or null when there is no store to ask.
+ *   `held` — the parking lot's SHELF, as `shelvedDetail(lot, spaces)` read it. Omit it and the
+ *   `shelved` row is reported as `unoffered` rather than answered; there is no third thing this
+ *   function can do, because the shelf is not in the blob and never will be (see the row).
  * @returns {{state:string, errorKind:?string, detail:?string, pendingOps:number,
  *   consecutiveFailures:number, lastPullAt:?number, observables:ReadonlyArray<Object>,
- *   blind:ReadonlyArray<string>, silent:boolean}}
+ *   blind:ReadonlyArray<string>, unoffered:ReadonlyArray<string>, silent:boolean}}
  */
-export function judgeSyncStatus({ engine = null, diagnostics = null } = {}) {
+export function judgeSyncStatus({ engine = null, diagnostics = null, held = null } = {}) {
   const e = engine && typeof engine === 'object' ? engine : {};
   const engineState = SYNC_STATE_RANK[e.state] === undefined ? SYNC_STATE.healthy : e.state;
 
-  const observables = observeSync(diagnostics);
+  const observables = observeSync(diagnostics, held);
   const blind = blindSpots(diagnostics);
+  const unoffered = unofferedRows(held);
 
   let state = engineState;
   for (const o of observables) state = worstSyncState(state, o.state);
@@ -427,10 +594,18 @@ export function judgeSyncStatus({ engine = null, diagnostics = null } = {}) {
     lastPullAt: Number.isFinite(e.lastPullAt) ? e.lastPullAt : null,
     observables,
     blind,
+    unoffered,
     /**
      * 19.3's promise, as a boolean. TRUE only when the state is healthy AND the whole enumerated
      * domain is empty AND every row of it could actually be answered. A build that cannot see one
-     * of the seven is not silent; it is uninformed, and it says so.
+     * of the store-fed rows is not silent; it is uninformed, and it says so.
+     *
+     * ⚠ `unoffered` is NOT in this conjunction, and the `shelved` row is the whole of why: a
+     * row whose evidence is a PORT is answered by the call site, and making every call site that
+     * holds no parking lot un-silent would put a permanent glyph on a solo Mac. What the caution
+     * costs is stated where it is incurred (the `shelved` row) and named in the return value, so
+     * a reader of this object can see the difference between "nothing to tell you" and "nothing
+     * to tell you about the seven I was shown".
      */
     silent: state === SYNC_STATE.healthy && observables.length === 0 && blind.length === 0,
   });

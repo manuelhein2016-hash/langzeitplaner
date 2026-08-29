@@ -60,12 +60,20 @@
 import '../helpers/env.js';
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { createFleet, simClock, MINUTE } from '../helpers/fleet.js';
 import { MAX_DEFERRALS, PARK_HANDLING } from '../../src/js/sync/personal.js';
 import { createParkingLot, memoryRecordStore, PARK_REVIVALS } from '../../src/js/sync/outbox.js';
+import { judgeSyncStatus, shelvedDetail } from '../../src/js/sync/status.js';
+import { createCursors, memoryCursorStore } from '../../src/js/sync/cursor.js';
 import { ENVELOPE_PARK } from '../../src/js/crypto/envelope.js';
 import { b64u } from '../../src/js/core/b64.js';
+
+const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const SRC = (p) => fs.readFileSync(path.join(REPO, p), 'utf8');
 
 const BOARD = () => ({
   schemaVersion: 1,
@@ -678,6 +686,78 @@ describe('§6 · the parking lot may not lose an envelope, and may not lie about
     assert.equal(b.d.peek()[0].refused, true, 'on the disk, marked, ready for the next launch');
   });
 
+  test('§6.2c · R10-9d · a SHELF ROW for an op that has since opened is dropped', async () => {
+    // THE CROSS-SESSION HALF of R10-9d. The shelf means one thing — "this hold ended and nothing
+    // will ever open these bytes" — and the revival exists precisely so that a LATER process can
+    // open them after all. When it does, the row that said otherwise has to go.
+    //
+    // Until round 10 the shelf was append-only from `release()`'s side, so the ordinary F-6 story
+    // left a permanent entry behind: the ladder gives up, `terminal()` shelves the envelope, the
+    // pairing completes, the next launch revives it, the op opens and applies — and `shelved()`
+    // still reported an envelope nothing would ever open, about an entry sitting on the board.
+    //
+    // Invisible while nothing read the shelf. It became a USER-VISIBLE permanent `error` the
+    // moment `sync/personal.js status()` began offering the shelf to `judgeSyncStatus`, which is
+    // why the two landed together: without this the new observable's first act would have been to
+    // put a red light on every Mac that once paired slowly.
+    //
+    // THE IN-SESSION HALF is a different mechanism and has its own row: `unopened` accumulates
+    // across pulls, so `pullNow` opens each pull with an empty `release()`. It is measured
+    // end-to-end by `round10-e6-gate.test.js` §1b, and mutant M-R10-9d-1 (delete that call) kills
+    // exactly that row and this one stays green — which is the point of separating them.
+    const d = disk();
+    const first = createParkingLot({ storage: d });
+    await first.load();
+    const e = sealed();
+    await first.park(SPACE, e, '11', 'attestation');
+    await first.refuse(SPACE, [e.oid], 'still attestation after 5 attempts');
+    assert.equal(first.shelved(SPACE).length, 1, 'SETUP: the ladder gave up and kept the bytes');
+
+    // A FRESH PROCESS — where the cure can have arrived — revives it, and this time it opens.
+    const next = createParkingLot({ storage: d });
+    await next.load();
+    assert.equal(next.parked(SPACE).length, 1, 'SETUP: the revival put it back in the replay set');
+    assert.equal(await next.release(SPACE, [e.oid]), 1, 'and it OPENED, so the caller releases it');
+    assert.deepEqual(next.shelved(SPACE), [],
+      'THE ROW: no shelf row survives. MUTANT — drop the `opened` filter in `release()` and this '
+      + 'line dies while every other row in this file stays green.');
+    assert.deepEqual(d.peek(), [], 'and the disk agrees, so the next launch does not resurrect it');
+
+    // AND THE ROW IS DROPPED EVEN WITH NO REPLAY ROW TO GO WITH IT — the shelved envelope whose
+    // op arrives by a route that never re-parks it. `release()` returns 0 (nothing left the replay
+    // set, which is true) and must still have cleaned the shelf and PERSISTED.
+    const d2 = disk();
+    const lone = createParkingLot({ storage: d2 });
+    await lone.load();
+    const e2 = sealed();
+    await lone.park(SPACE, e2, '12', 'attestation');
+    await lone.refuse(SPACE, [e2.oid], 'gave up');
+    assert.equal(lone.parked(SPACE).length, 0, 'SETUP: on the shelf, out of the replay set');
+    assert.equal(await lone.release(SPACE, [e2.oid]), 0,
+      'nothing left the REPLAY SET, and the return value says so honestly');
+    assert.deepEqual(lone.shelved(SPACE), [], 'but the shelf row is gone');
+    assert.deepEqual(d2.peek(), [],
+      'and it was PERSISTED — an early return before the write would leave the next launch '
+      + 'reviving an op that is already on the board');
+
+    // THE CONTROL, so the clause cannot be satisfied by a `release()` that empties the shelf: an
+    // oid the caller did NOT name is untouched, and neither is another space's row.
+    const d3 = disk();
+    const keeps = createParkingLot({ storage: d3 });
+    await keeps.load();
+    const mine = sealed();
+    const theirs = sealed();
+    await keeps.park(SPACE, mine, '13', 'attestation');
+    await keeps.park(SPACE, theirs, '14', 'attestation');
+    await keeps.refuse(SPACE, [mine.oid, theirs.oid], 'gave up');
+    await keeps.release(SPACE, [mine.oid]);
+    assert.deepEqual(keeps.shelved(SPACE).map((r) => r.oid), [theirs.oid],
+      'CONTROL: only the oid the caller named is dropped. A clause that cleared the shelf wholesale '
+      + 'would pass every assertion above and lose a genuinely retained envelope.');
+    await keeps.release('psp_someOtherSpaceEntirelyXX', [theirs.oid]);
+    assert.equal(keeps.shelved(SPACE).length, 1, 'and another space cannot reach this one\'s shelf');
+  });
+
   test('§6.3 · a fresh process puts the shelf back — and only a fresh process does', async () => {
     const d = disk();
     const lot = createParkingLot({ storage: d });
@@ -733,5 +813,217 @@ describe('§6 · the parking lot may not lose an envelope, and may not lie about
     assert.equal(await lot.park(SPACE, sealed(), '3', 'attestation'), true,
       'the shelf does not eat the cap');
     assert.equal(lot.diagnostics().refused, 1, 'and the shelved one is still counted, and still kept');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §7 · CLOSED — R10-9c. THE SHELF IS READ, AND THE VERDICT SAYS SO
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// §6.4 above ends with the sentence this section is about: past `PARK_REVIVALS` the envelope is
+// "still held", byte for byte, and NOTHING IN THE PRODUCT READ IT. The round-10 adversary put the
+// two halves side by side in `round9-e6.test.js` §3c — `shelved()` had no caller anywhere in
+// `src/`, so the retention was real and the recovery path did not exist — and this is that row's
+// other end: the reader, and the verdict that names the state.
+//
+// It is the same finding as R8-5 (a durably held op invisible while the build said `silent:
+// true`), as R8-6 (`chain` declared `durable: true` and persisted nowhere) and as R8-8 (a
+// quarantine that erased the refusal ledger and was not itself an observable). A state the system
+// can enter and cannot report is not a smaller defect than a state it enters wrongly; it is the
+// same defect with the evidence removed.
+//
+// TWO MECHANISMS, TWO ROWS, so a revert of either dies here by name:
+//   §7a  `shelvedDetail()` reads `lot.shelved(space)` and hands back the facts WITHOUT the bytes.
+//        Mutant M-F9b — make it return `[]` without asking the lot — kills §7a and §7c.
+//   §7b  the `shelved` row of `SYNC_OBSERVABLES` puts the state in the judgement.
+//        Mutant M-F9a — delete the row, or ignore `held` in the fold — kills §7b and §7d.
+
+describe('§7 · a hold that ENDED is readable, and the judgement names it', () => {
+  const shelfOf = async (n = 1) => {
+    const d = disk();
+    const lot = createParkingLot({ storage: d });
+    await lot.load();
+    const envs = [];
+    for (let i = 0; i < n; i++) {
+      const e = sealed();
+      envs.push(e);
+      await lot.park(SPACE, e, String(5 + i), 'attestation');
+      await lot.refuse(SPACE, [e.oid], 'still attestation after 5 attempts');
+    }
+    return { lot, envs };
+  };
+
+  test('§7a · INVERTED (R10-9c) · `shelvedDetail()` reads the shelf, and carries no ciphertext', async () => {
+    const { lot, envs } = await shelfOf(2);
+    const rows = shelvedDetail(lot, [SPACE]);
+    assert.equal(rows.length, 2,
+      'THE ROW, INVERTED: `shelved()` has a reader. Round 10 measured zero callers in `src/`, so a '
+      + 'change a family member made sat on this disk, correctly kept, and no screen, no '
+      + 'diagnostic and no launch would ever surface it as anything but a count.');
+    assert.deepEqual(rows.map((r) => r.oid).sort(), envs.map((e) => e.oid).sort(), 'every one of them');
+    assert.equal(rows[0].reason, 'still attestation after 5 attempts', 'with the reason it stopped for');
+    assert.equal(rows[0].refusals, 1, 'and how many ladders it has burned');
+    assert.equal(rows[0].space, SPACE);
+
+    // 21.3 — a report is read in a settings sheet, a screenshot and a support bundle. `shelved()`
+    // hands back the whole row INCLUDING `env`, which is right for a recovery path and wrong here.
+    const text = JSON.stringify(rows);
+    for (const field of ['ct', 'iv', 'sig', 'env']) {
+      assert.equal(text.includes(`"${field}"`), false, `the detail carries no \`${field}\``);
+    }
+    for (const e of envs) assert.equal(text.includes(e.ct), false, 'and no ciphertext by value either');
+
+    // Total over hostile-ish input: no lot, a lot without the method, a space nobody parked in.
+    assert.deepEqual(shelvedDetail(null, [SPACE]), []);
+    assert.deepEqual(shelvedDetail({}, [SPACE]), []);
+    assert.deepEqual(shelvedDetail(lot, ['psp_nothingWasEverParkedHere']), []);
+    assert.equal(shelvedDetail(lot, SPACE).length, 2, 'one space id, not in an array, is accepted');
+  });
+
+  test('§7b · INVERTED (R10-9c) · the shelved state is IN the verdict, and silence is not claimed', async () => {
+    const { lot } = await shelfOf(1);
+    const diagnostics = {
+      sync: { parked: 0, refused: 0, lost: 0, chain: null, outbox: 0 }, warnings: [], quarantine: null,
+    };
+    const blindToIt = judgeSyncStatus({ diagnostics });
+    assert.equal(blindToIt.silent, true,
+      'CONTROL: with an empty store and nothing offered, silence is still free — 19.3 is not '
+      + 'broken in the other direction, which is what round 8 measured a fix doing');
+
+    const judged = judgeSyncStatus({ diagnostics, held: shelvedDetail(lot, [SPACE]) });
+    assert.equal(judged.state, 'error',
+      'THE ROW, INVERTED: a retained envelope nothing will ever open again is `error`. Round 10 '
+      + 'measured `healthy` — the state was not in the enumeration, so the fold could not see it.');
+    assert.equal(judged.silent, false, 'and 19.3\'s promise is not claimed over it');
+    assert.deepEqual(judged.observables.map((o) => o.id), ['shelved'], 'by name, as its own row');
+    assert.equal(judged.observables[0].count, 1);
+    assert.equal(judged.observables[0].row, 'S4-shelved',
+      'and it names the domain entry it belongs to. It said `S4-held` until the round-10 '
+      + 'integration pass, which is a DIFFERENT state — a hold still going, `pending`, curable, '
+      + 'replayed by the next launch. The two shared one entry only because the enumeration had '
+      + 'none for the second; `tests/helpers/sync-domains.js` now carries `S4-shelved`.');
+    assert.equal(judged.errorKind, null,
+      '`errorKind: null` is the GENERIC sentence, deliberately: `sync.contract.js` §4 has no word '
+      + 'for "held, then given up on", and a true generic sentence beats a false specific one');
+
+    // An EMPTY shelf is an answered row, not an absent one — the distinction the whole file is
+    // about, one level up: "I looked and there are none" may claim silence; "I did not look" may not.
+    const empty = judgeSyncStatus({ diagnostics, held: shelvedDetail(lot, ['psp_someOtherSpace']) });
+    assert.equal(empty.silent, true, 'a shelf that was READ and is empty costs silence nothing');
+    assert.deepEqual(empty.unoffered, [], 'and it is not unoffered — it was offered and it was empty');
+  });
+
+  test('§7c · the reader is the ONLY thing standing between the bytes and a number', async () => {
+    // Non-vacuity for §7a, in `blindness.test.js` §7a's discipline: the row must fail for the
+    // reason it names. A `shelvedDetail` that answered from `diagnostics().refused` — the count
+    // the product already had — would pass §7a's length check and could never produce an oid, a
+    // reason or a seq, which is the whole difference between a number and a report.
+    const { lot, envs } = await shelfOf(1);
+    const [row] = shelvedDetail(lot, [SPACE]);
+    assert.equal(row.oid, envs[0].oid, 'the oid is the one on the disk, not a synthetic index');
+    assert.equal(row.seq, '5', 'and the seq it was parked at, which is what makes it findable');
+    assert.equal(lot.diagnostics().refused, 1,
+      'CONTROL: the count still says 1 — the count was never wrong, it was never a report');
+  });
+
+  test('§7d · INVERTED (round 10 integration) · `src/` OFFERS the shelf, and `unoffered` is empty', () => {
+    // THE ROW AS IT WAS: "nothing in `src/` offers the shelf yet, and the verdict says which row".
+    // The reader existed and the enumeration had the state; what was missing was a CALL SITE that
+    // holds a parking lot and hands it in. `sync/personal.js status()` is that call site — it
+    // holds `lot` and already built the `judgeSyncStatus` argument — and it was not the owner's
+    // file, so the half-fix was stated as `unoffered` rather than hidden.
+    //
+    // It is wired now, and this row keeps BOTH halves: the unwired verdict still names the row
+    // nobody answered (the mechanism that made the half-fix honest must not rot away), and the
+    // directory walk now asserts the caller is really there.
+    const judged = judgeSyncStatus({
+      diagnostics: {
+        sync: { parked: 0, refused: 0, lost: 0, chain: null, outbox: 0 }, warnings: [], quarantine: null,
+      },
+    });
+    assert.deepEqual(judged.unoffered, ['shelved'],
+      'THE MECHANISM, KEPT: with no `held` argument the verdict still names the row nobody '
+      + 'answered, rather than reporting an empty shelf it never read. This is what made the '
+      + 'un-wired build honest, and a future port-fed row inherits it.');
+    assert.equal(judged.silent, true,
+      'and it deliberately does NOT cost silence: a row fed by a PORT is answered by the call '
+      + 'site, so an un-wired build would otherwise put a permanent glyph on every solo Mac — '
+      + 'the failure `S4-quiet` is the control against.');
+
+    // Measured over the DIRECTORIES, in `round9-e6.test.js` §3c's discipline. Round 10 asserted
+    // this list was EMPTY; the inversion is that `personal.js` is now in it.
+    const callers = ['src/js/sync', 'src/js/family']
+      .flatMap((d) => fs.readdirSync(path.join(REPO, d)).filter((n) => n.endsWith('.js')).map((n) => `${d}/${n}`))
+      .filter((f) => f !== 'src/js/sync/status.js' && /shelvedDetail/.test(SRC(f)));
+    assert.deepEqual(callers, ['src/js/sync/personal.js'],
+      'THE ROW, INVERTED: the engine hands the shelf in. Measured over the directories, so a '
+      + 'revert dies here by name rather than by a silently empty report.');
+
+    // NON-VACUITY: a text match on the file proves a call site was written, not that it RUNS.
+    // The behavioural half is `round9-e6.test.js` §3c and the live-engine row below.
+    assert.match(SRC('src/js/sync/personal.js'), /held:\s*lotLoaded\s*\?\s*shelvedDetail\(lot,\s*\[spaceId\]\)\s*:\s*null/,
+      'and it hands in THIS engine\'s lot for THIS space, GUARDED BY `lotLoaded` — not an empty '
+      + 'array that would type-check and answer nothing, and not an unguarded read either: the lot '
+      + 'is empty until `loadLot()` has run, so an unguarded `status()` on a fresh process reports '
+      + 'an empty shelf WITH `unoffered: []` to prove it looked. Measured, before the guard '
+      + 'existed. See `tests/property/sync-domains.test.js` S4-shelved for the behavioural half.');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §8 · THE CURSOR RECORD — R9-1's WRITER, AND THE ONE PULL THAT DOES NOT USE IT
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// R9-1 made `fromGenesis` a REPORT rather than a ratchet: `cursor.js advance()` used to read
+// `opts.fromGenesis === true ? true : prev.fromGenesis`, which could raise the flag and could
+// never lower it, so a device that had given up the right to call an unknown `wit` a fork got it
+// back at the next launch and could accuse the relay of a fork it could no longer prove.
+//
+// The fix is in the file. What §8b measures is the consequence round 10 found in
+// `round9-witness.test.js` §3: the ONLY writer is `advance`, `pullNow` calls it only when the
+// cursor MOVES, and the one pull that lowers the flag is a break — which holds the cursor. The
+// writer needed to close that is already here and needs no new API, which is what §8a pins.
+
+describe('§8 · `fromGenesis` is a report, and a held cursor can still write one', () => {
+  const CSPACE = 'psp_9xQ2mR7bL0aZ4tV8wKQ1rT';
+
+  test('§8a · a SAME-SEQ advance persists a lowered `fromGenesis` and does not move the cursor', async () => {
+    let held = {};
+    const storage = {
+      durable: true,
+      async loadCursors() { return JSON.parse(JSON.stringify(held)); },
+      async saveCursors(all) { held = JSON.parse(JSON.stringify(all)); },
+    };
+    const c = createCursors({ storage });
+    await c.load();
+    await c.advance(CSPACE, '7', { seq: '7', chain: 'aaa' }, async () => {}, { fromGenesis: true });
+    assert.equal(c.fromGenesis(CSPACE), true, 'NON-VACUITY: an honest pull from genesis earns it');
+    assert.equal(held[CSPACE].fromGenesis, true, 'and the DISK says so, which is the half R9-1 is about');
+
+    const moved = await c.advance(CSPACE, '7', { seq: '7', chain: 'aaa' }, async () => {}, { fromGenesis: false });
+    assert.equal(moved, false, 'the cursor did not move — the same seq is not a move');
+    assert.equal(c.get(CSPACE), '7', 'and it is exactly where the break left it');
+    assert.equal(held[CSPACE].fromGenesis, false,
+      'THE ROW: the lowered right is on the disk anyway. `advance` runs the commit, writes the '
+      + 'record and persists it whenever the seq does not go BACKWARDS, so the writer '
+      + '`round9-witness.test.js` §3 asks for already exists: a held pull can report the flag it '
+      + 'lowered by advancing to the cursor it is holding. What is missing is the CALL — '
+      + '`pullNow` guards `cursors.advance` with `if (commit > since)`, which is `personal.js`.');
+
+    const relaunched = createCursors({ storage });
+    await relaunched.load();
+    assert.equal(relaunched.fromGenesis(CSPACE), false,
+      'and the next launch reads back the right this device gave up, rather than restoring it');
+  });
+
+  test('§8b · CONTROL · an OMITTED `fromGenesis` still carries the stored value forward', async () => {
+    // The direction R9-1 must not have broken: a caller with nothing to say about the flag —
+    // the family engine's own `advance` — changes nothing. Without this, "make it writable" and
+    // "make it default to false" are the same patch, and the second one silently disarms
+    // `unknownWitness` for every space that pulls a second page.
+    const c = createCursors({ storage: memoryCursorStore({ [CSPACE]: { seq: '5', chain: 'a', fromGenesis: true } }) });
+    await c.load();
+    await c.advance(CSPACE, '6', { seq: '6', chain: 'b' }, async () => {});
+    assert.equal(c.fromGenesis(CSPACE), true, 'omission carries the STORED value, not `false`');
   });
 });

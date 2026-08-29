@@ -570,12 +570,23 @@ async function attachDevice(req, ctx, mode) {
   const attestationBytes = new TextEncoder().encode(body.attestation);
 
   const result = await ctx.store.tx(async (tx) => {
-    // Idempotency, and the one collision that matters. `deviceShort` is a function of the
-    // signing key, so a second registration under the same short is either the SAME device
-    // retrying (fine — 200, no write) or a second member trying to claim a key that already
-    // belongs to someone. The latter is refused: it is how a removed member would try to
-    // re-attach a known-good short to a fresh member row.
-    const existingShort = await tx.getDeviceByShort(deviceShort);
+    // Idempotency, and the one collision that matters — NOW READ PER SPACE (round 10 item 8).
+    // `deviceShort` is a function of the signing key, so a second registration under the same
+    // short IN THIS SPACE is either the SAME device retrying (fine — 200, no write) or a second
+    // member of THIS circle trying to claim a key that already belongs to someone here. The
+    // latter is refused: it is how a removed member would try to re-attach a known-good short to
+    // a fresh member row.
+    //
+    // What it deliberately no longer refuses is the same Mac appearing in ANOTHER space. That
+    // refusal was finding E2-203-1 — it blocked 19.4 + 15.2 outright — and it was also a denial
+    // of service, because `GET /spaces/:id/members` publishes `sigPubRaw` to every member of a
+    // circle and this door is authorized by an attestation the caller signs with her OWN
+    // recovery key. Any member of your circle could therefore mint a row carrying your short and
+    // burn the one global slot your Mac would ever have. Per space, that row is local to her
+    // circle and inert in it: she cannot authenticate as it (ADR 003 §2 step 5 wants the private
+    // key). The residual — that she can still keep a KNOWN Mac out of HER OWN circle by
+    // pre-empting its short there — is finding R10-8a and is recorded in ADR 003 §5.1.
+    const existingShort = await tx.getDeviceByShort(spaceId, deviceShort);
     if (existingShort) {
       if (existingShort.memberId !== memberId || existingShort.id !== deviceId) {
         throw fail('bad_request', { taken: 'deviceShort' });
@@ -587,6 +598,7 @@ async function attachDevice(req, ctx, mode) {
 
     const row = {
       id: deviceId,
+      spaceId,
       memberId,
       deviceShort,
       sigPubRaw,
@@ -666,7 +678,19 @@ export async function revokeDevice(req, ctx) {
   const spaceId = requireId(body, 'spaceId');
   const deviceId = requireId(body, 'deviceId');
 
-  await ctx.assertMember(auth.memberId, spaceId);
+  // WHICH MEMBER IS SPEAKING — resolved HERE, not read off `auth` (round 10 item 8).
+  // `/devices/revoke` is not in `router.js`'s `SPACE_SCOPED`, so ADR 003 §2 step 4 had no space
+  // to select a row with, and a Mac that is in a personal space AND a circle has a row in each.
+  // `auth.memberId` is therefore `null` for exactly the users this round unblocked, and reading
+  // it would have made the endpoint 403 for them. The short plus the space the body names is the
+  // pair ADR 002 §2.3 calls the identity of a device, and it is what this resolves.
+  const caller = await ctx.store.getDeviceByShort(spaceId, auth.deviceShort);
+  // Unknown space, no row here, and revoked here are ONE answer: this endpoint may not tell a
+  // prober which circles a short is in. (A revoked-here device would have answered
+  // `device_revoked` at step 4 when the namespace was global; `not_a_member` says strictly less.)
+  if (!caller || (caller.revokedAt !== null && caller.revokedAt !== undefined)) throw fail('not_a_member');
+  const callerMemberId = caller.memberId;
+  await ctx.assertMember(callerMemberId, spaceId);
   // No limiter, deliberately: `RATE_COVERAGE.revokeDevice` in `server/core/limits.js` reasons
   // that this route "acts only on the caller's own member's devices" and is reachable only after
   // the whole ADR 003 §2 chain. Adding a second, undeclared bucket here would put §6.1's policy
@@ -676,13 +700,13 @@ export async function revokeDevice(req, ctx) {
     const target = await tx.getDevice(deviceId);
     // Unknown device and someone else's device are one answer: a member may not enumerate the
     // device ids of the rest of the family by probing this endpoint.
-    if (!target || target.memberId !== auth.memberId) throw fail('not_a_member');
+    if (!target || target.memberId !== callerMemberId) throw fail('not_a_member');
 
     // Refusing to leave a member with no way back in. Revoking your own last device would strand
     // the member behind the A2 backup file, and the honest place to say that is here rather than
     // in a support conversation. `/members/leave` is the endpoint for "I want out".
     const devices = await tx.listDevices(spaceId);
-    const live = devices.filter((d) => d.memberId === auth.memberId && d.revokedAt === null);
+    const live = devices.filter((d) => d.memberId === callerMemberId && d.revokedAt === null);
     if (live.length <= 1 && live.some((d) => d.id === deviceId)) {
       throw fail('bad_request', { reason: 'last_device', use: '/api/v1/members/leave' });
     }

@@ -62,8 +62,9 @@ with a written justification.
 | column | what it is | what it reveals |
 |---|---|---|
 | `id` | `dev_` + 22 b64url | a label the relay assigned. |
+| `spaceId` | relation | **which circle this machine's membership is in.** Added round 10 as the namespace of `deviceShort` (ADR 003 §5.1). It is DERIVED — the relay already resolved it through `memberId → Member.spaceId` — so it reveals no fact the dump did not already contain. What changed the dump is not this column but the rows it permits: see inference 5. |
 | `memberId` | relation | **which machines belong to which person.** The count is the interesting part: see §5. |
-| `deviceShort` | 16 Crockford chars | derived from the device's **public** signing key. It is the key every op row is attributed by, so it is the join column for a per-machine activity history. |
+| `deviceShort` | 16 Crockford chars | derived from the device's **public** signing key. It is the key every op row is attributed by, so it is the join column for a per-machine activity history — and, since round 10, one Mac in three circles has this same value in three rows. Inference 5. |
 | `sigPubRaw`, `kexPubRaw` | 65-byte P-256 points | **public** keys. |
 | `attestation` | opaque bytes | signed by the member's recovery key; the relay cannot verify it and never reads it. **No endpoint returns it** — see finding E2-207-B in `E2-VERIFICATION.md`. |
 | `lastSeenSeq` | bigint | **read progress: how far this machine has caught up.** Updated on every push. A machine whose `lastSeenSeq` is far behind the space head has been off for a while. |
@@ -400,10 +401,19 @@ Each was demonstrated against the real router in `tests/server/attack-relay-infe
    25 July.
 
 5. **Two circles can be attached to one person — cross-space correlation.** §7's dump list and
-   §2's tables are written for a single-space world. Three joins work **across spaces**, and the
-   relay holds every household at once:
+   §2's tables were written for a single-space world. Three joins work **across spaces**, and the
+   relay holds every household at once. *(Updated round 10: the first of these was LATENT until
+   the schema permitted the rows. It is now actual — see ADR 003 §5.1 for why the change was
+   taken anyway, and why no namespace choice would have avoided it.)*
    - `Device.deviceShort` is derived from a device's public signing key and is unique per machine
-     **across the whole database**, so one Mac in two circles is one row-set with one public key.
+     **across the whole database** — the constraint is now scoped per space, but the VALUE is
+     still a function of one `IK_sig` and that key is minted per machine, not per circle. So one
+     Mac in three circles is three rows carrying one short **and one `sigPubRaw`**. The public key
+     is the stronger of the two: 65 exact bytes the relay must hold in order to verify a
+     signature at all, so it cannot be renamed, blinded or scoped away. Only a per-space device
+     signing key would remove this join, and ADR 002 §2.1 does not mint one. The `@@unique([spaceId,
+     deviceShort])` index means a bare `WHERE deviceShort = ?` is a scan rather than a seek — a
+     speed bump for ad-hoc SQL, **not a control**, since the operator can build any index.
    - `Member.recoveryPubSig` / `recoveryPubKex` — §2 calls them "public keys … stable identifiers
      for as long as the member exists". Both halves are true and the sentence misses the point: a
      **stable identifier is exactly what a JOIN needs**, and the scope that matters is not "as

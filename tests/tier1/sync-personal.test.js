@@ -231,6 +231,7 @@ async function seedRelay(relay, F) {
     for (const m of [F.A, F.B]) {
       await tx.addDevice({
         id: m.id.forStore.deviceId,
+        spaceId: F.spaceId,
         memberId: F.memberId,
         deviceShort: m.id.forStore.deviceShort,
         sigPubRaw: await raw(m.id.identity.devSig),

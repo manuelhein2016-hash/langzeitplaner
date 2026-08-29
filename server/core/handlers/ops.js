@@ -409,7 +409,8 @@ export async function pushOps(req, ctx) {
     const highWater = after.nextSeq;
 
     const ack = parseAck(body.ackSeq, highWater);
-    if (ack !== null) await tx.setLastSeenSeq(auth.deviceShort, ack);
+    // Space-scoped since round 10 item 8: one Mac has a cursor per circle. See C32b.
+    if (ack !== null) await tx.setLastSeenSeq(spaceId, auth.deviceShort, ack);
 
     // WRITE progress (server.contract.js's 2026-08-27 amendment). `lastPushedSeq` means "the
     // space seq high-water at the moment this device last confirmed a DRAINED outbox", and only
@@ -421,7 +422,7 @@ export async function pushOps(req, ctx) {
     // why inventing a value here — say, the highest seq of this batch — would have been the
     // dangerous choice: read progress and write progress are different facts, and guessing the
     // second one resurrects deleted entries (ADR 001 §7.3 condition 3).
-    if (body.drained === true) await tx.setLastPushedSeq(auth.deviceShort, highWater);
+    if (body.drained === true) await tx.setLastPushedSeq(spaceId, auth.deviceShort, highWater);
 
     return { inserted, existing, spaceSeq: highWater };
   });

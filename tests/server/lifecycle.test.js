@@ -267,7 +267,7 @@ for (const adapter of ADAPTERS) {
     assert.equal(res.body.keysPending, true, 'a fresh device holds no wrap — ADR 002 §7.1 step 6');
     assert.equal(res.body.rotateRequired, true);
 
-    const stored = await store.getDeviceByShort(body.deviceShort);
+    const stored = await store.getDeviceByShort(SPACE, body.deviceShort);
     assert.ok(stored, 'the row is there');
     assert.equal(stored.memberId, mama.id);
     assert.ok(stored.attestation instanceof Uint8Array, 'the blob is stored as BYTES — an opaque column refuses a String (RULE 1)');
@@ -288,7 +288,7 @@ for (const adapter of ADAPTERS) {
     assert.equal(res.status, 401);
     assert.equal(res.code, 'bad_signature');
     assert.equal(res.extra.check, 'attestation_signature');
-    assert.equal(await store.getDeviceByShort(forged.deviceShort), null, 'nothing was written');
+    assert.equal(await store.getDeviceByShort(SPACE, forged.deviceShort), null, 'nothing was written');
 
     // And so the attacker's key never enters the set a rotation is REQUIRED to wrap to.
     const required = coverageRequires(await store.listMembers(SPACE), await store.listDevices(SPACE), 'FAMILY');
@@ -304,7 +304,7 @@ for (const adapter of ADAPTERS) {
     const res = await call(registerDevice, req({ routeName: 'registerDevice', body: lied }), anon());
     assert.equal(res.status, 400);
     assert.equal(res.extra.check, 'deviceShort');
-    assert.equal(await store.getDeviceByShort('ZZZZZZZZZZZZZZZZ'), null);
+    assert.equal(await store.getDeviceByShort(SPACE, 'ZZZZZZZZZZZZZZZZ'), null);
 
     const bad = await call(registerDevice, req({ routeName: 'registerDevice', body: { ...good, deviceShort: 'lower-case-hax!' } }), anon());
     assert.equal(bad.status, 400);
@@ -360,7 +360,7 @@ for (const adapter of ADAPTERS) {
     const res = await call(registerDevice, req({ routeName: 'registerDevice', body: rehome }), anon());
     assert.equal(res.ok, false);
     assert.ok(res.status === 401 || res.status === 400, `expected a refusal, got ${res.status}`);
-    assert.equal((await store.getDeviceByShort(body.deviceShort)).memberId, mama.id, 'still Mama’s');
+    assert.equal((await store.getDeviceByShort(SPACE, body.deviceShort)).memberId, mama.id, 'still Mama’s');
   });
 
   T('/devices/adopt is the SAME check — one signature under Member.recoveryPubSig (ADR 002 §7.3)', async ({ store, anon }) => {
@@ -422,6 +422,49 @@ for (const adapter of ADAPTERS) {
     assert.equal(last.status, 400);
     assert.equal(last.extra.reason, 'last_device');
     assert.equal(last.extra.use, '/api/v1/members/leave');
+  });
+
+  T('a Mac in TWO circles can still unpair, and the member is resolved from the SPACE it names', async ({ store, as }) => {
+    // ROUND 10 ITEM 8, the half that is easy to get wrong. `/devices/revoke` is not in
+    // `router.js`'s `SPACE_SCOPED`, so ADR 003 §2 step 4 has no space to select a row with — and
+    // a Mac that is in a personal space AND a Familienkreis now has a row in each. Step 4
+    // therefore returns `memberId: null` rather than guessing, and a handler that read
+    // `auth.memberId` would answer 403 for exactly the users this round unblocked. The identity
+    // ADR 002 §2.3 defines is the PAIR — the short and the space — and that is what is resolved.
+    const mama = await makeMember(store, SPACE, 'gruen');
+    const m1 = await register(makeCtx(store, fakeClock()), mama);
+    const m2 = await register(makeCtx(store, fakeClock()), mama);
+    assert.equal(m1.res.status, 200); assert.equal(m2.res.status, 200);
+
+    // The same Mac (`m1`), in her own personal space, under a different member row.
+    await store.createSpace({
+      id: SPACE2, kind: 'FAMILY', currentEpoch: 1, nextSeq: 0n, headChain: null, createdAt: new Date(0),
+    });
+    const alsoHers = await makeMember(store, SPACE2, 'gruen');
+    await store.addDevice({
+      id: 'dev_TWOCIRCLESAAAAAAAAAA', spaceId: SPACE2, memberId: alsoHers.id,
+      deviceShort: m1.body.deviceShort,
+      sigPubRaw: b64uToBytes(m1.body.sigPubRaw), kexPubRaw: b64uToBytes(m1.body.kexPubRaw),
+      attestation: new TextEncoder().encode('x'), lastSeenSeq: 0n, lastPushedSeq: 0n,
+      addedAt: new Date(0), revokedAt: null,
+    });
+
+    // What the REAL ladder hands a handler on this route for this Mac: a principal, and no member.
+    const twoCircles = { deviceShort: m1.body.deviceShort, deviceId: null, memberId: null };
+
+    const own = await call(revokeDevice, req({ routeName: 'revokeDevice', body: { spaceId: SPACE, deviceId: m2.body.deviceId } }), as(twoCircles));
+    assert.equal(own.status, 200, JSON.stringify(own));
+    assert.equal(own.body.revoked, true, 'she unpairs her second Mac from THIS circle, as before');
+
+    // And the scope holds: naming the other space, where this short IS registered but under a
+    // member who owns no such device, does not reach across.
+    const across = await call(revokeDevice, req({ routeName: 'revokeDevice', body: { spaceId: SPACE2, deviceId: m2.body.deviceId } }), as(twoCircles));
+    assert.equal(across.status, 403);
+    assert.equal(across.code, 'not_a_member');
+
+    // A space this Mac has no row in at all is the same answer — no circle-membership oracle.
+    const nowhere = await call(revokeDevice, req({ routeName: 'revokeDevice', body: { spaceId: 'fsp_CCCCCCCCCCCCCCCCCCCCCC', deviceId: m2.body.deviceId } }), as(twoCircles));
+    assert.equal(nowhere.code, 'not_a_member');
   });
 
   // ── keys.js — THE COVERAGE CHECK ──────────────────────────────────────────

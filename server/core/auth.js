@@ -451,6 +451,26 @@ export function spaceIdOf(req, body) {
 }
 
 /**
+ * The space a request names, read WITHOUT trusting it — the row-selection hint for step 4.
+ *
+ * It is the same extraction as `spaceIdOf`, over a body parsed defensively: at step 4 nothing has
+ * been verified yet, and a malformed body must not change which error the ladder answers. So a
+ * parse failure is `null` (no hint), never a throw. The AUTHORITATIVE space is `spaceIdOf` at
+ * step 6/7, over the strict parse, after the signature.
+ *
+ * A wrong hint cannot grant anything: it can only select a row whose `memberId` step 7 then
+ * checks against the same space, or select none, which is `not_a_member`.
+ *
+ * @param {Object} req @returns {string|null}
+ */
+export function spaceHintOf(req) {
+  let body = null;
+  try { body = readSignedBody(req); } catch { body = null; }
+  const v = spaceIdOf(req, body);
+  return typeof v === 'string' && SPACE_ID_RE.test(v) ? v : null;
+}
+
+/**
  * Steps 6 and 7, together, because with this store interface they are one lookup.
  *
  * `Member.removedAt` (step 6) can only be read through `listMembers(spaceId)`, and the interface
@@ -482,8 +502,11 @@ export async function assertMember(memberId, spaceId, ctx) {
 /**
  * @typedef {Object} AuthResult
  * @property {string} deviceShort  the principal
- * @property {string} deviceId     the row's label — NOT an identity (ADR 002 §2.3)
- * @property {string} memberId
+ * @property {string|null} deviceId  the row's label — NOT an identity (ADR 002 §2.3). `null` on a
+ *                                 bootstrap route (no row yet) and on a route that names no space
+ *                                 when this Mac has rows in several (round 10 item 8).
+ * @property {string|null} memberId  `null` in exactly the same two cases. A route that names a
+ *                                 space never returns null here: step 7 answers `not_a_member`.
  * @property {string|null} spaceId the space this request is scoped to, when it is scoped to one
  * @property {Object|null} member  the member row, when step 6/7 ran
  * @property {Object|null} body    the parse of the SIGNED bytes; handlers must use this
@@ -496,12 +519,13 @@ export async function assertMember(memberId, spaceId, ctx) {
  *   1 parse Authorization                          -> 401 bad_auth
  *   2 |now - ts| > limits.authWindowMs             -> 401 stale_request
  *   3 claimNonce() === false                       -> 401 replay
- *   4 unknown device, or revokedAt != null         -> 403 device_revoked
- *  4b the stored deviceShort is not derivable from
- *     the stored sigPubRaw                         -> 403 device_revoked
+ *   4 unknown device, or revoked in this space     -> 403 device_revoked
+ *  4b a stored deviceShort is not derivable from
+ *     its stored sigPubRaw                         -> 403 device_revoked
  *   5 signature verification fails                 -> 401 bad_signature
  *   6 member.removedAt != null                     -> 403 not_a_member
- *   7 not a member of this route's spaceId         -> 403 not_a_member
+ *   7 no row in / not a member of this route's
+ *     spaceId                                      -> 403 not_a_member
  *
  * **Step 4 answers the same code for "unknown" and "revoked" on purpose.** Distinguishing them
  * would turn the endpoint into a device-enumeration oracle for anyone who can guess an 80-bit
@@ -620,18 +644,50 @@ export async function authenticate(req, ctx) {
     if (derived !== cred.device) throw fail('bad_auth', { detail: 'bootstrap_key_mismatch' });
     principal = { deviceShort: cred.device, sigPubRaw: presented, deviceId: null, memberId: null };
   } else {
-    // ── 4 ──
-    const device = await ctx.store.getDeviceByShort(cred.device);
-    if (!device) throw fail('device_revoked');
-    if (device.revokedAt !== null && device.revokedAt !== undefined) throw fail('device_revoked');
+    // ── 4 ── THE SHORT NAMES A MACHINE; THE ROW NAMES A MEMBERSHIP (round 10 item 8).
+    // `deviceShort` used to be globally unique, so this was one lookup and one row. It is now
+    // unique per SPACE — a Mac is legitimately in a personal space and one or more circles at
+    // once (19.4 + 15.2), with a row in each. So the lookup returns a SET, and the ladder has to
+    // say which of the two questions each step is asking:
+    //
+    //   · WHO SIGNED THIS? — answered by the KEY, which every row for one short shares, because
+    //     `deviceShort` is a function of it (ADR 001 §1.2) and 4b below re-derives it per row.
+    //     Step 5 therefore never depends on picking the right row.
+    //   · WHICH MEMBER IS SPEAKING? — answered by the row for THIS REQUEST'S SPACE, and by
+    //     nothing else. A Mac's membership in one circle says nothing about another.
+    const rows = await ctx.store.listDevicesByShort(cred.device);
+    if (rows.length === 0) throw fail('device_revoked');
 
-    // ── 4b ──
-    const derived = await deviceShortOfRaw(device.sigPubRaw, ctx);
-    if (derived !== device.deviceShort) throw fail('device_revoked');
+    // ── 4b ── on EVERY row, not just the one we end up using. One bad row is a bad principal.
+    for (const r of rows) {
+      const derived = await deviceShortOfRaw(r.sigPubRaw, ctx);
+      if (derived !== r.deviceShort) throw fail('device_revoked');
+    }
+    // 4b's corollary, and the line that lets step 5 ignore the row choice: one short, one signer.
+    // 4b already forces it (two distinct keys hashing to one short is an 80-bit collision), so
+    // this is the assertion that says so out loud rather than a second check.
+    if (new Set(rows.map((r) => b64u(r.sigPubRaw))).size !== 1) throw fail('device_revoked');
+
+    const revoked = (r) => r.revokedAt !== null && r.revokedAt !== undefined;
+    const hint = spaceHintOf(req);
+    const inHint = hint === null ? null : (rows.find((r) => r.spaceId === hint) || null);
+    if (inHint !== null) {
+      // Revoked HERE. Answered before step 5, exactly as it was when there was one row.
+      if (revoked(inHint)) throw fail('device_revoked');
+    } else if (rows.every(revoked)) {
+      throw fail('device_revoked');
+    }
+    const live = rows.filter((r) => !revoked(r));
+    // **`null` is a legitimate answer, and it must not be resolved by guessing.** A route that
+    // names no space (`pair/*`) from a Mac that is in three circles has no "the" member, and
+    // picking one would be inventing an authorization. Step 6/7 below turns a null memberId into
+    // `not_a_member` for any route that DOES name a space — after the signature, so that "is this
+    // Mac in your circle?" is never answerable without the private key.
+    const row = inHint || (live.length === 1 ? live[0] : null);
 
     principal = {
-      deviceShort: device.deviceShort, sigPubRaw: device.sigPubRaw,
-      deviceId: device.id, memberId: device.memberId,
+      deviceShort: cred.device, sigPubRaw: rows[0].sigPubRaw,
+      deviceId: row ? row.id : null, memberId: row ? row.memberId : null,
     };
   }
 
@@ -648,7 +704,12 @@ export async function authenticate(req, ctx) {
   const body = readSignedBody(req);
   const spaceId = spaceIdOf(req, body);
   let member = null;
-  if (spaceId !== null && principal.memberId !== null) {
+  if (spaceId !== null) {
+    // A bootstrap route reaches here with `memberId === null`, and `SPACE_SCOPED` lists neither
+    // of them, so this branch cannot fire for one. On an ordinary route a null memberId means
+    // step 4 found no row for this Mac IN THIS SPACE — the post-round-10 spelling of "not your
+    // family", and the same answer as a removed member, deliberately (see `assertMember`).
+    if (principal.memberId === null) throw fail('not_a_member');
     member = await assertMember(principal.memberId, spaceId, ctx);
   }
 

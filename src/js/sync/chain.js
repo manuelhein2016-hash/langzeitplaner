@@ -279,7 +279,10 @@ export function createChainWitness(ports = {}) {
   const slot = (space) => {
     let s = spaces.get(space);
     if (!s) {
-      s = { head: null, seen: new Set(), order: [], reported: new Set(), fromGenesis: false, broken: false };
+      s = {
+        head: null, seen: new Set(), order: [], reported: new Set(),
+        fromGenesis: false, spanFromGenesis: false, broken: false,
+      };
       spaces.set(space, s);
     }
     return s;
@@ -289,7 +292,13 @@ export function createChainWitness(ports = {}) {
     if (typeof chain !== 'string' || chain === '' || s.seen.has(chain)) return;
     s.seen.add(chain);
     s.order.push(chain);
-    while (s.order.length > memory) s.seen.delete(s.order.shift());
+    // AN EVICTION ENDS THE RIGHT TO ACCUSE, and it has to. `spanFromGenesis` is the claim
+    // "everything I could be asked about is in `seen`"; the moment the oldest value falls off the
+    // end that claim is false, and a `wit` older than the window would be reported as a fork on
+    // the strength of a memory bound. `WITNESS_MEMORY` is 4096 chain values, so this is the
+    // long-lived-space case rather than an edge — and the degradation is to
+    // `unverifiableWitness`, which is what a device that cannot judge is supposed to say.
+    while (s.order.length > memory) { s.seen.delete(s.order.shift()); s.spanFromGenesis = false; }
   };
 
   return {
@@ -321,6 +330,30 @@ export function createChainWitness(ports = {}) {
         remember(s, head.chain);
       }
       s.fromGenesis = fromGenesis === true;
+      // ── R10-1b · A RESTORED HEAD IS NOT A RESTORED WINDOW ────────────────────────────────────
+      //
+      // The docblock above says a device "restored a head it had built that way" may answer a
+      // `wit` cross-check with "I have never seen that". That was written while `wit` was `''`
+      // everywhere and nothing could test it; the moment round 10 wired check 2 it became a
+      // routine FALSE FORK ACCUSATION, and the reason is one line up: what is restored is the
+      // HEAD, and the cross-check is against `seen` — the window — which is not persisted
+      // anywhere and comes back holding exactly one value.
+      //
+      // The shape, which is two ordinary Macs and no attacker: A is the Mac that gets opened once
+      // a week, so its head is old; it authors an entry, committing to the chain value it had
+      // seen. B is used daily and was restarted this morning. B pulls from ITS cursor, which is
+      // far above A's head, so the row carrying A's chain value is BELOW everything B is served
+      // and never re-enters B's window — and B calls a fork on a relay that did nothing.
+      //
+      // So `spanFromGenesis` is set here to `false`, always. `fromGenesis` keeps its own meaning
+      // and its own durable record (it is what a device would need *in addition*), and the right
+      // to accuse needs BOTH. **Reported, and it is what would restore the design's intent: the
+      // window has to be persisted beside the head — `cursor.js`'s record, which is not this
+      // file's — as a bounded list or a Bloom filter of chain values. Until then a device can
+      // prove a fork only in a session in which it pulled from genesis**: first contact, a new Mac, a
+      // restored backup and every new member of a family — E6's whole population, and the case
+      // ADR 002 §5.4 is written about — but not the second launch of an old Mac.
+      s.spanFromGenesis = false;
     },
 
     /** `{seq, chain}` or null. */
@@ -363,8 +396,12 @@ export function createChainWitness(ports = {}) {
       if (fresh.length === 0) return [];
 
       const first = parseSeq(fresh[0].seq);
-      // Pulling from genesis is what earns the right to call an unknown witness a fork.
-      if (s.head === null && first === 1n) s.fromGenesis = true;
+      // Pulling from genesis is what earns the right to call an unknown witness a fork — and it
+      // earns BOTH halves of it at once: the flag, which is durable and is a report about this
+      // device's history, and `spanFromGenesis`, which is the live claim "every chain value this
+      // space has ever had is in `seen`". Only a pull that starts at seq 1 with nothing folded can
+      // set the second one, because only that pull is followed by every chain value in order.
+      if (s.head === null && first === 1n) { s.fromGenesis = true; s.spanFromGenesis = true; }
 
       const anchor = s.head && cmpSeq(s.head.seq, fresh[0].seq) === -1 ? s.head : null;
       const res = await verifyChain(fresh, anchor, ports);
@@ -392,6 +429,7 @@ export function createChainWitness(ports = {}) {
         // witness this device cannot place is no longer evidence of anything.
         s.broken = true;
         s.fromGenesis = false;
+        s.spanFromGenesis = false;
       }
       for (const c of res.chains) remember(s, c);
       if (res.head) s.head = res.head;
@@ -399,18 +437,28 @@ export function createChainWitness(ports = {}) {
       // The cross-check. A peer's `wit` is the chain IT had pulled; if this device's own chain is
       // complete and has never contained that value, the relay served the two devices different
       // logs. Ops this device authored are skipped: their `wit` is our own and proves nothing.
+      //
+      // ⚠ R10-1b · THE RIGHT TO ACCUSE IS `fromGenesis` **AND** `spanFromGenesis`, NOT ONE FLAG.
+      // `fromGenesis` is a report about this device's history and survives a relaunch;
+      // `spanFromGenesis` is a claim about what is in `seen` RIGHT NOW, and it is the one the
+      // cross-check actually depends on, because `seen` is what the check reads. They come apart
+      // in two ordinary places — `restore()` (a head is not a window) and an eviction at `memory`
+      // — and in both the old single flag would have called a fork on an honest relay. The two
+      // mutants are `tests/tier1/sync-chain.test.js` §3's eviction row and `round9-witness.test.js`
+      // §1d. See `restore`.
       for (const row of fresh) {
         const wit = row.env && row.env.wit;
         if (typeof wit !== 'string' || wit === '') continue;
         if (s.seen.has(wit)) continue;
+        const provable = s.fromGenesis && s.spanFromGenesis;
         out.push({
-          kind: s.fromGenesis ? CHAIN_FINDINGS.UNKNOWN_WITNESS : CHAIN_FINDINGS.UNVERIFIABLE_WITNESS,
+          kind: provable ? CHAIN_FINDINGS.UNKNOWN_WITNESS : CHAIN_FINDINGS.UNVERIFIABLE_WITNESS,
           space,
           seq: String(row.seq),
           oid: row.env.oid,
           dv: row.env.dv,
           wit,
-          detail: s.fromGenesis
+          detail: provable
             ? 'a peer authored this op committing to a chain value this device has never been '
               + 'served. The relay showed the two devices different logs (ADR 002 §5.4 fork).'
             : 'a peer committed to a chain value outside this device\'s own chain window. Not '
@@ -427,6 +475,7 @@ export function createChainWitness(ports = {}) {
         out[space] = {
           head: s.head ? { ...s.head } : null,
           fromGenesis: s.fromGenesis,
+          spanFromGenesis: s.spanFromGenesis,
           broken: s.broken,
           remembered: s.order.length,
         };

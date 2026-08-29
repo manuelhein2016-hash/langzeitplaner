@@ -659,6 +659,26 @@ export const S4 = deep([
       + 'after a relaunch, with the line sitting in the log the whole time.',
   },
   {
+    id: 'S4-shelved',
+    value: 'a held op the ladder GAVE UP on — the bytes retained, nothing left that will open them',
+    label: 'the end of F-6\'s ladder — a park that became a shelf (R8-4, R10-9c)',
+    expect: { status: 'error', storeReports: 'sync.refused', survives: true },
+    openFinding: null,   // CLOSED — R10-9c: `status.js shelvedDetail()` + the `shelved` observable
+    note: 'THE STATE BETWEEN `S4-held` AND `S4-refused`, and it was in neither. A park is not a '
+      + 'drop — past `PARK_REVIVALS` launches the lot stops replaying the envelope and KEEPS it '
+      + '(R8-4) — so the bytes are on this disk, correctly, and no ladder will ever run against '
+      + 'them again. `error` and not `pending`: nothing is outstanding, which is the difference '
+      + 'from `S4-held`. '
+      + 'AND THE `storeReports` COLUMN IS THE FINDING ITSELF: the shelf lives in the ENGINE\'s '
+      + 'parking lot, and `store.diagnostics()` structurally cannot see it (R8-6b), so the only '
+      + 'thing the STORE can answer with is the refusal ledger the same event wrote. That is why '
+      + '`status.js` gives the `shelved` observable scope `at: \'held\'` and the engine hands the '
+      + 'evidence in from `personal.js status()`. The `status` column above is the half that '
+      + 'needs the wiring; the ENGINE-side non-vacuity — that the verdict names `shelved` by id '
+      + 'rather than inheriting `error` from the refusal beside it — is `S4e`, because a triple '
+      + 'that two mechanisms both satisfy cannot tell you which one is present.',
+  },
+  {
     id: 'S4-refused',
     value: 'an op terminally refused — a bad signature, a failed AEAD',
     label: 'a refusal that is correct, final, and forgotten',
@@ -721,7 +741,7 @@ export const S4 = deep([
 // `expect = { reachable: true }` on every row — that is the rule, and it does not vary. `role`
 // is not a requirement, it is the DISPOSITION: what closing the row means.
 //
-//   'live'    reachable today. 51 of the 58.
+//   'live'    reachable today. 55 of the 62.
 //   'dead'    LZP-501's superseded engine. Closing the row means DELETING the file.
 //   'defence' a mechanism the design names and the product does not have. Closing the row means
 //             WIRING it, and deleting it instead would close the row while making the product worse.
@@ -779,8 +799,12 @@ export const S5 = deep([
   MOD('src/js/crypto/spacekeys.js', 'live'),
   MOD('src/js/crypto/suite.js', 'live'),
   MOD('src/js/dates.js', 'live'),
+  MOD('src/js/family/adminpanel.js', 'live'),
+  MOD('src/js/family/createjoin.js', 'live'),
   MOD('src/js/family/engine.js', 'live'),
   MOD('src/js/family/familysettings.js', 'live'),
+  MOD('src/js/family/leavedelete.js', 'live'),
+  MOD('src/js/family/membersui.js', 'live'),
   MOD('src/js/family/mount.js', 'live'),
   MOD('src/js/family/pairflow.js', 'live'),
   MOD('src/js/family/pairingui.js', 'live'),
@@ -866,5 +890,5 @@ export const DOMAINS = deep({
 
 /** Counts, so a truncated file is a loud failure rather than a quiet one. */
 export const DOMAIN_SIZES = deep({
-  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 7, S5: 58,
+  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 62,
 });

@@ -1,12 +1,45 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-29 · **Stopped at:** **round 9 — the adversary's verdict, closed.** A
+**Last session:** 2026-08-29 · **Stopped at:** **round 10 — the E6 gate. The verdict is NO-GO,
+and it is not about the fork detector.**
+
+Round 10's adversary set a shortest path of nine items as the condition of a GO. All nine are
+landed and mutation-tested, three more defects were found by landing them, and **all six suites are
+green**. The verdict is still **NO-GO**, for a reason none of the nine touches:
+
+> **E6 needs a family space, and nothing in this product can sync one.** `createPersonalSync`
+> throws on an `fsp_…` id — correctly, because that is story 21.2 enforced at construction — and
+> there is no other engine: six modules under `src/js/sync/`, exactly one of them an engine, and
+> `src/js/family/engine.js` (the file whose *name* says family) builds the personal one and gates
+> itself on `startsWith('psp_')`. „Familie" in this product means *"my own Macs, over a relay"*,
+> which is M1, which is what E5 shipped.
+
+**This is a scope statement, not a quality one.** The personal engine is sound: 168 green fleet
+rows, both directions driven over the real handlers, every honest-direction row carrying a control
+that proves the detector was live. What those rows cannot be is evidence about an engine that does
+not exist — and `tests/fleet/round10-e6-gate.test.js` §4 asserts the gate over the shipped source
+so no future reader mistakes the first for the second.
+
+**Start at FINDINGS §9** — the whole round is there: what landed (§9a), the mutation table (§9b),
+both directions (§9c), E6's shape driven with four devices and three members (§9d), and the gate
+(§9e). Then `tests/fleet/round10-e6-gate.test.js`, which is 11 rows and reads as the argument.
+
+**The three new findings, all opened by doing the work rather than by reading it:**
+**R10-9d** (a shelf row survived the op being applied — a permanent false `error` the moment
+anything read the shelf; fixed), **R10-11** (a member joining a circle that already has a removal
+in its history wears a red light until somebody next writes; OPEN, and ADR 003 §4.1's `baselineSeq`
+is the specified fix), and **R10-10** (the relay admits a second member to a *personal* space —
+latent, not a break, and defence in depth that is simply absent).
+
+---
+
+**The previous session** was **round 9 — the adversary's verdict, closed.** A
 fresh adversary read round 8's work and returned *"E6 cannot safely be built on this sync engine as
 it stands."* It is closed: `pullNow` uses `createChainWitness` rather than the raw `verifyChain`
 leaf, the cursor hold moved behind the witness's re-anchor where ADR 002 §5.4 put it, a park is
 never a drop, and every door that persists a device row runs one closed-set rule.
-**Start at the round-9 addendum at the bottom of this file, then FINDINGS §3d, §7a-round9 and
-§4.8.** The two headline checks the verdict set as the bar are `tests/fleet/round9-headline.test.js`.
+See FINDINGS §3d, §7a-round9 and §4.8. The two headline checks that verdict set as the bar are
+`tests/fleet/round9-headline.test.js`.
 
 **The previous session** was **round 8 — the OP LIFECYCLE, enumerated, and E5's
 two adversaries answered.** M1 „Zwei Macs" was demonstrated; two adversaries then attacked it and
@@ -56,13 +89,16 @@ register blocking a family-mode release: finding E3-1**, and it is an input to *
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-# CURRENT — re-measured 2026-08-29 at the close of the ROUND-9 integration pass. ALL SIX GREEN.
+# CURRENT — re-measured 2026-08-29 at the close of the ROUND-10 integration pass. ALL SIX GREEN.
 npm test              # tier 1, pure logic          → 1932 pass / 0 fail
-npm run test:attack   # adversarial corpus          →  714 pass / 0 fail
-npm run test:property # property harness + domains  →   85 pass / 0 fail   ← sync-domains: 0 UNEXPECTED, 0 STALE
-npm run test:server   # the sync server             →  846 pass / 0 fail
-npm run test:fleet    # two and three Macs, real handlers → 131 pass / 0 fail
-npm run test:dom      # real headless WKWebView     → 26 files, tier 2 PASS
+npm run test:attack   # adversarial corpus          →  720 pass / 0 fail
+npm run test:property # property harness + domains  →   88 pass / 0 fail   ← sync-domains: 0 UNEXPECTED, 0 STALE
+npm run test:server   # the sync server             →  868 pass / 0 fail
+npm run test:fleet    # two, three and FOUR Macs, real handlers → 168 pass / 0 fail
+npm run test:dom      # real headless WKWebView     → 29 files, tier 2 PASS
+
+# 2026-08-29, the ROUND-9 integration pass — superseded
+npm test → 1932 · test:attack → 714 · test:property → 85 · test:server → 846 · test:fleet → 131
 
 # 2026-08-29, the ROUND-8 integration pass — superseded
 npm test → 1929 · test:attack → 706 · test:property → 85 · test:server → 815 · test:fleet → 103
@@ -1096,3 +1132,69 @@ be inverted the day somebody closes it.
 **And E6's own first obligation is written into `round9-headline.test.js` §2b's closing
 assertion:** the day the fleet mints a family space, §2a and §2b collapse into one row, and the
 seam between them is exactly what E6 closes.
+
+---
+
+# Round-10 addendum — the E6 gate
+
+*2026-08-29. Three fixers, one integration pass. All six suites green (numbers in §2 above).*
+
+## What the round was asked for, and what it returned
+
+Round 10's adversary returned NO-GO for E6 and enumerated a shortest path of nine items, each with a
+named mutant. **That path was the whole scope.** All nine are landed, every one is mutation-tested
+with the row that dies named (FINDINGS §9b), and the answer is still **NO-GO** — for the reason in
+the header, which none of the nine items touches.
+
+The useful part of the round is not the nine items. It is the **three defects that only appeared
+when the items were driven end-to-end over the real handlers**, and one correction to the brief:
+
+### The brief's central claim was half right, and the measurement is better than the claim
+
+The brief required proof that wiring the witness value (`wit`) without the durable `fromGenesis`
+write is "the false positive the ADR forbids". Building each mutant separately shows there are
+**three** parts, not two, and either guard alone is sufficient:
+
+| build | measured |
+|---|---|
+| the durable write reverted alone | the durable lie IS restored — **but no accusation follows** |
+| `spanFromGenesis` reverted alone | no accusation: the disk honestly says `false` |
+| **both reverted** | `unknownWitness`, `error`, a verdict written — **against an honest relay** |
+| all three (`wit: ''` too) | nothing: no value to misjudge |
+
+`wit` is the *arming* condition for all of it, which is the exact sense in which round 9's build was
+"safe" — its detector was dead. This is now a row (`round9-witness.test.js` §3c), not an argument.
+
+### Two defects found by wiring the shelf, not by reading it
+
+- **`lotLoaded`**: handing the shelf in unconditionally made a fresh process report an *empty
+  shelf* with `unoffered: []` to prove it had looked — a confident, wrong answer about a Mac with a
+  retained envelope on the disk beside it. Worse than not wiring the row at all.
+- **R10-9d**: `lot.release()` shelves any oid "parked or touched since its last release", and that
+  set is cleared only inside `release()` — so F-6's ordinary story (park, ladder burns, pairing
+  completes, op applies) left a **permanent** shelf row saying nothing would ever open bytes whose
+  op was on the board. Invisible while nothing read the shelf; a permanent user-visible `error` the
+  moment `status()` offered it. Fixed in two places, each with its own row.
+
+## What E6 must do first
+
+1. **Build the family engine.** This is the gate and everything else is behind it. The three rows
+   of `round10-e6-gate.test.js` §4 will invert the day it exists.
+2. **R10-11** — ADR 003 §4.1's `baselineSeq`/`baselineChain`. It is fully specified and
+   unimplemented, and without it every member joining a circle with any removal in its history
+   opens on a red light. E6 creates that population by definition.
+3. **A PO ruling on R10-2 / §4.8.** Both are blocked on the same thing and neither is an engineer's
+   call. Round 10 added the measurement that makes the trade concrete: mutant M-I4 shows what an
+   un-clearable verdict costs — three rows in three files go red on a *legitimate* removal.
+4. **R10-10** — the relay's membership doors should refuse a non-`fsp_` space. Latent today because
+   two other barriers hold; it is the missing third.
+
+## The instrument, and its one blind spot
+
+`tests/helpers/fleet.js` now drives four devices and three members over all 23 real handlers, and
+`joinNewMember` performs a genuine invite/redeem. **It can only mint a personal space**, so every
+multi-member row measures the CURSOR and the VERDICT and never the BOARD: no content crosses
+between members, because a personal space correctly refuses another member's ops (`notMyAct`). That
+limitation is the gate itself, and it is asserted rather than assumed — but a reader who wants
+family-mode convergence evidence will not find it in this suite, and should not read 168 green rows
+as though it were there.

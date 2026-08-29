@@ -112,24 +112,36 @@ export const CTX_EXTENSIONS = Object.freeze([
 export const HANDLER_FINDINGS = Object.freeze([
   Object.freeze({
     id: 'E2-203-1',
+    status: 'CLOSED round 10 (item 8) — kept, not deleted, because the reasoning is the record.',
     what:
-      'Device.deviceShort is @unique GLOBALLY and Device.memberId points at exactly one Member, '
-      + 'which is per-space. One Mac can therefore have a Device row in exactly ONE space. But '
-      + 'ADR 002 §2.1 mints IK_sig per DEVICE, not per space, so a Mac has one deviceShort for '
-      + 'life, and the product requires that Mac to be in a personal space (19.4) AND a family '
-      + 'space (15.2) at once — ADR 003 §10.2 even budgets "8 members x 2 spaces" of pull '
-      + 'traffic. The second `POST /spaces` from a Mac that already has a Device row is refused '
-      + 'here with 400 device_registered, because the alternative is a 500 out of the adapter.',
+      'WAS: Device.deviceShort was @unique GLOBALLY while Device.memberId points at exactly one '
+      + 'Member, which is per-space. One Mac could therefore have a Device row in exactly ONE '
+      + 'space. But ADR 002 §2.1 mints IK_sig per DEVICE, not per space, so a Mac has one '
+      + 'deviceShort for life, and the product requires that Mac to be in a personal space (19.4) '
+      + 'AND a family space (15.2) at once — ADR 003 §10.2 even budgets "8 members x 2 spaces" of '
+      + 'pull traffic. NOW: the namespace is the SPACE, @@unique([spaceId, deviceShort]).',
     consequence:
-      'A user who has paired a second Mac (so a psp_ space exists) cannot create or join a '
-      + 'Familienkreis. This blocks the main flow of 15.2/15.3 for exactly the users who bought '
-      + 'the multi-device feature.',
+      'WAS: a user who had paired a second Mac (so a psp_ space exists) could not create or join '
+      + 'a Familienkreis — the main flow of 15.2/15.3, blocked for exactly the users who bought '
+      + 'the multi-device feature. And worse than a product bug: deviceShort is a FUNCTION of a '
+      + 'public key that GET /spaces/:id/members publishes to every member of the space, and '
+      + 'POST /devices is authorized by an attestation the caller signs with her own recovery '
+      + 'key — so any member of your circle could compute your short, register it under her own '
+      + 'member and burn the ONE global slot your Mac would ever have.',
     fix:
-      'Device needs to be per (member, device) rather than globally unique: @@unique([memberId, '
-      + 'deviceShort]) instead of @unique on deviceShort, and auth step 4 (ADR 003 §2) has to '
-      + 'resolve (deviceShort, spaceId) rather than deviceShort alone — `getDeviceByShort` '
-      + 'returns one row and would have to return the set.',
-    owner: 'server/prisma/schema.prisma + server/core/store-interface.js (E2 skeleton) and auth.js (LZP-202)',
+      'DONE, and NOT as proposed here. This row proposed @@unique([memberId, deviceShort]); that '
+      + 'is one notch too loose (two members of one circle could then hold the same short, and '
+      + 'ADR 003 §2 step 4 would have two rows in one space and nothing to choose on), and — the '
+      + 'half this row was silent about and tests/server/attack-relay-correlate.test.js §2 '
+      + 'measured — it hands T1 a CROSS-SPACE CORRELATION column: one machine\'s identical '
+      + 'deviceShort in a row in every circle it belongs to. Shipped instead: Device.spaceId + '
+      + '@@unique([spaceId, deviceShort]); auth step 4 resolves (deviceShort, spaceId) through '
+      + 'listDevicesByShort and verifies the signature against the key every row shares. The '
+      + 'correlation is NOT fixed by any of this — it is created by one Mac having a row in two '
+      + 'spaces at all, it is stronger through sigPubRaw than through deviceShort, and only a '
+      + 'per-space device signing key would remove it. Stated in docs/v2/server-metadata.md §7 '
+      + 'and in ADR 003 §5.1; the residual squat is finding R10-8a.',
+    owner: 'CLOSED — server/prisma/schema.prisma, server/core/store-interface.js, server/core/auth.js',
   }),
   Object.freeze({
     id: 'E2-203-2',
@@ -885,10 +897,11 @@ export async function createSpace(req, ctx) {
   const result = await ctx.store.tx(async (tx) => {
     if (await tx.getSpace(spaceId)) throw fail('bad_request', { field: 'spaceId', reason: 'exists' });
     if (await tx.getDevice(device.deviceId)) throw fail('bad_request', { field: 'device.deviceId', reason: 'registered' });
-    if (await tx.getDeviceByShort(device.deviceShort)) {
-      // Finding E2-203-1. `Device.deviceShort` is globally unique while `IK_sig` is per Mac, so
-      // the second space a Mac joins has nowhere to put its device row. Refused here with a
-      // named reason rather than left to become a StoreShapeError and a 500.
+    if (await tx.getDeviceByShort(spaceId, device.deviceShort)) {
+      // Round 10 item 8, closing E2-203-1: the short's namespace is the SPACE. This space is
+      // being created a line above, so a hit here can only be a retry racing itself — but the
+      // check stays, because the alternative is a StoreShapeError and a 500. What it no longer
+      // refuses is the Mac's OTHER spaces, which is the whole of E2-203-1.
       throw fail('bad_request', { field: 'device.deviceShort', reason: 'registered' });
     }
 
@@ -914,6 +927,7 @@ export async function createSpace(req, ctx) {
     });
     await tx.addDevice({
       id: device.deviceId,
+      spaceId,
       memberId: member.memberId,
       deviceShort: device.deviceShort,
       sigPubRaw: device.sigPubRaw,

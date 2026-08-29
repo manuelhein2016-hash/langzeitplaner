@@ -434,7 +434,7 @@ async function makeServer({ gate, adapter, clock }) {
   for (let i = 0; i < FLEET_SHORTS.length; i++) {
     const short = FLEET_SHORTS[i];
     await store.addMember(fixtures.member({ id: memberIdOf(short), spaceId: SPACE, colorRef: colors[i] }));
-    await store.addDevice(fixtures.device({ id: deviceIdOf(short), memberId: memberIdOf(short), deviceShort: short }));
+    await store.addDevice(fixtures.device({ id: deviceIdOf(short), spaceId: SPACE, memberId: memberIdOf(short), deviceShort: short }));
   }
   const lines = [];
   const ctx = {
@@ -457,7 +457,7 @@ async function makeServer({ gate, adapter, clock }) {
       const h = (r.headers || {}).authorization || '';
       const m = /device=([0-9A-HJKMNP-TV-Z]{16})/.exec(h);
       if (!m) throw new Error('the harness client did not send an Authorization header');
-      const dev = await store.getDeviceByShort(m[1]);
+      const dev = (await store.listDevicesByShort(m[1]))[0] || null;
       if (!dev || dev.revokedAt !== null) throw new Error('unknown device');
       return { deviceShort: dev.deviceShort, deviceId: dev.id, memberId: dev.memberId };
     },

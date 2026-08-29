@@ -384,7 +384,7 @@ test('the file adapter flushes EVERY mutating method — all 25 survive a restar
   const B = (n) => new Uint8Array(n).fill(7);
   const space = (id) => ({ id, kind: 'FAMILY', currentEpoch: 1, nextSeq: 0n, headChain: null, createdAt: new Date(0) });
   const member = (id, colorRef) => ({ id, spaceId: 'fsp_1', colorRef, recoveryPubSig: B(65), recoveryPubKex: B(65), joinedAt: new Date(0), removedAt: null });
-  const device = (id, short) => ({ id, memberId: 'mem_1', deviceShort: short, sigPubRaw: B(65), kexPubRaw: B(65), attestation: B(80), lastSeenSeq: 0n, lastPushedSeq: 0n, addedAt: new Date(0), revokedAt: null });
+  const device = (id, short) => ({ id, spaceId: 'fsp_1', memberId: 'mem_1', deviceShort: short, sigPubRaw: B(65), kexPubRaw: B(65), attestation: B(80), lastSeenSeq: 0n, lastPushedSeq: 0n, addedAt: new Date(0), revokedAt: null });
   const op = (opId, short) => ({ opId, epoch: 1, deviceShort: short, witness: null, chain: B(32), envelope: B(64) });
   const invite = (id) => ({ id, spaceId: 'fsp_1', verifier: B(32), wrapSalt: B(32), epoch: 1, createdBy: 'mem_1', expiresAt: new Date(86400000), usedAt: null, revokedAt: null });
 
@@ -403,8 +403,8 @@ test('the file adapter flushes EVERY mutating method — all 25 survive a restar
   await a.addDevice(device('dev_1', 'S1'));                                  // 10
   await a.addDevice(device('dev_2', 'S2'));
   await a.revokeDevice('dev_2', 2000);                                       // 11
-  await a.setLastSeenSeq('S1', 4n);                                          // 12
-  await a.setLastPushedSeq('S1', 3n);                                        // 13
+  await a.setLastSeenSeq('fsp_1', 'S1', 4n);                                 // 12
+  await a.setLastPushedSeq('fsp_1', 'S1', 3n);                               // 13
   await a.putKeyWraps([                                                      // 14
     { spaceId: 'fsp_1', epoch: 1, recipientId: 'dev_1', wrapped: B(156), senderDeviceId: 'dev_1' },
     { spaceId: 'fsp_1', epoch: 1, recipientId: 'dev_9', wrapped: B(156), senderDeviceId: 'dev_1' },
@@ -437,8 +437,8 @@ test('the file adapter flushes EVERY mutating method — all 25 survive a restar
   assert.equal(await b.colorFree('fsp_1', 'gruen'), false);
   assert.equal((await b.listDevices('fsp_1')).length, 2, 'addDevice');
   assert.ok((await b.getDevice('dev_2')).revokedAt, 'revokeDevice');
-  assert.equal((await b.getDeviceByShort('S1')).lastSeenSeq, 4n, 'setLastSeenSeq');
-  assert.equal((await b.getDeviceByShort('S1')).lastPushedSeq, 3n, 'setLastPushedSeq');
+  assert.equal((await b.getDeviceByShort('fsp_1', 'S1')).lastSeenSeq, 4n, 'setLastSeenSeq');
+  assert.equal((await b.getDeviceByShort('fsp_1', 'S1')).lastPushedSeq, 3n, 'setLastPushedSeq');
   assert.equal((await b.getKeyWraps('fsp_1', 'dev_1')).length, 1, 'putKeyWraps');
   assert.equal((await b.getKeyWraps('fsp_1', 'dev_9')).length, 0, 'deleteKeyWrapsForDevices');
   assert.equal((await b.getInvite('inv_1')).epoch, 7, 'refreshInvite');

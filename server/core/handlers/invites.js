@@ -268,9 +268,10 @@ export async function redeemInvite(req, ctx) {
       throw fail('bad_request', { field: 'member.memberId', reason: 'exists' });
     }
     if (await tx.getDevice(device.deviceId)) throw fail('bad_request', { field: 'device.deviceId', reason: 'registered' });
-    if (await tx.getDeviceByShort(device.deviceShort)) {
-      // Finding E2-203-1 again, and this is where it hurts most: a Mac that already has a
-      // personal space cannot join a Familienkreis at all.
+    if (await tx.getDeviceByShort(spaceId, device.deviceShort)) {
+      // Round 10 item 8, closing E2-203-1 where it hurt most: a Mac that already has a personal
+      // space used to be unable to join a Familienkreis at all. The namespace is now the SPACE,
+      // so this only refuses a short already registered IN THIS CIRCLE.
       throw fail('bad_request', { field: 'device.deviceShort', reason: 'registered' });
     }
 
@@ -285,6 +286,7 @@ export async function redeemInvite(req, ctx) {
     });
     await tx.addDevice({
       id: device.deviceId,
+      spaceId,
       memberId: member.memberId,
       deviceShort: device.deviceShort,
       sigPubRaw: device.sigPubRaw,

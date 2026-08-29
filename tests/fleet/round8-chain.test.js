@@ -375,20 +375,31 @@ describe('§2 · CLOSED · one legitimate member removal costs one pull, and not
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §3 · SUCCEEDED — R8-3. `chain` IS DECLARED `durable: true` AND IS NOT PERSISTED AT ALL
+// §3 · INVERTED (round 10) — R8-3. `chain` IS DECLARED `durable: true` AND NOW IS
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// `sync/status.js`'s `SYNC_OBSERVABLES` row `chain` carries `durable: true`, and its own docblock
-// says durability is "the requirement, not a nicety". `store.syncChain` is a plain field, set to
-// `null` in the constructor and again in `init()`, and it rides in no file. The refusal ledger
-// beside it got `checkpoint.lzp.refusals`; this one got nothing.
+// THE ROW AS IT WAS: `sync/status.js`'s `SYNC_OBSERVABLES` row `chain` carries `durable: true`,
+// and its own docblock says durability is "the requirement, not a nicety". `store.syncChain` was a
+// plain field, set to `null` in the constructor and again in `init()`, riding in no file. The
+// refusal ledger beside it got `checkpoint.lzp.refusals`; this one got nothing — and the two are
+// declared in ONE `store.js` docblock, for one stated reason, which the disk honoured for one.
 //
-// The S4-diverged probe in `tests/property/sync-domains.test.js` cannot see this: it relaunches
-// with the withhold STILL ARMED, so the verdict is re-derived on the next pull and the row reads
-// as durable. A one-shot lie is the input that separates the two.
+// CLOSED in the round-10 integration pass. `_stampedCheckpoint` writes `lzp.chain` through
+// `_syncChainForDisk()` and `_restoreSyncLedger` reads it back, under the same quarantine gate the
+// refusals use. The write is a PROJECTION — kind, seq, from, detail — so 21.3 holds and a future
+// `chain.js` field cannot silently reach the disk; the read drops malformed rows rather than
+// throwing, because it runs inside `init()`.
+//
+// The S4-diverged probe in `tests/property/sync-domains.test.js` could not see this: it relaunched
+// with the withhold STILL ARMED, so the verdict was re-derived on the next pull and the row read
+// as durable. A one-shot lie is the input that separates the two, and S4c is that row.
+//
+// THE HALF THAT MATTERS AS MUCH AS THE DURABILITY: a restored verdict must be WITHDRAWABLE, or
+// this fix trades a silent Mac for a permanently red one — the failure `chain.js`'s header forbids
+// and the reason R10-2 could not ship. The second row below is that control.
 
-describe('§3 · SUCCEEDED · a fork this device detected is forgotten by the next launch', () => {
-  test('one rewritten chain value: `error` before the quit, `silent: true` after it', async () => {
+describe('§3 · INVERTED · a fork this device detected OUTLIVES the next launch', () => {
+  test('one rewritten chain value: `error` before the quit, and still named after it', async () => {
     const f = await twoMacs();
     const A = f.device('A');
     const B = f.device('B');
@@ -406,16 +417,56 @@ describe('§3 · SUCCEEDED · a fork this device detected is forgotten by the ne
     await B.close();
     await B.open();
     const s = B.status();
+    const restored = B.storeDiagnostics().sync.chain;
+    assert.notEqual(restored, null,
+      'THE ROW, INVERTED: the verdict survives the quit. Round 9 measured `null` here — the '
+      + 'build actively claimed "there is nothing to tell you" about a fork it had detected and '
+      + 'recorded ninety seconds earlier, which is L-1 exactly, one field over.');
+    assert.equal(restored.ok, false, 'and it comes back as a VERDICT, not as a re-derivation');
+    assert.equal(restored.findings.some((x) => x.kind === 'mismatch'), true,
+      'carrying the finding that was actually made, so a detail pane can say WHAT rather than THAT');
+    assert.equal(s.state, 'error', 'so the state is `error` on a fresh process, before any pull');
+    assert.equal(s.silent, false, 'and 19.3\'s promise is not made over a board with a hole in it');
+
+    // 21.3 — the checkpoint is a file a person can mail to support. Nothing from an envelope may
+    // be in it. Asserted on the BYTES, not on the object, because the projection is the defence.
+    const cp = JSON.parse(B.disk.getItem('langzeitplaner.checkpoint') || '{}');
+    const wrote = JSON.stringify(cp.lzp && cp.lzp.chain);
+    assert.notEqual(wrote, 'undefined', 'NON-VACUITY: the verdict really is in the checkpoint file');
+    for (const field of ['ct', 'iv', 'sig', 'env', 'aad']) {
+      assert.equal(wrote.includes('"' + field + '"'), false,
+        'the persisted verdict carries no `' + field + '` — `_syncChainForDisk()` is a projection '
+        + 'of four named fields, not a copy, so a future `chain.js` cannot widen what reaches disk');
+    }
+  });
+
+  test('CONTROL · and the restored verdict is WITHDRAWN once the relay proves itself', async () => {
+    // Without this the fix above is a ratchet: every Mac that ever saw one bad page would wear a
+    // red light for the rest of its life. `personal.js` clears `store.syncChain` on the first pull
+    // carrying POSITIVE EVIDENCE — freshly folded rows, or an owed row delivered — and an honest
+    // relay REPEATING ITSELF is deliberately not enough (R8-1a).
+    const f = await twoMacs();
+    const A = f.device('A');
+    const B = f.device('B');
+    await f.settle();
+    await A.apply('createNotePopover', { id: 'x', date: '2027-06-07', text: 'x', categoryId: 'c1' });
+    await A.push();
+    f.wire.hostile.onResponse = MUTATORS.rewriteChain((o, i) => (i === 0 ? 'AAAA' + o.chain.slice(4) : null));
+    await B.pull();
+    f.wire.honest();
+    await B.close();
+    await B.open();
+    assert.equal(B.status().state, 'error', 'NON-VACUITY: the launch really did restore a verdict');
+
+    await A.apply('createNotePopover', { id: 'x2', date: '2027-06-09', text: 'x2', categoryId: 'c1' });
+    await A.push();
+    await f.settle(3);
     assert.equal(B.storeDiagnostics().sync.chain, null,
-      'DEFECT: the verdict did not survive the quit. `sync/status.js` declares this observable '
-      + '`durable: true`; nothing writes it to disk.');
-    assert.equal(s.state, 'healthy', 'DEFECT: `healthy`');
-    assert.equal(s.silent, true,
-      'DEFECT: `silent: true` — the build actively claims "there is nothing to tell you" about a '
-      + 'fork it detected and recorded ninety seconds ago. That is L-1 exactly, one field over.');
-    assert.deepEqual(s.blind, [],
-      'and `blindSpots()` cannot help: the field EXISTS and reads `null`, which the fold is '
-      + 'required to read as "no fork" rather than as "I have not looked"');
+      'THE CONTROL: honest pages with new rows in them take the verdict away again. A restored '
+      + 'verdict is a REPORT, not a ratchet.');
+    assert.equal(B.status().state, 'healthy', 'and the indicator goes out');
+    assert.equal(B.state.notes.some((n) => n.id === 'x2'), true,
+      'on a Mac that really did catch up, rather than one that stopped looking');
   });
 });
 

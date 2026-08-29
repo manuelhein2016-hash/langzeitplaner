@@ -133,6 +133,16 @@ const WARN_LIMIT = 1000;
  * able to grow this file without bound. Most recent kept — see `_syncRefusalsForDisk`.
  */
 const REFUSAL_LEDGER_CAP = 200;
+/**
+ * How many chain findings ride in `checkpoint.json` (P-4, and S4c in the property suite).
+ *
+ * The same argument as `REFUSAL_LEDGER_CAP`, one field over: `syncChain` is a FLAG — one finding
+ * is enough for `status.js` to stop reporting `healthy` — and a device being fed a broken stream
+ * by a hostile relay must not be able to grow this file without bound. Ten is well past the point
+ * where an eleventh detail string tells a reader anything the first did not, and the whole record
+ * is thrown away by the first pull that verifies (`personal.js` sets `store.syncChain = null`).
+ */
+const CHAIN_FINDING_CAP = 10;
 const SNAPSHOT_LIMIT = 7;
 const SAVE_DEBOUNCE = 700;
 
@@ -1277,9 +1287,14 @@ class Store {
     //
     // BOTH ARE THE STORE'S, NOT THE ENGINE'S, and they are declared here rather than created by
     // the first engine that writes one: an engine that adds properties to the store it was
-    // injected with is how two files stop agreeing about what the store is. `syncRefusals` RIDES
-    // IN THE CHECKPOINT (`_stampedCheckpoint` writes `lzp.refusals`, `init()` reads it back), so
-    // it survives the quit — an array on an instance dies with the process exactly as the Map did.
+    // injected with is how two files stop agreeing about what the store is.
+    //
+    // AND BOTH NOW RIDE IN THE CHECKPOINT — `_stampedCheckpoint` writes `lzp.refusals` and
+    // `lzp.chain`, `_restoreSyncLedger` reads both back — so both survive the quit, where an
+    // array on an instance dies with the process exactly as the Map did. For two rounds only the
+    // first of them rode, which is the whole of finding S4c: the docblock gave one reason for two
+    // fields and the disk honoured it for one. `syncChain` is cleared again by the first pull
+    // that carries positive evidence, so a restored verdict is a report and not a ratchet.
     /** @type {Array<{oid:string, seq:string, reason:string, at:number}>} */
     this.syncRefusals = [];
     /** @type {{ok:false, findings:Array, at:number}|null} */
@@ -3880,7 +3895,56 @@ class Store {
         // record and re-pulls the op, which re-derives the same refusal. Losing it in that
         // direction is free; the direction that is not free is losing it at every quit.
         refusals: this._syncRefusalsForDisk(),
+        // ── P-4 · AND SO DOES THE CHAIN VERDICT, FOR THE SAME REASON, AT LAST ────────────────
+        //
+        // These two fields are declared in ONE docblock above (`syncRefusals`, `syncChain`) for
+        // one stated reason — "facts about bytes that are GONE" — and for two rounds only the
+        // first of them rode here. The cost was measured as S4c in `tests/property/
+        // sync-domains.test.js`: a Mac that spent a whole session correctly saying the relay's
+        // stream did not add up quits, relaunches, and reports `healthy` over a board that is
+        // still missing the appointment. `init()` nulls `syncChain`, no checkpoint carried it,
+        // and so the only thing that could ever speak up again was a successful pull — from the
+        // relay the accusation is ABOUT.
+        //
+        // IT DOES NOT BECOME AN UN-CLEARABLE RED LIGHT, which is the failure this whole round
+        // exists to avoid. `sync/personal.js` clears the field (`store.syncChain = null`) on the
+        // first pull carrying POSITIVE EVIDENCE — freshly folded rows, or an owed row delivered
+        // — so a restored verdict lasts exactly until the relay proves itself and no longer. An
+        // honest relay repeating itself does not clear it and must not: that is R8-1a.
+        chain: this._syncChainForDisk(),
       },
+    };
+  }
+
+  /**
+   * The chain verdict, bounded and stripped for the disk.
+   *
+   * WHAT MAY RIDE: the finding KIND, the seq it is about, the seq a gap counted from, and the
+   * human detail string `chain.js` wrote. That is the same four facts `diagnostics().sync.chain`
+   * already publishes to a settings sheet.
+   *
+   * WHAT MAY NOT, and why this is a projection rather than a `JSON.stringify` of the object: 21.3
+   * forbids ciphertext in anything a person can screenshot or mail to support, and a finding is
+   * built beside envelopes. Dropping unknown fields HERE rather than at the display is the same
+   * rule `status.js shelvedDetail()` follows — a field dropped at the display is a field the next
+   * display forgets to drop — and it also keeps a future `chain.js` from silently widening what
+   * this file writes to disk.
+   */
+  _syncChainForDisk() {
+    const c = this.syncChain;
+    if (!c || typeof c !== 'object' || c.ok !== false) return null;
+    const all = Array.isArray(c.findings) ? c.findings : [];
+    const kept = all.slice(0, CHAIN_FINDING_CAP).map((f) => {
+      const row = { kind: String((f && f.kind) ?? '') };
+      if (f && f.seq !== undefined && f.seq !== null) row.seq = String(f.seq);
+      if (f && f.from !== undefined && f.from !== null) row.from = String(f.from);
+      if (f && typeof f.detail === 'string') row.detail = f.detail;
+      return row;
+    });
+    return {
+      kind: typeof c.kind === 'string' ? c.kind : 'chain',
+      findings: kept,
+      at: Number.isFinite(c.at) ? c.at : 0,
     };
   }
 
@@ -3969,6 +4033,58 @@ class Store {
       if (out.length >= REFUSAL_LEDGER_CAP) break;
     }
     this.syncRefusals = out;
+
+    // ── P-4 · THE CHAIN VERDICT, READ BACK ───────────────────────────────────────────────────
+    //
+    // Same gate as the refusals above (`this.quarantine` — a log this launch refused takes its
+    // whole ledger with it), same total-parser discipline: a malformed entry is DROPPED, never
+    // thrown on, because this runs inside `init()`.
+    //
+    // A restored verdict is restored as `ok: false` and NOT re-derived, which is the point: this
+    // device cannot re-check a page it will never be served again, so what rides is the record of
+    // a check that already happened. `at` is kept as written so the detail pane can say WHEN,
+    // rather than claiming the launch discovered it.
+    const c = lzp && typeof lzp === 'object' ? lzp.chain : null;
+    const rawFindings = c && typeof c === 'object' && Array.isArray(c.findings) ? c.findings : null;
+    if (rawFindings) {
+      const findings = [];
+      for (const f of rawFindings) {
+        if (!f || typeof f !== 'object' || typeof f.kind !== 'string' || f.kind === '') continue;
+        const row = { kind: f.kind };
+        if (typeof f.seq === 'string') row.seq = f.seq;
+        if (typeof f.from === 'string') row.from = f.from;
+        if (typeof f.detail === 'string') row.detail = f.detail;
+        findings.push(row);
+        if (findings.length >= CHAIN_FINDING_CAP) break;
+      }
+      // An EMPTY findings list is not a verdict. `status.js` reads `sync.chain` as a flag, so a
+      // `{ok:false, findings:[]}` would light the indicator with nothing behind it to show — the
+      // "not evidence" shape round 10 spent a whole item keeping out of this field.
+      if (findings.length) {
+        this.syncChain = {
+          ok: false,
+          kind: typeof c.kind === 'string' && c.kind !== '' ? c.kind : 'chain',
+          findings,
+          at: Number.isFinite(c.at) ? c.at : 0,
+        };
+      }
+      // ⚠ AND NO `_warn()` HERE, WHICH IS THE DIFFERENCE BETWEEN THIS FIELD AND THE REFUSALS.
+      //
+      // The restore above is deliberately silent on the warning channel, and it was measured
+      // getting this wrong first: a `_warn` on restore turned S4c's second half red with
+      // `'warnings' !== null` — the Mac caught up, `syncChain` was correctly cleared by the
+      // evidence, and the warning outlived it, so the indicator stayed lit on a device with
+      // nothing left to tell anybody. That is the un-clearable red light in a different field.
+      //
+      // The two ledgers differ in exactly this: a REFUSAL is permanent (the bytes are gone and
+      // will never be offered again), so a channel with no lifecycle fits it. A CHAIN VERDICT is
+      // withdrawable by definition — `personal.js` clears it on positive evidence — so it may
+      // only ride in a channel that can be withdrawn too. `syncChain` is that channel:
+      // `diagnostics().sync.chain` is non-null from the first millisecond of the launch,
+      // `status.js` enumerates it as a flag, and the first verifying pull takes it away again.
+      // `warnings` has no such door — `clearWarnings()` runs at `init()` and nowhere else.
+    }
+
     if (out.length) {
       this._warn(
         `sync: ${out.length} change${out.length === 1 ? '' : 's'} from another device `

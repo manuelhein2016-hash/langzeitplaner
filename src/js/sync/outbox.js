@@ -605,7 +605,43 @@ export function createParkingLot(ports = {}) {
       }
       const n = rows.length - keep.length;
       unopened.clear();
-      if (n === 0) return 0;
+
+      // ── R10-9d · A SHELF ROW FOR AN OP THAT LATER OPENED IS A LIE, AND IT WAS PERMANENT ──────
+      //
+      // The shelf means ONE thing: "this hold ended and nothing will ever open these bytes". An
+      // oid that reaches `release()` NOT in `unopened` is the exact opposite — it opened, and the
+      // op is in the log. Until this clause the shelf was append-only from `release()`'s side, so
+      // the ordinary F-6 story left a permanent entry behind: first contact parks an op, the
+      // ladder burns before the attestation lands, `terminal()` shelves the envelope, the pairing
+      // then completes, the op is re-served, applied, and released — and the shelf still held a
+      // row saying nothing would ever open it, about an entry sitting on the board.
+      //
+      // Invisible for as long as nothing read the shelf, which is why it survived round 9. It
+      // became a USER-VISIBLE false `error` the moment `status()` began offering the shelf to
+      // `judgeSyncStatus`, and it is the reason that wiring could not ship without this: the new
+      // observable's first act would have been to put a permanent red light on an ordinary Mac
+      // that had done nothing but pair slowly once.
+      //
+      // ⚠ THIS IS THE CROSS-SESSION HALF ONLY. It catches a row a PREVIOUS process wrote, whose op
+      // arrives and applies later — the revival doing exactly what it exists to do. The half that
+      // fires inside ONE session is in `sync/personal.js`: `unopened` is cleared only inside this
+      // method, so a session where nothing applies for several pulls accumulates marks and shelves
+      // an op that opened. `pullNow` now opens each pull with an EMPTY release, which is the pull
+      // boundary `round8-park.test.js` §6.2 models with a fresh lot. Both halves are R10-9d.
+      //
+      // Bytes are destroyed here, so it is worth being exact about which: only rows whose oid the
+      // CALLER has just named as applied, and only in this space. That is the same evidence
+      // `release()` already destroys the replay row on, one list over.
+      const opened = shelf.filter((r) => r.space === space && gone.has(r.oid)).length;
+      if (opened) shelf = shelf.filter((r) => !(r.space === space && gone.has(r.oid)));
+
+      if (n === 0) {
+        // The replay set had nothing, but the SHELF may still have been cleaned — an op whose
+        // envelope was shelved in an earlier session arrives, applies, and is released with no
+        // replay row of its own. Persisting is not optional there.
+        if (opened) await persist();
+        return 0;
+      }
       rows = keep;
       for (const r of shelved) shelf.push({ ...r, tries: 0, refusals: r.refusals + 1 });
       if (shelved.length) {

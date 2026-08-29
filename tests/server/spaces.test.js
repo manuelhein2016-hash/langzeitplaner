@@ -202,7 +202,7 @@ async function joinDirect(store, clock, p, colorRef, spaceId) {
     recoveryPubKex: p.recoveryPubKex, joinedAt: new Date(clock.now()), removedAt: null,
   });
   await store.addDevice({
-    id: p.deviceId, memberId: p.memberId, deviceShort: p.deviceShort, sigPubRaw: p.sigPubRaw,
+    id: p.deviceId, spaceId: spaceId || SPACE, memberId: p.memberId, deviceShort: p.deviceShort, sigPubRaw: p.sigPubRaw,
     kexPubRaw: p.kexPubRaw, attestation: p.attestationBytes, lastSeenSeq: 0n, lastPushedSeq: 0n,
     addedAt: new Date(clock.now()), revokedAt: null,
   });
@@ -375,7 +375,7 @@ for (const adapter of ADAPTERS) {
     );
     assert.equal(await store.getSpace(SPACE), null, 'the whole creation rolled back');
     assert.deepEqual(await store.listMembers(SPACE), []);
-    assert.equal(await store.getDeviceByShort(ADMIN.deviceShort), null);
+    assert.equal(await store.getDeviceByShort(SPACE, ADMIN.deviceShort), null);
   });
 
   T('createSpace refuses a key ring that covers only the recovery key', async () => {
@@ -484,8 +484,10 @@ for (const adapter of ADAPTERS) {
     assert.equal(err.extra.reason, 'exists');
     assert.equal((await store.listMembers(SPACE)).length, 1, 'the original space is untouched');
 
-    // Finding E2-203-1: one Mac, one Device row, globally. A user who already has a personal
-    // space cannot create a family one. Refused with a named reason rather than a 500.
+    // ROUND 10 ITEM 8: what is refused here is the reused `deviceId`, and ONLY that. E2-203-1's
+    // half — one Mac, one Device row, globally, so a user with a personal space could not create
+    // a family one — is closed; the row below ('a Mac that already has a space CAN create a
+    // second one') is the positive case, and this one now proves the id collision on its own.
     // MOM's member row, and a device MOM really attested that reuses ADMIN's `deviceId`. The
     // attestation therefore VERIFIES (finding E2E3-7 made that a precondition of getting this
     // far), so the request reaches the store check this row is about instead of stopping at 401.
@@ -499,6 +501,35 @@ for (const adapter of ADAPTERS) {
       400, 'bad_request');
     assert.equal(err2.extra.reason, 'registered');
     assert.equal(err2.extra.field, 'device.deviceId');
+  });
+
+  T('a Mac that already has a space CAN create a second one — E2-203-1, closed (round 10 item 8)', async () => {
+    // The flow this round unblocked, on the wire: one machine, one `IK_sig`, one `deviceShort`
+    // for life (ADR 002 §2.1), and 19.4 + 15.2 both need it. The ONLY thing that changes between
+    // the two requests is the space and the member row — the device's short and keys are the
+    // same bytes, deliberately, because that is what used to be refused.
+    const { store, clock } = await withSpace(adapter);
+    // The SAME machine: `borrowKeysFrom` hands MOM's new attestation ADMIN's actual public
+    // points, so the payload MOM signs carries ADMIN's `deviceShort` — which is what one Mac in
+    // two circles genuinely looks like, since ADR 002 §2.1 mints `IK_sig` per DEVICE.
+    const sameMac = await attestedDeviceFor(MOM, { borrowKeysFrom: ADMIN });
+    assert.equal(sameMac.deviceShort, ADMIN.deviceShort, 'one machine, one short, for life');
+
+    const second = createBody(ADMIN, { spaceId: OTHER_SPACE, colorRef: 'blau' });
+    second.member = { ...memberBody(MOM) };
+    second.device = deviceWire(sameMac);
+    second.wraps = [wrap(sameMac.deviceId, 1, 1), wrap(recoveryRecipient(MOM.memberId), 1, 2)];
+    const ctx = makeCtx(store, clock, { auth: { deviceShort: sameMac.deviceShort } });
+    const res = await createSpace(req({ body: second }), ctx);
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.spaceId, OTHER_SPACE);
+
+    // Two rows, one machine, one key — and the correlation that follows is stated rather than
+    // denied (ADR 003 §5.1, server-metadata.md §7, attack-relay-correlate.test.js §2).
+    const both = await store.listDevicesByShort(sameMac.deviceShort);
+    assert.equal(both.length, 2, 'one Mac, a row in each circle');
+    assert.equal(new Set(both.map((d) => d.spaceId)).size, 2);
+    assert.equal(new Set(both.map((d) => [...d.sigPubRaw].join(','))).size, 1, 'and one public key');
   });
 
   T('signing with one device and registering another is refused', async () => {

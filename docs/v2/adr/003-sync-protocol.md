@@ -351,6 +351,89 @@ today, which is exactly what lets ADR 002 §2.3's binding land as a client-only 
 versioning, not negotiation — no round trip, nothing offered or withdrawn, and the release order is
 the whole protocol. See ADR 002 §2.3 and finding R8-7.
 
+### 4.1 The baseline a joining device may claim — and the case where it may claim none  *(round 10, item 9)*
+
+**The case this is about is E6's normal one, not an edge.** Mama joins a Familienkreis that
+already removed someone. Story 20.2's removal purges the departed member's `Op` rows server-side,
+so the log she pulls **has holes by design**: `seq` numbers are missing, and `Op.chain =
+SHA-256(prevChain ‖ opId)` (ADR 002 §5.4) was computed over the *original* sequence, so it does not
+verify across the gap even against a perfectly honest relay. She has no anchor that predates the
+holes, because she was not there.
+
+**The answer is that she cannot prove a baseline, and the specification is that she must say so.**
+An unprovable claim reported as proved is worse than one reported as unprovable — that is what ADR
+002 §5.4's `fromGenesis` flag exists for, and this section is the rule that makes a client's use of
+it testable rather than tasteful.
+
+**Why there is no anchor to be had. Three candidates, and each fails for its own reason:**
+
+| candidate | why it is not a baseline |
+|---|---|
+| `Op.chain` itself | The **relay** computes it, per space, and **nobody signs it**. For a device with no independent history it proves only that the relay served a self-consistent sequence — which a lying relay produces from genesis at zero cost. |
+| a peer's `Envelope.wit` | Signed, and it *does* anchor — but only at ops the joiner can also see and recompute. A `wit` committing to a head across a purged range names a chain she can never reconstruct, so it is **unverifiable rather than falsifiable**: she cannot tell a lie from a legal hole. |
+| the `member.remove` op | It is in the log she pulls and it is signed by the admin, so she can see **that** a removal happened and roughly where. That upgrades "an unexplained break" to "a break with a signed explanation next to it" — the strongest honest statement available — and it is still not proof that the break is *only* the removal's. The relay chooses which rows to serve and can hide withheld ops under the cover of a real one. That is finding R10-4: **to this client a withhold and a purge are the same event.** |
+
+**The rules. A client is conformant iff all five hold.**
+
+- **R1 — record the baseline, once.** On its first successful pull in a space a device MUST persist
+  `baselineSeq` (the `seq` of the first op it folds) and `baselineChain` (that op's `chain`), and
+  MUST record them as **asserted by the relay**, never as verified. There is no endpoint that
+  supplies them and none may be added: any value the relay hands over is a value the relay chose.
+- **R2 — `fromGenesis` is derived, not set.** It is true iff `baselineSeq === 1` **and** every chain
+  link from 1 to the device's cursor has verified without a break. Anything else is false.
+- **R3 — `fromGenesis` may fall and may never rise.** A device that has once seen a break lowers it
+  and keeps it lowered across restarts. Raising it — on a fresh pull, a re-anchor, a cache clear —
+  is the lie this section exists to forbid.
+- **R4 — a break below `baselineSeq` is not a finding.** It is outside what this device can speak
+  about at all, and reporting it would make every honest post-removal join look like an attack. A
+  break **at or above** `baselineSeq` is a finding, and it stays a **diagnostic** that never blocks
+  sync (ADR 002 §5.4; the wedge R8-2 measured is what a blocking one costs).
+- **R5 — the copy contract.** A device with `fromGenesis === false` may render „**seit dem Beitritt
+  geprüft**" and MUST NOT render „geprüft", „vollständig" or a bare green check for history it did
+  not witness. This is the sync half of ADR 002 §7.4, and it is the half 19.3's *"silence must MEAN
+  health"* depends on: a joiner whose UI says "verified" has turned silence into a claim.
+
+**What would actually fix it, named so that its absence is a decision.** A signed, append-only
+transparency log over `(spaceId, seq, chain)` with client-side continuity checking and cross-member
+gossip — ADR 002 §8.6, *"the item most worth reconsidering if the threat model ever hardens"*. That
+is the only construction in which a post-removal joiner verifies against a commitment the relay
+cannot rewrite per device. Until it exists, R1–R5 are the whole of what an honest client may claim,
+and E6 ships with a member who says „seit dem Beitritt geprüft" rather than one who says nothing.
+
+---
+
+### 4.2 The attestation allow-list moves with `X-LZP-Protocol` — the versioning contradiction, settled  *(round 10)*
+
+Round 9 reconciled the *reasoning* (the paragraph above: a client parks, a publisher cannot) and
+left the *mechanism* implicit — "the release order is the whole protocol". Implicit is what bites:
+a v2.1 client minting a new attestation field against a relay one release behind gets
+`400 bad_request { reason: "attestation_unknown_field" }` on `POST /devices`, which reads to a UI
+as a malformed request and to a user as a Mac that will not pair, with nothing anywhere saying
+*update the relay*. Made explicit here, and it needs no new surface:
+
+> **The device-attestation allow-list is part of the HTTP surface, and is therefore versioned by
+> `X-LZP-Protocol` like every other part of it.** A field enters the allow-list in protocol `N`. A
+> client MUST NOT mint it until it has seen the relay answer `N` or higher — `GET /meta`'s
+> `maxProto`, or the `X-LZP-Protocol` on any response. `400 attestation_unknown_field` from a relay
+> whose `maxProto` is below the field's `N` is a **version signal**, and the client shows 22.4's
+> quiet „Update verfügbar" for the SERVER rather than a pairing error.
+
+**And this is where ADR 002 §2.3's forward-compatibility bullet is wrong, which is worth naming
+because it looks like it contradicts the rule above.** §2.3 says `parseAttestationBlob` *"already
+tolerates extra fields, deliberately, so a v2.0 client reads a v2.1 blob unchanged"*, offered as a
+reason a seventh field is cheap. It is true of a **client reading a blob out of the member list**
+and false of the **relay's door**, which refuses one — and the two are not in conflict, because
+they are not about the same object:
+
+- §4's **N+1 park rule** governs the **encrypted op stream**, which the relay never reads. Parking
+  is available there, so parking is required.
+- The **attestation blob** is not in that stream. It is an HTTP field the relay **stores and
+  publishes** (`GET /spaces/:id/members`), so "park it" and "store it" are one act and a tolerant
+  door is a free-text channel (finding R8-7). It is governed by `X-LZP-Protocol`.
+
+ADR 002 §2.3 needs one sentence after that bullet to say so; it is **owed and is not this
+document's to write** — recorded here and in `server/core/handlers/devices.js`'s §2 note.
+
 **⚠ OPEN — a client cannot re-ask for ONE seq, and R8-2's bound makes that visible.**
 `GET /api/v1/ops` can only be asked *"everything after `since`"*. Since round 9, a chain-witness
 finding holds the cursor for the pull that discovers it and not after (ADR 002 §5.4 forbids the
@@ -418,8 +501,12 @@ model Member {
 
 model Device {
   id           String    @id                    // "dev_" + 22 b64url
+  spaceId      String                           // THE NAMESPACE OF deviceShort — round 10 item 8.
+                                                //   Derived from member.spaceId; addDevice refuses
+                                                //   a row where the two disagree
   memberId     String
-  deviceShort  String    @unique                // 16 Crockford base32 — the stamp tiebreak
+  deviceShort  String                           // 16 Crockford base32 — the stamp tiebreak.
+                                                //   NOT @unique any more; see @@unique below
   sigPubRaw    Bytes                            // 65 B
   kexPubRaw    Bytes                            // 65 B
   attestation  Bytes                            // signed by the member's recovery key. UTF-8 of the
@@ -432,6 +519,7 @@ model Device {
   addedAt      DateTime  @default(now())
   revokedAt    DateTime?
   member       Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  @@unique([spaceId, deviceShort])              // round 10 item 8 — see below
 }
 
 model Op {
@@ -499,6 +587,57 @@ model Nonce { deviceShort String  nonce String  expiresAt DateTime
 
 model RateBucket { key String @id  count Int  windowStart DateTime }
 ```
+
+#### The `deviceShort` namespace — the decision, the residual, and what it does NOT buy  *(round 10, item 8)*
+
+`Device.deviceShort` was `@unique` **globally**. It is now `@@unique([spaceId, deviceShort])`.
+
+**Why the old constraint was wrong in two directions.** `IK_sig` is minted per DEVICE (ADR 002
+§2.1), so a Mac has one `deviceShort` for life, while `Device.memberId` names one `Member`, which
+is per space. So one Mac could hold a row in exactly one space — while 19.4 and 15.2 require it in
+two, and §10.2 of this document budgets *"8 members × 2 spaces"* of pull traffic. That is finding
+E2-203-1, and it blocked the product. The second direction is sharper and is round 10's own finding
+R10-7: **`deviceShort` is a function of a PUBLIC key**, and `GET /spaces/:id/members` publishes
+`sigPubRaw` to every member of the space, while `POST /devices` is authorized by an attestation the
+caller signs with her *own* recovery key. So any member of your circle could compute your short,
+mint a row under it, and burn the one global slot your Mac would ever have — a permanent lockout,
+one request, from inside the family. **A uniqueness constraint over a value everyone can compute is
+not an identity check; it is a land grab with a queue.**
+
+**Why per SPACE and not per member.** E2-203-1 proposed `@@unique([memberId, deviceShort])`. That
+is one notch too loose: two different members of the *same* circle could then hold the same short,
+and §2 step 4 would face two rows inside one space with nothing to choose on. Per space, the
+resolution is exact — and it is what lets step 4 keep answering with a single member id.
+
+**Why NOT "require a signature by the key being registered", the other option.** It is already
+enforced everywhere it can be: `authenticate`'s bootstrap ladder binds the header's `device=` to
+the key in the body, and steps 4b and 5 re-derive and verify on every later request. The one door
+it is *not* on is `POST /devices` / `POST /devices/adopt`, which are **deliberately
+unauthenticated** — authorized by the attestation under `Member.recoveryPubSig`. Adding a
+possession proof there is a wire change to a door designed not to have one, and the namespace fix
+makes it unnecessary for the reachable attack: a squatted row is now local to the squatter's own
+circle and inert in it, because she still cannot authenticate as it.
+
+> **⚠ RESIDUAL — finding R10-8a, OPEN.** She can still pre-empt a KNOWN Mac's short **inside her
+> own circle** and keep that machine out of *that* circle. It needs the victim's `sigPubRaw`, which
+> she has only if they already share a space — so it is a co-member's nuisance, inside ADR 002 §0's
+> T5, and it is bounded to one circle. Closing it means giving `POST /devices` the same
+> self-authenticating ladder the two bootstrap routes have (`BOOTSTRAP_ROUTES` becomes four), which
+> is a client-transport change and is **owned by WP-8 / LZP-501**, not by the relay alone.
+
+**What this does NOT buy: the cross-space join is now real, and no naming choice removes it.**
+One Mac legitimately holds a row in every circle it belongs to, and those rows carry the same
+`deviceShort` **and the same `sigPubRaw`**. `sigPubRaw` is the stronger join — 65 exact bytes the
+relay must hold to verify a signature — so blinding or per-space-deriving the short would change
+nothing. The only construction that removes it is a **per-space device signing key**, and ADR 002
+§2.1 mints `IK_sig` per device; that is a client crypto change (pairing and A2 recovery would each
+have to mint one per circle, and `Op.dv` and the authorization fold would need per-space shorts) and
+nobody has costed it. Recorded, not fixed. `docs/v2/server-metadata.md` §7 states it as a dump
+inference, and `tests/server/attack-relay-correlate.test.js` §2 measures both columns.
+
+`@@unique([spaceId, deviceShort])` does mean a bare `WHERE deviceShort = ?` is not served by the
+leading column of any index. **That is a speed bump for ad-hoc SQL and not a control**: the
+operator owns the database and can `CREATE INDEX`. It is stated so nobody mistakes it for one.
 
 ### 5.2 The metadata inventory (LZP-207 → LZP-1001)
 

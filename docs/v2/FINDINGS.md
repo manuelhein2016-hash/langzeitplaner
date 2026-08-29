@@ -1878,10 +1878,10 @@ stored value forward, so a caller with nothing to say changes nothing.
 
 | # | still open | why, and who owns it |
 |---|---|---|
-| **R8-3** | `chain` is declared `durable: true` and persisted nowhere — a fork detected before a quit is forgotten by the next launch | `round8-chain.test.js` §3 still asserts the defect. `store.syncChain` needs to ride in `checkpoint().lzp` exactly as `refusals` already does. Owner: `src/js/store.js`. |
+| ~~**R8-3**~~ | `chain` is declared `durable: true` and persisted nowhere — a fork detected before a quit is forgotten by the next launch | **CLOSED round 10.** `_stampedCheckpoint` writes `lzp.chain` through `_syncChainForDisk()` (a four-field PROJECTION, so 21.3 holds and a future `chain.js` field cannot silently reach the disk); `_restoreSyncLedger` reads it back under the same quarantine gate the refusals use. `round8-chain.test.js` §3 is INVERTED and gained a second row: the restored verdict must still be WITHDRAWABLE by positive evidence, or the fix trades a silent Mac for a permanently red one. |
 | **R8-6(b)** | `diagnostics().sync.parked` counts the LOG's park and can never count the lot's | `round8-park.test.js` §3 row 1. Owner: `src/js/store.js`. |
 | **R8-8 loud half** | `diagnostics().quarantine` does not say what was discarded | Owner: `src/js/store.js`, same fix as `_restoreSyncLedger` preserving the ledger. |
-| **§7c-R9** | a relay that withholds a row in the MIDDLE of a page and keeps withholding it consumes that row on the second poll | `attack-converge-relay.test.js` §6b, RESIDUAL — it ASSERTS a loss and must be inverted when closed. See §4.8. |
+| **§7c-R9** | a relay that withholds a row in the MIDDLE of a page and keeps withholding it consumes that row on the second poll | `attack-converge-relay.test.js` §6b, RESIDUAL — it ASSERTS a loss and must be inverted when closed. **Re-verified and re-accepted round 10**, with the cost of the alternative now measured (mutant M-I4). See §4.8. |
 | **E6's own** | there is no family-space sync client, so a member removal cannot be driven end-to-end in one row | `round9-headline.test.js` §2a/§2b, joined by a measured store call rather than by assumption. |
 
 
@@ -2179,6 +2179,21 @@ re-asked about it before it is designed.
 Round 9 deliberately added neither: an unbounded re-ask is a worse failure than the one it fixes,
 and a bounded one is a number nobody has chosen. **A PO or the protocol owner picks; an engineer
 should not pick a retry count that is really a privacy trade.**
+
+**RE-VERIFIED AND RE-ACCEPTED, round 10.** `attack-converge-relay.test.js` §6b is untouched and
+still asserts the loss; it is green, which means the defect is still exactly as described. Round 10
+did not close it and deliberately did not try: the genesis-page defence it *did* land (R10-2b) is a
+different shape — an *unanchored* mismatch at row zero, not an *anchored* mid-page gap — and §4.8's
+bounded re-ask is still a PO call, not an engineer's.
+
+What round 10 adds is the **cost of the alternative, measured rather than argued**. Mutant **M-I4**
+(make a chain verdict un-clearable, which is what "keep asking until you get it" amounts to at the
+verdict level) turns `round9-headline` §2b, `round8-chain` §2 and `sync-domains` S4c red **on a
+legitimate member removal** — three rows, in three files, all reporting a permanent red light on a
+family that did nothing wrong. That is the same wall R10-2 hit, from the other side, and it is the
+strongest available argument that (a) must be BOUNDED and (b) is the only clean answer.
+
+**This row stays on the accepted-defect list (§7c) and is not owed by anybody until that ruling.**
 
 ## 5. What was attacked and held — recorded so it is not re-attacked
 
@@ -2632,7 +2647,7 @@ asserting `_persistOps()` never appends, which A3-M5's closure made false, and i
 | ~~R5-7b~~ | `round5-attestation.test.js` | ONE well-formed op mutes a named device, permanently | **INVERTED 2026-08-28 · I-3 closed** |
 | R5-7c | `round5-attestation.test.js` | **P2 does not close it** — `sigPubRaw` is public | **STILL TRUE, AND KEPT** — it is why §4.5 (a) was needed |
 | **R9-6b** | `attack-converge-relay.test.js` §6b | **RESIDUAL, round 9.** A relay that withholds a row in the MIDDLE of a page and KEEPS withholding it consumes that row on the second poll. The loss is permanent, REPORTED (`error` plus a gap finding that never clears) and one-sided. It is the price of R8-2's bound: the hold lasts one honest round trip instead of for ever, and the alternative is the wedge. The row ASSERTS the loss and must be inverted the day it is closed. See §4.8 for the two protocol moves that would close it. | §4.8 |
-| **R9-3** | `round8-chain.test.js` §3 | `store.syncChain` is declared `durable: true` and persisted nowhere: a fork this device detected before a quit is `silent: true` after it | R8-3, `store.js` |
+| ~~**R9-3**~~ | `round8-chain.test.js` §3 | `store.syncChain` is declared `durable: true` and persisted nowhere: a fork this device detected before a quit is `silent: true` after it | **INVERTED round 10** — R8-3 closed in `store.js` |
 | **R9-6b2** | `round8-park.test.js` §3 row 1 | `diagnostics().sync.parked` counts the LOG's park, so a synchronous `status()` poll at launch reads `healthy` while a held envelope sits on the disk beside it | R8-6(b), `store.js` |
 | **R9-8** | `round8-park.test.js` §5 | a quarantined log takes the durable refusal record with it | R8-8 loud half, `store.js` |
 | ~~R5-7d~~ | `round5-attestation.test.js` | `authz.js` rules this trade out for the LABEL and ships it for the SHORT | **INVERTED 2026-08-28** — it is now refused for both |
@@ -2899,11 +2914,12 @@ touched.** These are the items that need one of those files, or a file no one ow
 **All four of these are `src/js/store.js`.** Round 9 could not take them — `store.js` was another
 owner's file for most of the round and the four are one pass, not four.
 
-1. **`store.syncChain` must ride in `checkpoint().lzp`** (R8-3), exactly as `refusals` already
-   does through `_stampedCheckpoint` and `_restoreSyncLedger`. Today `sync/status.js` declares the
-   `chain` row `durable: true` and it is persisted nowhere, so a fork this device DID detect is
-   `silent: true` after the next quit. `round8-chain.test.js` §3 asserts the defect and goes red
-   the day it lands.
+1. ~~**`store.syncChain` must ride in `checkpoint().lzp`** (R8-3)~~ — **DONE, round 10.** It rides
+   there now, through `_syncChainForDisk()` and `_restoreSyncLedger`, and `round8-chain.test.js`
+   §3 is inverted. Two things were learned landing it and are written into the code:
+   the restore may NOT `_warn()` (the warning channel has no withdrawal door, so it outlived the
+   verdict and re-created the un-clearable light one field over — measured as `'warnings' !== null`
+   in `sync-domains` S4c), and an empty `findings` list is not a verdict.
 2. **`diagnostics().sync.parked` must count the engine's held envelopes as well as the log's
    parked lines** (R8-6b). `round8-park.test.js` §3 row 1 asserts the defect. Half (a) is closed —
    `attach()` re-emits — so what is left is only the SYNCHRONOUS poll at the instant of launch.
@@ -2966,3 +2982,239 @@ owner's file for most of the round and the four are one pass, not four.
    reduced row. Its assertion text is the deadline.
 8. **`src/js/family/pairingui.js`** — „Gerät koppeln" is the third moment `crypto/probe.js` names
    and is still ungated. Pinned in `privacy-e5-silence.test.js` §5 with the line to invert.
+   **RE-OWNED, round 10:** this is not a sync row and never was. `src/js/family/*` is E6's flow
+   work, which held that directory for the whole of round 10, so the gate belongs in the pass that
+   owns the pairing screen. Round 10 re-verified only that the row is still green — i.e. that the
+   defect is still there — and touched nothing in that directory.
+
+---
+
+## 9. ROUND 10 — the E6 gate. What was integrated, what was found, and the verdict
+
+*2026-08-29, the round-10 integration pass. All six suites green:*
+`npm test` **1932** · `test:attack` **720** · `test:property` **88** · `test:server` **868** ·
+`test:fleet` **168** · `test:dom` **29 files PASS**.
+
+Three fixers worked the shortest path round 10's adversary set as the condition of a GO. Their work
+is integrated, every item is mutation-tested below, and the verdict is **NO-GO for E6** — for a
+reason that is *not* any of the nine items, and that no amount of finishing them would change.
+
+### 9a. What landed in the integration pass itself
+
+| # | change | file | row that dies without it |
+|---|---|---|---|
+| **R10-9c** | `status()` OFFERS the shelf: `held: lotLoaded ? shelvedDetail(lot, [spaceId]) : null` | `sync/personal.js` | `round8-park` §7d (INVERTED); `sync-domains` **S4e** |
+| **R8-3** | `syncChain` rides in `checkpoint().lzp.chain` | `store.js` | `round8-chain` §3 (INVERTED); `sync-domains` **S4c** (INVERTED) |
+| **R10-9d** | a shelf row for an op that has since OPENED is dropped — two halves | `sync/outbox.js`, `sync/personal.js` | `round8-park` §6.2c; `round10-e6-gate` §1b |
+| **S4-shelved** | the domain gains the state the observable pointed at | `tests/helpers/sync-domains.js` | `sync-domains` S4a (`DOMAIN_SIZES.S4` 7 → 8) |
+| **B-16** | ADR 002 §2.3's owed amendment — the allow-list moves with `X-LZP-Protocol` | `adr/002-crypto.md` | `server/adr-claims.test.js` |
+
+**Two of these were found by wiring the other one**, which is the pass's most useful result:
+
+- **`lotLoaded` (part of R10-9c).** Handing `shelvedDetail(lot, …)` in unconditionally is *worse
+  than not wiring the row at all*: the lot is empty until `loadLot()` has read the disk, so a fresh
+  process reported an empty shelf **with `unoffered: []` to prove it had looked** — a confident,
+  wrong answer about a Mac with a retained envelope beside it. Measured before the guard existed.
+- **R10-9d, NEW and the reason R10-9c could not ship alone.** `lot.release()` shelves any oid the
+  caller "parked or touched since its last release", and `unopened` is cleared *only inside
+  `release()`* — so a session where nothing applies for several pulls accumulates marks, and the
+  pull where the cure finally lands shelves an op **that opened**. F-6's ordinary story therefore
+  left a permanent shelf row behind, saying nothing would ever open bytes whose op was on the
+  board. Invisible while nothing read the shelf; a **permanent user-visible `error`** the moment
+  `status()` offered it. Fixed in two places: `pullNow` opens each pull with an empty `release()`
+  (the pull boundary `round8-park` §6.2 models with a fresh lot and says so in its own comment), and
+  `release()` drops shelf rows for oids the caller names as applied (the cross-session half).
+
+### 9b. The mutation table
+
+| mutant | change | row that dies |
+|---|---|---|
+| **M-F1** | `wit: ''` back in `sealLine` | `round9-witness` §1a, §1d · `privacy-e5-wire` §2 |
+| **M-F1c** | `provable = s.fromGenesis` (drop `spanFromGenesis`) | `round9-witness` §1d · `tier1/sync-chain` §3 |
+| **M-F3** | `if (commit > at)` — the durable `fromGenesis` write behind the cursor move alone | `round9-witness` §3, §3b |
+| **M-F1c + M-F3** | both guards off, `wit` still wired | `round9-witness` **§3c**, §1d, §3, §3b |
+| **M-F2b** | the genesis-page row-zero mismatch no longer holds the cursor | `round9-witness` §2b |
+| **M-R9-1** | `fromGenesis` a ratchet again | `tier1/sync-queue` R9-1 · `round8-park` §8a · `round9-witness` §3, §3c |
+| **M-F9a** | delete the `shelved` row from `SYNC_OBSERVABLES` | `round8-park` §7b, §7d · `sync-domains` S4e |
+| **M-F9b** | `shelvedDetail` answers `[]` without asking the lot | `round8-park` §7a, §7b, §7c · `sync-domains` S4e |
+| **M-I1** | `status()` stops offering the shelf | `round8-park` §7d · `sync-domains` S4e |
+| **M-I2** | drop the `lotLoaded` guard | `round8-park` §7d · `sync-domains` S4-shelved (cold-launch half) |
+| **M-I3** | `syncChain` out of the checkpoint | `round8-chain` §3 (both rows) · `sync-domains` S4c |
+| **M-I4** | a chain verdict can never be cleared | `round8-chain` §2 and §3-control · `round9-headline` §2b · `sync-domains` S4c |
+| **M-R10-9d-1** | delete the pull boundary | `round10-e6-gate` §1b |
+| **M-R10-9d-2** | keep shelf rows for ops that opened | `round8-park` §6.2c |
+| **M-F7a** | the `deviceShort` guard global again | `attack-relay-correlate` §1, §2 · `auth` STEP 4 ×2 · C29b, C32b |
+| **M-F7d** | the progress setters ignore the space | contract **C32b** |
+
+#### The one the brief asked for by name — and the received account of it was wrong
+
+The brief required proof that *"a build with the witness value wired and `commit >=` missing must be
+demonstrably red, because that combination is the false positive the ADR forbids."* It is red
+(**M-F3** kills `round9-witness` §3 and §3b). But building each mutant and running it showed the
+hazard has **three** parts, not two, and they do not compose the way the sentence suggests:
+
+| build | result, measured on `round9-witness` §3c's arrangement |
+|---|---|
+| item 2 reverted alone (**M-F3**) | the durable lie IS restored (`fromGenesis: true` after a break the Mac gave the right up for) — **and no accusation follows**: `spanFromGenesis` is false on a fresh process |
+| item 1b reverted alone (**M-F1c**) | no accusation: the disk honestly says `false` |
+| **both reverted** | `unknownWitness`, `status: error`, `store.syncChain` SET — **against a relay honest since the break** |
+| all three reverted (`wit: ''` too) | nothing: with no value to misjudge there is nothing to misjudge |
+
+So the two guards are **independent and either alone is sufficient**, and `wit` is the *arming*
+condition for all of it — which is the precise sense in which round 9's build was "safe": its
+detector was dead. This is a stronger position than the brief assumed, and it is now a row
+(`round9-witness` §3c) rather than an argument.
+
+### 9c. Both directions, driven at fleet level over the real handlers
+
+`tests/fleet/round10-e6-gate.test.js`, 11 rows. **Every honest-direction row carries a control in
+the same arrangement** proving the detector was live and could have fired — without them the whole
+section is satisfied by a build with the detector switched off.
+
+| input | verdict | cursor | control |
+|---|---|---|---|
+| honest relay repeating itself, ×6 polls | quiet | moved | one rewritten value on the next page IS caught |
+| a held page re-served, ×4, then cured | quiet | held, then **moved** | the hold is asserted, so the quiet is not the quiet of an idle Mac |
+| a member purge (real `POST /members/remove`) | quiet | moved past the hole | verification RESUMES past the purge and catches a later lie |
+| a first pull from genesis, 3 pages | quiet | moved off `0` | a head-of-log withhold on the same pull IS caught |
+| **a real fork** | `error`, named, **survives the quit** | — | and is WITHDRAWN by one honest page with new rows |
+
+### 9d. E6's actual shape — four devices, three members
+
+| input | what the sync engine does |
+|---|---|
+| **a join into a circle that already has a removal** | not wedged; cursor reaches the head; **but she carries a live `gap` verdict** — see **R10-11** |
+| **a removal during a partition** | the returning Mac traverses the hole, cursor moves, alleges nothing, and catches up on everything authored while it was away |
+| **two removals racing** | both stick (the membership transaction serialises them); two holes in one log; the survivor is not wedged, alleges nothing, and its cursor moves through **both**. R8-2's bound is **per pull, not per hole** — which is why a race is not twice as bad as one removal |
+
+#### R10-11 — a joiner past a pre-existing removal wears a red light on her first day · MEDIUM · **OPEN**
+
+*Found by:* `tests/fleet/round10-e6-gate.test.js` §3a, which ASSERTS the defect and must be inverted
+when it is closed.
+
+She is not wedged and she alleges no fork, but she finishes her catch-up holding `gap@<seq>`, and
+**pulling does not clear it** — measured over fourteen further rounds. The only thing that clears a
+verdict is positive evidence (`foldedFresh` — the head MOVED), and her head is already at the top of
+the log. Nothing is owed, nothing is broken, and the indicator is red.
+
+The bound is real and is not comfort: **the next entry anybody in the family writes** moves the head
+and withdraws the verdict (asserted in the same row). So the window is *"until someone writes"* —
+minutes for an active family, days for a quiet one — on a new member's **first day**. Round 10 made
+it worse in one specific way: `syncChain` now rides in the checkpoint, so quitting no longer clears
+it either. That is the correct trade (a real fork must outlive a quit) and it sharpens this row.
+
+**The shortest fix is already specified**: ADR 003 §4.1's `baselineSeq`/`baselineChain`, R4 — *a
+break BELOW the baseline a joiner recorded at her first pull is not a finding*, because she can
+prove nothing about a range she was never served. It is written; nothing implements it.
+
+#### R10-10 — the relay admits a second member to a PERSONAL space · LOW / LATENT · **OPEN**
+
+*Found by:* `round10-e6-gate.test.js` §4c. `POST /invites` + `POST /invites/redeem` admitted a second
+member to a `psp_` space over the real handlers. **Not a confidentiality break, and it must not be
+over-read as one:** `SK_personal` reaches a joiner by no relay path, and every client refuses her ops
+as `notMyAct` regardless. What is missing is the relay's own half of story 21.2 — the membership
+doors do not look at the space KIND — so the only thing between a personal space and a second member
+is that no UI offers it. Defence in depth, absent. Inverts when those doors refuse a non-`fsp_`
+space.
+
+### 9e. THE GATE — why this is a NO-GO, and why finishing the nine items would not change it
+
+`round10-e6-gate.test.js` §4, three rows over the shipped source:
+
+1. **`createPersonalSync` throws on an `fsp_…` id** (`assertPersonalSpace`). This is *correct* —
+   21.2 enforced at construction, which `personal.js`'s header calls "negative work" done on
+   purpose. It is quoted as a fact about SCOPE, not as a defect.
+2. **No other engine exists.** Six modules under `src/js/sync/`, exactly one of them an engine, no
+   `family.js` — and `src/js/family/engine.js`, the file whose *name* says family, builds
+   `createPersonalSync` and gates itself on `startsWith('psp_')`. „Familie" in this product means
+   *"my own Macs, over a relay"*, which is M1 and is exactly what E5 shipped.
+3. Consequently **§3's rows could only measure the CURSOR and the VERDICT, never the BOARD**: no
+   content crossed between members in any of them, because a personal space correctly refuses
+   another member's ops.
+
+**So E6's convergence question cannot be asked of this build.** The adversary's sentence — *"E6's
+threat model is the one this engine cannot currently serve"* — is not a statement about the fork
+detector's quality. It is a statement about which space the product can sync, and it is still true
+with all nine items landed. A suite of 168 green fleet rows is evidence that the personal engine is
+sound under attack; **it is not evidence that a family engine will be**, and the three rows above
+exist so that no future reader mistakes the first for the second.
+
+### 9f. Owed after round 10
+
+1. **R10-11's fix** — ADR 003 §4.1 R1–R4 (`baselineSeq`/`baselineChain`). Owner: `sync/cursor.js`
+   (the record) and `sync/personal.js` (the "below the baseline is not a finding" rule).
+2. **R10-2** — still blocked, and round 10 added a second reason. `personal.js:1075` carries the
+   argument; **M-I4 now measures the cost directly**: make a verdict un-clearable and
+   `round9-headline` §2b, `round8-chain` §2 and `sync-domains` S4c all go red on a legitimate
+   removal. A PO ruling is still required.
+3. **The witness window is not persisted** (`cursor.js`). A device can prove a fork only in a
+   session in which it pulled from genesis. This is the honest ceiling of check 2 as shipped and is
+   stated in ADR 003 §4.1 R5's copy contract („seit dem Beitritt geprüft").
+4. **R10-10** — the membership doors should refuse a non-`fsp_` space.
+5. **`lot.refuse()`'s return value is still discarded** at its one call site
+   (`round9-e6` §3a/§3b). Untouched by this pass and still open.
+6. **`round9-e6` §3c's reader walk is a TEXT grep including comments.** Two agents have now
+   reddened it by writing a method name in prose. The row now says so; a reader who trips it should
+   check whether they wrote a CALL or a sentence.
+
+---
+
+## 10. E6 — Familienkreis. What integrating and DRIVING the client flows found.
+
+**Date:** 2026-08-29 · **Tickets:** LZP-601…607 · Full record: `docs/v2/E6-VERIFICATION.md`.
+
+§9 closed with *"E6's convergence question cannot be asked of this build"*, reached from the sync
+engine's side. This section is the same wall reached from the client's, plus five findings that only
+appeared when the flows were driven against `node server/dev-server.mjs` with two real Macs.
+
+**What DID hold, and is now measured rather than argued:** create → invite → join → both members
+listed → rename → leave → delete are real signed HTTP round trips; the relay stores **no** display
+name and **no** circle name; the invite row carries **no key material**; the colour collision rolls
+the redemption back atomically so the code survives; solo mode loads **36 modules, 0 from
+`family/`/`crypto/`/`sync/`, and makes 0 requests**.
+
+### 10a. The five findings
+
+| id | finding | owner |
+|---|---|---|
+| **E6-1** | `member.set` / `space.set` have op **constructors** and no `MUTATIONS` entry, so a circle has no shared vocabulary. Every member row on every Mac reads „Name noch nicht angekommen" — including **my own** name, since writing it is the same missing mutation. 15.6's write half does not exist; 20.1's rename is per-Mac. | `core/ops.js` + a family publish path |
+| **E6-2** | **Handing over the admin role is a one-way demotion.** `POST /members/transfer` answers `{authoritative:false, stored:'nothing'}` by design; the authoritative record is the `space.set{admin}` op E6-1 is missing. Measured on two Macs: the outgoing admin demotes himself, the successor is never promoted, **the circle ends with no admin anywhere and no route back**. The control is now **disabled** behind `adminpanel.js#TRANSFER_PROPAGATES=false` with its reason in both languages; `family-admin.dom.js` §7 was inverted to assert that, and a second row guards the confirmation copy at `consequencesOf()` level so it cannot rot. | `core/ops.js`; re-enable is one constant + one test |
+| **E6-3** | **Leaving a circle bricks that Mac's family mode on that relay.** The device row survives the leave (revoked, not deleted) and `deviceId` uniqueness is global, so a later create *or* join is refused `400 device.deviceId/registered`. Server finding **E2-203-1** met from a second direction — the reported case was `deviceShort` vs a *personal* space; this is `deviceId` vs the joiner's own *past* membership. | `server/` — scope uniqueness to `(spaceId, deviceId)` |
+| **E6-4** | **The huge paste field defeated its own parser.** `parseInvitePaste` is correct and its tier-2 rows pass; the field is an `<input>`, and an `<input>` **strips** newlines rather than spacing them, so pasting a whole invitation welded the code to the next word and yielded `found:'none'`. Fixed at the `paste` event, where `clipboardData` still holds the original string. **The test exercised the pure function and passes either way** — the seam a tier-2 row cannot see. | closed here |
+| **E6-5** | v1's default **category** „Familie" collides with the member **section** „Familie" in the legend and in ⚙. Rename the category, or drop the section label and let the divider carry A3's two halves (~48 px saved). | PO / design |
+
+### 10b. D9 part 4 is not demonstrable, and this is why
+
+ADR 002 §7.1 steps 4–6 have **no implementation in the client** — absent, not incomplete:
+
+```
+client callers of GET  /api/v1/spaces/:id/keys   → NONE
+client callers of POST /api/v1/spaces/:id/epoch  → NONE
+client code wrapping the ring for a PEER device  → NONE
+a route to push a wrap outside space creation or
+  epoch rotation                                 → DOES NOT EXIST (23 routes)
+sync/personal.js from crypto/spacekeys.js        → { spaceKindOf, isSpaceId }  ← no wraps
+```
+
+and a Familienkreis arms no engine at all: `readFamilyConfig` requires `personalSpaceId` to start
+with `psp_`, and `assertPersonalSpace` THROWS on an `fsp_` id — correctly, and it must stay. Measured:
+a full member's Mac made **zero** `/ops` requests in 8 s after joining, and makes none on relaunch.
+
+**So D9's waiting state can be entered and cannot be left.** Its first three required behaviours are
+demonstrated and machine-checked as negatives (no spinner, no error, no instruction to wake anyone,
+the line names *another Mac* and not a person). The fourth — "it resolves itself" — is honest about
+what is *supposed* to happen and, in this build, never happens. `E6-VERIFICATION.md` §5 states it
+plainly rather than describing it as working.
+
+**This blocks LZP-608 by the same mechanism**, since rotation needs the same wrap producer and the
+same `POST /spaces/:id/epoch` client. Whoever builds one should build both.
+
+### 10c. One defect this pass introduced and caught in the browser
+
+Mounting the members port unconditionally made „Familie" — a heading and a member row — render in
+the settings sheet of a Mac that had never heard of a Familienkreis, which is exactly what 15.1
+forbids. `buildMembersSection`'s own guard could not see it: it asks whether a **port** exists, not
+whether a **circle** does. Fixed in `mount.js#syncCircleMounts`, which mounts *and unmounts* on every
+sheet open, because a Mac becomes a member mid-session (the join flow) and stops being one
+mid-session (20.3). The lesson is the guard's shape, not the mount: a capability check is not a
+state check.

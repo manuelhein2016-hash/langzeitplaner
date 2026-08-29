@@ -76,6 +76,9 @@
 /**
  * @typedef {Object} DeviceRow
  * @property {string} id                     'dev_' + 22 b64url — A LABEL, NOT AN IDENTITY (ADR 002 §2.3)
+ * @property {string} spaceId                the NAMESPACE of `deviceShort` (round 10 item 8). Must
+ *                                           equal the member's `spaceId`; `addDevice` refuses a
+ *                                           row where it does not.
  * @property {string} memberId
  * @property {string} deviceShort            16 Crockford base32 — the real device identity
  * @property {Uint8Array} sigPubRaw
@@ -151,7 +154,7 @@
 export const MODEL_COLUMNS = Object.freeze({
   Space:       Object.freeze(['id', 'kind', 'currentEpoch', 'nextSeq', 'headChain', 'createdAt']),
   Member:      Object.freeze(['id', 'spaceId', 'colorRef', 'recoveryPubSig', 'recoveryPubKex', 'joinedAt', 'removedAt']),
-  Device:      Object.freeze(['id', 'memberId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'attestation', 'lastSeenSeq', 'lastPushedSeq', 'addedAt', 'revokedAt']),
+  Device:      Object.freeze(['id', 'spaceId', 'memberId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'attestation', 'lastSeenSeq', 'lastPushedSeq', 'addedAt', 'revokedAt']),
   Op:          Object.freeze(['spaceId', 'seq', 'opId', 'epoch', 'deviceShort', 'witness', 'chain', 'envelope', 'receivedAt']),
   Epoch:       Object.freeze(['spaceId', 'epoch', 'createdAt']),
   KeyWrap:     Object.freeze(['spaceId', 'epoch', 'recipientId', 'wrapped', 'senderDeviceId']),
@@ -211,7 +214,8 @@ export const PLAINTEXT_STRINGS = Object.freeze({
   'Member.colorRef':     'THE ONE DELIBERATE LEAK. 15.3 needs @@unique([spaceId,colorRef]) server-side to prevent a colour collision. One palette index per member. It appears verbatim in the Datenschutz copy (21.3).',
   'Device.id':           'a label, not an identity (ADR 002 §2.3)',
   'Device.memberId':     'the relation',
-  'Device.deviceShort':  'derived from the signing key (ADR 001 §1.2); the auth lookup key',
+  'Device.spaceId':      'THE NAMESPACE OF deviceShort (round 10 item 8, closing E2-203-1). Derived, not new knowledge: the relay already resolved a device\'s space through Device.memberId -> Member.spaceId, and addDevice refuses a row whose spaceId disagrees with its member\'s. It exists because @@unique([spaceId, deviceShort]) needs a column to name. What DOES change what a dump reveals is not this column but the rows it now permits — one Mac with a row in every circle it belongs to; server-metadata.md §7 states it.',
+  'Device.deviceShort':  'derived from the signing key (ADR 001 §1.2); the auth lookup key, per space',
   'Op.spaceId':          'the relation and the per-space cursor scope',
   'Op.opId':             'the idempotency key — random, carries nothing',
   'Op.deviceShort':      'needed to purge a removed member (20.2) and to check e.dv === auth device',
@@ -364,8 +368,19 @@ export function normalizeRow(model, row, opts) {
  * @property {(memberId:string, at:number) => Promise<void>} removeMember
  * @property {(spaceId:string, colorRef:string) => Promise<boolean>} colorFree
  * @property {(d:DeviceRow) => Promise<void>} addDevice
+ *   Refuses a row whose `spaceId` is not its member's `spaceId`, and a `deviceShort` already
+ *   registered IN THAT SPACE. The namespace is per space (round 10 item 8) — see schema.prisma.
  * @property {(deviceId:string) => Promise<DeviceRow|null>} getDevice
- * @property {(deviceShort:string) => Promise<DeviceRow|null>} getDeviceByShort
+ * @property {(spaceId:string, deviceShort:string) => Promise<DeviceRow|null>} getDeviceByShort
+ *   The row this short names IN THIS SPACE. It took `deviceShort` alone until round 10, when the
+ *   namespace became per space and "the row" stopped being a well-formed question without one.
+ * @property {(deviceShort:string) => Promise<DeviceRow[]>} listDevicesByShort
+ *   EVERY row for this short, in every space. **The one method in this interface that reads
+ *   across spaces, and it is here under protest.** ADR 003 §2 step 4 has to answer `pair/*` —
+ *   routes that name no space and still need the principal's public key — and after the
+ *   namespace change no single space can answer them. Auth is its ONLY caller; a handler that
+ *   reaches for it is reaching for the cross-space join `server-metadata.md` §7 names, and
+ *   `tests/server/blindness.test.js` pins the caller set.
  * @property {(spaceId:string) => Promise<DeviceRow[]>} listDevices
  *   Every device of every member of the space, revoked ones included. Three callers need it and
  *   the contract had no method for it: the `members` piggyback on pull (ADR 003 §3.2), the
@@ -373,9 +388,14 @@ export function normalizeRow(model, row, opts) {
  *   (ADR 002 §4.2): the server can only reject an epoch bump that omits an honest member if it
  *   can enumerate who was owed a wrap. See INTERFACE_EXTENSIONS.
  * @property {(deviceId:string, at:number) => Promise<void>} revokeDevice
- * @property {(deviceShort:string, seq:bigint) => Promise<void>} setLastSeenSeq   monotone
+ * @property {(spaceId:string, deviceShort:string, seq:bigint) => Promise<void>} setLastSeenSeq
+ *   Monotone. SPACE-SCOPED since round 10: one Mac now has a row per circle and each carries its
+ *   own progress, so a setter keyed on the bare short would push the personal space's read
+ *   cursor forward every time the family space was pulled — and both cursors gate tombstone GC,
+ *   so the personal space would collect tombstones that Mac had never seen. Contract case C32b.
  * @property {(spaceId:string) => Promise<bigint>} minLastSeenSeq
- * @property {(deviceShort:string, seq:bigint) => Promise<void>} setLastPushedSeq monotone
+ * @property {(spaceId:string, deviceShort:string, seq:bigint) => Promise<void>} setLastPushedSeq
+ *   Monotone, and space-scoped for the same reason.
  * @property {(spaceId:string) => Promise<bigint>} minLastPushedSeq
  *   Both minima FAIL CLOSED: a space with no devices, or a device that has never reported,
  *   yields 0n. "Unknown" must never mean "collectable" (server.contract.js amendment).
@@ -422,7 +442,7 @@ export const STORE_METHODS = Object.freeze([
   'getSpace', 'createSpace', 'deleteSpace', 'reserveSeq', 'claimEpoch', 'setCurrentEpoch', 'setHeadChain',
   'upsertOps', 'existingOpIds', 'listOps', 'headSeq', 'deleteOpsByDevices',
   'listMembers', 'addMember', 'removeMember', 'colorFree',
-  'addDevice', 'getDevice', 'getDeviceByShort', 'listDevices', 'revokeDevice',
+  'addDevice', 'getDevice', 'getDeviceByShort', 'listDevicesByShort', 'listDevices', 'revokeDevice',
   'setLastSeenSeq', 'minLastSeenSeq', 'setLastPushedSeq', 'minLastPushedSeq',
   'putKeyWraps', 'getKeyWraps', 'deleteKeyWrapsForDevices',
   'putInvite', 'getInvite', 'consumeInvite', 'revokeInvite', 'listOpenInvites', 'refreshInvite',
@@ -517,7 +537,7 @@ export const fixtures = Object.freeze({
   bytes,
   space: (o) => ({ id: 'fsp_AAAAAAAAAAAAAAAAAAAAAA', kind: 'FAMILY', currentEpoch: 1, nextSeq: 0n, headChain: null, createdAt: new Date(0), ...o }),
   member: (o) => ({ id: 'mem_AAAAAAAAAAAAAAAAAAAAAA', spaceId: 'fsp_AAAAAAAAAAAAAAAAAAAAAA', colorRef: 'gruen', recoveryPubSig: bytes(65, 1), recoveryPubKex: bytes(65, 2), joinedAt: new Date(0), removedAt: null, ...o }),
-  device: (o) => ({ id: 'dev_AAAAAAAAAAAAAAAAAAAAAA', memberId: 'mem_AAAAAAAAAAAAAAAAAAAAAA', deviceShort: '7QAR2MZ9XKPNC0GV', sigPubRaw: bytes(65, 3), kexPubRaw: bytes(65, 4), attestation: bytes(120, 5), lastSeenSeq: 0n, lastPushedSeq: 0n, addedAt: new Date(0), revokedAt: null, ...o }),
+  device: (o) => ({ id: 'dev_AAAAAAAAAAAAAAAAAAAAAA', spaceId: 'fsp_AAAAAAAAAAAAAAAAAAAAAA', memberId: 'mem_AAAAAAAAAAAAAAAAAAAAAA', deviceShort: '7QAR2MZ9XKPNC0GV', sigPubRaw: bytes(65, 3), kexPubRaw: bytes(65, 4), attestation: bytes(120, 5), lastSeenSeq: 0n, lastPushedSeq: 0n, addedAt: new Date(0), revokedAt: null, ...o }),
   op: (opId, o) => ({ opId, epoch: 1, deviceShort: '7QAR2MZ9XKPNC0GV', witness: null, chain: bytes(32, 6), envelope: bytes(512, 7), ...o }),
   invite: (o) => ({ id: 'inv_AAAAAAAAAAAAAAAAAAAAAA', spaceId: 'fsp_AAAAAAAAAAAAAAAAAAAAAA', verifier: bytes(32, 8), wrapSalt: bytes(32, 9), epoch: 1, createdBy: 'mem_AAAAAAAAAAAAAAAAAAAAAA', expiresAt: new Date(7 * 86400000), usedAt: null, revokedAt: null, ...o }),
 });
@@ -898,17 +918,68 @@ export const STORE_CONTRACT_CASES = Object.freeze([
       await store.removeMember('mem_nope', 1000);
     } },
 
-  { id: 'C29', title: 'devices: add, look up by id and by short, and refuse a duplicate short', tags: ['devices'],
+  { id: 'C29', title: 'devices: add, look up by id and by short, and refuse a duplicate short IN THE SAME SPACE', tags: ['devices'],
     run: async ({ makeStore, assert }) => {
       const store = await withSpace(makeStore);
       await store.addMember(fixtures.member({ id: 'mem_1' }));
       await store.addDevice(fixtures.device({ id: 'dev_1', memberId: 'mem_1', deviceShort: 'SHORT1' }));
       assert.equal((await store.getDevice('dev_1')).deviceShort, 'SHORT1');
-      assert.equal((await store.getDeviceByShort('SHORT1')).id, 'dev_1');
+      assert.equal((await store.getDeviceByShort(SP, 'SHORT1')).id, 'dev_1');
       assert.equal(await store.getDevice('dev_nope'), null);
-      assert.equal(await store.getDeviceByShort('NOPE'), null);
+      assert.equal(await store.getDeviceByShort(SP, 'NOPE'), null);
       await threw(assert, () => store.addDevice(fixtures.device({ id: 'dev_2', memberId: 'mem_1', deviceShort: 'SHORT1' })),
-        'deviceShort is globally unique — it is derived from the signing key (ADR 001 §1.2)');
+        'one short, one row, WITHIN a space — two rows would give ADR 003 §2 step 4 nothing to choose on');
+    } },
+
+  { id: 'C29b', title: 'ONE MAC, MANY CIRCLES: the same short in two spaces is legal, and each row is its own', tags: ['devices'],
+    run: async ({ makeStore, assert }) => {
+      // Round 10 item 8, closing E2-203-1. `IK_sig` is per DEVICE (ADR 002 §2.1), so a Mac has
+      // one `deviceShort` for life, and 19.4 + 15.2 require that Mac to be in a personal space
+      // AND a family space at once. Under the old global `@unique` this case threw.
+      const store = await withSpace(makeStore);
+      await store.createSpace(fixtures.space({ id: SP2 }));
+      await store.addMember(fixtures.member({ id: 'mem_1', spaceId: SP }));
+      await store.addMember(fixtures.member({ id: 'mem_2', spaceId: SP2 }));
+      const key = bytes(65, 77);
+      await store.addDevice(fixtures.device({ id: 'dev_1', spaceId: SP, memberId: 'mem_1', deviceShort: 'ONEMAC', sigPubRaw: key }));
+      await store.addDevice(fixtures.device({ id: 'dev_2', spaceId: SP2, memberId: 'mem_2', deviceShort: 'ONEMAC', sigPubRaw: key }));
+
+      assert.equal((await store.getDeviceByShort(SP, 'ONEMAC')).id, 'dev_1');
+      assert.equal((await store.getDeviceByShort(SP2, 'ONEMAC')).id, 'dev_2');
+
+      // Revocation is per row, and it must be: a Mac unpaired from the Familienkreis is still
+      // this person's own machine in their own space.
+      await store.revokeDevice('dev_2', 9000);
+      assert.equal((await store.getDeviceByShort(SP, 'ONEMAC')).revokedAt, null);
+      assert.ok((await store.getDeviceByShort(SP2, 'ONEMAC')).revokedAt);
+
+      // The one cross-space read in the interface, and auth is its only caller.
+      const all = await store.listDevicesByShort('ONEMAC');
+      assert.deepEqual(all.map((d) => d.id).sort(), ['dev_1', 'dev_2']);
+      assert.equal(new Set(all.map((d) => Array.from(d.sigPubRaw).join(','))).size, 1,
+        'every row for one short carries one public key — which is what lets auth verify a signature '
+        + 'on a route that names no space');
+      assert.deepEqual(await store.listDevicesByShort('NOBODY'), []);
+
+      // …and the namespace is the SPACE, not the MEMBER. E2-203-1 proposed @@unique([memberId,
+      // deviceShort]); under that constraint this would be legal, and ADR 003 §2 step 4 would
+      // then face two rows inside ONE space with nothing to choose on.
+      await store.addMember(fixtures.member({ id: 'mem_3', spaceId: SP, colorRef: 'rot' }));
+      await threw(assert, () => store.addDevice(fixtures.device({
+        id: 'dev_3', spaceId: SP, memberId: 'mem_3', deviceShort: 'ONEMAC', sigPubRaw: key,
+      })), 'two members of ONE circle may not hold the same short');
+    } },
+
+  { id: 'C29c', title: 'a device row may not name a space its member is not in', tags: ['devices'],
+    run: async ({ makeStore, assert }) => {
+      // `Device.spaceId` is DERIVED (from `Member.spaceId`). A row where the two disagree would
+      // make `getDeviceByShort(spaceId, short)` and `listDevices(spaceId)` answer different
+      // questions, and the constraint would guard a namespace nobody is in.
+      const store = await withSpace(makeStore);
+      await store.createSpace(fixtures.space({ id: SP2 }));
+      await store.addMember(fixtures.member({ id: 'mem_1', spaceId: SP }));
+      await threw(assert, () => store.addDevice(fixtures.device({ id: 'dev_x', spaceId: SP2, memberId: 'mem_1', deviceShort: 'DRIFT' })),
+        'Device.spaceId must equal its member\'s spaceId');
     } },
 
   { id: 'C30', title: 'a revoked device is still readable — auth step 4 must be able to see it', tags: ['devices'],
@@ -917,7 +988,7 @@ export const STORE_CONTRACT_CASES = Object.freeze([
       await store.addMember(fixtures.member({ id: 'mem_1' }));
       await store.addDevice(fixtures.device({ id: 'dev_1', memberId: 'mem_1', deviceShort: 'SHORT1' }));
       await store.revokeDevice('dev_1', 4242);
-      const d = await store.getDeviceByShort('SHORT1');
+      const d = await store.getDeviceByShort(SP, 'SHORT1');
       assert.ok(d, 'a revoked device must not vanish, or auth would answer 401 bad_auth instead of 403 device_revoked');
       assert.equal(d.revokedAt.getTime(), 4242);
     } },
@@ -947,18 +1018,40 @@ export const STORE_CONTRACT_CASES = Object.freeze([
       await store.addDevice(fixtures.device({ id: 'dev_1', memberId: 'mem_1', deviceShort: 'S1' }));
       await store.addDevice(fixtures.device({ id: 'dev_2', memberId: 'mem_1', deviceShort: 'S2' }));
       assert.equal(await store.minLastSeenSeq(SP), 0n, 'a device that never reported holds the minimum at 0');
-      await store.setLastSeenSeq('S1', 50n);
+      await store.setLastSeenSeq(SP, 'S1', 50n);
       assert.equal(await store.minLastSeenSeq(SP), 0n, 'still 0 — S2 has reported nothing');
-      await store.setLastSeenSeq('S2', 30n);
+      await store.setLastSeenSeq(SP, 'S2', 30n);
       assert.equal(await store.minLastSeenSeq(SP), 30n);
-      await store.setLastSeenSeq('S1', 10n);
+      await store.setLastSeenSeq(SP, 'S1', 10n);
       assert.equal((await store.getDevice('dev_1')).lastSeenSeq, 50n, 'progress is monotone; a stale ack must not rewind it');
-      await store.setLastPushedSeq('S1', 40n);
-      await store.setLastPushedSeq('S2', 5n);
+      await store.setLastPushedSeq(SP, 'S1', 40n);
+      await store.setLastPushedSeq(SP, 'S2', 5n);
       assert.equal(await store.minLastPushedSeq(SP), 5n,
         'WRITE progress gates GC too: a device caught up on reads can still hold a three-week-old unpushed edit');
-      await store.setLastSeenSeq('UNKNOWN', 999n);
+      await store.setLastSeenSeq(SP, 'UNKNOWN', 999n);
       assert.equal(await store.minLastSeenSeq(SP), 30n);
+    } },
+
+  { id: 'C32b', title: 'progress is PER SPACE — pulling the family board may not advance the personal cursor', tags: ['devices', 'gc'],
+    run: async ({ makeStore, assert }) => {
+      // Round 10 item 8's sharp edge. One Mac now has a row per circle. Both cursors gate
+      // tombstone GC (`minLastSeenSeq` / `minLastPushedSeq`), so a setter keyed on the bare
+      // short would let a busy Familienkreis fast-forward the personal space's read cursor past
+      // tombstones that Mac had never seen — and GC would then collect them.
+      const store = await withSpace(makeStore);
+      await store.createSpace(fixtures.space({ id: SP2 }));
+      await store.addMember(fixtures.member({ id: 'mem_1', spaceId: SP }));
+      await store.addMember(fixtures.member({ id: 'mem_2', spaceId: SP2 }));
+      await store.addDevice(fixtures.device({ id: 'dev_1', spaceId: SP, memberId: 'mem_1', deviceShort: 'ONEMAC' }));
+      await store.addDevice(fixtures.device({ id: 'dev_2', spaceId: SP2, memberId: 'mem_2', deviceShort: 'ONEMAC' }));
+
+      await store.setLastSeenSeq(SP2, 'ONEMAC', 900n);
+      await store.setLastPushedSeq(SP2, 'ONEMAC', 900n);
+      assert.equal((await store.getDevice('dev_1')).lastSeenSeq, 0n,
+        'the OTHER space\'s cursor did not move — if it did, GC there would drop tombstones this Mac has not read');
+      assert.equal((await store.getDevice('dev_1')).lastPushedSeq, 0n);
+      assert.equal(await store.minLastSeenSeq(SP), 0n);
+      assert.equal(await store.minLastSeenSeq(SP2), 900n);
     } },
 
   // ── key wraps ─────────────────────────────────────────────────────────────

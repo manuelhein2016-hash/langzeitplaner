@@ -678,7 +678,7 @@ for (const adapter of ADAPTERS) {
     assert.equal(await srv.store.headSeq(otherSpace), otherHead);
     assert.equal((await srv.store.listMembers(otherSpace)).length, 2);
     assert.equal((await srv.store.listDevices(otherSpace)).length, 2);
-    assert.notEqual(await srv.store.getDeviceByShort(other.deviceShort), null);
+    assert.notEqual(await srv.store.getDeviceByShort(otherSpace, other.deviceShort), null);
     assert.equal((await srv.store.getInvite(liveInvite.inviteId)).revokedAt, null);
     assert.equal((await srv.store.getKeyWraps(otherSpace, other.deviceId)).length, 1);
   });

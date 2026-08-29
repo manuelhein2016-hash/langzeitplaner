@@ -279,7 +279,7 @@ export async function seedSpace(h, clock, spec) {
       dev.memberId = mid;
       dev.spaceId = spaceId;
       await h.store.addDevice(fixtures.device({
-        id: dev.id, memberId: mid, deviceShort: dev.deviceShort,
+        id: dev.id, spaceId, memberId: mid, deviceShort: dev.deviceShort,
         sigPubRaw: dev.sigPubRaw, kexPubRaw: dev.kexPubRaw,
         addedAt: new Date(m.addedAt === undefined ? clock.now() : m.addedAt),
       }));
@@ -302,7 +302,7 @@ export async function alsoJoin(h, clock, spaceId, dev, o) {
   }));
   const newId = (o && o.deviceId) || deviceId(9000 + Math.floor(Math.random() * 1000));
   await h.store.addDevice(fixtures.device({
-    id: newId, memberId: mid, deviceShort: dev.deviceShort,
+    id: newId, spaceId, memberId: mid, deviceShort: dev.deviceShort,
     sigPubRaw: dev.sigPubRaw, kexPubRaw: dev.kexPubRaw, addedAt: new Date(clock.now()),
   }));
   return { memberId: mid, deviceId: newId };

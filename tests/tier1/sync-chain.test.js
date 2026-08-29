@@ -290,7 +290,19 @@ describe('§3 · the detector never accuses when it cannot prove', () => {
     const found = await w.observe(f.space, next.ops);
     // It fell out of the window, so the honest answer is "I cannot judge this" — not "fork".
     assert.equal(found.length, 1);
-    assert.equal(found[0].kind, CHAIN_FINDINGS.UNKNOWN_WITNESS, 'a genesis-anchored device DOES accuse');
+    // ── ROUND 10 · THIS ASSERTION USED TO SAY `UNKNOWN_WITNESS`, AND CONTRADICTED ITS OWN ROW ──
+    //
+    // The test's name says *"falling out of it is `unverifiable`"*, the line above says *"the
+    // honest answer is 'I cannot judge this' — not 'fork'"*, and this describe block is called
+    // *"the detector never accuses when it cannot prove"* — and the assertion asserted the
+    // accusation. It was unreachable while `sync/personal.js` sealed `wit: ''` on every push, so
+    // nothing on the product path could tell the three apart. Round 10 wired check 2 (R10-1), and
+    // an evicted chain value is now a value the device really did see once and really has
+    // forgotten: calling it a fork is a false positive with a memory bound as its only evidence.
+    // `chain.js` therefore splits the right to accuse into `fromGenesis` (durable history) AND
+    // `spanFromGenesis` (the window is whole right now), and an eviction clears the second.
+    assert.equal(found[0].kind, CHAIN_FINDINGS.UNVERIFIABLE_WITNESS,
+      'a device that forgot the value it is being asked about must say so, not cry fork');
   });
 
   test('a corrupt stored anchor is reported as ours, and re-anchors instead of accusing', async () => {
@@ -335,7 +347,12 @@ describe('§4 · scope (ADR 002 §5.4)', () => {
     for (const forbidden of [page.ops[0].env.ct, page.ops[0].env.sig, page.ops[0].env.iv]) {
       assert.equal(snap.includes(forbidden), false, 'the witness snapshot carries envelope bytes');
     }
-    assert.deepEqual(Object.keys(w.snapshot()[f.space]).sort(), ['broken', 'fromGenesis', 'head', 'remembered']);
+    // `spanFromGenesis` joined the snapshot in round 10 (R10-1b): with `wit` finally populated,
+    // "why did this device NOT call that a fork" is a question the LZP-1003 self-audit has to be
+    // able to answer, and `fromGenesis` alone no longer answers it. Still a boolean, still no key
+    // material, still no ciphertext — which is what the two assertions above are for.
+    assert.deepEqual(Object.keys(w.snapshot()[f.space]).sort(),
+      ['broken', 'fromGenesis', 'head', 'remembered', 'spanFromGenesis']);
   });
 });
 

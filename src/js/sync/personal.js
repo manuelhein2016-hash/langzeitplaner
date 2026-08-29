@@ -165,7 +165,10 @@ import { spaceKindOf, isSpaceId } from '../crypto/spacekeys.js';
 // (without which the honest re-serve of a held page is reported as `seq jumped from 1 to 1`), the
 // per-break dedupe, the `broken` flag, the re-anchor that makes a member purge survivable, and
 // `fromGenesis` so an unprovable claim is reported as unprovable rather than as a fork.
-import { createChainWitness } from './chain.js';
+// `CHAIN_FINDINGS` comes with it because the ONE cursor decision this file makes on the witness's
+// word is per-kind (R10-2b, below), and `chain.js`'s own docblock says a caller may enumerate the
+// kinds and nothing else may — so the enum is imported rather than a string literal typed here.
+import { createChainWitness, CHAIN_FINDINGS } from './chain.js';
 // P-8's third axis — the DURABLE park for a sealed envelope. See `lot` below for why this is not
 // `core/oplog.js`'s park and why the module it lives in is a defence rather than a dead engine.
 import { createParkingLot } from './outbox.js';
@@ -180,7 +183,7 @@ import { createCursors } from './cursor.js';
 // L-1/L-2/E5-2/P-4 — the enumeration of what can be observed, and the fold over it. `status()`
 // below merges the engine's own reading with the DURABLE evidence in the store, by `max` over the
 // three-state ladder, so this file can only ever raise a state and never lower one.
-import { judgeSyncStatus } from './status.js';
+import { judgeSyncStatus, shelvedDetail } from './status.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The protocol numbers, from `docs/v2/contracts/sync.contract.js` §0 (ADR 003 §4, §6.1, §8.2).
@@ -731,9 +734,33 @@ export function createPersonalSync(deps) {
    * against the op rather than rewriting either, so a disagreement is a local throw instead of a
    * remote, permanent, silent failure to open.
    *
-   * `wit: ''` is the honest value: ADR 002 §5.4's chain witness is computed by the RELAY and is
-   * diagnostic-only, and §5.1 allows `''`. Inventing one here would put a value in the AAD that
-   * nothing can check.
+   * ── R10-1 · `wit` IS THE FORK DETECTOR, AND IT IS ONE EXPRESSION ─────────────────────────
+   *
+   * Until round 10 this file sealed the literal `wit: ''` on every push and explained it as "the
+   * honest value: the chain witness is computed by the RELAY". Half of that is true — the CHAIN is
+   * the relay's, and this device may not invent one — and the conclusion drawn from it was wrong.
+   * ADR 002 §5.4 asks for something this device *can* answer for: **the highest chain value it has
+   * itself been served.** `witness.witness(spaceId)` is exactly that, it is `''` before the first
+   * pull (§5.1's "`''` on the first push"), and it is checkable by any peer that recomputes the
+   * same chain — which is the whole of check 2:
+   *
+   *   > every op a member authors commits to what that member had seen … the half that a relay
+   *   > lying consistently to one device cannot escape.
+   *
+   * With `''` there is no input to that check anywhere in the system, so `UNKNOWN_WITNESS` could
+   * not fire on the product path in any circumstance whatsoever (`round9-witness.test.js` §1a).
+   *
+   * THREE PROPERTIES THIS MUST NOT LOSE, ALL OF THEM ALREADY HELD BY THE CODE AROUND IT:
+   *
+   *   · **the bytes are frozen once sealed.** `sealed` caches by opId and `envelopeStore` persists
+   *     it, because the relay answers `409 forked_op_id` when a re-push differs in ANY
+   *     authenticated field — and `wit` is authenticated (`envelope.js AAD_FIELDS`, and the server
+   *     compares `prev.witness` in its pre-pass). A value read at seal time and never re-read is
+   *     stable; re-deriving it at push time would 409 every op queued across a pull;
+   *   · **it is a claim about this device, not about the op.** An op sealed before the first pull
+   *     carries `''` for ever, which is honest and is what §5.1 provides for;
+   *   · **it never blocks anything.** The value is a diagnostic input for a PEER; nothing in this
+   *     file reads it back, and a relay that rewrites it can only produce a finding, never a stop.
    */
   async function sealLine(op) {
     const cached = sealed.get(op.id);
@@ -745,7 +772,7 @@ export function createPersonalSync(deps) {
         'key');
     }
     const env = await sealOp(op, d.keyring, d.sigPriv, {
-      v: 1, sp: spaceId, ep: epoch, dv: deviceShort, oid: op.id, wit: '',
+      v: 1, sp: spaceId, ep: epoch, dv: deviceShort, oid: op.id, wit: witness.witness(spaceId),
     }, { ...ports, ...(d.attestation ? { attestation: d.attestation } : {}) });
     sealed.set(op.id, env);
     return env;
@@ -902,6 +929,31 @@ export function createPersonalSync(deps) {
    */
   async function pullNow() {
     await loadLot();
+    // ── R10-9d · A NEW PULL, SO THE LOT'S "STILL CANNOT OPEN THIS" MARKS START EMPTY ──────────
+    //
+    // `lot.release()` shelves rather than destroys any oid the caller PARKED OR TOUCHED "since
+    // its last release" — R8-4's guard, and the safe direction: it can only ever retain an
+    // envelope it could have destroyed. The window is the bug. `unopened` is cleared inside
+    // `release()` and nowhere else, so in a session where nothing applies for several pulls the
+    // marks ACCUMULATE — and the pull where the cure finally lands releases an op that opened
+    // while it is still carrying four pulls' worth of "cannot open this".
+    //
+    // The consequence is F-6's ordinary story: first contact parks an op, the attestation lands a
+    // few pulls later, the op opens and applies — and its envelope goes on the shelf anyway, with
+    // `shelved()` reporting for ever that nothing will ever open bytes whose op is on the board.
+    // `round8-park.test.js` §6.2 models the pull boundary with a FRESH LOT and says so in its own
+    // comment ("the marks do not outlive a release"); this line is what makes that assumption
+    // true of the engine rather than only of the test.
+    //
+    // It was invisible while nothing read the shelf. It became a user-visible permanent `error`
+    // the moment `status()` began offering the shelf to `judgeSyncStatus`, which is why it is
+    // fixed in the same pass and not filed: shipping the observable over this would have put a red
+    // light on every Mac that ever paired slowly once.
+    //
+    // NO NEW API, deliberately: `release()` clears `unopened` BEFORE its `n === 0` early return,
+    // so an empty release is exactly "a new round starts here" and nothing else — no write, no
+    // persist, no state change. `refuse()` is untouched, and so is the retention it performs.
+    await lot.release(spaceId, []);
     const since = store.cursor(spaceId);
     const res = normalizeResponse(await transport.request('GET', '/api/v1/ops', {
       space: spaceId, since, limit: String(LIMITS.opsPerPull),
@@ -981,10 +1033,20 @@ export function createPersonalSync(deps) {
     // same request. **Reported: ADR 003 §4 needs a way to re-request one seq.** The end-withhold,
     // which is the shape that can also move the cursor by a LIE rather than by a gap, is still
     // refused unconditionally by check 2 below on every pull, for ever.
+    //
+    // ── R10-1 · THE ROW SHAPE IS `observe()`'s, NOT A SUBSET OF IT ───────────────────────────
+    //
+    // `observe(space, rows)` documents its input as `{seq, chain, env:{oid, wit, dv}}` and its
+    // cross-check loop reads `row.env.wit` — the value each PEER committed to when it authored the
+    // op. Round 9 handed it `{seq, chain, env:{oid}}`, so check 2 had no input even for a peer that
+    // had sealed one, and neither `unknownWitness` nor its honest weaker sibling could ever fire.
+    // `wit` and `dv` are relay data and are copied WITHOUT validation on purpose: `chain.js` treats
+    // a `wit` it cannot place as a finding, never as a throw, and `dv` only ever appears inside a
+    // diagnostic. Passing them is the whole of the fix at this end.
     const rows = [];
     for (const e of page) {
       if (e && typeof e.oid === 'string' && e.seq !== undefined) {
-        rows.push({ seq: String(e.seq), chain: e.chain, env: { oid: e.oid } });
+        rows.push({ seq: String(e.seq), chain: e.chain, env: { oid: e.oid, wit: e.wit, dv: e.dv } });
       }
     }
     // WHERE THE VERIFICATION STARTS, AND WHY IT IS NOT ALWAYS ROW ZERO.
@@ -1033,17 +1095,93 @@ export function createPersonalSync(deps) {
     for (const r of rows) {
       if (chainOwed.delete(r.seq)) owedFilled = true;
     }
-    const chainVerified = (foldedFresh || owedFilled) && found.length === 0;
-    if (found.length) noteChain('chain', found);
+    // ⚠ R10-2 · THE DEBT IS NOT IN THIS EXPRESSION, AND THAT IS A REPORTED BLOCKER, NOT AN
+    // OVERSIGHT. Round 10's adversary asks for `&& chainOwed.size === 0` here, so that a relay
+    // withholding one appointment for ever cannot go green two honest pages later. The clause is
+    // correct about the attack and it is **unshippable on its own**: a member purge (ADR 003 §6.3)
+    // produces a gap of exactly the same shape, its rows are gone BY DESIGN, and the debt can then
+    // never be discharged — so the clause turns the one legitimate destructive operation in the
+    // product into the permanent red light `chain.js`'s header forbids in as many words. Measured,
+    // not argued: with the clause in place `round8-chain.test.js` §2 fails on *"the red light
+    // `chain.js` forbids is out"* (`'error' !== 'healthy'`) and `round9-headline.test.js` §2b fails
+    // on *"the indicator is OUT"*, both after a purge that withholds nothing from anybody.
+    //
+    // The two events are byte-for-byte indistinguishable at this client — that is round 10's own
+    // R10-4, pinned field by field in `round9-witness.test.js` §4a — so no rule computed from the
+    // findings can hold the verdict for one and release it for the other. Closing R10-2 therefore
+    // needs a SECOND input, and §4b names the only one that arrives: the roster piggyback ADR 003
+    // §3.2 puts on every pull response, whose `Member.removedAt` says a removal really happened.
+    // `protocol.js`'s total pull-body reader already surfaces it; this path reads neither. Neither
+    // the field nor that reader is spelled here the way `round9-e6.test.js` §2 and
+    // `round9-witness.test.js` §4b grep for them — those rows assert this file does not TOUCH
+    // them, they are still open, and a mention in a comment is not a call site.
+    //
+    // **REPORTED: R10-2 is blocked on R10-4, and even R10-4 does not finish it.** Both purge rows
+    // delete op rows with no membership write at all, so the roster is silent there too, and a PO
+    // has to rule on which way the light goes for a hole with no corroboration of any kind.
+    //
+    // ── R10-1b · A FINDING THAT SAYS "NOT EVIDENCE" MAY NOT BE READ AS EVIDENCE ──────────────
+    //
+    // `unverifiableWitness` is the witness declining to judge: *"a peer committed to a chain value
+    // outside this device's own chain window. **Not evidence**"*. It is emitted whenever this
+    // device's window does not reach back far enough to place a peer's `wit` — after a relaunch,
+    // after a break, past the 4096-value memory bound — which is to say on an honest relay, in
+    // ordinary use, whenever one Mac is further behind than another.
+    //
+    // `store.syncChain` is a FLAG in `status.js`'s taxonomy (`shape: 'flag'`, `state: error`), so
+    // writing anything into it lights S4-diverged. Handing it a finding whose own text says it
+    // proves nothing is exactly the shape of alarm this round exists to avoid: MEASURED, before
+    // this split, as `round9-headline.test.js` §2b going red on *"the indicator is OUT"* — three
+    // honest Macs, a legitimate member purge, and a red light nobody can clear.
+    //
+    // So the verdict is computed from EVIDENCE, and the declined judgements ride along in the
+    // payload of a verdict something else created. When they are all there is, nothing is written.
+    // **Reported: `status.js` and `store.js` have no channel for "seen, not evidence"** — an
+    // observable that counts without forcing `error`, or an `ok: true` shape `presenceOf` reads as
+    // absent. Until one exists this diagnostic is visible only through `witness.snapshot()`.
+    const evidence = found.filter((f) => f && f.kind !== CHAIN_FINDINGS.UNVERIFIABLE_WITNESS);
+    const chainVerified = (foldedFresh || owedFilled) && evidence.length === 0;
+    if (evidence.length) noteChain('chain', found);
     // A GAP finding carries the seq the counter jumped FROM, so the first row the relay owes is
     // the next one. Anything else the witness reports (a mismatch, an unreadable chain value) is a
     // statement about a row that WAS served, and the cursor is left to the ordinary rule.
+    //
+    // ── R10-2b · AND THE GENESIS PAGE IS DEFENDED THE WAY EVERY LATER PAGE IS ────────────────
+    //
+    // A device with no anchor verifies its first page from the space's GENESIS: row zero is checked
+    // as `SHA-256(∅ ‖ oid)`. Withhold the FIRST row of the log from such a device and the break
+    // lands on row zero, where there is no `prevSeq` for §3.3's gapless rule to be violated against
+    // — so the witness reports a MISMATCH, a mismatch carries no `from`, and until this clause the
+    // cursor was not held at all. The relay could pick the shape of the finding by picking which
+    // row to withhold, and the shape that cost it nothing was always available.
+    //
+    // That is the position E6 creates constantly and by design — a new member, a new Mac, a
+    // restored backup all start at `since = 0` — which is why *the least defended pull in the
+    // product was the one every new device makes first*.
+    //
+    // The hold is the SAME hold, with the same bound: one honest round trip, for the pull that
+    // discovered the break and for that pull only. The witness re-anchors on the row it was served,
+    // the re-served page is at or below the new head, `observe`'s `fresh` filter drops it, no second
+    // finding is manufactured, and the cursor moves. So a purge that removed the OLDEST rows of a
+    // space — which produces exactly this mismatch on a device pulling from zero — costs one pull
+    // and not a wedge, and R8-2's rule is not re-crossed.
+    //
+    // It is deliberately narrow: only the FIRST row of a page verified from genesis. A mismatch
+    // anywhere else is a statement about a row that WAS served, its neighbours pin it, and holding
+    // the cursor under it would hand a hostile relay a wedge for one rewritten byte.
+    const genesisPage = headBefore === null && rows.length > 0;
     for (const fi of found) {
       const from = fi && fi.from !== undefined ? toSeq(fi.from) : null;
-      if (from === null) continue;
-      chainHoles.push(from + 1n);
-      chainOwed.add(String(from + 1n));
-      while (chainOwed.size > CHAIN_SEQ_MEMORY) chainOwed.delete(chainOwed.values().next().value);
+      if (from !== null) {
+        chainHoles.push(from + 1n);
+        chainOwed.add(String(from + 1n));
+        while (chainOwed.size > CHAIN_SEQ_MEMORY) chainOwed.delete(chainOwed.values().next().value);
+        continue;
+      }
+      if (!genesisPage || fi.kind !== CHAIN_FINDINGS.MISMATCH) continue;
+      const brokeAt = toSeq(fi.seq);
+      if (brokeAt === null || String(fi.seq) !== String(rows[0].seq)) continue;
+      chainHoles.push(brokeAt);
     }
     // The chain values, by the seq they belong to, so the durable anchor is ONE ROW (R8-1b).
     for (const r of rows) {
@@ -1286,7 +1424,31 @@ export function createPersonalSync(deps) {
     // relay keeps owing it and the next honest page delivers it.
     const nextCursor = toSeq(body.nextCursor);
     if (floor === null && claimSound && nextCursor !== null && nextCursor > commit) commit = nextCursor;
-    if (commit > (toSeq(since) ?? 0n)) {
+    // ── R10-3 · THE RECORD IS ALSO WRITTEN ON THE PULL THAT HOLDS THE CURSOR ─────────────────
+    //
+    // `fromGenesis` is *"the RIGHT TO CALL AN UNKNOWN `wit` A FORK"* (`cursor.js`), and R9-1 made
+    // it writable in both directions so a device cannot hand itself back a right it has given up.
+    // The only writer is `cursors.advance`, and this call site ran it only when the cursor MOVED —
+    // so the one pull that lowers the flag (a break, which sets `s.fromGenesis = false` inside the
+    // witness) is exactly the pull whose cursor is held by that same break, and the lowering was
+    // never written down. Quit there — which is what a person does when the indicator goes red —
+    // and the next launch restores `true` and accuses the relay of a fork it can no longer prove.
+    // That is the false positive ADR 002 §5.4 forbids, and it is why this had to land in the same
+    // change as `wit`: wiring check 2 without it ARMS the accusation instead of enabling it.
+    //
+    // So the record is written when the cursor moves **or** when this pull disagrees with the disk
+    // about the flag. Not on every pull: `advance()` persists unconditionally, and a write per
+    // idle poll is churn with nothing to say.
+    //
+    // ⚠ AND THE HELD PULL MAY NOT WIPE THE ANCHOR. `advance` treats any `head.chain` STRING as the
+    // value to store, `''` included — which is deliberate when the cursor moves to a row this
+    // device holds no chain for (R8-1b: no anchor beats a wrong one). A pull that did not move is
+    // making no claim about a new row, so it passes `null` and the stored chain is carried
+    // forward; passing `{chain: ''}` there would erase a good anchor on every held pull and on the
+    // first empty pull after a relaunch, when `chainBySeq` is still empty.
+    const at = toSeq(since) ?? 0n;
+    const fromGenesisNow = witness.snapshot()[spaceId]?.fromGenesis === true;
+    if (commit > at || cursors.fromGenesis(spaceId) !== fromGenesisNow) {
       // The cursor move and the chain anchor, in ONE ordered write. `cursor.js`'s `advance` runs
       // the commit first and persists the record only if it resolves — so a crash between them
       // costs a re-pull (idempotent, ADR 001 §6) and never a cursor ahead of what was folded.
@@ -1302,10 +1464,11 @@ export function createPersonalSync(deps) {
       // this device does not hold one for that row it stores NO anchor rather than a wrong one:
       // `''` reads back as "no head" and the next page re-anchors, which accuses nobody.
       const anchorAt = chainBySeq.get(String(commit)) ?? '';
+      const record = commit > at || anchorAt !== '' ? { seq: String(commit), chain: anchorAt } : null;
       await cursors.advance(
-        spaceId, String(commit), { seq: String(commit), chain: anchorAt },
+        spaceId, String(commit), record,
         async () => { store.noteCursor(spaceId, String(commit)); },
-        { fromGenesis: witness.snapshot()[spaceId]?.fromGenesis === true },
+        { fromGenesis: fromGenesisNow },
       );
     }
 
@@ -1629,12 +1792,41 @@ export function createPersonalSync(deps) {
     // right to name the transport `errorKind` (it saw the failure; the enumeration only sees what
     // is left over), and `deferredOps` is carried across because it is this file's own counter and
     // the settings sheet reads it.
+    // ── R10-9c · AND THE SHELF IS OFFERED, BECAUSE THIS IS THE CALL SITE THAT HOLDS IT ───────
+    //
+    // The eighth observable, `shelved`, is a hold that ENDED: bytes this Mac kept, correctly, and
+    // will never open again. It is the one row of the enumeration `store.diagnostics()` cannot
+    // structurally answer — the shelf is in the ENGINE's parking lot, not in the log (R8-6b) — so
+    // `status.js` declares it `at: 'held'` and the evidence is handed in from here.
+    //
+    // Unwired, `judgeSyncStatus` reported it as `unoffered`: named, not counted, and deliberately
+    // NOT `unknown`, because a port-fed row nobody answered must not put a permanent glyph on
+    // every solo Mac (`S4-quiet`). That caution has a price — the shelf was readable and unread —
+    // and this argument is the whole of what it costs to stop paying it. `shelvedDetail` drops
+    // `env`, so no ciphertext reaches a status object (21.3); it is pure and duck-typed, so this
+    // stays the only call site that needs to know the lot exists.
     const judged = judgeSyncStatus({
       engine: {
         state, pendingOps: pending, consecutiveFailures: stats.consecutiveFailures,
         lastPullAt: stats.lastPullAt, errorKind, detail: null,
       },
       diagnostics: typeof store.diagnostics === 'function' ? store.diagnostics() : null,
+      // ⚠ AND ONLY ONCE THE LOT HAS BEEN READ, WHICH IS THE WHOLE CARE IN THIS LINE.
+      //
+      // The lot's shelf reader answers from memory, and the lot is empty until `loadLot()` has read the
+      // disk back. Handing that in unconditionally is WORSE than not wiring the row at all: an
+      // un-loaded lot answers "zero shelved", `judgeSyncStatus` reads a list that was offered and
+      // empty, and the verdict states — with no caveat, and with `unoffered` empty to prove it
+      // looked — that there is nothing on the shelf, about a Mac with a retained envelope on the
+      // disk beside it. MEASURED before this guard existed: a fresh process reported
+      // `observables: ['refused'], unoffered: []` over a shelf holding one envelope.
+      //
+      // `null` is the honest answer to "have you read it yet", and `status.js` has a word for it:
+      // the row comes back as `unoffered` — named, not counted, and not folded into `blind` so a
+      // launch does not go un-silent over a question that is about to be answered. `attach()`
+      // starts `loadLot()` and re-emits when it lands (R8-6), so the window is one microtask in
+      // the shipping app and the whole session only for a caller that never attaches.
+      held: lotLoaded ? shelvedDetail(lot, [spaceId]) : null,
     });
     return {
       ...judged,

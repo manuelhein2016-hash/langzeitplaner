@@ -225,12 +225,24 @@ into a new blob or a new column:
 - the payload is signed by `RK_sig`, which is exactly the key that must vouch for `RK_kex`;
 - `parseAttestationBlob` **already tolerates extra fields**, deliberately, so a v2.0 client reads
   a v2.1 blob unchanged, and those fields are **already covered by the signature**.
-  **That tolerance is a property of the parser and of clients.** The relay's door is a CLOSED SET
-  (`assertAttestationClosed`, `server/core/handlers/devices.js`), because the relay PUBLISHES this
-  blob and cannot park what it must store; a new field is therefore added to the relay's
-  allow-list **one release BEFORE any client mints it** — ADR 003 §4's N−1 rule, in the
-  server-first direction. That is versioning, not negotiation: no round trip, nothing offered or
-  withdrawn, and the release order is the whole protocol. *(Amendment B-13, round 9. The finding
+  **That tolerance is a property of the parser and of clients reading the member list.** The
+  relay's door is a CLOSED SET (`assertAttestationClosed`, `server/core/handlers/devices.js`),
+  because the relay PUBLISHES this blob and cannot park what it must store; a new field is
+  therefore added to the relay's allow-list **one release BEFORE any client mints it** — ADR 003
+  §4's N−1 rule, in the server-first direction.
+
+  **And the release order is NOT the whole protocol, which is amendment B-16 (round 10).** Saying
+  "server first" states the intention and leaves the client with no way to act on it. What
+  actually bites is that a v2.1 client meeting an older relay gets
+  `400 { reason: "attestation_unknown_field" }` and has every reason to read it as a malformed
+  request of its own. So: **the allow-list is part of the HTTP surface and moves with
+  `X-LZP-Protocol`.** A field is added to the allow-list in protocol `N`; a client MUST NOT mint
+  it until it has seen `maxProto ≥ N` (already published by `GET /meta` — no new surface); and
+  that `400` is a **version signal**, which is what 22.4's „Update verfügbar" is for, pointed at
+  the *server*. The two rules never governed the same object: ADR 003 §4's N+1 park rule governs
+  the **encrypted op stream the relay never reads**, and this blob is an HTTP field the relay
+  **stores and publishes**, where a tolerant door would be R8-7's free-text channel. The full
+  statement, with its five obligations, is **ADR 003 §4.2**. *(Amendment B-13, round 9. The finding
   it closes is R8-7: the closed set had shipped on two of the four doors that persist a `Device`
   row, so `POST /devices` and `/devices/adopt` stored a seventh field verbatim and
   `GET /spaces/:id/members` published it — a free-text channel through a relay whose whole claim,

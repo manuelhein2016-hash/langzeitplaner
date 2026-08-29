@@ -735,6 +735,23 @@ function storeReportsOf(dev) {
 /** @type {Record<string, {status:string, storeReports:?string, survives:boolean}>} */
 const OBSERVED = {};
 
+/**
+ * The one measurement S4's own `expect` triple has no column for: what a FRESH LAUNCH says about
+ * a fork, before anything is pulled. Filled in by the S4-diverged arrangement; read by S4c.
+ * @type {?{status:string, storeReports:?string, diverged:boolean}}
+ */
+let AFTER_QUIT = null;
+
+/** What the Mac got back once the lie stopped. Filled in by the same arrangement; read by S4d. */
+let RECOVERED = null;
+
+/**
+ * The `shelved` observable off the ENGINE's verdict, and the refusal count beside it. Filled in by
+ * the S4-shelved arrangement; read by S4e, which is the non-vacuity row S4-shelved's triple cannot
+ * be. @type {?{obs:?Object, refused:number}}
+ */
+let SHELF = null;
+
 describe('S4 · what the user and the system can observe', () => {
   before(async () => {
     // S4-quiet — the control. Silence is TRUE here and must stay free.
@@ -777,6 +794,69 @@ describe('S4 · what the user and the system can observe', () => {
         storeReports: storeReportsOf(B),
         survives: stillHeld && (B.status().state !== 'healthy' || storeReportsOf(B) !== null),
       };
+    }
+    // S4-shelved — the end of F-6's ladder: a park that became a shelf.
+    //
+    // ── THE ARRANGEMENT IS THE HONEST PATH, RUN TO ITS END ───────────────────────────────────
+    //
+    // Nothing is written by hand and no internal is poked. A's attestation is removed from the
+    // fleet's pairing source — which is what a Mac that was never adopted, or whose adoption
+    // never reached this device, actually looks like — so B parks A's op at `openOp`'s P1. Then
+    // the ladder is allowed to run: `maxDeferrals: 1` makes each session burn its deferral in one
+    // pull, `terminal()` shelves the envelope, and the LAUNCH is what decides whether it is
+    // revived. Past `PARK_REVIVALS` the lot stops replaying it and keeps the bytes.
+    //
+    // MEASURED, so the arrangement is not taken on faith: `refused` climbs 1 → 2 → 3 → 4 and then
+    // STOPS, which is the ladder reaching its bound. Six launches is two past that.
+    {
+      const f = await createFleet({
+        board: BOARD(), devices: ['A', 'B'],
+        clock: simClock(Date.UTC(2026, 11, 10, 9, 0, 0)), maxDeferrals: 1,
+      });
+      const A = f.device('A');
+      const B = f.device('B');
+      await f.settle(2);
+      f.attestations.delete(A.short);
+      await A.apply('createNotePopover', { id: 'sv1', date: '2027-08-09', text: 'IM REGAL', categoryId: 'c1' });
+      await A.push();
+      for (let launch = 0; launch < 6; launch++) {
+        await B.pull();
+        await B.pull();
+        await B.relaunch();
+      }
+      // ── AND THE SHELF IS READ ON A FRESH PROCESS, WHICH IS THE HALF THAT NEARLY SHIPPED WRONG.
+      //
+      // The reading below happens after `B.relaunch()`, so the engine is new and its parking lot
+      // starts EMPTY — `loadLot()` is what reads the disk back. The first wiring of `status()`
+      // handed `shelvedDetail(lot, …)` in unconditionally and this Mac then reported, with no
+      // caveat and with `unoffered: []` to prove it had looked, that there was nothing on a shelf
+      // holding a retained envelope. `status()` now offers the shelf only once the lot is loaded,
+      // and `attach()` starts that read at launch (R8-6). This asserts BOTH directions.
+      const cold = B.status();
+      assert.deepEqual(cold.unoffered, ['shelved'],
+        'a fresh process that has not read its parking lot yet must say NOBODY LOOKED. Reporting '
+        + 'an empty shelf here is the confident-and-wrong answer this whole round is about.');
+      assert.equal(cold.observables.some((o) => o.id === 'shelved'), false,
+        'and it must not claim the row either way while it cannot answer it');
+      await B.pull();
+      const shelf = B.status().observables.find((o) => o.id === 'shelved');
+      assert.deepEqual(B.status().unoffered, [],
+        'and once the lot IS read the row is answered, so `unoffered` is empty — a build stuck on '
+        + '`unoffered` for ever would pass the two lines above and report nothing, for ever');
+      assert.equal(B.storeDiagnostics().sync.parked, 0,
+        'the arrangement did not reach the END of the ladder — the op is still being replayed, so '
+        + 'this is S4-held again and S4-shelved is measuring nothing');
+      assert.ok(shelf && shelf.count > 0,
+        'the arrangement produced no shelved envelope at all — fix it before reading the row');
+      assert.equal(B.state.notes.some((n) => n.id === 'sv1'), false,
+        'NON-VACUITY: the change really never landed on this Mac, which is what makes retaining '
+        + 'the bytes the correct behaviour and losing sight of them the defect');
+      OBSERVED['S4-shelved'] = {
+        status: B.status().state,
+        storeReports: storeReportsOf(B),
+        survives: true,   // every reading above is already POST-relaunch — six of them
+      };
+      SHELF = { obs: shelf, refused: B.storeDiagnostics().sync.refused };
     }
     // S4-refused — a refusal that is correct, final, and forgotten.
     {
@@ -865,6 +945,48 @@ describe('S4 · what the user and the system can observe', () => {
       };
     }
     // S4-diverged — ADR 002 §5.4's fork: a relay that withholds from ONE Mac, both self-consistent.
+    //
+    // ── R10-7 · THE LIE IS ONE-SHOT NOW, AND THAT IS THE WHOLE SHAPE OF THIS ROW ─────────────
+    //
+    // This arrangement used to leave the withhold ARMED across `B.relaunch()`, and every field of
+    // the triple was then read off the pull that followed the launch — from a relay that was
+    // still lying. `survives` was therefore satisfied by re-derivation: the Mac had to remember
+    // NOTHING, because the adversary was still there to tell it again. **A row that reads the
+    // same whether or not the property holds is not measuring the property**, and that is the
+    // false-green class this suite exists to kill, one level up from the code it is pointed at.
+    //
+    // The input that separates them is a lie that STOPS. The relay withholds the op for as long
+    // as B is pulling, B holds its cursor at `since` (the page claim is unsound: a `nextCursor`
+    // past the last row actually served), the witness fires, and the two Macs are self-consistent
+    // and disagree. Then `f.wire.honest()` — the adversary is GONE — and only then the quit.
+    //
+    // What each half of the triple now measures, and how each can fail:
+    //
+    //   status / storeReports  are read WHILE THE FORK IS LIVE. A build that cannot detect the
+    //                          withhold reads `healthy`/`null` here and the row is red.
+    //   survives               is read after the quit, with the relay honest. The rule the domain
+    //                          states — "still reportable after a relaunch" — is answered by ONE
+    //                          of two outcomes, and both are real defences:
+    //                            · the Mac CATCHES UP, because round 9's held cursor never told
+    //                              the relay it had consumed the withheld row, so the honest page
+    //                              delivers it and there is nothing left to report; or
+    //                            · it does not, and then it must still be SAYING so.
+    //                          A build that released the cursor past the withheld op — the exact
+    //                          regression round 9's hold exists to prevent — gets neither: the op
+    //                          is gone for good and the report is gone with it, and this row goes
+    //                          red with `survives: false`. MEASURED: mutant M-S4, both halves of
+    //                          the hold removed (`holds.set(chainHole, 'withheld')` and the
+    //                          `claimSound` guard on `nextCursor`), kills this row and S4d.
+    //
+    // WHAT THE OLD SHAPE COULD NOT ASK AT ALL, which is the sharper half of the finding: with the
+    // lie still being told after the relaunch, `survives` was answered by a pull from the
+    // adversary itself, so NOTHING in this suite — or anywhere else — measured whether this Mac
+    // remembers a fork across a quit. The one-shot lie is what makes that question askable, and
+    // `S4c` below asks it: a fresh launch, before the first pull. It is a SUCCEEDED row, it dies
+    // to mutant M-S4c (`syncChain` made to ride in the checkpoint), and it names `store.js` as
+    // its owner. The neighbouring half — a LIVE verdict withdrawn by one honest page, with no
+    // quit involved — is `round9-witness.test.js` §2a and is deliberately NOT re-measured here:
+    // two rows for one finding drift apart.
     {
       const f = await twoMacs();
       const A = f.device('A');
@@ -881,18 +1003,37 @@ describe('S4 · what the user and the system can observe', () => {
         return res;
       };
       await f.settle(3);
+
+      const live = { status: B.status().state, storeReports: storeReportsOf(B) };
+      assert.equal(eq(registerDigest(A), registerDigest(B)), false,
+        'the withhold did not produce a divergence, so S4-diverged is measuring nothing — fix the '
+        + 'arrangement before reading the row');
+      assert.equal(B.state.notes.some((n) => n.id === 'dv1'), false,
+        'NON-VACUITY: the appointment really is absent from this Mac while the lie is being told');
+
+      // ── THE LIE ENDS HERE. Everything below is measured with an honest relay. ──────────────
+      f.wire.honest();
       await B.relaunch();
+      // The moment S4c reads: a fresh process, nothing pulled yet, the fork still real.
+      AFTER_QUIT = {
+        status: B.status().state,
+        storeReports: storeReportsOf(B),
+        diverged: !eq(registerDigest(A), registerDigest(B)),
+      };
       await f.settle(2);
       const digestsAgree = eq(registerDigest(A), registerDigest(B));
       OBSERVED['S4-diverged'] = {
-        status: B.status().state,
-        storeReports: storeReportsOf(B),
+        ...live,
         survives: digestsAgree ? true : (B.status().state !== 'healthy' || storeReportsOf(B) !== null),
       };
-      f.wire.honest();
-      assert.equal(digestsAgree, false,
-        'the withhold did not produce a divergence, so S4-diverged is measuring nothing — fix the '
-        + 'arrangement before reading the row');
+      RECOVERED = {
+        digestsAgree,
+        arrived: B.state.notes.some((n) => n.id === 'dv1'),
+        // Read for S4c's second half: a RESTORED verdict must be clearable by the relay proving
+        // itself, or the durability fix trades a silent Mac for a permanently red one.
+        storeReports: storeReportsOf(B),
+        status: B.status().state,
+      };
     }
   });
 
@@ -905,6 +1046,112 @@ describe('S4 · what the user and the system can observe', () => {
       return { entry: e, ok, got };
     });
     verdict('S4', results);
+  });
+
+  test('S4c — INVERTED (round 10) · the fork survives the quit, and so does the RECORD of it', () => {
+    // The row the one-shot lie exposed, and the one S4-diverged's `expect` triple has no column
+    // for. S4-diverged is green because the fork is reported WHILE IT IS LIVE and because round
+    // 9's held cursor lets the entry arrive once the relay stops lying. Neither of those is the
+    // claim `durable: true` makes in `sync/status.js`'s `chain` row. This reads the one moment
+    // where the two answers differ — a fresh process, before its first pull — and finds a Mac
+    // that is knowingly behind and says nothing at all.
+    //
+    // WHY IT IS NOT A CURIOSITY. The next pull is what saves this Mac, and a pull is exactly what
+    // it may not have: a closed lid, a tunnel, a relay that is down, or the same relay lying
+    // again in a shape that produces no finding. In every one of those the person is looking at a
+    // board that is missing an appointment this Mac was already told about once, under an
+    // indicator that promises there is nothing to tell them.
+    //
+    // IT WAS FINDING L-1'S SHAPE, ONE FIELD OVER, and the fix was written down in the file that
+    // owns it: `store.js` declares `syncRefusals` and `syncChain` in ONE docblock, for the same
+    // stated reason — "facts about bytes that are GONE" — and then rode the first in the
+    // checkpoint (`lzp.refusals`, read back by `init()`) and the second in nothing.
+    //
+    // CLOSED in the round-10 integration pass: `_stampedCheckpoint` writes `lzp.chain` through
+    // `_syncChainForDisk()` (a PROJECTION — kind, seq, from, detail — so 21.3 holds and no future
+    // `chain.js` field silently reaches the disk), and `_restoreSyncLedger` reads it back under
+    // the same quarantine gate the refusals use.
+    //
+    // NOT MEASURED HERE, deliberately: the LIVE half — a verdict withdrawn by one honest page
+    // with no quit involved — is `tests/fleet/round9-witness.test.js` §2a. One finding, one row.
+    assert.ok(AFTER_QUIT, 'S4c never ran its arrangement — see the S4-diverged block above');
+    assert.equal(AFTER_QUIT.diverged, true,
+      'NON-VACUITY: at this moment the two Macs really do disagree — the withheld appointment is '
+      + 'not on this one, and this Mac spent the whole previous session saying so');
+    assert.equal(AFTER_QUIT.storeReports, 'sync.chain',
+      'THE ROW, INVERTED: a fresh process, before its first pull, still names what the last '
+      + 'session found. Round 10 measured `null` here — `init()` nulled `syncChain` and no '
+      + 'checkpoint carried it, so the only thing that could ever speak up again was a successful '
+      + 'pull FROM THE RELAY THE ACCUSATION IS ABOUT. A closed lid, a tunnel or a relay that is '
+      + 'simply down left the person looking at a board with a hole in it under a quiet indicator.');
+    assert.notEqual(AFTER_QUIT.status, 'healthy',
+      'and 19.3\'s promise is no longer made over a board with a hole in it');
+
+    // AND IT IS A REPORT, NOT A RATCHET — the half that decides whether this fix is shippable at
+    // all. `S4d` below is the same arrangement two pulls later: the relay stops lying, the owed
+    // row arrives, and the verdict must be GONE. If a restored `syncChain` could not be cleared,
+    // every Mac that ever saw one bad page would wear a red light for the rest of its life, which
+    // is the failure `chain.js`'s header forbids and the reason R10-2 could not ship.
+    assert.equal(RECOVERED.storeReports, null,
+      'THE SECOND HALF: two honest pages later the restored verdict is GONE. `personal.js` clears '
+      + '`store.syncChain` on the first pull carrying POSITIVE EVIDENCE — freshly folded rows, or '
+      + 'the owed row delivered — so what rides across the quit is a report and not a ratchet. '
+      + 'Mutant: drop that clear, or restore the verdict without it, and this line dies while the '
+      + 'one above stays green, which is exactly the un-clearable red light R10-2 could not ship.');
+    assert.equal(RECOVERED.status, 'healthy',
+      'and the indicator is out again, on a Mac that has caught up');
+  });
+
+  test('S4d — CONTROL · when the lie stops, the owed appointment arrives', () => {
+    // What makes S4-diverged's `survives` an honest `true` rather than a shrug, and the reason
+    // the one-shot lie is the input that separates the two readings of this row.
+    //
+    // The withheld row was never acknowledged: `pullNow` puts the witness's hole into `holds`,
+    // the commit point stops strictly below it, and `nextCursor` is refused as UNSOUND because
+    // the relay claimed a cursor past the last row it actually served. So the relay still OWES
+    // the row, and the first honest page pays it. A build that walked over the hole — round 9's
+    // defence removed — loses the appointment for ever, and then `survives` demands a report this
+    // build cannot give. MEASURED, mutant M-S4 (`holds.set(chainHole, 'withheld')` deleted AND
+    // the `claimSound` guard dropped from the `nextCursor` take): this row and S4-diverged both
+    // go red, this one first and by name.
+    assert.ok(RECOVERED, 'S4d never ran its arrangement — see the S4-diverged block above');
+    assert.equal(RECOVERED.arrived, true,
+      'the relay stopped lying and the owed row was NOT delivered — the cursor was released past '
+      + 'a row this Mac never saw, which is the one loss ADR 003 §3.3 and round 9\'s hold exist '
+      + 'to prevent. The fix for this row is not in this file.');
+    assert.equal(RECOVERED.digestsAgree, true, 'and the two Macs agree again, on the register digest');
+  });
+
+  test('S4e — the shelf is named by the verdict, not inherited from the refusal beside it', () => {
+    // WHY S4-shelved's TRIPLE CANNOT BE THIS ROW. The same event writes two records: the parking
+    // lot shelves the envelope, and `terminal()` appends to `store.syncRefusals`. `judgeSyncStatus`
+    // folds the refusal to `error` on its own, so a build with the shelf entirely unwired reads
+    // `status: 'error'` and `storeReports: 'sync.refused'` and satisfies S4-shelved's triple
+    // completely — while nothing in the product can tell you an envelope is being kept.
+    //
+    // That is a row that reads the same whether or not the property holds, which is the false-green
+    // class this file exists to kill. So the mechanism gets its own row: the verdict must name
+    // `shelved` BY ID, with a count, pointing at its domain entry.
+    //
+    // MEASURED, mutant M-F9b (`shelvedDetail` returns `[]` without asking the lot) and the
+    // integration mutant (drop `held:` from `personal.js status()`): this row dies and S4-shelved
+    // stays green, which is the whole reason it is separate.
+    assert.ok(SHELF, 'S4e never ran its arrangement — see the S4-shelved block above');
+    assert.ok(SHELF.obs, 'THE ROW: the engine\'s verdict does not carry a `shelved` observable at '
+      + 'all, so the retained bytes are invisible to every screen in the product. `sync/personal.js '
+      + 'status()` must pass `held: shelvedDetail(lot, [spaceId])`.');
+    assert.equal(SHELF.obs.count, 1, 'and it counts the envelope, rather than reporting a boolean');
+    assert.equal(SHELF.obs.state, 'error',
+      '`error` and not `pending`: a hold that is still going is work outstanding, a hold that '
+      + 'ENDED has nothing outstanding at all — nothing will ever run against these bytes again');
+    assert.equal(SHELF.obs.row, 'S4-shelved',
+      'and it names the domain entry it belongs to. Round 10 shipped this row pointing at '
+      + '`S4-held`, which is a DIFFERENT state — the enumeration had no entry for a hold that had '
+      + 'ended, so the observable had nowhere correct to point.');
+    assert.equal(SHELF.refused, 4,
+      'CONTROL: the refusal ladder really did reach its bound and stop — `PARK_REVIVALS` + 1 '
+      + 'refusals and no more. If this climbs, the lot is still replaying and the arrangement has '
+      + 'drifted back onto S4-held.');
   });
 
   test('S4b — the two controls are genuine: `healthy` and `pending` are reachable and free', () => {
@@ -953,8 +1200,12 @@ describe('S5 · module reachability', () => {
     assert.deepEqual(ghosts, [], `S5 enumerates modules that are not in the tree: ${ghosts.join(', ')}`);
     const enumerated = S5.map((e) => e.value);
     assert.equal(new Set(enumerated).size, enumerated.length, 'S5 lists a module twice');
-    assert.equal(enumerated.length, 58,
-      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 58. If a module `
+    // 58 → 62 at the E6 integration: `createjoin.js`, `membersui.js`, `adminpanel.js` and
+    // `leavedelete.js` became REACHABLE the moment `familysettings.js` called their sections.
+    // They existed on disk for a round before that and this walk could not see them — the import
+    // graph is the measurement, and an unmounted module is correctly invisible to it.
+    assert.equal(enumerated.length, 62,
+      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 62. If a module `
       + 'was added or deleted, add or delete its row rather than changing this number alone.');
   });
 

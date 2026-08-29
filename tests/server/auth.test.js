@@ -529,6 +529,75 @@ for (const adapter of ADAPTERS) {
     assert.equal(await codeOf(() => authenticate(junk, ctx)), 'not_a_member');
   });
 
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // STEP 4, ROUND 10 ITEM 8 — the short names a machine; the ROW names a membership
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+  T('STEP 4 — one Mac, two circles: each request resolves the member of ITS OWN space', async () => {
+    // The whole of E2-203-1's product half, at the auth layer. Before round 10 this store state
+    // was not representable: `deviceShort` was globally unique, so the second row threw.
+    const clock = fakeClock(T0);
+    const store = adapter.make(clock);
+    const { dev, memberId } = await seed(store);
+    await store.createSpace(fixtures.space({ id: OTHER_SPACE }));
+    await store.addMember(fixtures.member({ id: 'mem_BBBBBBBBBBBBBBBBBBBBBB', spaceId: OTHER_SPACE, colorRef: 'blau' }));
+    await store.addDevice(fixtures.device({
+      id: 'dev_BBBBBBBBBBBBBBBBBBBBBB', spaceId: OTHER_SPACE, memberId: 'mem_BBBBBBBBBBBBBBBBBBBBBB',
+      deviceShort: dev.deviceShort,                       // THE SAME MAC: one IK_sig, one short
+      sigPubRaw: dev.sigPubRaw, kexPubRaw: dev.kexPubRaw, addedAt: new Date(T0),
+    }));
+    const ctx = makeCtx(store, clock);
+
+    const here = await authenticate(await signReq({ dev, query: { space: SPACE } }), ctx);
+    assert.equal(here.memberId, memberId, 'in her own space she is her own member');
+    assert.equal(here.deviceId, 'dev_AAAAAAAAAAAAAAAAAAAAAA');
+    assert.equal(here.spaceId, SPACE);
+
+    const there = await authenticate(await signReq({ dev, query: { space: OTHER_SPACE } }), ctx);
+    assert.equal(there.memberId, 'mem_BBBBBBBBBBBBBBBBBBBBBB',
+      'and in the circle she is the OTHER member — resolving this by picking the first row would '
+      + 'attribute her family ops to her personal member id and vice versa');
+    assert.equal(there.deviceId, 'dev_BBBBBBBBBBBBBBBBBBBBBB');
+  });
+
+  T('STEP 4 — revocation is per circle: unpairing a Mac from the family leaves the personal space alone', async () => {
+    const clock = fakeClock(T0);
+    const store = adapter.make(clock);
+    const { dev } = await seed(store);
+    await store.createSpace(fixtures.space({ id: OTHER_SPACE }));
+    await store.addMember(fixtures.member({ id: 'mem_BBBBBBBBBBBBBBBBBBBBBB', spaceId: OTHER_SPACE, colorRef: 'blau' }));
+    await store.addDevice(fixtures.device({
+      id: 'dev_BBBBBBBBBBBBBBBBBBBBBB', spaceId: OTHER_SPACE, memberId: 'mem_BBBBBBBBBBBBBBBBBBBBBB',
+      deviceShort: dev.deviceShort, sigPubRaw: dev.sigPubRaw, kexPubRaw: dev.kexPubRaw, addedAt: new Date(T0),
+    }));
+    await store.revokeDevice('dev_BBBBBBBBBBBBBBBBBBBBBB', clock.now());
+    const ctx = makeCtx(store, clock);
+
+    assert.equal(await codeOf(async () => authenticate(await signReq({ dev, query: { space: OTHER_SPACE } }), ctx)),
+      'device_revoked', 'revoked HERE');
+    assert.equal(await codeOf(async () => authenticate(await signReq({ dev, query: { space: SPACE } }), ctx)),
+      'OK', 'and still this person\'s own machine in their own space — a family unpairing is not a wipe');
+  });
+
+  T('STEP 4/7 — a Mac with no row in the named space answers not_a_member, and only AFTER the signature', async () => {
+    // The oracle this ordering exists to deny: "is device X in circle Y?" must cost the private
+    // key. Answering the membership question at step 4 would have made it free.
+    const clock = fakeClock(T0);
+    const store = adapter.make(clock);
+    const { dev } = await seed(store);
+    await store.createSpace(fixtures.space({ id: OTHER_SPACE }));
+    await store.addMember(fixtures.member({ id: 'mem_BBBBBBBBBBBBBBBBBBBBBB', spaceId: OTHER_SPACE, colorRef: 'blau' }));
+    const ctx = makeCtx(store, clock);
+
+    const forged = await signReq({
+      dev, query: { space: OTHER_SPACE }, signWith: (await mintDevice()).pair.privateKey,
+    });
+    assert.equal(await codeOf(() => authenticate(forged, ctx)), 'bad_signature',
+      'step 5 wins: a prober without the key learns nothing about which circles this short is in');
+    const honest = await signReq({ dev, query: { space: OTHER_SPACE } });
+    assert.equal(await codeOf(() => authenticate(honest, ctx)), 'not_a_member');
+  });
+
   T('the steps run IN ORDER: an earlier failure always wins', async () => {
     const clock = fakeClock(T0);
     const store = adapter.make(clock);

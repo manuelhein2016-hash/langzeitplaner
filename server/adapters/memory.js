@@ -266,9 +266,23 @@ export function createStoreEngine(opts) {
     addDevice(d) {
       const r = normalizeRow('Device', d);
       if (state.devices.has(r.id)) throw new StoreShapeError(`device ${r.id} already exists`);
+      // `Device.spaceId` is DERIVED from `Member.spaceId` and this is what keeps it derived.
+      // A row where the two disagree would put the `@@unique([spaceId, deviceShort])` guard on a
+      // namespace nobody is in, and `getDeviceByShort(spaceId, …)` and `listDevices(spaceId)`
+      // would answer different questions about the same machine. Postgres cannot express this
+      // (it is a cross-row invariant); it is stated here and carried as U-DEVSPACE in prisma.js.
+      const owner = state.members.get(r.memberId);
+      if (!owner) throw new StoreShapeError(`device ${r.id} names member ${r.memberId}, which does not exist`);
+      if (owner.spaceId !== r.spaceId) {
+        throw new StoreShapeError(
+          `Device.spaceId (${r.spaceId}) must equal its member's spaceId (${owner.spaceId}) — the short's namespace is the space`);
+      }
+      // ONE SHORT, ONE ROW, PER SPACE — round 10 item 8. It used to be per RELAY, which blocked
+      // the product (E2-203-1) and turned a key-derived identity into a name any member of your
+      // circle could claim first. See server/prisma/schema.prisma's Device note.
       for (const other of state.devices.values()) {
-        if (other.deviceShort === r.deviceShort) {
-          throw new StoreShapeError(`deviceShort ${r.deviceShort} is already registered — it is derived from the signing key (ADR 001 §1.2)`);
+        if (other.spaceId === r.spaceId && other.deviceShort === r.deviceShort) {
+          throw new StoreShapeError(`deviceShort ${r.deviceShort} is already registered in ${r.spaceId}`);
         }
       }
       if (typeof r.lastSeenSeq !== 'bigint' || typeof r.lastPushedSeq !== 'bigint') {
@@ -279,9 +293,16 @@ export function createStoreEngine(opts) {
 
     getDevice(deviceId) { return copy(state.devices.get(deviceId) || null); },
 
-    getDeviceByShort(deviceShort) {
-      for (const d of state.devices.values()) if (d.deviceShort === deviceShort) return copy(d);
+    getDeviceByShort(spaceId, deviceShort) {
+      for (const d of state.devices.values()) {
+        if (d.spaceId === spaceId && d.deviceShort === deviceShort) return copy(d);
+      }
       return null;
+    },
+
+    /** Every space's row for this short. Auth's only, on the routes that name no space. */
+    listDevicesByShort(deviceShort) {
+      return copies([...state.devices.values()].filter((d) => d.deviceShort === deviceShort));
     },
 
     listDevices(spaceId) {
@@ -298,17 +319,21 @@ export function createStoreEngine(opts) {
       d.revokedAt = new Date(at);
     },
 
-    setLastSeenSeq(deviceShort, seq) {
+    // Both setters are keyed on (spaceId, deviceShort) and not on the short alone: since round
+    // 10 one Mac has a row per circle, each with its own cursor, and both cursors gate tombstone
+    // GC. A short-only setter would let a busy Familienkreis fast-forward the personal space's
+    // read cursor past tombstones that Mac had never pulled. Contract case C32b.
+    setLastSeenSeq(spaceId, deviceShort, seq) {
       for (const d of state.devices.values()) {
-        if (d.deviceShort !== deviceShort) continue;
+        if (d.spaceId !== spaceId || d.deviceShort !== deviceShort) continue;
         if (seq > d.lastSeenSeq) d.lastSeenSeq = seq;   // monotone: a stale ack never rewinds it
         return;
       }
     },
 
-    setLastPushedSeq(deviceShort, seq) {
+    setLastPushedSeq(spaceId, deviceShort, seq) {
       for (const d of state.devices.values()) {
-        if (d.deviceShort !== deviceShort) continue;
+        if (d.spaceId !== spaceId || d.deviceShort !== deviceShort) continue;
         if (seq > d.lastPushedSeq) d.lastPushedSeq = seq;
         return;
       }

@@ -11,7 +11,8 @@
 // session — URL, query, headers, body — and searches those.
 //
 //   §1  is there one readable byte anywhere in a real session?
-//   §2  the envelope on the wire: nine fields, no timestamp, and `wit` really is empty
+//   §2  the envelope on the wire: nine fields, no timestamp, and `wit` carries only a
+//       relay-served chain value (R10-1 changed this row; it used to assert `wit` was empty)
 //   §3  the size channel, measured on real bytes and checked against `server-metadata.md` §4
 //   §4  Belegt vs Geteilt — what M1 can and cannot say about it
 //
@@ -25,6 +26,7 @@ import { createFleet } from '../helpers/fleet.js';
 import { recordWire, envelopeBytes, repoFile } from '../helpers/privacy-audit.js';
 import { PAD_BUCKET, AEAD } from '../../src/js/crypto/suite.js';
 import { paddedLength, ENVELOPE_FIELDS } from '../../src/js/crypto/envelope.js';
+import { b64u } from '../../src/js/core/b64.js';
 
 /** The German a household actually types, and the ids and dates that go with it. */
 const SECRETS = [
@@ -151,16 +153,48 @@ describe('§2 · nine fields, and what each of them can carry', () => {
     }
   });
 
-  test('FAILED — the shipped client never uses `wit`, which E3 showed is 86 bytes of free plaintext', async () => {
-    // `crypto-relay-read.test.js` established that `wit` is author-chosen plaintext that nothing
-    // checks — an exfiltration channel for a MODIFIED client (T2/T5). This is the complementary
-    // question for an UNMODIFIED one: does the shipping client put anything there? It does not,
-    // and `sync/personal.js` says why in its `sealLine` docblock — the witness is the relay's to
-    // compute, and inventing one would put an unverifiable value in the AAD.
-    const { rec } = await session();
-    const wits = new Set(rec.calls.filter((c) => c.method === 'POST').flatMap((c) => c.body.ops.map((e) => e.wit)));
-    assert.deepEqual([...wits], [''], 'the client now writes a witness — audit what goes in it');
-    assert.match(repoFile('src/js/sync/personal.js'), /wit: ''/);
+  // ── INVERTED IN ROUND 10 (R10-1). WHAT THE CLIENT NOW WRITES, AND THE AUDIT THAT REPLACES IT ──
+  //
+  // This row used to assert `wit` was empty on every envelope, on the reasoning that "the witness
+  // is the relay's to compute, and inventing one would put an unverifiable value in the AAD". Half
+  // of that was right and the conclusion was wrong: ADR 002 §5.4 asks the client for the highest
+  // chain value it HAS BEEN SERVED — a value the relay computed and handed over — and with `''`
+  // there the fork half of §5.4 had no input anywhere in the system and could never fire.
+  //
+  // So the privacy question changes shape rather than going away. It is no longer "is the field
+  // empty" but **"can anything but a relay-served chain value get into it"**, and that is what is
+  // measured below, on real bytes:
+  //
+  //   · every non-empty `wit` on the wire is a chain value THIS RELAY served this device. It is
+  //     not author-chosen, not derived from content, and carries no length signal — 43 base64url
+  //     characters of SHA-256, whatever the op says;
+  //   · what it discloses to the relay is the read position of the authoring device at the moment
+  //     it authored. The relay already stores exactly that, per device, in `Device.lastSeenSeq`
+  //     (ADR 003 §3.2), and updates it on every pull. So this is a value the operator already has,
+  //     restated — not a new observable, and nothing a `tcpdump` learns that the database did not
+  //     already say. **Recorded for 21.1 rather than assumed**;
+  //   · the exfiltration channel `crypto-relay-read.test.js` measured is unchanged and is about a
+  //     MODIFIED client (T2/T5). A modified client could always write 86 bytes here. What this row
+  //     pins is the SHIPPED one.
+  test('FAILED — the shipped client puts only relay-served chain values in `wit`', async () => {
+    const { fleet, rec } = await session();
+    const posts = rec.calls.filter((c) => c.method === 'POST' && c.body && Array.isArray(c.body.ops));
+    const wits = [...new Set(posts.flatMap((c) => c.body.ops.map((e) => e.wit)))];
+    assert.ok(wits.some((w) => w !== ''),
+      'NON-VACUITY: after two Macs have each pulled a page, some envelope carries a witness — '
+      + 'otherwise this row would be the old one wearing a new name');
+
+    // The relay's own chain values for this space, which is the only vocabulary `wit` may use.
+    const stored = (await fleet.relay.store.listOps(fleet.spaceId, 0n, 1000)).ops;
+    const served = new Set(stored.map((o) => (typeof o.chain === 'string' ? o.chain : b64u(o.chain))));
+    for (const w of wits) {
+      if (w === '') continue;
+      assert.equal(served.has(w), true,
+        `the client wrote a witness the relay never served (${w}) — audit what goes in it`);
+      assert.match(w, /^[A-Za-z0-9_-]{43}$/, 'and it is a fixed-width SHA-256, so it says nothing about length');
+    }
+    // The shape of the call site, so a future refactor cannot quietly widen the field again.
+    assert.match(repoFile('src/js/sync/personal.js'), /wit: witness\.witness\(spaceId\)/);
   });
 });
 

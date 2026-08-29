@@ -294,14 +294,33 @@ function build(db, now, inTransaction) {
     async addDevice(d) {
       const r = normalizeRow('Device', d);
       try { await db.device.create({ data: r }); } catch (err) {
-        if (isUniqueViolation(err)) throw new StoreShapeError(`device ${r.id} or deviceShort ${r.deviceShort} already exists`);
+        if (isUniqueViolation(err)) throw new StoreShapeError(`device ${r.id}, or deviceShort ${r.deviceShort} in ${r.spaceId}, already exists`);
         throw err;
       }
     },
 
     async getDevice(deviceId) { return outRow('Device', await db.device.findUnique({ where: { id: deviceId } })); },
 
-    async getDeviceByShort(deviceShort) { return outRow('Device', await db.device.findUnique({ where: { deviceShort } })); },
+    /**
+     * Round 10 item 8 — the short's namespace is the SPACE. UNVERIFIED (U-DEVSPACE): the compound
+     * selector Prisma generates for `@@unique([spaceId, deviceShort])` is spelled
+     * `spaceId_deviceShort`, and `Device.spaceId` never disagrees with `Member.spaceId` — the
+     * memory engine enforces that cross-row invariant, Postgres cannot.
+     */
+    async getDeviceByShort(spaceId, deviceShort) {
+      return outRow('Device', await db.device.findUnique({ where: { spaceId_deviceShort: { spaceId, deviceShort } } }));
+    },
+
+    /**
+     * Every space's row for one short. Auth's only caller, and only on the routes that name no
+     * space (`pair/*`). UNVERIFIED (U-DEVSHORTSCAN): `deviceShort` is not the leading column of
+     * any index, so this is a scan — deliberately, see schema.prisma's Device note; it runs at
+     * most once per authenticated request on three routes.
+     */
+    async listDevicesByShort(deviceShort) {
+      const found = await db.device.findMany({ where: { deviceShort } });
+      return found.map((d) => outRow('Device', d));
+    },
 
     /**
      * The rotation coverage input (ADR 002 §4.2) and the `members` piggyback (ADR 003 §3.2).
@@ -321,12 +340,12 @@ function build(db, now, inTransaction) {
      * stale ack a no-op rather than a rewind. A rewind would un-collect tombstones the peers
      * have already dropped.
      */
-    async setLastSeenSeq(deviceShort, seq) {
-      await db.device.updateMany({ where: { deviceShort, lastSeenSeq: { lt: toBig(seq) } }, data: { lastSeenSeq: toBig(seq) } });
+    async setLastSeenSeq(spaceId, deviceShort, seq) {
+      await db.device.updateMany({ where: { spaceId, deviceShort, lastSeenSeq: { lt: toBig(seq) } }, data: { lastSeenSeq: toBig(seq) } });
     },
 
-    async setLastPushedSeq(deviceShort, seq) {
-      await db.device.updateMany({ where: { deviceShort, lastPushedSeq: { lt: toBig(seq) } }, data: { lastPushedSeq: toBig(seq) } });
+    async setLastPushedSeq(spaceId, deviceShort, seq) {
+      await db.device.updateMany({ where: { spaceId, deviceShort, lastPushedSeq: { lt: toBig(seq) } }, data: { lastPushedSeq: toBig(seq) } });
     },
 
     async minLastSeenSeq(spaceId) { return minOver(db, spaceId, 'lastSeenSeq'); },
@@ -556,7 +575,9 @@ export const UNVERIFIED_CLAIMS = Object.freeze([
   { tag: 'U-CURSOR', method: 'listOps', claim: 'seq: { gt: cursor } with orderBy seq asc and take limit+1 paginates exactly, and BigInt comparison is numeric rather than lexical.', breaks: 'Lexical comparison makes seq 9 sort after seq 10 and a client silently skips ops.' },
   { tag: 'U-PURGE', method: 'deleteOpsByDevices', claim: '@@index([spaceId, deviceShort]) makes the 20.2 purge an index scan, and deleteMany returns an exact count.', breaks: 'A member removal in a space with a year of ops exceeds the 10 s function timeout, and the membership write commits without the purge.' },
   { tag: 'U-COLOR', method: 'addMember', claim: '@@unique([spaceId, colorRef]) is what enforces 15.3; colorFree is advisory.', breaks: 'Two members racing to join pick the same colour and the board legend has two identical swatches with no way to tell them apart.' },
-  { tag: 'U-MONO', method: 'setLastSeenSeq', claim: 'updateMany with lastSeenSeq: { lt: seq } makes a stale ack a no-op rather than a rewind.', breaks: 'GC un-collects: a device rewinds the minimum and tombstones peers already dropped come back, resurrecting deleted entries.' },
+  { tag: 'U-MONO', method: 'setLastSeenSeq', claim: 'updateMany with (spaceId, deviceShort) and lastSeenSeq: { lt: seq } makes a stale ack a no-op rather than a rewind, and touches ONE circle\'s row.', breaks: 'GC un-collects: a device rewinds the minimum and tombstones peers already dropped come back, resurrecting deleted entries.' },
+  { tag: 'U-DEVSPACE', method: 'getDeviceByShort', claim: 'Prisma spells the @@unique([spaceId, deviceShort]) selector `spaceId_deviceShort`, and no row has a spaceId its member does not share.', breaks: 'Auth step 4 cannot resolve a device at all (every request 403 device_revoked), or resolves one in the wrong circle and answers with another member\'s id.' },
+  { tag: 'U-DEVSHORTSCAN', method: 'listDevicesByShort', claim: 'A findMany on the non-leading `deviceShort` column is a scan, and that is acceptable at three routes per request.', breaks: 'pair/* auth pays a table scan of every device on the relay per request; at fleet scale that is the Hobby-tier query budget.' },
   { tag: 'U-JOIN', method: 'listDevices', claim: 'where: { member: { spaceId } } is one join, not N+1.', breaks: 'The rotation coverage check and every pull pay a query per member; at eight members and a 45 s cadence that is the Hobby-tier connection budget.' },
   { tag: 'U-WRAPUPSERT', method: 'putKeyWraps', claim: 'upsert on the composite key replaces a wrap for an epoch already wrapped.', breaks: 'ADR 002 §4.2 step 3 re-wraps open invites on every rotation; without replace it raises a unique violation and the whole rotation aborts.' },
   { tag: 'U-CONSUME', method: 'consumeInvite', claim: 'updateMany with usedAt: null in the WHERE gives a row count of 1 to exactly one concurrent caller.', breaks: 'Two people redeem one invite. Both become members; the admin issued one invitation and sees two names, one of which they cannot account for.' },
