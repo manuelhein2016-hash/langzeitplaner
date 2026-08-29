@@ -37,6 +37,7 @@ import { authenticate, assertMember, b64u, ub64 } from '../../server/core/auth.j
 import { LIMITS, createLog, clientIp } from '../../server/core/limits.js';
 import { createVersionGate } from '../../server/core/version.js';
 import { memoryStore } from '../../server/adapters/memory.js';
+import { attestedPerson, attestedDeviceFor } from './_attested-person.js';
 import { fileStore } from '../../server/adapters/file.js';
 
 const S = globalThis.crypto.subtle;
@@ -73,23 +74,29 @@ const rawOf = async (k) => new Uint8Array(await S.exportKey('raw', k));
 const rnd = (n) => globalThis.crypto.getRandomValues(new Uint8Array(n));
 
 async function person(colorRef, ip) {
-  const sig = await S.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const kex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  const recSig = await S.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const recKex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  const sigPubRaw = await rawOf(sig.publicKey);
+  // Finding E2E3-7: `POST /spaces` and `POST /invites/redeem` now run ADR 002 §2.3's checks that
+  // `POST /devices` has always run, and `GET /members` publishes the blob (E2E3-6). A person made
+  // of `b64u(rnd(120))` is refused at the door — so this mints with the SHIPPING
+  // `buildDeviceAttestation` + `attestDevice`, exactly what a Mac does.
+  const p = await attestedPerson({ colorRef });
   return {
     colorRef,
     ip: ip || '198.51.100.9',
-    memberId: `mem_${b64u(rnd(16))}`,
-    deviceId: `dev_${b64u(rnd(16))}`,
-    deviceShort: await shortOf(sigPubRaw),
-    sigPriv: sig.privateKey,
-    sigPubRaw: b64u(sigPubRaw),
-    kexPubRaw: b64u(await rawOf(kex.publicKey)),
-    recoveryPubSig: b64u(await rawOf(recSig.publicKey)),
-    recoveryPubKex: b64u(await rawOf(recKex.publicKey)),
-    attestation: b64u(rnd(120)),
+    memberId: p.memberId,
+    deviceId: p.deviceId,
+    deviceShort: p.deviceShort,
+    sigPriv: p.sigPriv,
+    sigPub: p.sigPub,
+    kexPriv: p.kexPriv,
+    kexPub: p.kexPub,
+    sigPubRaw: p.sigPubRawB64,
+    kexPubRaw: p.kexPubRawB64,
+    recPriv: p.recPriv,
+    recoveryPubSig: p.recoveryPubSigB64,
+    recoveryPubKex: p.recoveryPubKexB64,
+    recoveryPubKexBytes: p.recoveryPubKex,
+    attestation: p.attestation,
+    attestationBytes: p.attestationBytes,
   };
 }
 const wireDevice = (p) => ({

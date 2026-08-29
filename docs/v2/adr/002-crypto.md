@@ -7,7 +7,8 @@
 | **Tickets** | LZP-301, 302, 303, 304, 305, 306 · supports 502, 601/602, 608, 701, 1003, 1004 |
 | **Stories** | 15.2, 15.3, 15.5, 19.4, 19.5, 20.2, 20.3, 20.5, 21.1, 21.2, 21.3, 21.4, A2 |
 | **Amends** | LZP-301's "libsodium-based design" premise → `LZP-CRYPTO-1` (§1); LZP-302's "macOS Keychain via Tauri" → non-extractable IndexedDB keys + a Keychain *backstop* (§2.2) |
-| **Amended** | 2026-08-28 (E3 fix pass) — §2.3's "Two shorts, no winner" is rewritten as **"One short, one signer"** and its claim that *"attestOpen (WP-6) MUST enforce P2, which closes this at the root and removes the stall"* is **struck as false**: P2 shipped and the squat still passes it, because `sigPubRaw` is public and the squat copies key and short together. I-3 / R5-7 is closed instead by a **possession proof at fold time** — a `dev.<S>` register is a credential only if the op that wrote it was stamped by the device it attests. §5.2.1's and §5.2.5's I-3 notes amended to match; §5.2.2 gains two obligations (check 4 is now load-bearing for the fold, and nothing may enter the log without passing `openOp`). |
+| **Amended** | 2026-08-29 (E2↔E3 seam) — **§4.2 is amended in four places and §2.3 gains one optional field.** The rotation this section specifies could not be performed by any client over the API ADR 003 specifies, and both sides were green because neither suite ever put one side's output into the other's input. (a) Step 4's POST body is restated exactly: `wraps[]` carries `recipientId` (not `deviceId`), `wrapped` is **base64url of the canonical-JSON `WrapBlob`** (not the object), and it carries **no `invites`** — D9 removed the key material, so the relay refreshes open invites itself and refuses the field. (b) Step 6's `senderKexPubRaw` is **published by the relay, never supplied by a client**: `KeyWrap` gains a relay-stamped `senderDeviceId` and `GET /keys` serves the ADR's field by joining to `Device.kexPubRaw`. (c) `GET /spaces/:id/members` **publishes `Device.attestation`** — the roster step 6 already required, and without it `familyRecipients()` throws on the list the relay serves. (d) Step 2's "plus each member's `RK_kex`" is **SUSPENDED for the family space**: nothing signs `Member.recoveryPubKex`, so wrapping to it hands a curious relay `FSK_{e+1}` silently. §2.3 specifies the binding that lifts the suspension — an OPTIONAL seventh signed field `recoveryPubKex` in `DeviceAttestation`. Findings **E2E3-1 … E2E3-8**. |
+| | 2026-08-28 (E3 fix pass) — §2.3's "Two shorts, no winner" is rewritten as **"One short, one signer"** and its claim that *"attestOpen (WP-6) MUST enforce P2, which closes this at the root and removes the stall"* is **struck as false**: P2 shipped and the squat still passes it, because `sigPubRaw` is public and the squat copies key and short together. I-3 / R5-7 is closed instead by a **possession proof at fold time** — a `dev.<S>` register is a credential only if the op that wrote it was stamped by the device it attests. §5.2.1's and §5.2.5's I-3 notes amended to match; §5.2.2 gains two obligations (check 4 is now load-bearing for the fold, and nothing may enter the log without passing `openOp`). |
 | | 2026-08-27 (round 4) — §2.3's stated guarantee was untrue in two places and is corrected in place: the four acceptance conditions bind **nothing to `deviceId`** ("A `deviceId` is a label, not an identity"), and `deviceShort → DeviceAttestation` is *argued* rather than enforced, so a contested short now resolves to `null` instead of to a winner ("Two shorts, no winner"). §2.3 also gains "Revocation — the gap, and who owns it" (WP-9) and §8 gains **8.2a**. §5.2.1 and §5.2.5 amended to match; §5.2.4's T5 row extended. |
 
 > This ADR is written threat-model-first. §0 names the adversaries; every later section
@@ -202,9 +203,47 @@ A device's public keys are trusted **only** if signed by the owning member's rec
  * @property {string} sigPubRaw     b64url of the 65-byte raw P-256 point
  * @property {string} kexPubRaw     b64url, 65 bytes
  * @property {string} createdAt     'YYYY-MM-DD'
+ * @property {string} [recoveryPubKex]  OPTIONAL, b64url, 65 bytes — the MEMBER's RK_kex. §4.2's
+ *                                      suspended recovery wrap turns on this field. See below.
  */
 signature = ECDSA-P256/SHA-256( RK_sig.private, canonicalJSON(attestation) )
 ```
+
+#### `recoveryPubKex` — the optional seventh field, and what it buys  *(added 2026-08-29)*
+
+**The problem it solves.** §4.2 step 2 wraps the space key "plus each member's `RK_kex`", and
+`Member.recoveryPubKex` is a relay column that **nothing signs**. Swapping `recoveryPubSig` is
+loud — every device attestation of that member stops verifying and the rotation halts. Swapping
+`recoveryPubKex` alone is silent, leaves every attestation genuine, is invisible in the member
+list, and hands the relay `FSK_{e+1}`. So §4.2 step 2's family half is SUSPENDED (finding
+E2E3-8), and the only thing that lifts the suspension is a signature over that key by the member
+whose key it is.
+
+**The cheapest such signature already exists**, and this is why the field goes here rather than
+into a new blob or a new column:
+
+- the payload is signed by `RK_sig`, which is exactly the key that must vouch for `RK_kex`;
+- `parseAttestationBlob` **already tolerates extra fields**, deliberately, so a v2.0 client reads
+  a v2.1 blob unchanged, and those fields are **already covered by the signature**;
+- the relay **already accepts** the field — it is the one entry on `assertAttestationClosed`'s
+  optional list — and checks only its shape, because the binding is not the relay's to make;
+- a member attests every one of her own devices, so the binding is repeated once per device and
+  a relay that swaps the column is contradicted by every one of them.
+
+**The obligations, and there are exactly three:**
+
+1. `identity.js` `attestDevice()` must sign it when the caller supplies it. Today it
+   re-canonicalises exactly six fields, so it cannot mint a seventh — that is the one change.
+2. `familyRecipients()` must build the recovery recipient **only** when the member's own device
+   attestations carry a `recoveryPubKex` equal to the roster's `Member.recoveryPubKex`, and
+   `recipientProblem()`'s named refusal must be narrowed to the unbound case rather than deleted.
+3. `requiredRecipients()` may then demand `rec_<memberId>` of a family space again. It does not
+   need to change first: the wrap is already a KNOWN recipient, so it lands as soon as a client
+   can build it.
+
+**Not a fifth acceptance condition.** The four conditions below are unchanged; this field is
+covered by condition (4)'s signature and by nothing else, and no `dev.*` register is accepted or
+rejected on account of it. A blob without it is a v2.0 blob and stays valid for ever.
 
 The attestation travels **inside the E2EE stream**, as the family register
 `member:<memberId>` → field `dev.<deviceShort>` → value `b64u(canonicalJSON(att)) + '.' + b64u(sig)`
@@ -517,13 +556,64 @@ within a minute") at the mercy of a sleeping laptop.
 1. `FSK_{e+1} = createSpaceKey()`
 2. Verify the **device attestation** (§2.3) of every current, non-revoked member device, then
    `wrapSpaceKey(FSK_{e+1}, myKexPriv, deviceKexPub)` for each, plus each member's `RK_kex`.
+
+   > **AMENDED 2026-08-29 — "plus each member's `RK_kex`" is SUSPENDED for the family space.**
+   > Finding **E2E3-8**. The wire field exists (E3-2 added `Member.recoveryPubKex` and
+   > `GET /spaces/:id/members` publishes it) and `familyRecipients()` still refuses to use it,
+   > because **nothing signs it**. The asymmetry is the argument: `recoveryPubSig` is also a relay
+   > column, but it is self-checking *in use* — swap it and every device attestation of that
+   > member stops verifying, `assertRecipients` throws and the rotation stops, loudly.
+   > `recoveryPubKex` is checked by nothing: swap it alone and every attestation stays genuine,
+   > the member list looks exactly right, no signature fails, and the next rotation wraps
+   > `FSK_{e+1}` to a key the relay chose. That is not §8.5's accepted, UI-surfaceable phantom
+   > member — it is a **silent, unattributable key injection**, the same class as finding S1 one
+   > door further along, and a live break of 21.1 and 21.2.
+   >
+   > So: `familyRecipients()` builds no recovery recipient; `recipientProblem()` **refuses a
+   > family-scoped recovery recipient by name** so a future change cannot open the door by
+   > accident; and `requiredRecipients()` on the relay no longer *demands* the row for an `fsp_`
+   > space — it remains a KNOWN recipient, so the day the binding exists no relay change is
+   > needed. The **personal** space is unaffected and still requires it: `personalRecipients()`
+   > builds that recipient from `me.recoveryKexPubRaw`, my own key, held locally, which never
+   > came off a relay.
+   >
+   > **The price, stated rather than hidden.** A family member who loses every device has no wrap
+   > addressed to her recovery key, so §7.3's A2 recovery of a FAMILY space waits for the next
+   > rotation by somebody else — which re-wraps epochs `1..e+1` to the device she re-adopts with
+   > `RK_sig`. That is a delay. The alternative is the relay reading the family board. **The
+   > binding that lifts the suspension is specified in §2.3 ("`recoveryPubKex`, the optional
+   > seventh field"), and closing this means BUILDING IT** — not calling `rawOf(recoveryPubKex)`.
 3. Re-wrap every **open (un-redeemed, non-expired, non-revoked) invite blob** to `FSK_{1..e+1}`
    under its stored `wrapSalt` — the server returns the open-invite list in the same call
    (§5 of ADR 003). *Rotation must not silently invalidate a pending invite; a family of eight
    onboarding two people at once would otherwise break.*
-4. `POST /api/v1/spaces/:id/epoch { epoch: e+1, wraps: [{deviceId, wrapped}], invites: [...] }`
+
+   > **SUPERSEDED BY D9, and the wire now says so.** An invite carries no key material, so there
+   > is nothing for a client to re-wrap and **the POST body carries no `invites` field** — the
+   > relay refreshes every open invite's epoch itself. `rotateEpoch` refuses the field's
+   > *presence* (`400 retired_by_d9`), and `rotationBody()` does not emit it, so a body spread
+   > from a `Rotation` is no longer a 400. Finding **E2E3-4**.
+4. `POST /api/v1/spaces/:id/epoch { epoch: e+1, wraps: [{recipientId, epoch, wrapped}] }`
    — one transaction: insert the `KeyWrap` rows, set `Space.currentEpoch`, **delete every
-   `KeyWrap` belonging to a removed or revoked device, for all epochs**, refresh invite blobs.
+   `KeyWrap` belonging to a removed or revoked device, for all epochs**, refresh open invites.
+
+   > **AMENDED 2026-08-29 — the body is restated exactly, because the old spelling was a 400.**
+   > Findings **E2E3-1 … E2E3-4**. Three fields and one absence, and each was a real mismatch
+   > between this ADR's client and ADR 003's relay:
+   >
+   > | field | it is | it was, and why that failed |
+   > |---|---|---|
+   > | `recipientId` | a device id **or** `rec_<memberId>` | the client emitted `deviceId`; `readObject`'s closed field set 400s an unknown key. The relay's spelling wins and is also the true one — `rec_…` is not a device id (finding E3-4) |
+   > | `epoch` | per entry | unchanged; a rotation carries the `1..e` backfill alongside `e+1` (§4.3) |
+   > | `wrapped` | **base64url of `canonicalJSON(WrapBlob)`** | the client emitted the `WrapBlob` OBJECT. `KeyWrap.wrapped` is `Bytes` and `OPAQUE_FIELDS` refuses a String there — that refusal is what makes "a future handler cannot store a readable note" structural — so the encoding moves to the client. `spacekeys.js` `encodeWrap`/`decodeWrap` are the only two functions that perform it |
+   > | *(no `invites`)* | — | see step 3 |
+   > | *(no sender)* | — | see step 6 |
+   >
+   > **`rotationBody()` is the ONLY function that writes this body and `parseKeysResponse()` the
+   > only one that reads the reply.** A second translator anywhere is this finding again: the one
+   > program that ran both sides before this pass, `server/dev/two-client.js`, hand-rolled its own
+   > packer and carried the sender key by courier, and so stepped over every gap instead of
+   > hitting one.
 5. Emit `space.set{epoch: e+1}` into the family log so honest clients switch immediately.
 6. **ON THE RECEIVING DEVICE — the mirror of step 2, and it is not optional.** Before a wrap row
    from `GET /api/v1/spaces/:id/keys` is unwrapped, the receiver verifies **who sent it**, against
@@ -541,6 +631,35 @@ within a minute") at the mercy of a sleeping laptop.
    | personal `psp_…` | **my own** attested, non-revoked devices, and nothing else — never another member's device, however attested, however current |
    | family `fsp_…` | every **non-removed** member's attested, non-revoked devices |
 
+   > **AMENDED 2026-08-29 — `senderKexPubRaw` IS PUBLISHED BY THE RELAY, NEVER SUPPLIED BY A
+   > CLIENT.** Finding **E2E3-3**. This step was unimplementable end to end: `MODEL_COLUMNS.KeyWrap`
+   > had four columns and none was a sender, `GET /spaces/:id/keys` returned
+   > `{epoch, recipientId, wrapped}`, and `POST /spaces/:id/epoch` 400s a wrap carrying a fifth
+   > key — so `admitWraps` had no index into its verified set and **threw on every honest row**.
+   >
+   > `KeyWrap` gains **`senderDeviceId`**, written by the relay from the request it authenticated
+   > (`auth.deviceId` on a rotation, the founding device on `POST /spaces`) and **never read off a
+   > body** — `readWraps`'s closed field set refuses both spellings. `GET /spaces/:id/keys` then
+   > serves this section's own field, `senderKexPubRaw`, by joining to the `Device.kexPubRaw` it
+   > already holds and already publishes in the member list. The client side and the wording above
+   > are therefore unchanged.
+   >
+   > **Why a stamped device id rather than the client-supplied key this section first specified.**
+   > The row only ever *selects* a sender — the `CryptoKey` the KEK is derived against is the one
+   > `admissibleSenders()` imported from the sender's own verified attestation — so the field need
+   > only be an index. A 65-byte client-chosen blob on every wrap row is a covert channel a blind
+   > relay has no reason to accept; a stamped device id carries **zero** client-chosen bits and
+   > states no fact the relay did not already observe when it checked that signature. It is
+   > classified in ADR 003 §5.2's inventory as such.
+   >
+   > **What the relay can do with it, exactly:** lie. A relay that stamps or serves the wrong
+   > sender causes a **refusal** — the receiver derives against a key the wrap was not made for,
+   > or looks up a key that is not in its set — and never an admission. A dangling sender (the
+   > device row cascaded away by a member removal) publishes `null`, which `SenderSet.lookup`
+   > answers `null` for, which is `unauthorized`: the correct answer for a key deposited by a
+   > device this space no longer admits. The rotation that follows the removal re-deposits epochs
+   > `1..e+1` under a live sender, so it heals.
+
    `src/js/crypto/spacekeys.js` implements this as a **required parameter, not a validation step**:
    `admitWraps(ring, rows, ctx)` refuses to run without `ctx.senders`, and `ctx.senders` can only
    be the branded `Recipient[]` that `personalRecipients()` / `familyRecipients()` produce —
@@ -551,7 +670,43 @@ within a minute") at the mercy of a sleeping laptop.
 
    **The bootstrap residual, stated rather than hidden.** A device's first family sync (§7.1 step
    6) holds no epoch key, so it cannot fold the family stream and its roster must come from relay
-   coordination data (`MemberRowDb.recoveryPubSig` plus the `dev.*` blobs). Every attestation in
+   coordination data (`MemberRowDb.recoveryPubSig` plus the `dev.*` blobs).
+
+   > **AMENDED 2026-08-29 — and that roster is now actually served.** Finding **E2E3-6**. This
+   > paragraph specified the roster in 2026-08-28 and `handlers/members.js` did not publish
+   > `Device.attestation`, on the defensible ground that "the relay's device rows are a hint about
+   > who to wrap to; the log is the authority". `familyRecipients()` — the ONLY constructor of the
+   > branded recipient/sender set §3 barrier 2 and this step are built out of — **throws** on a
+   > device with no attestation blob. Two defensible positions, and together a rotation nobody
+   > could build. `GET /spaces/:id/members` now publishes it.
+   >
+   > **The 21.1 cost is nil, and that is measured rather than argued.** Every field inside the
+   > blob is already a column the relay holds and already publishes — `memberId`, `deviceId`,
+   > `deviceShort`, `sigPubRaw`, `kexPubRaw` — plus `createdAt`, a DAY, strictly coarser than the
+   > `Device.addedAt` the relay keeps to the millisecond. The relay already STORED the blob. And
+   > every member can already read the same blob out of the E2EE stream (§2.3: *"the blob is
+   > inside the E2EE stream, so every member can read it"*). To keep that true rather than
+   > incidental, the relay now enforces a **closed field set** on the payload at every write path:
+   > the six §2.3 fields plus the one optional `recoveryPubKex` below, `createdAt` matched against
+   > `YYYY-MM-DD`. There are no free bits, so the blob is not a channel. Forward compatibility
+   > becomes explicit — a v2.1 field must be added to that list, exactly as a new column must be
+   > added to `MODEL_COLUMNS`, under ADR 003 §4's N−1 rule.
+   >
+   > **It is a hint and never authority.** `recipientProblem()` re-verifies the signature under the
+   > housing member's `recoveryPubSig`, re-checks P2, and binds `att.kexPubRaw` to the very key the
+   > wrap would be addressed to. A relay that fabricates a blob fails that signature; a relay that
+   > fabricates a blob *and* a recovery key has invented a whole MEMBER, which is §8.5's
+   > already-accepted, UI-surfaceable phantom. The distinction §2.3 already draws is the one that
+   > resolves this: the relay's device rows support **key distribution, not admissibility**.
+   >
+   > **Where it is NOT published, deliberately:** not on `GET /ops`. That piggyback runs every 45
+   > seconds for every device in every space; the rotation roster is a membership-change path.
+   >
+   > **One residual this creates.** `familyRecipients()` throws on an unverifiable blob, so a
+   > device row carrying one wedges every future rotation for the whole family. Every write path
+   > now enforces the blob's shape and self-consistency, and `POST /spaces` and `POST /devices`
+   > additionally verify the signature — **`POST /invites/redeem` does not yet**, and must. Owner:
+   > `server/core/handlers/invites.js`. Every attestation in
    that roster is verified, so a relay that wants an admission must invent a whole **member** —
    recovery key, device, attestation — which surfaces in the member list (15.4). That is §8.5's
    already-accepted, UI-surfaceable phantom member, not an anonymous key injection. The personal

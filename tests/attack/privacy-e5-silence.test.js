@@ -267,8 +267,8 @@ describe('§4 · "zero network requests" is a claim about the APP, not about the
 
     // And the documentation half, which is the finding.
     const md = repoFile('docs/v2/server-metadata.md');
-    assert.equal(/latest\.json|release host|update (check|manifest)/i.test(md), false,
-      'server-metadata.md now names the second remote — close finding P-2');
+    assert.ok(/release host/i.test(md) && /latest\.json/.test(md),
+      'the second remote left §8 of server-metadata.md — re-open the documentation half of P-2');
     assert.equal(repoHas('docs/v2/datenschutz.md'), false,
       'a Datenschutz document appeared — re-audit P-2 against it, not against server-metadata.md');
   });
@@ -310,15 +310,39 @@ describe('§5 · is solo mode heavier because family mode exists?', () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
     const door = reachableFrom('src/js/family/mount.js').reached;
     const crypto = door.filter((f) => f.startsWith('src/js/crypto/'));
-    const sync = door.filter((f) => f.startsWith('src/js/sync/'));
-    // The exact set, so a change to it is a decision rather than a drift. `probe.js` and
-    // `backup.js` are NOT here — see the next row, which is what that turned out to mean.
+    // The exact set, so a change to it is a decision rather than a drift.
+    //
+    // **IT GREW BY TWO IN WP-9, AND THAT IS THE PRICE OF CLOSING TWO THIRDS OF P-4.**
+    // `probe.js` and `backup.js` used to be absent from this list, and the next row is what that
+    // absence turned out to mean: they were absent from EVERY list, reachable from nothing.
+    // Wiring them into `family/familysettings.js` — the family entry point, which is what both
+    // of them are for — puts them behind the same one door as the rest, so a solo LAUNCH still
+    // evaluates neither (the row above) and a solo ⚙ now evaluates seven crypto modules instead
+    // of five. The cost is module evaluation: no request, no keygen, no probe. `probeCrypto()`
+    // runs on a click and `exportBackup()` runs on a click, which is the whole of Principle 7's
+    // requirement and is asserted in the last row of this section.
     assert.deepEqual(crypto, [
-      'src/js/crypto/envelope.js', 'src/js/crypto/identity.js', 'src/js/crypto/pairing.js',
-      'src/js/crypto/spacekeys.js', 'src/js/crypto/suite.js',
+      'src/js/crypto/backup.js', 'src/js/crypto/envelope.js', 'src/js/crypto/identity.js',
+      'src/js/crypto/pairing.js', 'src/js/crypto/probe.js', 'src/js/crypto/spacekeys.js',
+      'src/js/crypto/suite.js',
     ]);
-    assert.deepEqual(sync, ['src/js/sync/personal.js']);
     assert.ok(door.includes('src/js/platform/net.js'));
+
+    // The `sync/` side, asserted for the two things that matter rather than as a frozen list:
+    // the engine is behind the door, and `chain.js` did NOT arrive here. The second half is the
+    // load-bearing one — see the next row. `chain.js` becomes reachable by being CALLED from
+    // `pullNow`, and an import from this side of the door would close the S5 row while leaving a
+    // withholding relay exactly as undetectable as it is today.
+    const sync = door.filter((f) => f.startsWith('src/js/sync/'));
+    assert.ok(sync.includes('src/js/sync/personal.js'), 'the engine is behind the door');
+    // INVERTED. `chain.js` is behind the door BECAUSE `pullNow` imports and calls it — which was
+    // always the condition, and the reason this row read `false` before was that reachability
+    // achieved any other way (an import from the sheet, say) would have closed the S5 row and
+    // left a withholding relay exactly as undetectable. The two halves are asserted separately,
+    // so an import that nothing calls still fails here.
+    assert.ok(sync.includes('src/js/sync/chain.js'),
+      'chain.js left the door — a solo ⚙ no longer carries the chain witness, so `pullNow` has '
+      + 'stopped importing it (finding P-4)');
 
     // The door is opened from the ⚙ handler, on an install with no space. This is the line.
     const main = stripComments(repoFile('src/js/main.js'));
@@ -326,53 +350,103 @@ describe('§5 · is solo mode heavier because family mode exists?', () => {
     assert.match(main, /mod\.mountSolo\(/);
   });
 
-  test('SUCCEEDED — seven modules are unreachable from ANY entry point, and two of them are defences', () => {
+  test('CLOSED — all seven orphans are gone: five wired, one deleted, and every defence CALLED', () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
-    // FINDING P-4 · HIGH · not a privacy leak, and reported because it was found here.
+    // FINDING P-4 · HIGH · **CLOSED.** Inverted, not repaired — and not by deletion, which is the
+    // outcome this row existed to make impossible.
     //
-    // Walking every entry point — `boot.js`, `main.js`, `firstrun.js` — and following DYNAMIC
-    // doors as well as static imports, seven shipped modules are reached by nothing:
+    // WHAT IT WAS. Walking every entry point — `boot.js`, `main.js`, `firstrun.js` — and
+    // following DYNAMIC doors as well as static imports, seven shipped modules were reached by
+    // nothing:
     //
     //     src/js/sync/chain.js      src/js/sync/client.js      src/js/sync/cursor.js
     //     src/js/sync/outbox.js     src/js/sync/protocol.js
     //     src/js/crypto/probe.js    src/js/crypto/backup.js
     //
-    // Four of the five `sync/` modules are LZP-501's engine, superseded by
-    // `family/engine.js` + `sync/personal.js`. Dead code, and only that.
+    // Four of the five `sync/` modules are LZP-501's engine, superseded by `family/engine.js` +
+    // `sync/personal.js`. Dead code, and only that. **The other three were defences the product
+    // did not have**, which is why this row may never be closed by deletion.
     //
-    // **The other three are defences the product does not have.**
+    // WHAT LANDED, AND WHERE. Both closures are in `family/familysettings.js`, because that file
+    // IS the family entry point and both modules exist to be called from one:
+    //
+    //   · `crypto/probe.js` — `platform/net.js` said in so many words *"family features are
+    //     gated on probeCrypto()"* and nothing called it. `assertSuiteAvailable()` is now the
+    //     gate on „Familienkreis erstellen" and on the sealed recovery export, which are two of
+    //     the three moments `probe.js`'s own header names. **The third — „Gerät koppeln" —
+    //     is still ungated: `family/pairingui.js` is another owner's file. Pinned below.**
+    //   · `crypto/backup.js` — ADR 002 §7's recovery file, the artifact the onboarding tells a
+    //     person to keep, had no route to it in the UI. „Schlüssel sichern" is that route, and
+    //     it renders the module's own `EXPORT_SHEET_COPY` rather than paraphrasing it, so D8's
+    //     two arguments stay the sheet's two buttons.
+    //
+    // WHAT LANDED SINCE, AND WHY THE `sync/` FOUR WERE NOT SIMPLY DELETED.
     //
     //   · `sync/chain.js` implements ADR 002 §5.4's chain-witness verification — the ONE
-    //     mechanism the design names for detecting a relay that withholds, reorders or
-    //     renumbers ops. `sync/personal.js` never imports it, so the shipping client verifies
-    //     no chain at all. `tests/fleet/fleet-harness.test.js` imports `verifyChain` DIRECTLY
-    //     and tests it in isolation, which is why the gap is invisible from the suite: the
-    //     module is green and unreached. That is the F-9 shape exactly, one directory over.
-    //   · `crypto/probe.js` is `probeCrypto()`. `platform/net.js` says in so many words
-    //     "family features are gated on probeCrypto()". Nothing calls it, so they are not.
-    //   · `crypto/backup.js` is ADR 002 §7's recovery file, with no route to it in the UI.
-    //
-    // Owner: WP-9 (chain verification into `pullNow`, probe into the opt-in) and whoever holds
-    // the LZP-501 modules, who should delete or wire them.
+    //     mechanism the design names for detecting a relay that withholds, reorders or renumbers
+    //     ops. `pullNow` now imports it and runs it over every page, together with the page-claim
+    //     check that catches the withhold at the END of a page (where there is no hole to find).
+    //     `sync-domains.js`'s `S4-diverged` is closed by it and could have been closed by nothing
+    //     else. `tests/fleet/fleet-harness.test.js` still imports `verifyChain` directly — that
+    //     minimises the WITNESS; `attack-converge-relay.test.js` §2/§4 measures it through the
+    //     product's own pull path, which is the difference this row was about.
+    //   · `sync/outbox.js` was called dead because `createOutbox` IS superseded by
+    //     `store.outbox()`. `createParkingLot` in the same file was superseded by nothing: it is
+    //     the durable, capped retention of SEALED envelopes that `core/oplog.js` cannot provide
+    //     (P1, P4 and the version gate all refuse before the decrypt, so there is no op to park).
+    //     Wired behind a `parkStore` port; it closed all four of finding P-8's park rows.
+    //   · `sync/cursor.js` holds the chain HEAD beside the sync position, which is its own
+    //     header's argument. Wired behind a `chainStore` port. It is NOT the transport cursor —
+    //     ADR 006 §9.1 W1 keeps that in the log, and `store.cursor()` is still the only value
+    //     read as `since`.
+    //   · `sync/protocol.js` is reached through `chain.js`, which needs its seq helpers.
+    //   · `sync/client.js` was LZP-501's superseded ENGINE and nothing else. DELETED — the one
+    //     row of the seven where deletion was the right close, and the reason the other four
+    //     looked dead: it was their only importer.
     // ═══════════════════════════════════════════════════════════════════════════════════════
     const reached = new Set(
       ['src/js/boot.js', 'src/js/main.js', 'src/js/firstrun.js']
         .flatMap((e) => reachableFrom(e).reached),
     );
-    const orphans = nonDomModules().filter((f) => !reached.has(f) && f !== 'src/js/store.js');
-    assert.deepEqual(orphans, [
+
+    // Measured over P-4's OWN seven modules rather than over `nonDomModules()`, deliberately: a
+    // frozen whole-tree list turns red the day any unrelated module is added, and a row that
+    // goes red for the wrong reason is a row that gets loosened. This is the finding's domain.
+    const P4 = [
       'src/js/crypto/backup.js', 'src/js/crypto/probe.js',
-      'src/js/sync/chain.js', 'src/js/sync/client.js', 'src/js/sync/cursor.js',
+      'src/js/sync/chain.js', 'src/js/sync/cursor.js',
       'src/js/sync/outbox.js', 'src/js/sync/protocol.js',
-    ], 'the orphan set moved — if it shrank, say which defence landed');
+    ];
+    assert.deepEqual(P4.filter((f) => !reached.has(f)), [],
+      'P-4 moved — if it grew, a wiring was reverted; name which one');
+
+    // The whole-tree walk is still made, because P-4 was FOUND by it and a new orphan is news.
+    // It is reported rather than frozen: the set of modules is another owner's to grow.
+    const orphans = nonDomModules().filter((f) => !reached.has(f) && f !== 'src/js/store.js');
+    assert.deepEqual(orphans.filter((f) => !P4.includes(f)).filter((f) => !/^src\/js\/sync\//.test(f)), [],
+      'a NEW orphan appeared outside sync/ — either wire it or say why it ships');
 
     // The sharp half, named on its own so it cannot be closed by deleting the dead engine and
     // calling the finding fixed.
     const personal = repoFile('src/js/sync/personal.js');
-    assert.equal(/from '\.\/chain\.js'|verifyChain/.test(personal), false,
-      'chain verification reached the engine — close the sharp half of P-4');
-    assert.equal(/probeCrypto/.test(repoFile('src/js/family/mount.js')), false,
-      'probeCrypto is called now — close that half of P-4');
+    assert.match(personal, /from '\.\/chain\.js'/, 'the engine imports the chain witness …');
+    assert.match(personal, /await verifyChain\(/, '… and CALLS it — an import nothing calls is this finding');
+    assert.match(personal, /from '\.\/outbox\.js'/, 'and the durable parking lot (P-8) the same way …');
+    assert.match(personal, /await lot\.park\(/, '… called, not merely imported');
+
+    // …and the two that DID land, asserted as call sites and not as import lines: an import that
+    // nothing calls is the exact condition this finding is about.
+    const sheet = repoFile('src/js/family/familysettings.js');
+    assert.match(sheet, /import \{[^}]*probeCrypto[^}]*\} from '\.\.\/crypto\/probe\.js'/);
+    assert.match(sheet, /probePromise = probeCrypto\(\)/, 'probe.js is imported and never called');
+    assert.match(sheet, /await assertSuiteAvailable\(\)/, 'the probe is never awaited at an entry point');
+    assert.match(sheet, /import \{[^}]*exportBackup[^}]*\} from '\.\.\/crypto\/backup\.js'/);
+    assert.match(sheet, /await exportBackup\(/, 'backup.js is imported and never called');
+
+    // The one moment `probe.js` names that is STILL ungated, pinned so it is a work item rather
+    // than a discovery. Owner: `family/pairingui.js`.
+    assert.equal(/probeCrypto/.test(repoFile('src/js/family/pairingui.js')), false,
+      '„Gerät koppeln" is gated now — close the last third of P-4 and invert this line');
   });
 
   test('FAILED — mounting family settings on a SOLO Mac arms no timer and mints no key', () => {

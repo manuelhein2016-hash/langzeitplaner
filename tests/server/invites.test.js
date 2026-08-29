@@ -32,6 +32,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { memoryStore } from '../../server/adapters/memory.js';
+import { attestedPerson, attestedDeviceFor, deviceWire, memberWire } from './_attested-person.js';
 import { fileStore } from '../../server/adapters/file.js';
 import { MODEL_COLUMNS } from '../../server/core/store-interface.js';
 import {
@@ -141,25 +142,12 @@ function capture(res) {
 
 // ── people, and the code a human would type ──────────────────────────────────
 
-function person(seed) {
-  return {
-    memberId: `mem_${id22(seed)}`,
-    deviceId: `dev_${id22(seed + 1)}`,
-    deviceShort: short16(seed + 2),
-    recoveryPubSig: bytes(65, seed + 3),
-    recoveryPubKex: bytes(65, seed + 4),
-    sigPubRaw: bytes(65, seed + 5),
-    kexPubRaw: bytes(65, seed + 6),
-    attestation: bytes(120, seed + 7),
-  };
-}
-const memberBody = (p) => ({
-  memberId: p.memberId, recoveryPubSig: b64(p.recoveryPubSig), recoveryPubKex: b64(p.recoveryPubKex),
-});
-const deviceBody = (p) => ({
-  deviceId: p.deviceId, deviceShort: p.deviceShort,
-  sigPubRaw: b64(p.sigPubRaw), kexPubRaw: b64(p.kexPubRaw), attestation: b64(p.attestation),
-});
+// A person is now REAL — see `_attested-person.js` and finding E2E3-7. `POST /invites/redeem`
+// shares `readDevice` with `POST /spaces`, and that reader now requires the attestation to parse
+// and to describe the very device being registered, so a fixture made of noise is refused.
+const person = attestedPerson;
+const memberBody = memberWire;
+const deviceBody = deviceWire;
 const wrap = (recipientId, epoch, seed) => ({ recipientId, epoch, wrapped: b64(bytes(156, seed || 1)) });
 
 /**
@@ -174,10 +162,10 @@ function inviteFromCode(codeSeed) {
   return { code, inviteId, proof, verifier: sha256(proof) };
 }
 
-const ADMIN = person(11);
-const MOM = person(21);
-const KID = person(31);
-const STRANGER = person(41);
+const ADMIN = await person({ colorRef: 'gruen' });
+const MOM = await person({ colorRef: 'blau' });
+const KID = await person({ colorRef: 'rot' });
+const STRANGER = await person({ colorRef: 'schiefer' });
 const SPACE = `fsp_${id22(2)}`;
 const OTHER_SPACE = `fsp_${id22(3)}`;
 
@@ -488,10 +476,18 @@ for (const adapter of ADAPTERS) {
       await createInvite(req({ body: { spaceId: SPACE, inviteId: inv.inviteId, verifier: b64(inv.verifier) } }), ctx);
       return inv;
     };
+    // The two device clashes are now built as REAL attestations, because `readDevice` refuses a
+    // blob that does not describe the device it arrives with (finding E2E3-7) — so swapping a
+    // field in `deviceBody(MOM)` no longer reaches the store check this row is about, it stops
+    // at the door. Mom therefore attests, under her OWN recovery key, a device that carries
+    // ADMIN's label in one case and ADMIN's public keys (and therefore ADMIN's short) in the
+    // other. Both blobs verify; both must still be refused by the relay's uniqueness checks.
+    const momClaimsAdminsLabel = await attestedDeviceFor(MOM, { deviceId: ADMIN.deviceId });
+    const momClaimsAdminsShort = await attestedDeviceFor(MOM, { borrowKeysFrom: ADMIN });
     const clash = [
       ['member.memberId', { ...redeemBody(await mk(18), MOM), member: { ...memberBody(MOM), memberId: ADMIN.memberId } }],
-      ['device.deviceId', { ...redeemBody(await mk(19), MOM), device: { ...deviceBody(MOM), deviceId: ADMIN.deviceId } }],
-      ['device.deviceShort', { ...redeemBody(await mk(20), MOM), device: { ...deviceBody(MOM), deviceShort: ADMIN.deviceShort } }],
+      ['device.deviceId', { ...redeemBody(await mk(19), MOM), device: deviceWire(momClaimsAdminsLabel) }],
+      ['device.deviceShort', { ...redeemBody(await mk(20), MOM), device: deviceWire(momClaimsAdminsShort) }],
     ];
     for (const [field, body] of clash) {
       const err = await expectFail(() => redeemInvite(req({ body }), makeCtx(store, clock, { auth: { deviceShort: body.device.deviceShort } })), 400, 'bad_request', field);
@@ -607,7 +603,7 @@ for (const adapter of ADAPTERS) {
   T('THE CROSS-SPACE GUARD: a member of one family cannot revoke another family\'s invite', async () => {
     const { store, clock } = await makeSpace(adapter);
     // A second family, on the same relay, with its own admin.
-    const other = person(300);
+    const other = await person({ colorRef: 'ocker' });
     await createSpace(req({
       body: {
         spaceId: OTHER_SPACE, kind: 'FAMILY', colorRef: 'rot',
@@ -721,7 +717,21 @@ test('no response this suite produced carries a key, a verifier or a name', () =
   assert.ok(seenBodies.length >= 10, `only ${seenBodies.length} responses captured — the scan needs material`);
   for (const body of seenBodies) {
     const json = JSON.stringify(body);
-    for (const f of FORBIDDEN_RESPONSE_FIELDS) {
+    // ── `attestation` LEFT THIS BLOCKLIST 2026-08-29 — finding E2E3-6 ──────────────────────
+    // `memberProjection` now publishes the device attestation, and the redeem response carries
+    // that projection (it is how a joiner learns who is already in the circle). The blob is a
+    // SIGNED payload whose field set is closed at the door (`assertAttestationClosed` in
+    // `spaces.js`), so every value in it is one the relay already holds in a column of its own —
+    // it is not key material and it cannot carry a name. Every other entry still bites.
+    //
+    // ⚠ CROSS-FILE: `FORBIDDEN_RESPONSE_FIELDS` in `server/core/handlers/invites.js` still lists
+    // `attestation` and should drop it. That constant is another pass's file, so the exclusion is
+    // made HERE, loudly, rather than reached into — and it is asserted to be exactly one entry so
+    // it cannot quietly grow into a hole.
+    const stillForbidden = FORBIDDEN_RESPONSE_FIELDS.filter((f) => f !== 'attestation');
+    assert.equal(stillForbidden.length, FORBIDDEN_RESPONSE_FIELDS.length - 1,
+      'exactly one field left the blocklist, and this is which');
+    for (const f of stillForbidden) {
       assert.equal(json.includes(`"${f}"`), false, `${f} appeared on a 200 body: ${json.slice(0, 200)}`);
     }
     for (const word of ['Mama', 'Familie Weber', 'privat', 'Zahnarzt']) {

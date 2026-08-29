@@ -160,16 +160,18 @@ describe('§2a · a relay that reorders, duplicates or delays changes latency an
     });
   }
 
-  test('a relay that withholds ops from ONE Mac takes them PERMANENTLY — and only the chain can see it', async () => {
+  test('a relay that withholds ops from ONE Mac now only DELAYS them — the chain sees it (P-4)', async () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════════
-    // THE ONE LIE THE PAYLOAD CANNOT EXPOSE, and v2 accepts it knowingly.
+    // INVERTED, NOT REPAIRED. This row measured the one lie the payload could not expose, and it
+    // was true: a relay that dropped ops from a page and still reported a `nextCursor` past them
+    // took those ops from that Mac for ever, because the client had nothing to compare against.
     //
-    // A relay that drops ops from a page and still reports a `nextCursor` past them takes those
-    // ops from that Mac for ever: the client has nothing to compare against, the merge is
-    // set-based so nothing looks wrong, and ADR 002 §8.6 / ADR 003 §10.6 make the chain witness
-    // DIAGNOSTIC-ONLY in v2 — it never blocks a sync. This test is the measurement of that trade,
-    // aimed at ONE victim (the third argument every mutator receives) so the result is a genuine
-    // DIVERGENCE between two Macs rather than a shared error.
+    // `sync/personal.js` now runs `sync/chain.js` over every page and checks the relay's own
+    // claim about it — `server/core/handlers/ops.js` says `nextCursor` is "the seq of the last op
+    // ACTUALLY RETURNED" — so the cursor stops below anything it was not handed. ADR 002 §8.6 /
+    // ADR 003 §10.6 keep the witness DIAGNOSTIC-ONLY, and that is respected: the ops that DID
+    // arrive are still applied, nothing is refused on the witness's word, and the only thing the
+    // finding changes is the cursor and the indicator. A withhold is a delay again.
     // ═══════════════════════════════════════════════════════════════════════════════════════════
     const f = await twoMacs();
     await scenario(f);
@@ -186,16 +188,18 @@ describe('§2a · a relay that reorders, duplicates or delays changes latency an
     await f.A.sync();
     assert.ok(lied >= 1, 'the adversary was actually armed');
 
-    assert.equal(f.B.state.notes.find((n) => n.id === 'n1'), undefined,
-      'the withheld op is GONE from this Mac and an honest relay afterwards does not bring it back — '
-      + 'the cursor was advanced over it by the relay\'s own nextCursor');
-    assert.equal(f.A.state.notes.find((n) => n.id === 'n1').text, 'zwei', 'while the other Mac has it');
-    assert.equal(boardsAgree([f.A, f.B]).equal, false, 'so the two Macs are permanently divergent');
+    assert.equal(f.B.state.notes.find((n) => n.id === 'n1').text, 'zwei',
+      'the withheld op COMES BACK the moment the relay is honest: the cursor was never advanced '
+      + 'over an op this Mac had not been handed, so the relay still owed it');
+    assert.equal(f.A.state.notes.find((n) => n.id === 'n1').text, 'zwei', 'and the other Mac has it');
+    assert.equal(boardsAgree([f.A, f.B]).equal, true, boardsAgree([f.A, f.B]).detail);
     assert.equal(f.B.status().state, 'healthy',
-      'and the engine reports HEALTHY, because nothing in the payload could have told it otherwise');
+      'and the indicator is quiet again once the stream verifies — a fork that healed is not a fork');
 
-    // …and this is precisely what `src/js/sync/chain.js` exists to see. ADR 003 §3.3 makes `seq`
-    // gapless per space, so a withheld op is a HOLE, and the hole is provable without any key.
+    // …and this is precisely what `src/js/sync/chain.js` sees. ADR 003 §3.3 makes `seq` gapless
+    // per space, so a withheld op is a HOLE, and the hole is provable without any key. Kept as a
+    // direct call because it minimises the WITNESS; the wiring that puts it on the product's own
+    // pull path is measured in `attack-converge-relay.test.js` §2/§4, through `pullNow`.
     const page = await f.A.run(() => f.A.transport.request(
       'GET', '/api/v1/ops', { space: f.spaceId, since: '0' }, null,
     ));

@@ -3,6 +3,14 @@
 **Date:** 2026-08-29 · **Milestone:** M1 „Zwei Macs" · **Tickets:** LZP-501…505, LZP-1002
 **Read `docs/v2/FINDINGS.md` §3 first** — this document's §6 is that list's disposition.
 
+> ### ⚠ SUPERSEDED IN PART — read §9 before you rely on anything below.
+>
+> This document records the M1 DEMONSTRATION and is kept as written, because what it claimed and
+> what it missed are both part of the record. Two adversary rounds ran against it and round 8's
+> integration pass then closed what they found. **Nothing here about confidentiality changed —
+> 21.1 and 21.2 held under both attacks.** What changed is §0's verdict about DURABILITY, and
+> §1's suite numbers. **§9 is the correction.**
+
 ---
 
 ## 0. The one-paragraph verdict
@@ -669,3 +677,77 @@ Files E5 edited that belong to someone else, and why each edit was unavoidable:
 | `package.json` | `test:fleet`, and it in `test:all` |
 | four tier-1 / attack / tier-2 gate files | the STATIC amendment (§4.1) and three inverted accepted-defect rows |
 | `tests/helpers/{importgraph,loopback,helper-hygiene}.js` | edge kinds; one re-export; the guard's self-exclusion |
+
+
+---
+
+## 9. WHAT ROUND 8 CORRECTED — read this before §0
+
+*Added 2026-08-29 by the round-8 integration pass. `docs/v2/FINDINGS.md` §3c has the rows, §7a-round8
+the mutants, §7d-2 the method.*
+
+### 9.1 §0's verdict was right about secrecy and wrong about durability
+
+> **M1 is demonstrated, not argued.**
+
+It was, and every confidentiality claim in this document survived two adversary rounds intact. But
+the demonstration was ONE scripted run, and a scripted run cannot see a defect whose trigger is an
+interleaving. Two of them were there:
+
+- **E5-2 was recorded in this document as CLOSED and was not.** §5's account of the clamp is
+  accurate about what the clamp does; the clamp stood down in one arm, and that arm — `cap === null`
+  — is the state EVERY compaction leaves a log in. `compact ▸ author offline ▸ compact` therefore
+  still destroyed the unacknowledged edit, `outbox()` still returned 0, and both Macs still said
+  `healthy`.
+- **A second, independent defect was hiding behind it.** `oplog.load()` fed each tail line the
+  `seq` its BYTES carry, and a tail line is written before any ack exists, so it always reads
+  `null`; the durable ack lives in `checkpoint().seqs`. An acknowledged op came back looking
+  unacknowledged, which dragged the outbox floor below the persisted horizon and pushed the clamp
+  into its one unrecoverable arm. **Filed as L-4, CRITICAL.** It is reached by any Mac that quits
+  after a compaction — no adversary, no old file, no hostile relay.
+
+The measurement that separates a demonstration from a proof: the seeded convergence sweep diverged
+on **the majority** of 24 seeds before this round, on **2 of 24** after E5-2's own arm was fixed —
+a rate that reads as *"it works"* on most runs — and on **0 of 128** after L-4.
+
+### 9.2 The park branch in this document's own engine was dead code
+
+§2 records `pullNow`'s F-6 handling as built. The branch existed and never ran: it tested
+`out.parked`, a field `openOp` does not set, so **every** park fell through to `terminal()` —
+quarantined, cursor released, op destroyed. The two ADR promises this document cites (ADR 002
+§5.2.5, ADR 003 §4: *"an old client in a family with a newer one degrades to does not show the new
+thing instead of loses the new thing"*) were false in the shipped engine. **Filed as P-8,
+CRITICAL, closed.**
+
+### 9.3 Three states this document could not report, because nothing could see them
+
+Round 8's enumeration of the op lifecycle opened three findings that had no adversary row at all:
+a refusal that dies with the session (**L-1**), a durable hold nothing can report (**L-2**), and a
+park with no reaper (**L-3**). All three are HIGH and all three are closed. They matter to this
+document specifically, because §0's confidence rests on the demonstration having reported nothing
+— and at the time, `sync.status()` could not have reported any of them.
+
+### 9.4 The suite numbers in §1 are superseded
+
+| suite | §1 (E5) | round 8 |
+|---|---|---|
+| `npm test` | 1956 / 0 | **1929 / 0** — the drop is `sync-client.test.js` deleted with the dead engine |
+| `test:attack` | 648 / 0 | **706 / 0** |
+| `test:property` | 70 / 0 | **85 / 0** — `sync-domains` walks 253 entries: 0 UNEXPECTED, 0 STALE |
+| `test:server` | 799 / 0 | **815 / 0** |
+| `test:fleet` | 60 / 0 | **103 / 0** |
+| `test:dom` | 26 files, 1 fail | **26 files, tier 2 PASS** — the E3-10 Saturday row is closed |
+
+### 9.5 What §0's verdict should say now
+
+**For LOSS, M1 is proved rather than demonstrated.** The claim is no longer one run: it is 128
+generated interleavings of partition, reorder, duplication, compaction, restart and quarantine
+against the real store, the real op log, the real `openOp`, the shipped engine and all 23 server
+handlers, over an enumerated 253-entry domain whose every cell is decided, with fourteen mutants
+each naming the row that dies.
+
+**For the PRODUCT it is not, and the gaps are unchanged and are not about losing ops:** **E5-6**
+(a paired Mac receives none of the pre-space board, categories included) and **E1's `sync_request`**
+in both shells — the demonstration ran on `fetch` in a browser, and the shipped app still has no
+family transport. The two-Mac evidence also remains fleet-level: two real store modules with two
+real disks over the real handlers, not two real machines.

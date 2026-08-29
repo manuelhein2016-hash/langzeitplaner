@@ -7,6 +7,7 @@
 | **Tickets** | LZP-201..207, 501, 502, 504, 505, 104, 109, 1002, 1008 |
 | **Stories** | 15.2–15.6, 19.1, 19.2, 19.3, 19.4, 19.6, 20.1–20.4, 21.1, 21.3, 21.4, 21.5, 22.7 |
 | **Depends on** | ADR 001 (op-log), ADR 002 (crypto) |
+| **Amended** | 2026-08-29 (E2↔E3 seam) — **§3 and §5.1 are amended so that this ADR and ADR 002 describe ONE wire.** Family key rotation could not be performed by any client over the endpoints below, and both sides' suites were green because neither ever put one side's output into the other's input. `POST /spaces/:id/epoch`'s body is stated exactly (§3.5); `GET /spaces/:id/keys` gains **`senderKexPubRaw`**, which ADR 002 §4.2 step 6 has required since 2026-08-28 and no column carried; `GET /spaces/:id/members` publishes **`device.attestation`**, the roster ADR 002 §4.2 step 6 already specified; `KeyWrap` gains a relay-stamped **`senderDeviceId`**; and `device.attestation` has ONE encoding on every write path — the blob string — verified on `POST /spaces` as it always was on `POST /devices`. §5.1's model block was also stale in four places and is refreshed against `server/prisma/schema.prisma`, which is the authority. Findings **E2E3-1 … E2E3-8**. |
 
 > **The one-sentence protocol.** Devices push signed, padded, end-to-end-encrypted envelopes to a
 > per-space append-only log and pull everything after a cursor; the server assigns sequence
@@ -83,10 +84,10 @@ risk **R7**, not silently reinterpreted.
 GET  /api/v1/meta                       → { minProto, maxProto, region, serverTime }
 POST /api/v1/ops                        push          §3.1
 GET  /api/v1/ops                        pull          §3.2
-GET  /api/v1/spaces/:id/keys            key wraps addressed to this device, ALL epochs
+GET  /api/v1/spaces/:id/keys            key wraps addressed to this device, ALL epochs  §3.5
 POST /api/v1/spaces                     create space (15.2)
-POST /api/v1/spaces/:id/epoch           rotate (ADR 002 §4.2) — atomic, coverage-checked
-GET  /api/v1/spaces/:id/members         member list + attested device public keys
+POST /api/v1/spaces/:id/epoch           rotate (ADR 002 §4.2) — atomic, coverage-checked   §3.5
+GET  /api/v1/spaces/:id/members         member list + attested device public keys + BLOBS §3.6
 POST /api/v1/spaces/:id/rename          20.1
 POST /api/v1/spaces/:id/delete          20.4 — cascade purge
 POST /api/v1/invites                    create   (15.2, 15.5)
@@ -205,6 +206,94 @@ mid-pull re-fetches rather than skips.
 
 The fleet suite still scripts it explicitly, including a device that misses two key rotations.
 
+### 3.5 Rotation and key delivery — the exact bodies  *(added 2026-08-29)*
+
+> **WHY THIS SECTION EXISTS.** ADR 002 §4.2 describes what a client must do; §3 above listed two
+> routes and no shapes. The two descriptions did not meet, and nothing in either suite would have
+> said so — the E2 handlers were proved against hand-built bodies and the E3 crypto against a
+> hand-built member list. Six fields disagreed and family key rotation was unbuildable by
+> anybody. The shapes are written down here, once, and ADR 002 §4.2 steps 4 and 6 point at them.
+
+```jsonc
+// POST /api/v1/spaces/:id/epoch  — the rotation.  ADR 002 §4.2 step 4.
+{
+  "epoch": 4,                           // exactly currentEpoch + 1; 409 epoch_taken otherwise
+  "wraps": [
+    { "recipientId": "dev_8Kx2Qm7bR0aZ4tV9wLpNcg",   // a device id OR "rec_<memberId>"
+      "epoch": 1,                                     // 1..epoch — the backfill rides along
+      "wrapped": "eyJjdCI6…" }                        // b64url of canonicalJSON(WrapBlob)
+  ]
+}
+```
+
+**Three things are NOT on this body and each absence is load-bearing:**
+
+| absent | why |
+|---|---|
+| `invites` | D9 removed every trace of key material from an invite, so there is nothing to re-wrap. The relay refreshes each open invite's epoch itself. The field's *presence* is `400 retired_by_d9` — not silently ignored, because a client that still sends it believes in a seven-day read window the PO removed |
+| `senderDeviceId` / `senderKexPubRaw` | **the relay stamps the depositor**, from the request it just authenticated. A client may not name it under either spelling; an unknown key is `400 unknown_field` |
+| a `deviceId` spelling of `recipientId` | a recipient may be `rec_<memberId>`, which is not a device id (finding E3-4). One name, and it is the true one |
+
+`Space.currentEpoch`, the `Epoch` row, the wrap inserts, the stale-wrap purge and the invite
+refresh are **one transaction**, and the coverage check runs *before* `claimEpoch` so a refused
+rotation cannot burn `e+1`.
+
+```jsonc
+// GET /api/v1/spaces/:id/keys  — delivery.  ADR 002 §4.2 step 6, §4.4.
+{
+  "spaceId": "fsp_…",
+  "currentEpoch": 4,
+  "wraps": [
+    { "epoch": 1,
+      "recipientId": "dev_8Kx2Qm7bR0aZ4tV9wLpNcg",
+      "wrapped": "eyJjdCI6…",
+      "senderKexPubRaw": "BF3k…" }   // b64url, 65 B — or NULL
+  ],
+  "keysPending": false,              // wraps.length === 0; the DESIGNED waiting state, not an error
+  "serverTime": 1787900000000
+}
+```
+
+**`senderKexPubRaw` is the field ADR 002 §4.2 step 6 has required since 2026-08-28**, and until
+2026-08-29 nothing on this wire carried it, so `admitWraps` threw on every honest row (finding
+E2E3-3). The relay stores the sender as `KeyWrap.senderDeviceId` — its own observation — and
+serves it here by joining to the `Device.kexPubRaw` it already publishes in §3.6.
+
+It is `null` when that device row is gone, which a member removal does by cascade. `null` is
+**not** an error: `SenderSet.lookup` answers `null`, `admitWraps` counts the row `unauthorized`,
+and the ops stay parked (ADR 002 §4.4) until a rotation by a live member re-deposits epochs
+`1..e+1`. That is the correct answer for a key deposited by a device this space no longer admits.
+
+**The relay cannot use this field to inject a key.** It selects among keys the receiver imported
+from verified attestations; it never supplies one. A wrong value causes a refusal.
+
+### 3.6 The member list carries the attestation blob  *(added 2026-08-29)*
+
+`GET /api/v1/spaces/:id/members` publishes, per device, `deviceId`, `deviceShort`, `sigPubRaw`,
+`kexPubRaw`, `revokedAt` **and `attestation`** — the blob string
+`b64u(canonicalJSON(payload)) + '.' + b64u(sig)`.
+
+This is the roster ADR 002 §4.2 step 6 already specified ("`MemberRowDb.recoveryPubSig` plus the
+`dev.*` blobs") and `familyRecipients()` refuses to build a recipient without it, so without this
+field no rotation is buildable at all (finding E2E3-6). It is a **hint**, never authority: every
+reader verifies it under the housing member's `recoveryPubSig` first, so the relay's device rows
+support *key distribution* and never *admissibility*. See ADR 002 §4.2 step 6 for the 21.1
+accounting, which is nil, and for the closed payload field set that keeps it nil.
+
+**It is NOT on the `GET /ops` piggyback** (§3.2), which stays four device fields. That runs every
+45 seconds for every device in every space; the roster is a membership-change path. Two
+projections, on purpose — `server/core/handlers/members.js` holds the reasoning and
+`tests/server/blindness.test.js` §7 holds both to one justified allowlist.
+
+**One encoding, everywhere.** `device.attestation` is the blob STRING on `POST /devices`,
+`POST /devices/adopt`, `POST /spaces` and `POST /invites/redeem`, stored as its UTF-8 bytes, and
+republished here byte for byte — it has to be, because clients verify a signature over exactly
+those bytes. `POST /spaces` previously read base64url and verified nothing while `POST /devices`
+read the string and verified P2 + S1 + S2; the column therefore had no type and a publication of
+it would have published two different things (finding E2E3-7). **`POST /invites/redeem` still
+does not verify the signature and must** — one unverifiable blob wedges every future rotation of
+that space, because `familyRecipients()` throws on it.
+
 ---
 
 ## 4. Protocol versioning and the N−1 rule (LZP-206, LZP-104 · addendum §3, story 22.7)
@@ -251,6 +340,14 @@ half the fleet at `PROTO_MAX − 1` — asserting round-trip and convergence in 
 
 ### 5.1 Prisma models (refining the addendum §3 sketch)
 
+> **REFRESHED 2026-08-29.** `server/prisma/schema.prisma` and `MODEL_COLUMNS` are the authority —
+> `tests/server/store-contract.test.js` parses the schema and compares it column by column — and
+> this block had drifted from both in four places. It is corrected in place rather than annotated,
+> because a sketch that disagrees with the schema is the thing an implementer reads first:
+> `Member.recoveryPubKex` (finding E3-2), `Device.lastPushedSeq` (interface extension E2-I8),
+> `KeyWrap`'s `recipientId`/composite key (finding E3-4) and its new `senderDeviceId` (finding
+> E2E3-3), and `PairSession.burnedAt` (E2-I7).
+
 ```prisma
 // server/prisma/schema.prisma        region: eu-central-1 (Frankfurt)
 
@@ -272,6 +369,12 @@ model Member {
   colorRef       String                         // PLAINTEXT — see the leak note below
   recoveryPubSig Bytes                          // 65 B raw P-256; verifies device attestations
                                                 //   and /devices/adopt (ADR 002 §7.3)
+  recoveryPubKex Bytes                          // 65 B raw P-256 (RK_kex). Finding E3-2: ADR 002
+                                                //   §4.2 step 2 wraps to each member's RK_kex and
+                                                //   had no public key to address. NOTHING SIGNS
+                                                //   IT — see ADR 002 §4.2 step 2 as amended
+                                                //   (finding E2E3-8): the FAMILY recovery wrap is
+                                                //   suspended until the attestation carries it.
   joinedAt       DateTime  @default(now())
   removedAt      DateTime?
   devices        Device[]
@@ -290,8 +393,13 @@ model Device {
   deviceShort  String    @unique                // 16 Crockford base32 — the stamp tiebreak
   sigPubRaw    Bytes                            // 65 B
   kexPubRaw    Bytes                            // 65 B
-  attestation  Bytes                            // signed by the member's recovery key
-  lastSeenSeq  BigInt    @default(0)            // reported on push; gates tombstone GC
+  attestation  Bytes                            // signed by the member's recovery key. UTF-8 of the
+                                                //   blob STRING on every write path (E2E3-7), and
+                                                //   PUBLISHED by GET /members (E2E3-6, §3.6)
+  lastSeenSeq  BigInt    @default(0)            // READ progress; reported on push, gates GC
+  lastPushedSeq BigInt   @default(0)            // WRITE progress. E2-I8: read progress alone is
+                                                //   unsafe — a device can be caught up on reads
+                                                //   and still hold a 3-week-old unpushed edit
   addedAt      DateTime  @default(now())
   revokedAt    DateTime?
   member       Member    @relation(fields: [memberId], references: [id], onDelete: Cascade)
@@ -321,13 +429,22 @@ model Epoch  { spaceId String  epoch Int  createdAt DateTime @default(now())
                @@id([spaceId, epoch]) }         // first-writer-wins rotation (ADR 002 §4.2)
 
 model KeyWrap {
-  id       String @id @default(cuid())
-  spaceId  String
-  epoch    Int
-  deviceId String
-  wrapped  Bytes                                // {salt,iv,ct} — opaque
-  @@unique([spaceId, epoch, deviceId])
-  @@index([deviceId])
+  spaceId        String
+  epoch          Int
+  recipientId    String                         // a device id OR "rec_<memberId>" — finding E3-4.
+                                                //   NOT a foreign key onto Device: a recovery
+                                                //   recipient has no Device row
+  wrapped        Bytes                          // {salt,iv,ct} — opaque
+  senderDeviceId String                         // WHO DEPOSITED IT. Finding E2E3-3: ADR 002 §4.2
+                                                //   step 6 makes the RECEIVER verify the sender,
+                                                //   and admitWraps needs an index into its own
+                                                //   verified set. STAMPED BY THE RELAY from the
+                                                //   authenticated request, never read off a body;
+                                                //   GET /keys publishes it as `senderKexPubRaw`
+                                                //   by joining to Device.kexPubRaw. Not a foreign
+                                                //   key, for the same reason recipientId is not
+  @@id([spaceId, epoch, recipientId])           // the composite key IS the upsert target
+  @@index([recipientId])
 }
 
 model Invite {
@@ -344,7 +461,9 @@ model Invite {
 }
 
 model PairSession { rid String @id  boxA Bytes?  boxB Bytes?  delivery Bytes?
-                    attempts Int @default(0)  expiresAt DateTime }
+                    attempts Int @default(0)  expiresAt DateTime  burnedAt DateTime? }
+// `burnedAt` is a TOMBSTONE, not a delete (E2-I7): a row a replayed pair/offer could re-create
+// would reset the 5-attempt budget and make the 60-bit code the security parameter after all.
 
 model Nonce { deviceShort String  nonce String  expiresAt DateTime
               @@id([deviceShort, nonce])  @@index([expiresAt]) }
@@ -357,10 +476,25 @@ model RateBucket { key String @id  count Int  windowStart DateTime }
 **Everything the server can observe, exhaustively:**
 
 space ids and kinds · pseudonymous member ids · member **color refs** · join and removal
-timestamps · device ids, device shorts and public keys · device `lastSeenSeq` · epoch numbers and
-rotation times · per-space op counts · **padded** envelope sizes (256-byte buckets) · op
+timestamps · device ids, device shorts and public keys · **device attestation blobs** · device
+`lastSeenSeq` and `lastPushedSeq` · epoch numbers and rotation times · **which device deposited
+each key wrap** · per-space op counts · **padded** envelope sizes (256-byte buckets) · op
 **arrival** times · the chain hashes · invite id hashes, epochs and expiry · IP addresses in
 transit · Vercel's own request logs.
+
+> **Two of those are new on 2026-08-29 and neither widens what the relay knows** — which is why
+> neither adds a sentence to the Datenschutz copy, and why that claim is checked rather than
+> asserted (`tests/server/rotation-wire.test.js` §6, `blindness.test.js` §7).
+>
+> · **`Device.attestation`** was already stored and is now also *published to members of the same
+>   space* (finding E2E3-6). Every field inside it is a column above — `memberId`, `deviceId`,
+>   `deviceShort`, `sigPubRaw`, `kexPubRaw` — plus `createdAt`, a DAY, coarser than the `addedAt`
+>   the relay keeps to the millisecond. The payload's field set is CLOSED at every write path, so
+>   there are no free bits and the blob is not a channel. And every member could already read the
+>   same blob out of the E2EE stream (ADR 002 §2.3).
+> · **`KeyWrap.senderDeviceId`** is stamped by the relay from the request it authenticated
+>   (finding E2E3-3). It carries no client-chosen bits — `readWraps` refuses the field on a body —
+>   and states nothing the relay did not observe when it checked that signature.
 
 **Nothing else. No note text, no bar label, no category, no scratchpad, no date, no display name,
 no authoring time.**

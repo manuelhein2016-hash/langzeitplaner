@@ -291,7 +291,7 @@ for (const adapter of ADAPTERS) {
     assert.equal(await store.getDeviceByShort(forged.deviceShort), null, 'nothing was written');
 
     // And so the attacker's key never enters the set a rotation is REQUIRED to wrap to.
-    const required = coverageRequires(await store.listMembers(SPACE), await store.listDevices(SPACE));
+    const required = coverageRequires(await store.listMembers(SPACE), await store.listDevices(SPACE), 'FAMILY');
     assert.equal(required.includes(forged.deviceId), false, 'no row, nothing owed — the amplifier never arms');
   });
 
@@ -409,7 +409,7 @@ for (const adapter of ADAPTERS) {
     assert.equal(ghost.code, 'not_a_member');
 
     // Her own second Mac: allowed, and its wraps go with it.
-    await store.putKeyWraps([{ spaceId: SPACE, epoch: 1, recipientId: m2.body.deviceId, wrapped: new Uint8Array([1, 2]) }]);
+    await store.putKeyWraps([{ spaceId: SPACE, epoch: 1, recipientId: m2.body.deviceId, wrapped: new Uint8Array([1, 2]), senderDeviceId: 'dev_seed' }]);
     const own = await call(revokeDevice, req({ routeName: 'revokeDevice', body: { spaceId: SPACE, deviceId: m2.body.deviceId } }), as(asMama));
     assert.equal(own.status, 200);
     assert.equal(own.body.revoked, true);
@@ -432,10 +432,10 @@ for (const adapter of ADAPTERS) {
     const m1 = await register(makeCtx(store, fakeClock()), mama);
     const p1 = await register(makeCtx(store, fakeClock()), papa);
     await store.putKeyWraps([
-      { spaceId: SPACE, epoch: 1, recipientId: m1.body.deviceId, wrapped: new Uint8Array([1]) },
-      { spaceId: SPACE, epoch: 3, recipientId: m1.body.deviceId, wrapped: new Uint8Array([3]) },
-      { spaceId: SPACE, epoch: 2, recipientId: recoveryRecipientId(mama.id), wrapped: new Uint8Array([2]) },
-      { spaceId: SPACE, epoch: 1, recipientId: p1.body.deviceId, wrapped: new Uint8Array([99]) },
+      { spaceId: SPACE, epoch: 1, recipientId: m1.body.deviceId, wrapped: new Uint8Array([1]), senderDeviceId: 'dev_seed' },
+      { spaceId: SPACE, epoch: 3, recipientId: m1.body.deviceId, wrapped: new Uint8Array([3]), senderDeviceId: 'dev_seed' },
+      { spaceId: SPACE, epoch: 2, recipientId: recoveryRecipientId(mama.id), wrapped: new Uint8Array([2]), senderDeviceId: 'dev_seed' },
+      { spaceId: SPACE, epoch: 1, recipientId: p1.body.deviceId, wrapped: new Uint8Array([99]), senderDeviceId: 'dev_seed' },
     ]);
 
     const asMama = { deviceShort: m1.body.deviceShort, deviceId: m1.body.deviceId, memberId: mama.id };
@@ -469,10 +469,10 @@ for (const adapter of ADAPTERS) {
       { opId: 'op_gone_2', epoch: 1, deviceShort: g2.body.deviceShort, witness: null, chain: new Uint8Array(32), envelope: new Uint8Array(64) },
     ]);
     await store.putKeyWraps([
-      { spaceId: SPACE, epoch: 1, recipientId: g1.body.deviceId, wrapped: new Uint8Array([1]) },
-      { spaceId: SPACE, epoch: 2, recipientId: g1.body.deviceId, wrapped: new Uint8Array([2]) },
-      { spaceId: SPACE, epoch: 1, recipientId: recoveryRecipientId(gone.id), wrapped: new Uint8Array([3]) },
-      { spaceId: SPACE, epoch: 1, recipientId: a1.body.deviceId, wrapped: new Uint8Array([4]) },
+      { spaceId: SPACE, epoch: 1, recipientId: g1.body.deviceId, wrapped: new Uint8Array([1]), senderDeviceId: 'dev_seed' },
+      { spaceId: SPACE, epoch: 2, recipientId: g1.body.deviceId, wrapped: new Uint8Array([2]), senderDeviceId: 'dev_seed' },
+      { spaceId: SPACE, epoch: 1, recipientId: recoveryRecipientId(gone.id), wrapped: new Uint8Array([3]), senderDeviceId: 'dev_seed' },
+      { spaceId: SPACE, epoch: 1, recipientId: a1.body.deviceId, wrapped: new Uint8Array([4]), senderDeviceId: 'dev_seed' },
     ]);
     const exp = new Date(clock.now() + 86400000);
     await store.putInvite({ id: 'inv_by_gone', spaceId: SPACE, verifier: new Uint8Array(32), wrapSalt: new Uint8Array(32), epoch: 1, createdBy: gone.id, expiresAt: exp, usedAt: null, revokedAt: null });
@@ -512,15 +512,23 @@ for (const adapter of ADAPTERS) {
     const g1 = await register(makeCtx(store, fakeClock()), gone);
     const asAdmin = { deviceShort: a1.body.deviceShort, deviceId: a1.body.deviceId, memberId: admin.id };
 
-    const before = coverageRequires(await store.listMembers(SPACE), await store.listDevices(SPACE));
+    const before = coverageRequires(await store.listMembers(SPACE), await store.listDevices(SPACE), 'FAMILY');
     assert.equal(before.includes(g1.body.deviceId), true, 'while she is a member, every rotation owes her a wrap');
 
     const res = await call(removeMember, req({ routeName: 'removeMember', body: { spaceId: SPACE, memberId: gone.id } }), as(asAdmin));
     assert.equal(res.body.removed, true);
 
-    const after = coverageRequires(await store.listMembers(SPACE), await store.listDevices(SPACE));
+    const after = coverageRequires(await store.listMembers(SPACE), await store.listDevices(SPACE), 'FAMILY');
     assert.equal(after.includes(g1.body.deviceId), false, 'T2 — a removed member is granted nothing further (ADR 002 §4.3)');
+    // Still false, and now for two reasons rather than one: she is removed, AND finding E2E3-8
+    // withdrew the FAMILY recovery demand entirely (nothing signs `Member.recoveryPubKex`, so
+    // wrapping to it would hand the relay the family key). The T2 property this row is about is
+    // unchanged — check the PERSONAL reading too, where the demand still exists and still drops.
     assert.equal(after.includes(recoveryRecipientId(gone.id)), false, 'nor her recovery recipient');
+    const afterPersonal = coverageRequires(await store.listMembers(SPACE), await store.listDevices(SPACE), 'PERSONAL');
+    assert.equal(afterPersonal.includes(recoveryRecipientId(gone.id)), false,
+      'T2 holds under the reading that still demands a recovery wrap, so this row is about removal and not about E2E3-8');
+    assert.equal(afterPersonal.includes(recoveryRecipientId(admin.id)), true);
     assert.equal(after.includes(a1.body.deviceId), true, 'and the admin is still owed hers');
     assert.equal(clock.now() > 0, true);
   });
@@ -633,7 +641,7 @@ for (const adapter of ADAPTERS) {
     const o1 = await register(makeCtx(store, fakeClock()), other);
     await store.upsertOps(SPACE, [{ opId: 'op_1', epoch: 1, deviceShort: a1.body.deviceShort, witness: null, chain: new Uint8Array(32), envelope: new Uint8Array(64) }]);
     await store.upsertOps(SPACE2, [{ opId: 'op_o', epoch: 1, deviceShort: o1.body.deviceShort, witness: null, chain: new Uint8Array(32), envelope: new Uint8Array(64) }]);
-    await store.putKeyWraps([{ spaceId: SPACE, epoch: 1, recipientId: a1.body.deviceId, wrapped: new Uint8Array([1]) }]);
+    await store.putKeyWraps([{ spaceId: SPACE, epoch: 1, recipientId: a1.body.deviceId, wrapped: new Uint8Array([1]), senderDeviceId: 'dev_seed' }]);
     await store.putInvite({ id: 'inv_x', spaceId: SPACE, verifier: new Uint8Array(32), wrapSalt: new Uint8Array(32), epoch: 1, createdBy: admin.id, expiresAt: new Date(clock.now() + 86400000), usedAt: null, revokedAt: null });
 
     const asAdmin = { deviceShort: a1.body.deviceShort, deviceId: a1.body.deviceId, memberId: admin.id };

@@ -12,8 +12,8 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // space ids and kinds; pseudonymous member ids; member colour refs; join and removal times;
 // device ids, shorts and PUBLIC keys; per-device read/write progress; epoch numbers and rotation
-// times; per-space op counts; padded envelope sizes; op ARRIVAL times; chain hashes; invite id
-// hashes, epochs and expiry.
+// times; which device deposited each key wrap; per-space op counts; padded envelope sizes; op
+// ARRIVAL times; chain hashes; invite id hashes, epochs and expiry.
 //
 // Nothing else. No entry text, no bar caption, no category, no scratchpad, no date, no display
 // name, no authoring time. Story 21.1.
@@ -165,11 +165,31 @@ model Epoch {
 /// (`dev_…`) or the reserved recovery form `rec_<memberId>`, because ADR 002 §4.2 step 2 wraps
 /// to each member's RK_kex as well as to each device, and a recovery recipient has no Device
 /// row. Closes finding E3-4.
+///
+/// `senderDeviceId` is WHO DEPOSITED THE ROW, and it is written by the relay from the request it
+/// authenticated — never read off the body. ADR 002 §4.2 step 6 makes the receiving device verify
+/// who sent a wrap before it derives a KEK against it (finding S1), and `admitWraps` cannot do
+/// that without an index into its own verified sender set. E2 had no column for it, so E3's
+/// required `ctx.senders` parameter had nothing to select against and every honest wrap was
+/// refused — finding E2E3-3.
+///
+/// Why a stamped device id rather than the ADR's client-supplied `senderKexPubRaw`: a 65-byte
+/// client-chosen blob on every wrap row is a covert channel a blind relay has no reason to
+/// accept, while `senderDeviceId` carries ZERO client-chosen bits and states no fact the relay
+/// did not already observe — it authenticated that device on that request. `GET /keys` publishes
+/// the ADR's `senderKexPubRaw` unchanged, by joining to `Device.kexPubRaw`, so the wire the
+/// client reads is exactly the one §4.2 step 6 specifies.
+///
+/// Not a foreign key, for the same reason `recipientId` is not: the Device row can be cascaded
+/// away by a member removal while the wrap it deposited is still being purged. A dangling sender
+/// publishes as `null`, which `SenderSet.lookup` answers `null` for, which is `unauthorized` —
+/// the correct outcome for a key deposited by a device this space no longer admits.
 model KeyWrap {
-  spaceId     String
-  epoch       Int
-  recipientId String
-  wrapped     Bytes
+  spaceId        String
+  epoch          Int
+  recipientId    String
+  wrapped        Bytes
+  senderDeviceId String
 
   space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
 

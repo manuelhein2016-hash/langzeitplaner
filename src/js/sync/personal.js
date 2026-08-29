@@ -77,9 +77,7 @@
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
 // FINDINGS §3 item 4: "the ATTESTATION park reason, **or retain refused ops**. First contact
-// loses data without it." `core/ops.js` has no `PARK_REASONS.ATTESTATION` (finding E3-3, and
-// `core/ops.js` is not this ticket's file), so `oplog.park()` cannot be told the reason — which
-// leaves the second half of the finding, and it is the better half anyway:
+// loses data without it." The rule the whole seam is built on is:
 //
 //   **the cursor is not advanced past an op this device could not yet apply.**
 //
@@ -87,18 +85,30 @@
 // durable record, so "retain it" and "do not tell the server I have consumed it" are the same
 // statement, and the second one survives a quit while an in-memory park would not. Concretely:
 //
-//   · an envelope that parks on `attestation` or `epoch`, or an op the fold refuses with a reason
-//     a later op can cure (`unattestedDevice`, `notMyDevice`), is DEFERRED;
+//   · an envelope `openOp` PARKS — for ANY of `ENVELOPE_PARK`'s reasons, see `PARK_HANDLING` in
+//     §0 — or an op the fold refuses with a reason a later op can cure (`unattestedDevice`,
+//     `notMyDevice`), is DEFERRED;
 //   · the cursor advances only to the last seq before the first deferred op, so the next pull
 //     re-delivers it — in the same session it is retried from memory as well, which is what makes
 //     a same-batch attestation work without a round trip;
 //   · after `maxDeferrals` fruitless attempts it moves to QUARANTINE with a visible error and the
 //     cursor is released past it. ADR 003 §8.2 is explicit that "a permanently rejected op must
 //     never silently spin forever", and a cursor pinned for ever behind one op would block every
-//     later op on the space — a worse failure than the one it was avoiding.
+//     later op on the space — a worse failure than the one it was avoiding. It is also how a
+//     hostile relay would wedge this device with one unreadable envelope.
 //
 // A refusal nothing can cure (a bad shape, a foreign space, a `local`-space op) is TERMINAL and
 // never holds the cursor: re-pulling it would produce the same answer for ever.
+//
+// ⚠ **NONE OF THE ABOVE ACTUALLY RAN UNTIL 2026-08-29 — finding P-8, and it is worth one
+// paragraph here because the prose was right and the code was not.** `pullNow` tested `out.parked`
+// on an object whose discriminator is `out.status`, so the entire park branch was dead: every
+// parked envelope fell through it into `terminal()`, was quarantined as "openOp returned no op",
+// and the cursor was released past it. First contact between two Macs — the ordinary case, since
+// there is no causal delivery — destroyed the op, and one relaunch later the only trace was gone
+// and `status()` said `healthy`. The lesson is in §0's `PARK_HANDLING`: the branch was written
+// against the two reasons somebody remembered, so a table keyed off `ENVELOPE_PARK` itself
+// replaces it and `tests/tier1/sync-personal.test.js` §4b asserts the two agree.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // PURITY (ADR 005 §2, `tests/helpers/purity.js` PURE_DIRS)
@@ -113,6 +123,25 @@
 
 import { sealOp, openOp, ENVELOPE_PARK } from '../crypto/envelope.js';
 import { spaceKindOf, isSpaceId } from '../crypto/spacekeys.js';
+// P-4 — ADR 002 §5.4's chain witness. It shipped with E5 and `src/` imported it from NOWHERE, so
+// the client verified no chain at all and a relay that withheld, reordered or renumbered was
+// undetectable BY CONSTRUCTION. `pullNow` is the only call site the design ever named for it.
+import { verifyChain } from './chain.js';
+// P-8's third axis — the DURABLE park for a sealed envelope. See `lot` below for why this is not
+// `core/oplog.js`'s park and why the module it lives in is a defence rather than a dead engine.
+import { createParkingLot } from './outbox.js';
+// The nine fields ADR 002 §5.1 shapes an envelope from. A PULLED row carries `seq` and `chain`
+// on top of them — the relay's own framing, not part of the sealed thing — and the parking lot
+// stores envelopes, so the row is projected down to exactly these before it is retained.
+import { ENVELOPE_KEYS } from './protocol.js';
+// P-4's second half — the DURABLE chain anchor. `cursor.js`'s own header is the argument for
+// putting it here: the chain head "answers the same question the cursor does — where was I in
+// this space's log? — and two persisted answers to one question is how they drift apart".
+import { createCursors } from './cursor.js';
+// L-1/L-2/E5-2/P-4 — the enumeration of what can be observed, and the fold over it. `status()`
+// below merges the engine's own reading with the DURABLE evidence in the store, by `max` over the
+// three-state ladder, so this file can only ever raise a state and never lower one.
+import { judgeSyncStatus } from './status.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The protocol numbers, from `docs/v2/contracts/sync.contract.js` §0 (ADR 003 §4, §6.1, §8.2).
@@ -159,16 +188,119 @@ export class PersonalSyncError extends Error {
 }
 
 /**
- * The park reasons a LATER op or a later key fetch can cure. An envelope parked for one of these
- * is deferred and re-tried; anything else is terminal.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
+ * THE PARK DOMAIN, WRITTEN DOWN AS DATA — finding **P-8**, and the reason it is a table and not
+ * an `if`.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════
  *
- * `ATTESTATION` — the peer's device attestation has not arrived yet. This is F-6's whole case.
- * `EPOCH`       — sealed under a key epoch this ring does not hold. ADR 002 §4.4: a member
- *                 offline across three rotations needs every epoch spanning the ops they have
- *                 not read, so the fix is a key fetch, not a re-pull — but holding the cursor is
- *                 still right, because the ops themselves must still be there when it lands.
+ * WHAT WAS WRONG, IN TWO WORDS. `openOp` reports a park as
+ *
+ *     { status: 'park', parkReason: 'attestation'|'epoch'|'version'|…, reason: '<a sentence>' }
+ *
+ * and this file read `out.parked` — a field nothing ever sets — so the WHOLE PARK BRANCH WAS DEAD
+ * CODE. Every parked envelope fell through it, found no `op.id` on a `{status:'park'}` object, and
+ * was sent to `terminal()`: quarantined as "openOp returned no op", with the cursor RELEASED past
+ * it. The relay's `since` filter then never offers the op again, the engine's quarantine dies with
+ * the session, and one relaunch later `status()` says `healthy` over a permanent divergence.
+ * The second mistake was inside the dead branch and would have defeated it even if it had run:
+ * the list held ENUM VALUES and was tested against `out.reason`, which is the human sentence.
+ *
+ * WHY A TABLE. The previous shape was a two-element allow-list, and an allow-list answers the
+ * question "is this one of the two I thought of?" — which is the question that lost `version` and
+ * `unknownKind`. This table answers "what do I do with **every** reason the envelope layer can
+ * emit?", is keyed off `ENVELOPE_PARK` itself so a reason added upstream cannot be silently
+ * omitted (`tests/tier1/sync-personal.test.js` asserts the two agree), and `parkHandlingOf()`
+ * below is TOTAL — an unknown reason from a newer `crypto/envelope.js` is still a park, never a
+ * drop.
+ *
+ * THE RULE, WITH NO EXCEPTIONS: **a park is a deferral and it may never become a drop.** The
+ * envelope is retained and the cursor is held below it, because while the cursor is held THE RELAY
+ * IS THE DURABLE COPY (ADR 006 §9.1 W1) — "retain it" and "do not tell the server I have consumed
+ * it" are the same statement, and only the second one survives a quit.
+ *
+ * `curedBy` is what the entry is FOR — it is not a second disposition, it is the answer to "what
+ * has to happen in the world before re-opening this envelope can give a different answer":
+ *
+ *   'session' a later page, a pairing, a key fetch. A re-pull in THIS session can cure it, and
+ *             `CURABLE_PARKS` below is exactly this subset — which is what `isCurable` means.
+ *   'update'  an app update, and nothing else. Re-opening it costs one AES call and always
+ *             answers the same way until the binary changes.
+ *
+ * ⚠ **THE HALF THIS FILE CANNOT FINISH, STATED HERE RATHER THAN DISCOVERED AGAIN.** The `'update'`
+ * rows ought to RELEASE the cursor — a cursor pinned behind an op that only a new binary can read
+ * blocks every later op for as long as the user does not update, and a hostile relay that serves
+ * one `v: 99` envelope would wedge the stream for ever. Releasing it is only safe once the sealed
+ * envelope is retained DURABLY, and there is nowhere to put it: `openOp` parks `version` BEFORE it
+ * decrypts, so there is no op to hand `oplog.park()`, and `oplog` has no line shape for a sealed
+ * envelope. Between two silent losses this file takes the recoverable one — the cursor is held for
+ * every park, the ladder below bounds it, and the gap is reported rather than papered over.
+ * **Owner: `core/oplog.js` + `store.js` — a durable park for a SEALED ENVELOPE, with its reason.
+ * The day it exists, the `'update'` rows release the cursor immediately and `S1-park-version` /
+ * `S1-park-unknownKind` close.**
+ *
+ * @type {Readonly<Record<string, Readonly<{curedBy:'session'|'update', note:string}>>>}
  */
-export const CURABLE_PARKS = Object.freeze([ENVELOPE_PARK.ATTESTATION, ENVELOPE_PARK.EPOCH]);
+export const PARK_HANDLING = Object.freeze({
+  [ENVELOPE_PARK.ATTESTATION]: Object.freeze({
+    curedBy: 'session',
+    note: 'P1 — no attestation resolves `env.dv` yet. F-6\'s whole case, and M1\'s first contact: '
+      + 'my other Mac\'s op arriving before this Mac has learned that the device is mine. There is '
+      + 'no causal delivery, so this is the ORDINARY order of events, not an edge.',
+  }),
+  [ENVELOPE_PARK.EPOCH]: Object.freeze({
+    curedBy: 'session',
+    note: 'P4 — sealed under a key epoch this ring does not hold. ADR 002 §4.4: a member offline '
+      + 'across three rotations needs every epoch spanning the ops they have not read, so the cure '
+      + 'is a key fetch rather than a re-pull — but the cursor must still be held, because the ops '
+      + 'have to still be there when the key lands.',
+  }),
+  [ENVELOPE_PARK.VERSION]: Object.freeze({
+    curedBy: 'update',
+    note: 'ADR 002 §1 "versioning, not negotiation" — `env.v` is a version this build does not '
+      + 'know. ADR 003 §4: "a client keeps the ability to OPEN every Envelope.v it has ever seen", '
+      + 'which is a promise about the op still existing after the update.',
+  }),
+  [ENVELOPE_PARK.UNKNOWN_KIND]: Object.freeze({
+    curedBy: 'update',
+    note: 'ADR 003 §4 / ADR 001 §7.4 — "unknown op KINDS and unknown FIELD NAMES are parked, not '
+      + 'dropped. An old client in a family with a newer one degrades to *does not show the new '
+      + 'thing* instead of *loses the new thing*." `sealOp` refuses to seal one, so the only '
+      + 'producer in the world is a newer build.',
+  }),
+  [ENVELOPE_PARK.UNKNOWN_FIELD]: Object.freeze({
+    curedBy: 'update',
+    note: 'The same sentence of ADR 003 §4, one column over: a name in `f` this build has never '
+      + 'heard of. `openOp` returns the field list with the park.',
+  }),
+  [ENVELOPE_PARK.UNKNOWN_SPACE]: Object.freeze({
+    curedBy: 'update',
+    note: '`op.space` is a form this build does not recognise — a space CLASS from a newer build, '
+      + 'not a foreign space id (check 2 has already bound `op.space` to `env.sp`).',
+  }),
+});
+
+/**
+ * The handling for one park reason. **TOTAL**, and that is the point: a reason this build has
+ * never heard of is a message from a NEWER build, which is the one case where dropping the op is
+ * certainly wrong. It is treated as `'update'` — held, and re-judged after an app update — and the
+ * caller says so out loud.
+ *
+ * @param {string} reason @returns {{curedBy:'session'|'update', known:boolean}}
+ */
+export function parkHandlingOf(reason) {
+  const known = Object.prototype.hasOwnProperty.call(PARK_HANDLING, reason) ? PARK_HANDLING[reason] : null;
+  return known ? { curedBy: known.curedBy, known: true } : { curedBy: 'update', known: false };
+}
+
+/**
+ * The park reasons a LATER OP, a pairing or a key fetch can cure **within this session** — i.e.
+ * the ones for which re-opening the same bytes on the next pull can give a different answer.
+ *
+ * DERIVED from `PARK_HANDLING` rather than restated, so the two cannot disagree. Every park holds
+ * the cursor; this subset is the one where holding it is expected to pay off soon.
+ */
+export const CURABLE_PARKS = Object.freeze(
+  Object.keys(PARK_HANDLING).filter((r) => PARK_HANDLING[r].curedBy === 'session'));
 
 /**
  * The `foldAuthorized` rejection codes a later op can cure — i.e. the ones that are a statement
@@ -398,10 +530,106 @@ export function createPersonalSync(deps) {
     catch { /* the same trade as above, in the other direction */ }
   }
 
+  /**
+   * ── P-8's THIRD AXIS · THE DURABLE PARK FOR A SEALED ENVELOPE ─────────────────────────────
+   *
+   * `deferred` below is a `Map` and dies with the session. That was survivable while the cursor
+   * was held under every park — the relay is the durable copy below the cursor (ADR 006 §9.1 W1)
+   * — and it is NOT survivable at the two places the design needs the cursor released: ADR 003
+   * §8.2 forbids a cursor pinned for ever behind an envelope only a new binary can read, and the
+   * ladder below therefore ends every hold in a quarantine. From that instant an envelope with
+   * nothing but a `Map` behind it is gone.
+   *
+   * `sync/outbox.js`'s `createParkingLot` is the mechanism, and it already existed: a capped,
+   * storage-backed retention of SEALED ENVELOPES with their reasons, which **refuses at its cap
+   * rather than dropping** and tells the caller to hold the cursor. It could not be reached from
+   * anywhere in `src/` (P-4 counted it an orphan and `sync-domains.js` first called it dead),
+   * because its one importer was LZP-501's superseded `sync/client.js`. It is not superseded:
+   * `store.outbox()` replaces `createOutbox` and nothing replaces this.
+   *
+   * WHY NOT `core/oplog.js`. A park at P1 (no attestation), P4 (no epoch key) or the version gate
+   * happens BEFORE the decrypt, so there is no op to hand `oplog.park()` and the log has no line
+   * shape for ciphertext. The two layers are parking two different things and both are needed:
+   * the LOG parks ops it can read and will not apply; this parks bytes it cannot read yet.
+   *
+   * `parkStore` is the injected port, exactly like `envelopeStore` above and for the same reason
+   * (`src/js/sync/` is I/O-free, ADR 005 §2). Absent, the lot is per-session and says so through
+   * `diagnostics().park.durable`, which is `S4`'s "an undurable seam is visible rather than
+   * assumed" applied to itself.
+   */
+  const lot = createParkingLot({
+    storage: d.parkStore && typeof d.parkStore.loadRecords === 'function' ? d.parkStore : undefined,
+    now: () => d.now(),
+    warn: (m) => { if (typeof store._warn === 'function') store._warn(m); },
+  });
+  let lotLoaded = false;
+
+  /** Read the durable park back, once per session, and re-arm the retry set from it. */
+  async function loadLot() {
+    if (lotLoaded) return;
+    lotLoaded = true;
+    try {
+      await lot.load();
+    } catch { /* the lot warns for itself; a pull may not die here */ }
+    try {
+      await cursors.load();
+      chainAnchor = cursors.head(spaceId);
+    } catch { /* likewise: with no anchor this session re-anchors on its first page */ }
+    for (const row of lot.parked(spaceId)) {
+      if (deferred.has(row.oid)) continue;
+      const seq = toSeq(row.seq);
+      if (seq === null) continue;
+      deferred.set(row.oid, {
+        env: row.env,
+        seq,
+        // `tries` starts again at what the lot remembers, so a hold that has already burned the
+        // ladder on a previous run is not handed a fresh six attempts every launch.
+        tries: Number.isInteger(row.tries) ? row.tries : 0,
+        why: row.reason,
+        curedBy: parkHandlingOf(row.reason).curedBy,
+      });
+    }
+  }
+
   /** Ops pulled but not yet applicable — F-6. @type {Map<string, {env:Object, seq:bigint, tries:number, why:string}>} */
   const deferred = new Map();
   /** Terminally refused, with a visible error (ADR 003 §8.2). @type {Map<string, {seq:string, reason:string}>} */
   const quarantined = new Map();
+  /** Park reasons this build does not know, warned about once each rather than once a pull. */
+  const warnedParks = new Set();
+  /** Chain-witness verdicts already reported, so a wedged relay writes one sentence, not one a pull. */
+  const warnedChain = new Set();
+  /**
+   * P-4 — the last row of this space whose chain link this device has verified, `{seq, chain}`.
+   *
+   * PER SESSION, deliberately and reportedly. A durable anchor would let this device detect a
+   * relay that forks the stream ACROSS a relaunch, and there is nowhere to put one: the anchor
+   * belongs beside the cursor in `checkpoint().cursors`, and `core/oplog.js`'s cursor map holds a
+   * seq and nothing else. What the session anchor DOES catch is every fork inside one run — the
+   * gap, the mismatch, and the page whose `nextCursor` runs past the last row it served — and
+   * after a relaunch it re-anchors on the first page it verifies rather than accusing anybody.
+   * **Owed: `core/oplog.js` — one chain value beside each cursor.**
+   * @type {{seq:string, chain:string}|null}
+   */
+  let chainAnchor = null;
+  /**
+   * The durable home for that anchor.
+   *
+   * **THIS IS NOT A SECOND TRANSPORT CURSOR, and the distinction is load-bearing.** ADR 006 §9.1
+   * W1 makes "there is exactly one way to move a cursor and it writes into the LOG" a STRUCTURAL
+   * claim, and `store.js`'s `noteCursor` docblock names "persisting a cursor through some other
+   * file" as how a future engine would break it. So `store.cursor(spaceId)` remains the ONLY
+   * value read as `since`, and the only one anything branches on. What is read back from here is
+   * `head()` — the chain value — and nothing else.
+   *
+   * What this module contributes is its ONE WRITE PATH: `advance()` runs the commit FIRST and
+   * persists only if it resolves, which is the same ordering W1 requires and the reason the seq
+   * kept beside the head can lag the store's cursor but can never lead it.
+   */
+  const cursors = createCursors({
+    storage: d.chainStore && typeof d.chainStore.loadCursors === 'function' ? d.chainStore : undefined,
+    warn: (m) => { if (typeof store._warn === 'function') store._warn(m); },
+  });
 
   const stats = {
     pushes: 0, pulls: 0, opsPushed: 0, opsApplied: 0, opsDeferred: 0, opsQuarantined: 0,
@@ -591,6 +819,7 @@ export function createPersonalSync(deps) {
    * @returns {Promise<{applied:number, deferred:number, cursor:string, hasMore:boolean}>}
    */
   async function pullNow() {
+    await loadLot();
     const since = store.cursor(spaceId);
     const res = normalizeResponse(await transport.request('GET', '/api/v1/ops', {
       space: spaceId, since, limit: String(LIMITS.opsPerPull),
@@ -610,13 +839,124 @@ export function createPersonalSync(deps) {
     const body = res.json || {};
     const page = Array.isArray(body.ops) ? body.ops : [];
 
+    // ── P-4 · ADR 002 §5.4 — THE RELAY'S OWN CLAIMS MUST ADD UP ──────────────
+    //
+    // Every envelope in the page is individually authenticated: P3 checks the author's signature
+    // and AES-GCM checks the AAD, so a relay CANNOT forge, re-attribute or alter one. What a
+    // relay CAN do, and what nothing here checked before, is lie by OMISSION and by ORDER —
+    // withhold an op from one device, renumber a page, serve two devices two different streams.
+    // ADR 002 §5.4 names exactly one mechanism for that and `sync/chain.js` implements it; until
+    // this line it was imported by nothing in `src/`, so the fork was undetectable and
+    // `sync-domains.js`'s `S4-diverged` could be closed by nothing at all.
+    //
+    // TWO CHECKS, and they catch different halves:
+    //
+    //   1. `verifyChain` over the served rows, anchored on the last row this session verified.
+    //      Catches a hole INSIDE a page, a re-ordering, and a fabricated `chain` value.
+    //   2. THE PAGE CLAIM. `server/core/handlers/ops.js` is explicit that "`nextCursor` is the seq
+    //      of the last op ACTUALLY RETURNED, and when the page is empty it is `since`". A
+    //      `nextCursor` past the last row served is the relay telling this device to step over
+    //      rows it never sent — which is the withhold that leaves no hole to find, because the
+    //      hole is at the END of the page. That is the shape `S4-diverged` measures, and it is
+    //      the ONLY one of the two that can also cause a loss, so it is the only one that touches
+    //      the cursor.
+    //
+    // NEITHER CHECK REFUSES THE OPS. The rows that did arrive are authentic and applying them
+    // loses nothing; refusing them would hand a hostile relay a way to wedge the device with one
+    // bad `chain` byte. What the finding does is stop the cursor and light `error` — the op is
+    // held by the RELAY (ADR 006 §9.1 W1), which is the durable copy while the cursor is below it.
+    const rows = [];
+    for (const e of page) {
+      if (e && typeof e.oid === 'string' && e.seq !== undefined) {
+        rows.push({ seq: String(e.seq), chain: e.chain, env: { oid: e.oid } });
+      }
+    }
+    // WHERE THE VERIFICATION STARTS, AND WHY IT IS NOT ALWAYS ROW ZERO.
+    //
+    // `verifyChain(rows, null)` means "verify from the space's GENESIS" — it computes
+    // `SHA-256(∅ ‖ oid)` for the first row. That is right for a device pulling from `since = 0`
+    // and WRONG for every other page: a device resuming at seq 40 is handed a row whose chain is
+    // `SHA-256(chain₃₉ ‖ oid₄₀)`, which cannot match, and reporting a fork there would accuse an
+    // honest relay on the first pull after every relaunch. `chain.js`'s own answer to an anchor it
+    // cannot use is "re-anchor on the next row rather than reporting a fork this device cannot
+    // prove", and this is the same rule one layer up: with no anchor and a page that does not
+    // start at genesis, the FIRST row is adopted as the anchor and the links after it are checked.
+    //
+    // What that costs is exactly one unverifiable row per session, and it is the row the device
+    // has no evidence about — which is what the missing durable anchor means. It is not a hole a
+    // relay can widen: every LATER row in the page and in the session is checked against it.
+    let chainVerified = false;
+    /** The first seq of each run the relay did not serve. Turned into cursor holds below. */
+    const chainHoles = [];
+    let anchor = chainAnchor;
+    let toCheck = rows;
+    if (anchor === null && rows.length && (toSeq(since) ?? 0n) !== 0n) {
+      anchor = { seq: rows[0].seq, chain: rows[0].chain };
+      toCheck = rows.slice(1);
+    }
+    if (toCheck.length) {
+      let w;
+      try {
+        w = await verifyChain(toCheck, anchor, ports);
+      } catch (err) {
+        w = { ok: false, head: null, findings: [{ kind: 'unreadable', detail: `${err.name}: ${err.message}` }] };
+      }
+      if (w.ok) chainAnchor = w.head ?? chainAnchor;
+      else noteChain('chain', w.findings);
+      chainVerified = w.ok === true;
+      // A GAP finding carries the seq the counter jumped FROM, so the first row the relay owes is
+      // the next one. Anything else the witness reports (a mismatch, an unreadable chain value)
+      // is a statement about a row that WAS served, and the cursor is left to the ordinary rule.
+      for (const fi of w.findings || []) {
+        const from = fi && fi.from !== undefined ? toSeq(fi.from) : null;
+        if (from !== null) chainHoles.push(from + 1n);
+      }
+    } else if (rows.length) {
+      // A single row adopted as the anchor: nothing was checked, but the anchor is now set, so
+      // the next page IS checked. `chainVerified` stays false — nothing was proved here.
+      chainAnchor = anchor ?? chainAnchor;
+    }
+    // The page claim. `served` is the last row the relay actually handed over; `claimed` is where
+    // it says the cursor may go. On an honest relay these are equal, or the page is empty and
+    // `claimed === since`, so this never fires — measured by every green fleet row.
+    const served = rows.length ? toSeq(rows[rows.length - 1].seq) : null;
+    const claimed = toSeq(body.nextCursor);
+    const claimFloor = served === null ? (toSeq(since) ?? 0n) : served;
+    const claimSound = claimed === null || claimed <= claimFloor;
+    if (!claimSound) {
+      chainHoles.push(claimFloor + 1n);
+      noteChain('withheld', [{
+        kind: 'withheld',
+        seq: String(body.nextCursor),
+        from: String(claimFloor),
+        detail: `the relay served ${rows.length} row(s) up to seq ${claimFloor} and asked this `
+          + `device to move its cursor to ${body.nextCursor}. ADR 003 §3.3 makes the counter `
+          + 'gapless per space and the ops handler sets nextCursor to the last op actually '
+          + 'returned, so rows between those two seqs were withheld from THIS device. The cursor '
+          + 'is held below them; the relay still has them.',
+        benignCause: 'member-purge',
+      }]);
+    }
+    // A fork that healed is not a fork — but only POSITIVE evidence clears the verdict. An empty
+    // page is not evidence of anything, and a relay that answers `{ops: []}` for ever must not be
+    // able to erase what it was caught doing by saying nothing.
+    if (chainVerified && claimSound && 'syncChain' in store) store.syncChain = null;
+
     // ── the re-try set comes FIRST, and in seq order ─────────────────────────
     // A deferred envelope and a fresh one are the same kind of thing; merging them here means the
     // F-6 case where the attestation arrives in a LATER page is handled by exactly the code that
     // handles the same-batch case, rather than by a second path nobody exercises.
     /** @type {Array<{env:Object, seq:bigint, retry:boolean}>} */
     const work = [];
-    for (const [, held] of deferred) work.push({ env: held.env, seq: held.seq, retry: true });
+    for (const [, held] of deferred) {
+      // A DORMANT hold is not re-tried within this session. It is an envelope only a NEW BINARY
+      // can open — `PARK_HANDLING`'s `curedBy: 'update'` — so re-running `openOp` over the same
+      // bytes with the same build costs one AES call and always answers the same way. It is
+      // re-judged once per session, when `loadLot()` seeds it off the disk, which is exactly
+      // "the launch after the app was updated".
+      if (held.dormant) continue;
+      work.push({ env: held.env, seq: held.seq, retry: true });
+    }
     for (const e of page) {
       const seq = toSeq(e && e.seq);
       if (seq === null) continue;                      // a row the relay could not frame; never silent
@@ -629,6 +969,22 @@ export function createPersonalSync(deps) {
     const seqs = Object.create(null);
     /** seq → why it is held. The cursor stops BELOW the smallest of these. */
     const holds = new Map();
+    /** What this pull owes the DURABLE park, flushed once below rather than inside the loop. */
+    const toPark = [];
+    const toRelease = [];
+    // ── P-4 · THE HOLE THE WITNESS FOUND, AS A CURSOR HOLD ───────────────────
+    //
+    // Naming the fork is not enough on its own: `seq` is gapless per space (ADR 003 §3.3), so a
+    // hole means rows were withheld, and the rows ABOVE the hole are still served. Without this,
+    // the commit loop below walks right over the missing seq on the strength of the ones after
+    // it — the withhold-in-the-middle, which is the same permanent consumption as the
+    // withhold-at-the-end and is not fixed by gating `nextCursor` alone.
+    //
+    // So the first missing seq becomes a HOLD, in the same structure every other hold uses, and
+    // the commit stops strictly below it. The ops that DID arrive are still applied: ADR 002 §8.6
+    // and ADR 003 §10.6 keep the witness diagnostic-only in v2, and this respects that — nothing
+    // is refused on the witness's word. Only the cursor waits.
+    for (const chainHole of chainHoles) holds.set(chainHole, 'withheld');
 
     for (const item of work) {
       let out;
@@ -641,14 +997,23 @@ export function createPersonalSync(deps) {
         terminal(item, `envelope: ${e.message}`);
         continue;
       }
-      if (out && out.parked) {
-        if (CURABLE_PARKS.includes(out.reason)) defer(item, out.reason);
-        else terminal(item, `parked: ${out.reason}`);
+      // ── P-8 · A PARK IS A DEFERRAL, FOR EVERY REASON, WITHOUT EXCEPTION ──────
+      //
+      // `openOp`'s contract is `{status:'park', parkReason, reason}` (`crypto/envelope.js` §5).
+      // `status` is the discriminator and `parkReason` is the ENUM; `reason` is a sentence for a
+      // human and is never compared against anything. Reading either of the other two fields is
+      // what made this branch dead code for the whole of E5 — see `PARK_HANDLING` above.
+      if (out && out.status === 'park') {
+        parked(item, out.parkReason);
         continue;
       }
-      const op = out && out.op ? out.op : out;
+      const op = out && out.status === 'opened' ? out.op : (out && out.op ? out.op : out);
       if (!op || typeof op !== 'object' || typeof op.id !== 'string') {
-        terminal(item, 'openOp returned no op');
+        // NOT A PARK AND NOT AN OP. `openOp` has exactly three outcomes — opened, park, throw —
+        // so reaching this line means the seam changed under this file. It is DEFERRED rather
+        // than quarantined: an answer this build cannot read is the one case where destroying
+        // the op is certainly wrong, and the ladder below still bounds it.
+        parked(item, 'unreadableOutcome');
         continue;
       }
       opened.push({ op, item });
@@ -660,11 +1025,29 @@ export function createPersonalSync(deps) {
       const r = store.applyRemote(opened.map((o) => o.op), { seqs });
       applied = Array.isArray(r?.applied) ? r.applied : [];
       const byId = new Map(opened.map((o) => [o.op.id, o.item]));
+      const answered = new Set(applied);
       for (const ref of (r?.refused || [])) {
+        if (ref && typeof ref.id === 'string') answered.add(ref.id);
         const item = byId.get(ref.id);
         if (!item) continue;
         if (isCurable(ref.reason)) defer(item, ref.reason);
         else terminal(item, `refused: ${ref.reason}`);
+      }
+      // ── THE THIRD ANSWER `applyRemote` CAN GIVE, WHICH IS NO ANSWER AT ALL ───────────────────
+      //
+      // `{applied, refused}` is meant to be a partition of the batch, and `store.js`'s shape gate
+      // has one arm — "not a well-formed op" — that warns and reports NEITHER. Nothing `openOp`
+      // returns can take it today (`isOpId(op.id)` has already run), which is exactly why it is
+      // worth closing rather than trusting: an op that appears in neither list would slip past the
+      // hold computation below and the cursor would be released over it, silently. Held, not
+      // dropped, and the ladder bounds it.
+      //
+      // Like the unknown-park arm above, this is a REACHABILITY CLAIM and reverting it kills no
+      // test. The claim is pinned instead: `tests/tier1/sync-personal.test.js` §4b's "`applyRemote`
+      // answers for EVERY op it is handed" drives a mixed batch through the real store and asserts
+      // the partition is total. If that ever stops being true, this becomes load-bearing.
+      for (const o of opened) {
+        if (!answered.has(o.op.id)) defer(o.item, 'notReported');
       }
       // Anything that WAS applied leaves the deferral set — including one that had been held for
       // several pulls, which is the F-6 cure landing.
@@ -672,19 +1055,113 @@ export function createPersonalSync(deps) {
       stats.opsApplied += applied.length;
     }
 
+    // ── THE DURABLE PARK IS WRITTEN BEFORE THE CURSOR MOVES ──────────────────
+    //
+    // Same ordering rule as W1 below and for the same reason: the cursor is a claim that this
+    // device has consumed the op, and it may not be made until the op is somewhere a fresh
+    // process can find it. The lot's `park()` RETURNS FALSE AT ITS CAP, and its own docblock is
+    // explicit that "the caller MUST NOT advance the cursor past it" — so a refusal puts the seq
+    // straight into `holds`, which is the one structure the cursor is computed from. A full lot
+    // therefore STALLS this space, visibly, instead of losing an envelope.
+    for (const p of toPark) {
+      let kept = true;
+      try { kept = await lot.park(spaceId, p.env, String(p.seq), p.reason); }
+      catch { kept = false; }                 // the lot warns; an unwritable park is a stall
+      if (!kept) holds.set(p.seq, `park-full:${p.reason}`);
+    }
+    if (toRelease.length) { try { await lot.release(spaceId, toRelease); } catch { /* next pull */ } }
+
     // ── W1: persist BEFORE the cursor moves ──────────────────────────────────
     if (applied.length) await store.persistNow();
+    // An op that LANDED is not parked any more. Released after the board is committed, so a crash
+    // between the two leaves the envelope retained rather than dropped — the safe direction.
+    if (applied.length) { try { await lot.release(spaceId, applied); } catch { /* next pull */ } }
 
-    // ── the commit point: the last seq with nothing held at or below it ───────
+    // ── THE CURSOR RULE, MADE HONEST ─────────────────────────────────────────
+    //
+    //     THE CURSOR MAY NOT ADVANCE PAST AN OP THAT WAS NOT APPLIED — unless the op is retained
+    //     somewhere this Mac can still reach (a hold) or the refusal is recorded (a quarantine).
+    //
+    // `holds` is that rule as data: every disposition that keeps neither the op nor a record puts
+    // its seq in it, and the commit point stops strictly BELOW the smallest one. It is the whole
+    // of ADR 006 §9.1's W1 on the receiving side — while the cursor is held the RELAY is the
+    // durable copy, which is why "retain it" and "do not tell the server I have consumed it" are
+    // the same statement, and why only the second one survives a quit.
+    //
+    // `nextCursor` may only be taken when NOTHING is held: it is the relay's claim about a page,
+    // and a page whose middle is held is not a page this device has consumed.
     let commit = toSeq(since) ?? 0n;
     const floor = holds.size ? [...holds.keys()].reduce((a, b) => (a < b ? a : b)) : null;
     for (const item of work) {
       if (floor !== null && item.seq >= floor) break;
       if (item.seq > commit) commit = item.seq;
     }
+    // `nextCursor` is the relay's claim and is only taken while that claim is SOUND — see the
+    // page-claim check above. Unsound, the cursor stops at the last row this device was actually
+    // handed, which is the whole of the defence: a withheld op stays below the cursor, so the
+    // relay keeps owing it and the next honest page delivers it.
     const nextCursor = toSeq(body.nextCursor);
-    if (floor === null && nextCursor !== null && nextCursor > commit) commit = nextCursor;
-    if (commit > (toSeq(since) ?? 0n)) store.noteCursor(spaceId, String(commit));
+    if (floor === null && claimSound && nextCursor !== null && nextCursor > commit) commit = nextCursor;
+    if (commit > (toSeq(since) ?? 0n)) {
+      // The cursor move and the chain anchor, in ONE ordered write. `cursor.js`'s `advance` runs
+      // the commit first and persists the record only if it resolves — so a crash between them
+      // costs a re-pull (idempotent, ADR 001 §6) and never a cursor ahead of what was folded.
+      // `store.noteCursor` inside the commit keeps the AUTHORITATIVE cursor exactly where W1 put
+      // it: in the log, written by `_persistOps`, below the board.
+      await cursors.advance(
+        spaceId, String(commit), chainAnchor,
+        async () => { store.noteCursor(spaceId, String(commit)); },
+        { fromGenesis: (toSeq(since) ?? 0n) === 0n && chainVerified },
+      );
+    }
+
+    // ── L-3 · THE REAPER, ON THE ORDINARY SCHEDULE ───────────────────────────
+    //
+    // `store.unparkAttested()` re-judges a line held for a missing device attestation. It was
+    // called from ONE place in the product — `family/mount.js`, on the adoption of a new peer —
+    // so a hold whose cure arrived by any other route (a pairing that completed while the app was
+    // closed, `useIdentity()` on the next launch, a peer list refreshed by `family/engine.js`)
+    // was never looked at again. And the cure has to be looked for HERE, not only at launch: by
+    // the time the ladder above has released the cursor the parked line is the only copy this Mac
+    // can reach, and no batch will ever arrive to trigger `applyRemote`'s own sweep.
+    //
+    // It is a no-op with nothing parked, and it is deliberately AFTER the cursor: a launch that
+    // promotes a line has changed the board, and the persist that follows is scheduled by
+    // `unparkAttested` itself.
+    if (typeof store.unparkAttested === 'function') {
+      let promoted = [];
+      try { promoted = store.unparkAttested() || []; }
+      catch { /* the store warns; a reaper may not break a pull */ }
+      if (promoted.length) {
+        // W1 AGAIN, IN THE ONE PLACE IT IS EASY TO MISS. A promotion changes the board, and the
+        // cursor is ALREADY past the op — the ladder released it, which is why the parked line
+        // was the only copy. `unparkAttested` schedules a debounced persist; a quit inside that
+        // debounce would leave the board without the entry and the cursor beyond it. It is
+        // recoverable (the line is still parked on disk and the next launch's reaper re-does the
+        // promotion), but "recoverable by accident" is what this round exists to stop, so the
+        // commit is taken here, synchronously with the pull that caused it.
+        await store.persistNow();
+        // ── L-1, THE OTHER DIRECTION: A REFUSAL THAT WAS LATER RESOLVED IS NOT EVIDENCE ─────────
+        //
+        // The ladder's terminal is a statement about ONE DELIVERY — "six pulls and this envelope
+        // still would not open" — and ADR 003 §8.2 requires it, because a cursor pinned behind one
+        // op blocks every later op. It is NOT a statement that the op is lost: the STORE parked
+        // the line independently, and that is exactly the copy this promotion just applied.
+        //
+        // Leaving the row in the ledger would light `error` for ever over an op that is on the
+        // board. The ledger is evidence of a PERMANENT divergence and nothing else, so evidence
+        // the world has falsified is withdrawn.
+        if (Array.isArray(store.syncRefusals) && store.syncRefusals.length) {
+          const landed = new Set(promoted);
+          const kept = store.syncRefusals.filter((r) => !landed.has(r && r.oid));
+          if (kept.length !== store.syncRefusals.length) {
+            store.syncRefusals.length = 0;
+            for (const r of kept) store.syncRefusals.push(r);
+            await store.persistNow();
+          }
+        }
+      }
+    }
 
     emitStatus();
     return {
@@ -694,30 +1171,177 @@ export function createPersonalSync(deps) {
       hasMore: body.hasMore === true,
     };
 
-    function defer(item, why) {
-      const oid = item.env.oid;
+    /**
+     * P-8's landing point: ONE entry per `openOp` park reason, decided from `PARK_HANDLING`
+     * rather than from a branch, and never a drop.
+     *
+     * Both `curedBy` classes defer and hold the cursor. They differ only in what the engine says
+     * about them, because they differ only in what would have to happen for a re-open to answer
+     * differently — and telling a user "held until you update the app" is a different sentence
+     * from "held until your other Mac finishes pairing".
+     */
+    //
+    // ⚠ THE UNKNOWN-REASON ARM IS A REACHABILITY CLAIM, NOT A LIVE BRANCH — labelled as such
+    // after mutation testing, because reverting it to `terminal()` kills NO test. `openOp` emits
+    // only the six values of `ENVELOPE_PARK` today (`validateOp` in `core/ops.js` can produce
+    // `VERSION`, `UNKNOWN_SPACE`, `UNKNOWN_KIND` and `UNKNOWN_FIELD`, and `openOp` adds P1 and
+    // P4), so no input reaches it. What is pinned is the CLAIM: `tests/tier1/sync-personal.test.js`
+    // §4b asserts `PARK_HANDLING`'s keys are exactly `ENVELOPE_PARK`'s values, so a seventh reason
+    // is a red test here rather than a destroyed op in the field. The day one exists this arm
+    // becomes load-bearing, which is why it stays.
+    function parked(item, parkReason) {
+      const h = parkHandlingOf(parkReason);
+      if (!h.known && typeof store._warn === 'function' && !warnedParks.has(parkReason)) {
+        warnedParks.add(parkReason);
+        store._warn(
+          `sync: a change from your other Mac is being held for a reason this version does not `
+          + `recognise (${parkReason}). It is kept, not discarded; updating the app should let it in.`);
+      }
+      // THE ENVELOPE ITSELF IS RETAINED, not just a note that it exists. `defer` puts it in the
+      // session `Map` and holds the cursor; this puts the BYTES somewhere a fresh process can
+      // find them, with the reason, which is what makes "a park is a deferral" true across a
+      // quit and across the cursor release the ladder eventually performs.
+      toPark.push({ env: envelopeOnly(item.env), seq: item.seq, reason: parkReason });
+      defer(item, parkReason, h.curedBy);
+    }
+
+    /**
+     * @param {Object} item @param {string} why the ENUM — a park reason or a rejection code
+     * @param {'session'|'update'} [curedBy] what has to happen before re-judging can differ.
+     *   `'session'` for every REFUSAL (`CURABLE_REFUSALS` is by definition "a later op cures it")
+     *   and for the two anomaly holds; a park brings its own from `PARK_HANDLING`.
+     */
+    function defer(item, why, curedBy = 'session') {
+      const oid = keyOf(item);
       const prev = deferred.get(oid);
       const tries = (prev ? prev.tries : 0) + 1;
-      if (tries > maxDeferrals) {
+      // ── THE TWO KINDS OF HOLD, AND WHY ONLY ONE OF THEM PINS THE CURSOR ─────────────────────
+      //
+      // `PARK_HANDLING` splits every park reason by what would have to happen in the world before
+      // re-opening the envelope could answer differently. `'session'` — a later page, a pairing, a
+      // key fetch — is cured by waiting, so the cursor is held below it and the relay keeps the op.
+      // `'update'` is cured by a NEW BINARY and by nothing else, and ADR 003 §8.2 forbids a cursor
+      // pinned behind one of those: a single `v: 99` envelope would block every later op on the
+      // space until the user updates, which is also how a hostile relay would wedge this device.
+      //
+      // Releasing the cursor is only safe once the envelope is retained DURABLY — after the
+      // release the parked copy is the only one this Mac can reach. That is what `lot` now
+      // provides, and the condition is the LOT'S OWN ANSWER about itself (`durable`), not an
+      // assumption: with no `parkStore` injected the retention is per-session, and the cursor is
+      // held exactly as it was before. Between two silent losses this file still takes the
+      // recoverable one; it just no longer has to.
+      const dormant = curedBy === 'update' && lot.diagnostics().durable === true;
+      if (!dormant && tries > maxDeferrals) {
+        // ADR 003 §8.2 — "a permanently rejected op must never silently spin forever", and a
+        // cursor pinned behind one op blocks every later op on the space, which is also how a
+        // hostile relay would wedge this device with a single unreadable envelope. So the hold is
+        // BOUNDED, and its end is a visible quarantine rather than silence.
+        //
+        // The ladder does not apply to a DORMANT hold, and must not: nothing is spinning. The
+        // cursor has moved on, the envelope is on disk with its reason, and the thing it is
+        // waiting for is an app update rather than a message. Burning six pulls and then
+        // quarantining it would destroy precisely the op ADR 003 §4 promises to keep ("an old
+        // client in a family with a newer one degrades to *does not show the new thing* instead
+        // of *loses the new thing*").
         deferred.delete(oid);
         terminal(item, `still ${why} after ${maxDeferrals} attempts`);
         return;
       }
-      deferred.set(oid, { env: item.env, seq: item.seq, tries, why });
-      holds.set(item.seq, why);
+      deferred.set(oid, { env: item.env, seq: item.seq, tries, why, curedBy, dormant });
+      if (!dormant) holds.set(item.seq, why);
       if (!prev) stats.opsDeferred += 1;
     }
 
     function terminal(item, reason) {
-      const oid = item.env && item.env.oid;
-      if (typeof oid === 'string') {
-        deferred.delete(oid);
-        quarantined.set(oid, { seq: String(item.seq), reason });
-      }
+      const oid = keyOf(item);
+      deferred.delete(oid);
+      // A terminal is FINAL, so the retained bytes are no longer a deferral and must not be
+      // replayed on every launch for ever. The RECORD of the refusal replaces them, below.
+      toRelease.push(oid);
+      quarantined.set(oid, { seq: String(item.seq), reason });
       stats.opsQuarantined += 1;
+      // ── L-1 · THE RECORD OF A REFUSAL OUTLIVES THE REFUSAL ───────────────────────────────────
+      //
+      // The refusal above is CORRECT and final, and the cursor is released past it, so the relay
+      // will never offer the op again — which makes this record the only thing left. Keeping it
+      // in the `Map` two lines up means it is visible for minutes and then, after one relaunch,
+      // the permanent divergence is reported as `healthy` with nothing on disk that remembers it.
+      //
+      // `store.syncRefusals` is the store's own seam for it: `store.diagnostics().sync.refused`
+      // counts this array, and `sync/status.js`'s `S4-refused` row reads that count. The write is
+      // GUARDED rather than initialising — `src/js/store.js` belongs to another owner this round
+      // and an engine that creates fields on the store it was injected with is how two files stop
+      // agreeing about what the store is. Absent the array this is a no-op and the session `Map`
+      // is all there is, which is today's behaviour exactly.
+      //
+      // **OWED, and reported rather than reached for: `store.js` must (a) create `syncRefusals`
+      // and (b) PERSIST it.** An array on a store instance dies with the process just as this Map
+      // does, so until it rides in the checkpoint, L-1 is narrowed and not closed.
+      if (Array.isArray(store.syncRefusals)) {
+        store.syncRefusals.push({ oid, seq: String(item.seq), reason, at: d.now() });
+      }
       if (typeof store._warn === 'function') {
         store._warn(`sync: one change from your other Mac could not be applied (${reason}). `
           + 'It is not lost on the device that made it; nothing here was changed.');
+      }
+    }
+
+    /**
+     * The key an envelope is remembered under.
+     *
+     * `env.oid` when there is one — that is the identity every other layer uses. An envelope with
+     * NO `oid` at all is the one cell of the fate grid nothing in this product could report: the
+     * old `terminal()` was guarded on `typeof oid === 'string'`, so a header-less envelope was
+     * dropped with the cursor released and WITHOUT a record in the session either. It is refused
+     * either way — `assertHeader` sees to that — but a refusal that leaves no trace is precisely
+     * the failure this pass exists to remove, so it is filed under its seq instead.
+     */
+    function keyOf(item) {
+      const oid = item.env && item.env.oid;
+      return typeof oid === 'string' && oid !== '' ? oid : `seq:${String(item.seq)}`;
+    }
+
+    /**
+     * The SEALED thing, without the relay's framing.
+     *
+     * `GET /ops` returns each envelope with `seq` and `chain` beside it; those are the relay's
+     * claims ABOUT the row, not part of what was signed, and they are carried separately here
+     * (`item.seq`, and the chain witness above). The parking lot's own shape gate is exact — nine
+     * fields, no more — because an envelope with an extra field is not an envelope, and letting a
+     * tenth field through would let a relay smuggle bytes into a file this device replays for
+     * weeks. So the projection is a whitelist, not a delete-list.
+     */
+    function envelopeOnly(env) {
+      const out = {};
+      for (const k of ENVELOPE_KEYS) out[k] = env ? env[k] : undefined;
+      return out;
+    }
+
+    /**
+     * P-4's landing point: the chain witness's verdict, written where a relaunch and a settings
+     * pane can both read it.
+     *
+     * `store.syncChain` is `store.diagnostics().sync.chain`, which `sync/status.js` enumerates as
+     * an `error` observable — so one call here is what turns ADR 002 §5.4 from a module nobody
+     * imports into a state the product can be in and can say. It is REPLACED rather than
+     * appended: the newest verdict about the stream is the true one, and a page that verifies
+     * clears it (below), because a fork that healed is not a fork.
+     *
+     * The write is guarded on the field EXISTING, exactly as the refusal ledger's is: an engine
+     * that invents properties on the store it was handed is how two files stop agreeing about
+     * what the store is.
+     */
+    function noteChain(kind, findings) {
+      if (!('syncChain' in store)) return;
+      store.syncChain = { ok: false, kind, findings: findings || [], at: d.now() };
+      if (typeof store._warn === 'function' && !warnedChain.has(kind)) {
+        warnedChain.add(kind);
+        store._warn(
+          'sync: the server\'s record of this board does not add up — it served a page that skips '
+          + 'or re-orders changes this device has not seen (ADR 002 §5.4). Nothing here was '
+          + 'changed and nothing was accepted on its word; the cursor is held so those changes '
+          + 'are still owed. If this persists after a member was removed from a shared board it '
+          + 'is expected; otherwise the two devices may not be seeing the same board.');
       }
     }
   }
@@ -768,15 +1392,36 @@ export function createPersonalSync(deps) {
     else if (stats.consecutiveFailures >= 5) { state = 'error'; errorKind = 'offline'; }
     else if (stats.lastError && [401, 403].includes(stats.lastError.status)) { state = 'error'; errorKind = 'auth'; }
     else if (stats.lastError && stats.lastError.status === 426) { state = 'error'; errorKind = 'protocol'; }
-    else if (pending > 0 || !isOnline() || stats.consecutiveFailures > 0) state = 'pending';
+    // A HELD OP IS `pending`, NOT `healthy`. Story 19.3's promise is not "the indicator is quiet",
+    // it is "quiet means there is nothing to tell you" — and an op this Mac is holding is work
+    // outstanding in exactly the way an unacknowledged outbox line is. It is not `error`: nothing
+    // has failed, and P-8's whole cost was that a held op looked like a healthy one.
+    else if (pending > 0 || deferred.size > 0 || !isOnline() || stats.consecutiveFailures > 0) state = 'pending';
+
+    // ── THE THREE-STATE READING IS NOT THIS FILE'S ALONE ─────────────────────────────────────
+    //
+    // Everything above is what THIS SESSION saw happen. Four of the states story 19.3 promises to
+    // report are not in this session at all: a line parked before the last quit (L-2), a refusal
+    // recorded before it (L-1), an unacknowledged line a compaction folded away (E5-2), and a
+    // relay whose stream does not add up (P-4). All four are on disk, all four are enumerated in
+    // `sync/status.js`, and none of them could be seen from here — which is why every row of
+    // domain S4 measured `healthy`.
+    //
+    // `judgeSyncStatus` is a FOLD over that enumeration and merges the two readings by `max` over
+    // the ladder, so it can only ever RAISE this state and never lower one. The engine keeps the
+    // right to name the transport `errorKind` (it saw the failure; the enumeration only sees what
+    // is left over), and `deferredOps` is carried across because it is this file's own counter and
+    // the settings sheet reads it.
+    const judged = judgeSyncStatus({
+      engine: {
+        state, pendingOps: pending, consecutiveFailures: stats.consecutiveFailures,
+        lastPullAt: stats.lastPullAt, errorKind, detail: null,
+      },
+      diagnostics: typeof store.diagnostics === 'function' ? store.diagnostics() : null,
+    });
     return {
-      state,
-      pendingOps: pending,
+      ...judged,
       deferredOps: deferred.size,
-      consecutiveFailures: stats.consecutiveFailures,
-      lastPullAt: stats.lastPullAt,
-      errorKind,
-      detail: null,
     };
   }
 
@@ -846,9 +1491,25 @@ export function createPersonalSync(deps) {
     syncNow,
     flush,
     status,
-    /** The ops this engine is holding, and why. F-6's visible half. */
-    deferredOps: () => [...deferred.entries()].map(([oid, v]) => ({ oid, seq: String(v.seq), tries: v.tries, why: v.why })),
+    /**
+     * The ops this engine is holding, and why. F-6's visible half — and `curedBy` is the field a
+     * UI needs to write the right sentence: "held until your other Mac finishes pairing" and
+     * "held until you update the app" are the same STATE and two different things to tell a
+     * person. It is recorded at the moment of the hold from `PARK_HANDLING` rather than
+     * re-derived here, so the taxonomy has exactly one home and this seam cannot disagree with
+     * the one that made the decision.
+     */
+    deferredOps: () => [...deferred.entries()].map(([oid, v]) => ({
+      oid, seq: String(v.seq), tries: v.tries, why: v.why, curedBy: v.curedBy ?? 'session',
+    })),
     quarantined: () => [...quarantined.entries()].map(([oid, v]) => ({ oid, ...v })),
+    /**
+     * The SEALED envelopes this device is retaining, with their park reasons — P-8's third axis.
+     * Read from the durable lot, not from the session `Map`, so a fresh process answers the same
+     * question the same way. `load()` is idempotent and is what makes this callable before the
+     * first pull of a session.
+     */
+    heldEnvelopes: async () => { await loadLot(); return lot.parked(spaceId); },
     diagnostics: () => ({
       spaceId,
       deviceShort,
@@ -857,6 +1518,10 @@ export function createPersonalSync(deps) {
       sealedCached: sealed.size,
       deferred: deferred.size,
       quarantined: quarantined.size,
+      // P-8 — the durable park, and whether it IS durable. `durable: false` means the `parkStore`
+      // port was not injected and the retention is per-session, which is the state this seam
+      // exists to stop being invisible.
+      park: lot.diagnostics(),
       rejoin: stats.rejoin,
       protocol: stats.protocol,
       ...stats,

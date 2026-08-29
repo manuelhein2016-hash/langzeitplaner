@@ -157,8 +157,34 @@ describe('§2 · FAILED · the re-join overwrites the peer, and un-deletes on it
       + 'ADR 006 §9.4 stamps the re-derivation at `now` precisely so that it wins, and this is the '
       + 'other face of that. If this row ever reads "Zahnarzt 9 Uhr (verschoben)", the re-join has '
       + 'been made to yield to a stamp it has not seen and this test should be inverted.');
-    assert.equal(B.status().state, 'healthy');
-    assert.equal(A.status().state, 'healthy', 'and nothing anywhere reports a loss');
+    // ── THE SILENCE HALF IS CLOSED (F-8); THE DATA HALF ABOVE IS STILL THE FINDING ────────────
+    //
+    // What this row measured before was a re-join that overwrote a peer AND said nothing. The
+    // second half is now false: `store.warnings` has a consumer, it is enumerated in
+    // `sync/status.js` as an observable, and `sync/personal.js`'s `status()` folds it in. The
+    // re-joining Mac reports `error` and can name all three sentences — the quarantine, the
+    // move-aside and the re-publication — which is ADR 006 §9.3's "a quarantine is a VISIBLE,
+    // REPORTED, converging event, never a quiet one", now true rather than asserted.
+    //
+    // The PEER still says nothing, and that is still right: nothing failed on A. What A lost is a
+    // contest, at stamps that are genuinely newer, and no layer here can tell that from an
+    // ordinary edit. That is the part of this finding that is still open, and §9.4 owns it.
+    assert.equal(B.status().silent, false,
+      'the re-joining Mac no longer claims silence (F-8). `store.warnings` has a consumer, it is '
+      + 'enumerated in `sync/status.js`, and `status()` folds it in. If this reads `true` again, '
+      + 'the channel has lost its consumer — invert this line back rather than deleting it.');
+    assert.ok(B.status().observables.some((o) => o.id === 'warnings'),
+      'and the fold names the channel it came from');
+    assert.ok(B.warnings().some((w) => /RE-JOIN/i.test(w)),
+      'and it can say WHICH event: the §9.3 re-publication, by name');
+    assert.equal(B.status().state, 'healthy',
+      'the INDICATOR stays quiet, deliberately: a re-join is ADR 006 §9.3\'s "visible, reported, '
+      + 'CONVERGING event", not a fault, and `store.warnings` is a mixed channel that also carries '
+      + 'repairs and cures. Only sharp evidence — a parked line, a refusal, a lost line, a forked '
+      + 'chain — lights it. See `sync/status.js`\'s `warnings` row.');
+    assert.equal(A.status().state, 'healthy',
+      'THE FINDING, narrowed to what is still true: the PEER is told nothing. Its own correction '
+      + 'lost a stamp contest to a re-derivation it cannot distinguish from an ordinary edit.');
   });
 
   test('the peer\'s DELETE is undone — R4-7b\'s "un-deletes on its peers", still live', async () => {

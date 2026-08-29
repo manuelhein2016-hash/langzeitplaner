@@ -24,7 +24,7 @@ import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createFleet } from '../helpers/fleet.js';
-import { recordWire, repoFile } from '../helpers/privacy-audit.js';
+import { recordWire, repoFile, repoHas } from '../helpers/privacy-audit.js';
 import { HDR, PROTOCOL } from '../../src/js/platform/net.js';
 import { CADENCE } from '../../src/js/sync/personal.js';
 import { CLIENT_VERSION } from '../../src/js/family/engine.js';
@@ -49,7 +49,7 @@ const BOARD = () => ({
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('§1 · every request header, against the document', () => {
-  test('SUCCEEDED — the client stamps its EXACT VERSION on every request, and no document says so', async () => {
+  test('SUCCEEDED (P-12 CLOSED in the document) — the client stamps its EXACT VERSION on every request, and the document now says so', async () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
     // FINDING P-12 · MEDIUM · story 21.3 · `server-metadata.md` has no request-header section.
     //
@@ -90,14 +90,21 @@ describe('§1 · every request header, against the document', () => {
     }
     assert.equal(CLIENT_VERSION, '2.0.0');
 
-    // And what the document says about any of it: nothing.
-    assert.equal(documented('x-lzp-client'), false, 'the document now names the client header — close P-12');
-    assert.equal(documented('x-lzp-protocol'), false);
-    assert.equal(documented('client version', 'app version', 'versionsnummer'), false);
-    assert.equal(documented('request header', 'anfrage-header'), false);
+    // ── INVERTED · P-12 CLOSED ────────────────────────────────────────────────────────────
+    // The CAPABILITY above is unchanged and always will be — ADR 003 §4 needs the version for the
+    // N−1 rule. What closed is the SILENCE. `server-metadata.md` §5 gained "the headers every
+    // request carries", a table with a row per header, and §9 gained a line for each. The row
+    // stays here and is now asserted the other way round, so deleting the section reddens it.
+    assert.equal(documented('x-lzp-client'), true, 'the client header left the document — re-open P-12');
+    assert.equal(documented('x-lzp-protocol'), true);
+    assert.equal(documented('client version', 'app version', 'versionsnummer'), true);
+    assert.equal(documented('request header', 'anfrage-header'), true);
+    // The two inferences that make it more than a version string, named in the document's words.
+    assert.ok(documented('the minute each Mac was updated'), 'the upgrade timeline is not named');
+    assert.ok(documented('survives a device revocation and re-adoption'), 'the fingerprint is not named');
   });
 
-  test('SUCCEEDED — the Authorization header carries the CLIENT CLOCK, and that is undocumented too', async () => {
+  test('SUCCEEDED (P-13 CLOSED in the document) — the Authorization header carries the CLIENT CLOCK, and the document now says so', async () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
     // FINDING P-13 · LOW · story 21.3.
     //
@@ -126,8 +133,15 @@ describe('§1 · every request header, against the document', () => {
     assert.match(auth, /device=[0-9A-Z]{16}/);
     assert.match(auth, /nonce=[\w-]{22}/);
 
-    assert.equal(documented('ts=', 'client clock', 'clock skew', 'uhrzeit des'), false,
-      'the document now names the timestamp — close P-13');
+    // ── INVERTED · P-13 CLOSED ────────────────────────────────────────────────────────────
+    // Same shape as P-12: the mitigation and the leak are one mechanism and there is no version of
+    // this protocol without it, so the fix was always a sentence. §5's header table now carries
+    // the `Authorization` row, and §10 carries the German sentence for it.
+    assert.equal(documented('ts='), true, 'the timestamp left the document — re-open P-13');
+    assert.ok(documented('client\'s own wall clock', 'client clock'));
+    assert.ok(documented('uhrzeit des'), 'the Datenschutz sentence is gone');
+    assert.ok(documented('per-machine drift fingerprint', 'stable per-machine fingerprint'),
+      'the document names the timestamp but not what it discloses');
     assert.equal(documented('nonce'), true, 'the nonce half IS documented — §2, the Nonce table');
   });
 
@@ -153,7 +167,7 @@ describe('§1 · every request header, against the document', () => {
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('§2 · what goes in a URL, and therefore into a platform request log', () => {
-  test('SUCCEEDED — the space id and the read cursor are in the QUERY STRING of every pull', async () => {
+  test('SUCCEEDED (P-14 CLOSED in the document) — the space id and the read cursor are in the QUERY STRING of every pull', async () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
     // FINDING P-14 · MEDIUM · story 21.3 · `server-metadata.md` §8.
     //
@@ -196,12 +210,17 @@ describe('§2 · what goes in a URL, and therefore into a platform request log',
     // At least one pull carried a NON-ZERO cursor, so the leak is of progress and not of a constant.
     assert.ok(pulls.some((p) => p.query.since !== '0'), 'no pull carried real progress');
 
-    // The document names one URL leak, and it is the other one.
+    // ── INVERTED · P-14 CLOSED ────────────────────────────────────────────────────────────
+    // §8 named one URL leak and it was the other one. §5 now names this one, quotes the request
+    // line verbatim, and draws the conclusion §8's own argument forces: an operator with ONLY the
+    // platform log can reconstruct the activity timeline per space.
     assert.equal(documented('pair/<rid>', 'rendezvous id'), true, '§8 must still name the pairing rid');
     assert.equal(
-      documented('query string', 'querystring', 'in der url', '?space=', 'since='), false,
-      'the document now names the query-string leak — close P-14',
+      documented('query string', 'querystring', 'in der url', '?space=', 'since='), true,
+      'the query-string leak left the document — re-open P-14',
     );
+    assert.ok(documented('/api/v1/ops?limit=500&since=<cursor>&space='), 'the request line itself is gone');
+    assert.ok(documented('no\ndatabase at all', 'no database at all'), 'the platform-log-only inference is gone');
   });
 });
 
@@ -210,7 +229,7 @@ describe('§2 · what goes in a URL, and therefore into a platform request log',
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('§3 · the rhythm §5 describes, against the rhythm the code keeps', () => {
-  test('SUCCEEDED — §5 says the cadence STOPS when the window is hidden. It does not: it is 10 minutes', () => {
+  test('SUCCEEDED (P-15 CLOSED in the document) — §5 said the cadence STOPS when the window is hidden. It is 10 minutes, and §5 now says so', () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
     // FINDING P-15 · MEDIUM · story 21.3 · `server-metadata.md` §5 is factually wrong.
     //
@@ -239,17 +258,24 @@ describe('§3 · the rhythm §5 describes, against the rhythm the code keeps', (
     const engine = repoFile('src/js/family/engine.js');
     assert.match(engine, /const nextDelay = \(\) => \(hidden\(\)\s*\?\s*CADENCE\.pullHiddenMs/);
 
-    // The document, and the two sentences that are wrong.
+    // ── INVERTED · P-15 CLOSED ────────────────────────────────────────────────────────────
+    // This one was not an omission, it was a FACTUAL ERROR: §5 said the cadence stops when the
+    // window is hidden. It is ten minutes. The sentence is gone, the table is in, and §5 says in
+    // its own voice which of the two statements is the larger one.
     const md = repoFile(DOC);
-    assert.match(md, /the pull cadence stops when it is not/,
-      '§5 was corrected — close finding P-15');
-    assert.equal(documented('10 min', '10 minutes', 'zehn minuten', 'pullhiddenms', 'hidden'), false,
-      'the hidden cadence is documented now — close P-15');
-    assert.match(md, /\(ADR 003 §10\)/, 'the wrong citation was fixed — good');
+    assert.equal(/the pull cadence stops when it is not/.test(md), false,
+      'the false sentence is back in §5 — re-open P-15');
+    assert.equal(documented('10 min', '10 minutes', 'zehn minuten', 'pullhiddenms', 'hidden'), true,
+      'the hidden cadence left the document — re-open P-15');
+    assert.ok(documented('the relay knows your Mac was on'),
+      '§5 no longer says which of the two readings is the true and larger one');
+    // The citation was wrong too: the cadence table is ADR 003 §8.2, and §10 is "Known weaknesses".
+    assert.equal(/cadence[^.]*\(ADR 003 §10\)/.test(md), false, 'the wrong citation is back');
+    assert.ok(documented('ADR 003 §8.2'), '§5 must cite the section the table is actually in');
     assert.match(repoFile('docs/v2/adr/003-sync-protocol.md'), /^## 10\. Known weaknesses$/m);
   });
 
-  test('SUCCEEDED — three EVENT-DRIVEN requests are undocumented, and they are the sharp ones', () => {
+  test('SUCCEEDED (P-16 CLOSED in the document) — three EVENT-DRIVEN requests, now named and explained in §5', () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
     // FINDING P-16 · MEDIUM · story 21.3 · the most identifying observable in the product.
     //
@@ -285,8 +311,17 @@ describe('§3 · the rhythm §5 describes, against the rhythm the code keeps', (
     // ADR 003 documents them. The privacy document does not.
     assert.match(repoFile('docs/v2/adr/003-sync-protocol.md'),
       /`focus`, `visibilitychange → visible`, `online` \| pull all configured spaces immediately/);
-    assert.equal(documented('visibilitychange', 'pagehide', 'brings the window', 'looked at'), false,
-      'the wake triggers are documented now — close P-16');
+    // ── INVERTED · P-16 CLOSED ────────────────────────────────────────────────────────────
+    // The cadence is right and deliberate — a stale board when somebody has just looked at it is a
+    // real cost — so this was always a documentation finding. §5 now has "the three requests that
+    // are not a poll", one table row per trigger, and says what each one timestamps.
+    assert.equal(documented('visibilitychange', 'pagehide', 'brings the window', 'looked at'), true,
+      'the wake triggers left the document — re-open P-16');
+    assert.ok(documented('visibilitychange') && documented('pagehide') && documented('`online`'),
+      'all three triggers must be named, not one of them');
+    assert.ok(documented('they bracket a session'), 'the joint inference is what makes the three sharp');
+    assert.ok(documented('when you look at it and when you close it'),
+      'the Datenschutz sentence P-16 asked for is missing');
   });
 
   test('FAILED — the parts of §5 that ARE right are right, and they are the majority', () => {
@@ -309,7 +344,7 @@ describe('§3 · the rhythm §5 describes, against the rhythm the code keeps', (
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('§4 · "solo mode makes zero requests" — the document\'s own strongest claim', () => {
-  test('SUCCEEDED — the claim is true of the RELAY and is stated as if it were true of the app', () => {
+  test('SUCCEEDED (P-2\'s documentation half CLOSED; P-1 open) — the claim is true of the RELAY and now says so', () => {
     // The two findings from file 1 of this suite, restated where they land in the documentation:
     //
     //   P-2 — a solo install contacts a SECOND host, the release manifest, on every launch. The
@@ -323,8 +358,20 @@ describe('§4 · "solo mode makes zero requests" — the document\'s own stronge
     const md = repoFile(DOC);
     assert.match(md, /solo mode makes \*\*zero requests\*\*/);
     assert.match(md, /not an empty account, no\s+account/);
-    assert.equal(documented('release', 'update check', 'latest.json', 'zweiter server'), false,
-      'the second remote is documented now — close P-2');
+    // ── INVERTED · P-2's DOCUMENTATION HALF CLOSED ────────────────────────────────────────
+    // §8 now has "the second remote: the release host". It names `latest.json`, says the request
+    // is disclosure-gated and real rather than hidden, says what the release host's own log
+    // necessarily sees (IP, time, "this Mac runs this app") FOR SOLO INSTALLS TOO, and puts the
+    // qualifier on §5's sentence — "zero requests **to this relay**". P-2's remaining half is not
+    // this document's: `docs/v2/datenschutz.md` still does not exist, and when it is written it
+    // must name two remotes. That half is asserted below and stays open.
+    assert.equal(documented('release host', 'latest.json'), true,
+      'the second remote left the document — re-open P-2');
+    assert.ok(documented('zweiten server'), 'the German sentence for the second remote is gone');
+    assert.ok(documented('read as "no traffic"', 'read as “no traffic”'),
+      '§5\'s "no rows at all" no longer carries its qualifier');
+    assert.equal(repoHas('docs/v2/datenschutz.md'), false,
+      'a Datenschutz document appeared — P-2\'s second half is now audited against IT, not this file');
     // §6 names `POST /members/remove` as the purge route and never names leaving at all — so the
     // document has no place where "and this is how you stop" would go, which is the shape of the
     // gap rather than an omission from a list.

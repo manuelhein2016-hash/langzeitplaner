@@ -203,13 +203,86 @@ measure, not a null one.
 
 ## 5. Request patterns: the rhythm of a household
 
-The client pulls **every 45 s ± 15 s jitter while a window is visible** (ADR 003 §10). Each pull
-is an authenticated request that writes a `Nonce` row and bumps a `RateBucket`. Each push writes
-`Op` rows carrying `receivedAt` and `deviceShort`.
+The client pulls on a timer whose period depends on whether a window is visible — ADR 003 §8.2's
+cadence table, not §10, which is "Known weaknesses":
 
-An operator with the database and nothing else can therefore derive, per machine, per day:
+```
+timer, window visible   every 45 s ± 15 s jitter
+timer, window HIDDEN    every 10 min  (the push cadence is unchanged)
+```
 
-- **when that Mac is awake and has the app open** — the pull cadence stops when it is not;
+Each pull is an authenticated request that writes a `Nonce` row and bumps a `RateBucket`. Each
+push writes `Op` rows carrying `receivedAt` and `deviceShort`.
+
+**The hidden cadence is the correction that matters, and this document had it wrong.** An earlier
+draft said the pull cadence *stops* when the window is not visible. It does not: a Mac with the
+app running behind other windows — the ordinary state of a calendar — emits a heartbeat every ten
+minutes. That is the difference between *"the relay knows when you were looking at your calendar"*
+and *"the relay knows your Mac was on"*, and the second is the true and the larger statement.
+
+### The three requests that are not a poll
+
+A poll says a machine is on. The client also makes three requests that are **event-driven**, and
+each one timestamps a human action to the second (`family/engine.js`, ADR 003 §8.2's last rows):
+
+| trigger | what goes out | what it timestamps |
+|---|---|---|
+| `visibilitychange` → visible | an **immediate** pull | **the moment somebody brought the calendar to the front.** Not "the Mac is on" — "she looked at it, now". |
+| `online` | an **immediate** pull | **the moment this Mac's network came back**: the lid opened, the train left the tunnel, the café wifi connected. |
+| `pagehide` | a force-flushed **push** | **the moment the app was quit or the window closed.** |
+
+Together they bracket a session — opened at 08:12, looked at 08:12, 09:40 and 14:03, quit at
+18:31 — and they are strictly more identifying than the poll above them. The cadence itself is
+right and deliberate: a stale board when a person has just looked at it is a real cost. But a
+Datenschutz page that says only „alle 45 Sekunden" is describing the least revealing half. It
+should say plainly that **the app talks to the server when you look at it and when you close it.**
+
+### The headers every request carries
+
+This document enumerates database columns (§2), sizes (§4) and the transport headers the *server*
+sets (§8). Until now it had no section for the headers the **client** sends. There are three, and
+`tests/attack/privacy-e5-metadata.test.js` §1 asserts that they are the whole client-supplied
+surface — no cookie, no session, no bearer token, no `User-Agent`, no `Referer`, no
+`X-Forwarded-For`.
+
+| header | value | what it reveals |
+|---|---|---|
+| `X-LZP-Client` | the **client version**, e.g. `2.0.0` | the exact build running on each `deviceShort`, on every request. Because the value changes, it also gives **the minute each Mac was updated** — cross-referenced with a release date, a machine-level upgrade timeline for the household. It is a fingerprint that separates two machines before any `Device` row is joined, and one that **survives a device revocation and re-adoption**. |
+| `X-LZP-Protocol` | the protocol number | with `X-LZP-Client`, the N−1 window this client is inside — i.e. how far behind it is allowed to be, which is a proxy for how long it has been neglected. |
+| `Authorization` | `LZP1 device=…, ts=…, nonce=…, sig=…` | `device` is the `deviceShort`. `nonce` is the `Nonce` table of §2. **`ts=` is the client's own wall clock in milliseconds**, compared by the server against its own inside a 120 s window — so the relay reads, on every request, **the exact offset between each Mac's clock and its own**. Clock drift is a property of the hardware and of whether the machine syncs NTP, so that offset is a stable per-machine fingerprint that survives everything else. |
+
+Neither is a defect in the protocol. ADR 003 §4 needs the version for the N−1 rule and ADR 003 §2
+needs the timestamp for the replay window; the mitigation and the leak are the same mechanism, and
+there is no version of this protocol without them. They are **undocumented observables**, and the
+Datenschutz page owes two sentences: „Jede Anfrage nennt die Version der App." and „Jede Anfrage
+nennt die Uhrzeit des Macs, damit alte Anfragen nicht wiederverwendet werden können."
+
+### The URL every pull carries — and therefore the platform's request log
+
+§8 is careful and correct about one URL: `/api/v1/pair/<rid>` puts the pairing rendezvous id into
+a URL *path*, and a platform request log is exactly where a URL path goes. It named only that one.
+Every pull this product makes is
+
+```
+GET /api/v1/ops?limit=500&since=<cursor>&space=psp_<22 chars>
+```
+
+so **the space id and the device's read position are in a URL query string, on every request, at
+the 45-second cadence.** By §8's own argument they are therefore in Vercel's request log, whose
+retention and access are Vercel's terms and not ours. The space id is the join key for everything
+in §2; the cursor is `Device.lastSeenSeq` restated. **An operator with only the platform log — no
+database at all — can reconstruct this section's entire activity timeline per space.**
+
+Two more paths carry a space id in the path rather than the query: `/api/v1/spaces/:id/members`
+and `/api/v1/spaces/:id/keys`.
+
+### What an operator derives from all of it
+
+An operator with the database and nothing else can derive, per machine, per day:
+
+- **when that Mac is awake and has the app open** — and, because of the ten-minute hidden
+  heartbeat, this holds whether or not anybody is looking at the window;
+- **when somebody looked at the calendar, and when they quit** — the three event-driven requests;
 - **when a person is actually editing** — pushes are event-driven, pulls are not;
 - **the working rhythm of a household**: who writes in the morning, who writes at 23:00, who
   writes only at weekends, and which machine goes quiet for two weeks in August;
@@ -223,9 +296,14 @@ imply is covered by "end-to-end encrypted".
 **What bounds it in practice, honestly stated:** the family is 2–8 people, so the shadow is small
 and specific rather than large and anonymous. That makes it *more* identifying, not less.
 
-**What genuinely is not there:** solo mode makes **zero requests** (ADR 003 §7, four independent
-gates, `tests/tier1/network-scope.test.js`). A person who never joins a circle has no rows at
+**What genuinely is not there — and the one qualifier that sentence has always needed:**
+solo mode makes **zero requests** *to this relay* (ADR 003 §7, four independent gates,
+`tests/tier1/network-scope.test.js`). A person who never joins a circle has no rows at
 all — not an empty account, no account.
+
+That is a true statement about **this relay's database**, and it has been read as "no traffic".
+The two are not the same: see §8 on the **release host**, the second remote this product contacts,
+which a solo install with updates enabled reaches on every launch.
 
 ---
 
@@ -277,6 +355,64 @@ Everything in §2, at once, joined. Concretely, for one household:
 - an **IP address** for any per-IP limiter that fired within the last hour;
 - for each pairing ever attempted: that it happened, how far it got, and whether it burned.
 
+### Five things the tables above imply and never say out loud
+
+§2 and §3 are claims about **columns**, and they are true. These five are claims about the
+**dump**, and a Datenschutz page written only from the column tables would miss every one of them.
+Each was demonstrated against the real router in `tests/server/attack-relay-infer.test.js` and
+`tests/server/attack-relay-correlate.test.js`.
+
+1. **The relay can tell which member is admin — four independent ways.** §3 lists "no role or
+   admin column" among the things that cannot be added quietly, and that is true and it is not the
+   question. (a) **The founder:** the earliest `Member.joinedAt` in a family space created the
+   circle, because every other member arrived through an invite that row predates — one `ORDER
+   BY`. (b) **The issuer:** inviting is admin-only (20.1) and `Invite.createdBy` records it.
+   (c) **The remover:** `RATE_RULES.memberRemove` is keyed on the *acting* member, so removing
+   somebody writes `["memberRemove","mem_…"]` into `RateBucket.key`, and only the admin removes
+   members. (d) **The transfer:** `POST /members/transfer` stores nothing — the handler says so on
+   the wire — but the running relay sees both ends of it, the caller being the outgoing admin and
+   the body naming the successor, and the application log keeps the line. In a household the admin
+   is a specific person, and *"the relay can tell which of the five of you is in charge"* is
+   exactly the kind of sentence 21.3 exists to say out loud.
+
+2. **A member in another time zone is visible as a shifted activity window.** §5 gives the raw
+   material — "when that Mac is awake", "who writes at 23:00" — and stops there. The conclusion it
+   does not draw is that the **offset** between two members' quiet windows locates one of them in
+   a different **time zone**: an au pair at home for the summer, a parent posted abroad, a child
+   at university on another continent. No ciphertext, no IP, one `GROUP BY` over
+   `Op.receivedAt`.
+
+3. **`RateBucket`'s member-keyed rules are a per-member action record, at rest, unswept.** §2 and
+   §11 are honest that the row **survives indefinitely** and frame that as a problem about IP
+   addresses. The member-keyed rules survive identically and say something different: not
+   "somebody at this address", but **"this member did this thing"**. `["memberRemove","mem_…"]`
+   and `["pairSession","mem_…"]` outlive the counters they were created for and outlive the
+   membership they recorded, and each one **names the actor** in a table whose stated purpose is
+   abuse defence.
+
+4. **The application log's `route` is a named per-member event feed.** §8 lists the seven fields
+   the log may carry and then says what is *not* in it. It never says what the fields that **are**
+   in it mean together: `(route, spaceId, deviceShort)` at a timestamp, with `LOG_ROUTES` a closed
+   enum of 23 verbs, is *this machine renamed the circle / invited somebody / removed somebody /
+   handed over the admin role* — and `deviceShort` maps to a member by one join. **The log line
+   names the event.** `renameSpace` is the sharpest case: the handler stores nothing, is
+   documented as storing nothing, and the log still records that the family renamed its circle on
+   25 July.
+
+5. **Two circles can be attached to one person — cross-space correlation.** §7's dump list and
+   §2's tables are written for a single-space world. Three joins work **across spaces**, and the
+   relay holds every household at once:
+   - `Device.deviceShort` is derived from a device's public signing key and is unique per machine
+     **across the whole database**, so one Mac in two circles is one row-set with one public key.
+   - `Member.recoveryPubSig` / `recoveryPubKex` — §2 calls them "public keys … stable identifiers
+     for as long as the member exists". Both halves are true and the sentence misses the point: a
+     **stable identifier is exactly what a JOIN needs**, and the scope that matters is not "as
+     long as the member exists" but "across every space in the database". No constraint forbids
+     the same recovery point appearing in two spaces, and nothing in the product warns anybody.
+   - **Timing alone.** §5's rhythm is a link **between households** as well as a portrait of one:
+     two circles with no column in common can be attached to one person by arrival times, with no
+     cryptography and no IP address.
+
 What a dump does **not** reveal: a single word anyone wrote, a single date anyone entered, a
 single person's name, or which of the pseudonymous ids is which human. The link from `mem_…` to a
 name exists only inside the ciphertext, as `member.set{displayName}` ops, and inside the heads of
@@ -307,7 +443,34 @@ see the ISP's records. The pseudonymity of `mem_…` is real and it is not the w
 - **Application logs** carry at most `{route, spaceId, deviceShort, opCount, byteCount, status,
   ms}` — seven fields, allowlisted by name *and* by shape, so a value that does not look like what
   it claims to be is dropped rather than written. No IP, no path, no body, no ciphertext.
-  `blindness.test.js` §5 asserts this over a real session.
+  `blindness.test.js` §5 asserts this over a real session. What the seven fields mean *together*
+  is §7's fourth inference, and it is sharper than the list suggests.
+- **The client's own URLs go into the platform log too**, and there are more of them than the
+  pairing path: see §5's "the URL every pull carries". Every 45 seconds, a space id and a read
+  cursor.
+
+### The second remote: the release host
+
+**This product contacts two hosts, and only one of them is the relay.** The macOS shell's updater
+fetches a static **release** manifest — Tauri v2's `latest.json`, from the host configured in
+`src-tauri/tauri.conf.json` — to decide whether a newer build exists. That is an entirely separate
+operator, an entirely separate request log, and it appears in no privacy document.
+
+- It is **disclosure-gated**: `src/js/platform/updater.js` and story 21.5 require the user to have
+  been told before the first check, and the settings switch turns the **request** off and not
+  merely the hint (`tests/tier2/update-ui.dom.js`). So it is a real request that a person has
+  agreed to, not a hidden one.
+- What leaves the machine is *"some Mac asked for latest.json"* — no space, no member, no device
+  id, no board. What the release host's own log necessarily sees is the **IP address, the time,
+  and the fact that this Mac is running this app**, on the update-check cadence, for **solo
+  installs as well as family ones**.
+- That is why §5's sentence *"a person who never joins a circle has no rows at all — not an empty
+  account, no account"* needs its qualifier. It is true of **this relay's database**. It has been
+  read as "no traffic", and for a solo install with updates enabled that reading is wrong.
+
+**There is no `docs/v2/datenschutz.md` yet.** When it is written it must name **two** remotes and
+two processors, not one — and this document is the source for only the first of them. Owner:
+LZP-207 / the PO. (Finding P-2, recorded in E1 and again by the E5 privacy adversary.)
 
 ---
 
@@ -330,6 +493,26 @@ from the code.
 | **an IP address in `RateBucket.key`** | §5.2 says IPs are "in transit". For up to an hour they are also **at rest**. This one is a correction, not an addition. |
 | `Member.recoveryPubKex` | added by finding E3-2 after §5.2 was written. Public, harmless, and should still be listed. |
 | purge gaps in `Op.seq` | how much a departed member had written. |
+
+**And ten more, added after the E5 adversaries read this document against the code.** The first
+nine were derived from the SERVER. These were derived from the CLIENT and from the DUMP, which is
+why they were missed: a document written by reading `schema.prisma` cannot see a request header,
+and a document written column by column cannot see what two columns imply.
+
+| not in §5.2, and until now not here either | where it now lives |
+|---|---|
+| `X-LZP-Client` — the exact build per machine, the minute each Mac updated, and a fingerprint that survives revoke-and-readopt | §5, "the headers every request carries" |
+| `X-LZP-Protocol` — the N−1 window this client is inside | §5, same table |
+| `ts=` in `Authorization` — the client's wall clock, hence a per-machine drift fingerprint | §5, same table |
+| the space id and read cursor **in a URL query string** on every pull | §5, "the URL every pull carries" |
+| the pull cadence when the window is hidden — **10 minutes, not "stopped"** | §5, the cadence block. This one was a factual error in this document, not an omission. |
+| `visibilitychange`, `online`, `pagehide` — three event-driven requests that bracket a session | §5, "the three requests that are not a poll" |
+| **the admin is identifiable four ways** | §7, inference 1 |
+| a member's **time zone**, from the offset between two activity windows | §7, inference 2 |
+| the member-keyed `RateBucket` rows as **a per-member action record** | §7, inference 3 |
+| the application log's `route` as a named per-member event feed | §7, inference 4 |
+| **cross-space correlation** by `deviceShort`, by the recovery point, and by timing | §7, inference 5 |
+| **the release host** — a second remote, contacted by solo installs too | §8, "the second remote" |
 
 **Recommended action:** amend ADR 003 §5.2 to point at this file rather than restate a list that
 has to be kept in sync by hand. Owner: whoever holds ADR 003.
@@ -355,6 +538,17 @@ has to be kept in sync by hand. Owner: whoever holds ADR 003.
 > Zur Missbrauchsabwehr speichert der Server **IP-Adressen** zusammen mit einem Zähler. Der
 > Zähler läuft nach spätestens einer Stunde ab; **die Zeile selbst wird derzeit nicht automatisch
 > gelöscht** — siehe §11.
+
+> Jede Anfrage nennt die **Version der App** und die **Uhrzeit dieses Macs**. Die Uhrzeit ist
+> nötig, damit alte Anfragen nicht wiederverwendet werden können.
+
+> Die App meldet sich beim Server **nicht nur alle 45 Sekunden**, sondern auch **immer dann, wenn
+> Sie den Kalender nach vorne holen, wenn dieser Mac wieder Netz hat und wenn Sie die App
+> schließen**. Steht das Fenster im Hintergrund, meldet sie sich alle zehn Minuten.
+
+> Die App fragt außerdem bei einem **zweiten Server** nach, ob es eine neuere Version gibt. Das
+> passiert erst, nachdem Sie zugestimmt haben, und lässt sich in den Einstellungen wieder
+> ausschalten. Dieser Server erfährt nur, dass ein Mac gefragt hat — nichts über Ihren Kalender.
 
 (That last sentence is uncomfortable and it is the true one. If the PO adds the cleanup job in
 §11, it becomes „…und wird nach 24 Stunden gelöscht", and this page should be updated in the same

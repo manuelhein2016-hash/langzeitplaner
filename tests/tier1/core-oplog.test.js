@@ -2086,3 +2086,75 @@ test('`BODY_FINGERPRINT_CAP` is the retained-line bound the store compacts at', 
   assert.equal(BODY_FINGERPRINT_CAP, Math.min(5000, Math.floor(LS_OPS_CAP * 0.75)),
     'BODY_FINGERPRINT_CAP and store.js\'s TAIL_COMPACT_AT have drifted apart');
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// L-4 — THE ACK AND THE LINE MUST COME BACK AGREEING
+//
+// `checkpoint().seqs` is the durable record that the relay has an op; `store.outbox()`'s own
+// docblock names it ("an op leaves the outbox when the server reports it … which rides in
+// `checkpoint().seqs` and so survives a relaunch"). The TAIL is a byte stream written at the
+// moment the op is authored, which is before any server has seen it, so `line.seq` on disk is
+// `null` by construction and `ack()` never rewrites it.
+//
+// `load()` fed those bytes and dropped the index. The consequence was not a lost op here — it was
+// a PHANTOM OUTBOX ENTRY, which is the input to `store._outboxHorizonCap()`: an outbox floor
+// pinned below the persisted horizon pushed that method into E5-2's one unrecoverable arm, and
+// two of twenty-four seeds of `attack-converge-disorder.test.js` §2 still lost an op after E5-2's
+// own arm was fixed. This is the seam, minimised.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+test('L-4 · `load()` restores a tail line\'s ack from `checkpoint().seqs`', () => {
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'l4', wall });
+
+  const src = createOpLog({ now: () => wall.ms });
+  a.txn();
+  const one = a.note(U1, { date: '2026-09-10', text: 'gesendet', categoryId: 'cat-1', _alive: true }, { born: true });
+  wall.advance(1000);
+  a.txn();
+  const two = a.note(U2, { date: '2026-09-11', text: 'noch nicht', _alive: true }, { born: true });
+  src.append(one);
+  src.append(two);
+  // The relay acknowledged the FIRST op only — the ordinary state of a push that landed for one
+  // line and had not been made for the other yet.
+  assert.equal(src.ack(one.id, 7n), true);
+
+  const cp = src.checkpoint({ horizon: ZERO_STAMP });   // fold nothing: both stay LINES
+  assert.equal(cp.seqs[one.id], '7', 'the checkpoint carries the ack');
+  assert.equal(cp.seqs[two.id], undefined, 'and carries nothing for the unacknowledged one');
+
+  // THE TAIL AS IT IS ACTUALLY WRITTEN: `seq: null` on both, because both lines were appended to
+  // `ops.jsonl` before either push. This is not a contrived file — it is what `_persistOps` ①
+  // writes, and the ack arrived afterwards.
+  const tail = [{ op: one, seq: null, park: null }, { op: two, seq: null, park: null }];
+
+  const back = createOpLog({ now: () => wall.ms });
+  back.load({ checkpoint: cp, tail });
+
+  const lines = new Map(back.lines().map((l) => [l.op.id, l]));
+  assert.equal(lines.get(one.id).seq, '7',
+    'THE LINE knows it was acknowledged. Reverting `oplog.load()`\'s `seqById` lookup makes this '
+    + '`null`, `store.outbox()` re-offers an op the relay has had all along, and the outbox floor '
+    + 'sinks below the persisted horizon (finding L-4).');
+  assert.equal(lines.get(two.id).seq, null, 'and the unacknowledged one is still unacknowledged');
+  assert.equal(back.seqOfOp(one.id), 7n, 'the index and the line agree …');
+  assert.equal(back.seqOfOp(two.id), null, '… in both directions');
+});
+
+test('L-4 · a tail line that CARRIES a seq keeps its own, and the index never overrides it', () => {
+  // The other direction, so the fix cannot be read as "the index wins". A tail written by a build
+  // that DOES record acks in `ops.jsonl` is authoritative for its own line; the lookup is a
+  // fallback for the `null` the current writer produces, not a second source of truth.
+  const wall = makeWall();
+  const a = makeAuthor({ tag: 'l4b', wall });
+  const src = createOpLog({ now: () => wall.ms });
+  a.txn();
+  const one = a.note(U1, { date: '2026-09-10', text: 'x', categoryId: 'cat-1', _alive: true }, { born: true });
+  src.append(one);
+  src.ack(one.id, 3n);
+  const cp = src.checkpoint({ horizon: ZERO_STAMP });
+
+  const back = createOpLog({ now: () => wall.ms });
+  back.load({ checkpoint: cp, tail: [{ op: one, seq: '9', park: null }] });
+  assert.equal(back.lines()[0].seq, '9', 'the line\'s own seq stands');
+});

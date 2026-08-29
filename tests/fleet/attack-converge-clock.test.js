@@ -159,8 +159,14 @@ describe('§1 · SUCCEEDED · a 25 h-ahead op costs that op, and survives a comp
 // 2. A MAC MORE THAN 24 h FAST IS INVISIBLE TO ITS PEER
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§2 · FAILED · a fast Mac syncs nothing, and neither Mac is told', () => {
-  test('everything it wrote parks on the peer; both report `healthy`; the boards disagree', async () => {
+// The DIVERGENCE half of this section is unchanged and still stands: a Mac more than 24 h fast
+// syncs nothing to its peer until the wall clock catches up. What is INVERTED is the observability
+// half — "neither Mac is told" — which was finding L-2 and is closed. `store.diagnostics().sync`
+// now carries `parked`, `sync/status.js` enumerates it as a `pending` observable, and
+// `sync/personal.js`'s `status()` folds the two readings by `max`. The peer says `pending` and can
+// name the held lines; the fast Mac itself has nothing to report, and still does not.
+describe('§2 · a fast Mac syncs nothing — and the peer now SAYS SO (L-2 closed)', () => {
+  test('everything it wrote parks on the peer; the peer reports `pending`; the boards disagree', async () => {
     const f = await twoMacs();
     const A = f.device('A');
     const B = f.device('B');
@@ -183,10 +189,15 @@ describe('§2 · FAILED · a fast Mac syncs nothing, and neither Mac is told', (
       'nor the deletion');
     assert.deepEqual(B.parked().map((l) => l.park), ['future', 'future'],
       'both ops are parked, which is exactly right per op…');
-    assert.deepEqual([A.status().state, B.status().state], ['healthy', 'healthy'],
-      '…and yet BOTH indicators draw nothing. `sync.status()` counts the engine\'s `deferred` and '
-      + '`quarantined` sets and knows nothing about the STORE\'s parked lines, so a Mac that has '
-      + 'parked everything its peer has ever said still reports `healthy`.');
+    assert.deepEqual([A.status().state, B.status().state], ['healthy', 'pending'],
+      '…and the peer SAYS SO. `sync.status()` used to count the engine\'s `deferred` and '
+      + '`quarantined` sets and knew nothing about the STORE\'s parked lines, so a Mac that had '
+      + 'parked everything its peer ever said still reported `healthy` (L-2). It now folds '
+      + '`diagnostics().sync.parked` in, by `max` over the ladder. `pending` and not `error` is '
+      + 'deliberate: nothing has failed, the ops are held and dated, and the wall clock will cure '
+      + 'it. The FAST Mac is still `healthy`, correctly — it has nothing to report.');
+    assert.equal(B.storeDiagnostics().sync.parked, 2,
+      'and the store can NAME them, which is what `pending` is standing for');
     assert.equal(B.deferredOps().length, 0, 'the engine is not holding them — the store is');
     assert.equal(boardsAgree([A, B]).equal, false, 'and the two Macs disagree');
 

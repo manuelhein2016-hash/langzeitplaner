@@ -129,6 +129,15 @@ async function run(seed, events, steps = 30) {
       case 'mutate-on':
         f.wire.hostile.onResponse = chainMutators(MUTATORS.shuffleOps(seed + i), MUTATORS.duplicateOps());
         break;
+      // THE QUARANTINE EVENT. One flipped ciphertext byte per page: AES-GCM refuses it, `pullNow`
+      // quarantines that op and releases the cursor past it (ADR 003 §8.2), and the op is gone
+      // from whichever Mac was reading. It is stacked ON TOP of the reorder/duplicate mutators
+      // rather than replacing them, so the alphabet only ever grows.
+      case 'tamper-on':
+        f.wire.hostile.onResponse = chainMutators(
+          MUTATORS.shuffleOps(seed + i), MUTATORS.duplicateOps(), MUTATORS.tamperCiphertext(i));
+        break;
+      case 'tamper-off':
       case 'mutate-off': f.wire.honest(); break;
       default: break;
     }
@@ -182,10 +191,24 @@ async function run(seed, events, steps = 30) {
     logQuarantine: [A, B].map((d) => d.storeDiagnostics().quarantine?.reason ?? null).filter(Boolean),
     outbox: A.outboxSize() + B.outboxSize(),
     status: [A.status().state, B.status().state],
+    // 19.3's promise as a boolean, from `sync/status.js`'s own fold: TRUE only when the state is
+    // healthy AND the enumerated domain of observables is empty AND every row of it could be
+    // answered. A divergent run in which BOTH Macs are `silent` is the failure the whole round is
+    // about, and it is the one thing §2's second row forbids.
+    silent: A.status().silent === true && B.status().silent === true,
+    diag: [A.storeDiagnostics().sync, B.storeDiagnostics().sync]
+      .map((d) => ({ parked: d.parked, refused: d.refused, lost: d.lost, chain: !!d.chain, outbox: d.outbox })),
   };
 }
 
 const SEEDS = Array.from({ length: 24 }, (_, i) => i + 1);
+
+/**
+ * THE HEADLINE SWEEP. 128 seeds, because the property this file exists to state was found to be
+ * FALSE at 2 of 24 after the first fix landed — a rate a 24-seed sweep would report as "it works"
+ * on most runs. The alphabet is not narrowed to make it pass: it is the widest one in the file.
+ */
+const WIDE_SEEDS = Array.from({ length: 128 }, (_, i) => i + 1);
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // 1. WITHOUT COMPACTION — THE PROPERTY HOLDS
@@ -224,34 +247,100 @@ describe('§1 · SUCCEEDED · partition + reorder + duplication + paging + relau
 // 2. ADD ONE EVENT — COMPACTION — AND THE MAJORITY OF SEEDS DIVERGE FOR EVER
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§2 · FAILED · the same schedules with `compact` in the alphabet', () => {
-  test('a permanent, stable content divergence, with `healthy` on both Macs and nothing queued', async () => {
+// INVERTED, NOT REPAIRED, and this row named its own trigger: "If it ever goes green — no seed
+// diverges — `store._outboxHorizonCap()` has been fixed and this test should be inverted, not
+// deleted." Two fixes were needed and the second was only visible once the first had landed:
+//
+//   E5-2  `_outboxHorizonCap()` stood its cap down when `cap === null`, which is not a rare state
+//         — it is the state EVERY compaction leaves behind. Returning `undefined` there is not
+//         standing down, it is imposing NO cap and folding the unacknowledged line for real.
+//   L-4   `core/oplog.js` `load()` fed each tail line the `seq` its BYTES carry, and a tail line
+//         is written before any ack exists, so it always reads `null`. The durable ack rides in
+//         `checkpoint().seqs`. An acknowledged op therefore came back looking unacknowledged, the
+//         outbox floor sank below the persisted horizon, and the cap was pushed into E5-2's one
+//         genuinely unrecoverable arm. With only the first fix in place this sweep still lost an
+//         op on seeds 3 and 10 of 24 — which is how L-4 was found.
+//
+// The alphabet is UNCHANGED and is still the widest in the file. Nothing was narrowed to make it
+// pass; §1's honest sweep is the control that says so.
+describe('§2 · CLOSED (E5-2, L-4) · the same schedules with `compact` in the alphabet', () => {
+  test('128 seeds × 30 steps: content converges, the registers agree, nothing is lost', async () => {
     const events = [...EDITS, ...LIFE, 'compact'];
     const rows = [];
-    for (const seed of SEEDS) rows.push(await run(seed, events));
-    const diverged = rows.filter((r) => !r.content);
+    for (const seed of WIDE_SEEDS) rows.push(await run(seed, events));
 
-    assert.ok(diverged.length > 0,
-      'THIS ROW IS THE FINDING. If it ever goes green — no seed diverges — `store._outboxHorizonCap()` '
-      + 'has been fixed and this test should be inverted, not deleted.');
+    // NON-VACUITY FIRST. A sweep in which the two Macs never exchanged anything would satisfy
+    // every line below, and so would one in which `compact` never fired.
+    const built = rows.filter((r) => r.entries > 1).length;
+    assert.ok(built >= WIDE_SEEDS.length / 2,
+      `only ${built}/${WIDE_SEEDS.length} seeds ended with more than the starting entry — vacuous`);
+    const compacted = rows.filter((r) => r.log.some((e) => e.endsWith(':compact'))).length;
+    assert.ok(compacted >= WIDE_SEEDS.length * 0.9,
+      `only ${compacted}/${WIDE_SEEDS.length} scripts contained a compaction — the alphabet is not armed`);
 
-    // It is not an artefact of an unfinished endgame: nothing is queued, nothing is refused, and
-    // nothing repairs it on a second pass.
-    for (const r of diverged) {
-      assert.equal(r.outbox, 0, `seed ${r.seed}: both outboxes are empty — nothing is still owed`);
-      assert.deepEqual(r.quarantined, [], `seed ${r.seed}: the engine refused nothing`);
-      assert.deepEqual(r.logQuarantine, [], `seed ${r.seed}: neither log was quarantined`);
-      assert.deepEqual(r.status, ['healthy', 'healthy'],
-        `seed ${r.seed}: STORY 19.3 — the indicator draws nothing, on two Macs that disagree`);
-      assert.equal(r.stable, true, `seed ${r.seed}: and it is stable, i.e. permanent`);
-      assert.equal(r.e52, true,
-        `seed ${r.seed}: every divergent run carries the E5-2 stand-down warning — the mechanism is `
-        + 'minimised in attack-converge-outbox.test.js §1');
-    }
+    const bad = rows.filter((r) => !r.content || r.cells || !r.stable || r.lost.length || r.extra.length);
+    assert.deepEqual(
+      bad.map((r) => ({
+        seed: r.seed, content: r.content, cells: r.cells, stable: r.stable,
+        lost: r.lost, extra: r.extra, e52: r.e52, outbox: r.outbox, status: r.status,
+        script: r.log.join(' '),
+      })),
+      [],
+      'THE PROPERTY: for every op set and every interleaving of partition, reorder, duplication, '
+      + 'COMPACTION, restart and a hostile relay, the two Macs converge — on content, on the '
+      + 'register digests cell by cell, stably, with nothing the script performed missing from '
+      + 'either board and nothing on either board the script never performed.',
+    );
 
-    // The size of it, recorded so a later pass can see the number move.
-    assert.ok(diverged.length >= SEEDS.length / 4,
-      `measured at ${diverged.length}/${SEEDS.length} seeds; seeds ${JSON.stringify(diverged.map((r) => r.seed))}`);
+    // AND THE UNRECOVERABLE ARM IS NEVER REACHED. `_e52Warned` is set only when the persisted
+    // horizon ALREADY folds an unacknowledged op — a file written before the cap existed. No run
+    // of this build may produce one, and a run that does is the finding coming back.
+    const stoodDown = rows.filter((r) => r.e52).map((r) => r.seed);
+    assert.deepEqual(stoodDown, [],
+      `seeds ${JSON.stringify(stoodDown)} stood the outbox cap down; this build must never write a `
+      + 'checkpoint that folds past its own outbox floor');
+  });
+
+  test('SUCCEEDED · a QUARANTINE in the alphabet costs data — and never costs it SILENTLY', async () => {
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // THE SIXTH EVENT, AND THE ONE THE PROPERTY ABOVE CANNOT SIMPLY ABSORB.
+    //
+    // `tamper` flips a ciphertext byte, so AES-GCM refuses the op and `pullNow` quarantines it.
+    // That refusal is CORRECT — the bytes are what they are — and ADR 003 §8.2 releases the cursor
+    // past it, so the op is genuinely gone from the victim. Asserting convergence here would be
+    // asserting that a forged envelope is applied, which is the opposite of what 21.1 promises.
+    //
+    // So the property that must hold over this alphabet is the one that makes E6's bar meaningful:
+    // **either the two Macs converge, or the Mac that lost something SAYS SO, durably.** A run may
+    // not end divergent and quiet. That is what "provably not losing ops" means once an adversary
+    // is allowed to destroy one: not "nothing is ever lost", but "nothing is ever lost in silence".
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    const events = [...EDITS, ...LIFE, 'compact', 'tamper-on', 'tamper-off'];
+    const rows = [];
+    for (const seed of WIDE_SEEDS) rows.push(await run(seed, events));
+
+    const armed = rows.filter((r) => r.log.some((e) => e.endsWith(':tamper-on'))).length;
+    assert.ok(armed >= WIDE_SEEDS.length * 0.9,
+      `only ${armed}/${WIDE_SEEDS.length} scripts armed the tamperer — the alphabet is not armed`);
+    const refused = rows.filter((r) => r.quarantined.length > 0).length;
+    assert.ok(refused > 0,
+      'no run produced a refusal at all, so this row is measuring the same thing as the one above');
+
+    const silent = rows.filter((r) => !r.content && r.silent);
+    assert.deepEqual(
+      silent.map((r) => ({ seed: r.seed, status: r.status, diag: r.diag, script: r.log.join(' ') })),
+      [],
+      'A RUN ENDED WITH THE TWO MACS DISAGREEING AND `silent: true` ON BOTH. Story 19.3 promises '
+      + 'that quiet MEANS there is nothing to tell you; a divergence nobody can report makes that '
+      + 'promise false, and it is the whole of findings L-1, L-2, E5-2 and P-4.',
+    );
+
+    // And the converse control, so "report everything for ever" cannot pass: a run that DID
+    // converge must be allowed to be silent, and most of them must be.
+    const quiet = rows.filter((r) => r.content && r.silent).length;
+    assert.ok(quiet >= 1,
+      'not one converged run was silent — a build that reports a fault whenever it has anything '
+      + 'to say breaks 19.3 in the other direction, which is what this control is for');
   });
 });
 

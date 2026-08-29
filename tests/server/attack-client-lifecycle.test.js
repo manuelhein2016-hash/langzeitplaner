@@ -33,6 +33,7 @@ import { createHandlers } from '../../server/core/handlers/index.js';
 import { authenticate, assertMember, b64u } from '../../server/core/auth.js';
 import { LIMITS, createLog } from '../../server/core/limits.js';
 import { memoryStore } from '../../server/adapters/memory.js';
+import { attestedPerson, attestedDeviceFor } from './_attested-person.js';
 import { fileStore } from '../../server/adapters/file.js';
 import { requiredRecipients } from '../../server/core/handlers/spaces.js';
 import { MAX_OPEN_INVITES, INVITE_TTL_MS } from '../../server/core/handlers/invites.js';
@@ -67,23 +68,29 @@ const rawOf = async (k) => new Uint8Array(await S.exportKey('raw', k));
 const rnd = (n) => globalThis.crypto.getRandomValues(new Uint8Array(n));
 
 async function person(colorRef, ip) {
-  const sig = await S.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const kex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  const recSig = await S.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const recKex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  const sigPubRaw = await rawOf(sig.publicKey);
+  // Finding E2E3-7: `POST /spaces` and `POST /invites/redeem` now run ADR 002 §2.3's checks that
+  // `POST /devices` has always run, and `GET /members` publishes the blob (E2E3-6). A person made
+  // of `b64u(rnd(120))` is refused at the door — so this mints with the SHIPPING
+  // `buildDeviceAttestation` + `attestDevice`, exactly what a Mac does.
+  const p = await attestedPerson({ colorRef });
   return {
     colorRef,
     ip: ip || '198.51.100.9',
-    memberId: `mem_${b64u(rnd(16))}`,
-    deviceId: `dev_${b64u(rnd(16))}`,
-    deviceShort: await shortOf(sigPubRaw),
-    sigPriv: sig.privateKey,
-    sigPubRaw: b64u(sigPubRaw),
-    kexPubRaw: b64u(await rawOf(kex.publicKey)),
-    recoveryPubSig: b64u(await rawOf(recSig.publicKey)),
-    recoveryPubKex: b64u(await rawOf(recKex.publicKey)),
-    attestation: b64u(rnd(120)),
+    memberId: p.memberId,
+    deviceId: p.deviceId,
+    deviceShort: p.deviceShort,
+    sigPriv: p.sigPriv,
+    sigPub: p.sigPub,
+    kexPriv: p.kexPriv,
+    kexPub: p.kexPub,
+    sigPubRaw: p.sigPubRawB64,
+    kexPubRaw: p.kexPubRawB64,
+    recPriv: p.recPriv,
+    recoveryPubSig: p.recoveryPubSigB64,
+    recoveryPubKex: p.recoveryPubKexB64,
+    recoveryPubKexBytes: p.recoveryPubKex,
+    attestation: p.attestation,
+    attestationBytes: p.attestationBytes,
   };
 }
 const wireDevice = (p) => ({
@@ -200,7 +207,10 @@ async function family(srv) {
 
 /** The full, honest wrap set for the space as it stands — every recipient, every epoch 1..e. */
 async function fullCoverage(srv, spaceId, upTo) {
-  const rs = requiredRecipients(await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId));
+  const rs = requiredRecipients(
+    await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId),
+    (await srv.store.getSpace(spaceId)).kind,
+  );
   const out = [];
   for (const r of rs) for (let e = 1; e <= upTo; e++) out.push(wrap(r, e));
   return out;
@@ -452,7 +462,12 @@ for (const adapter of ADAPTERS) {
       409, 'incomplete_coverage', 'omitting a whole member');
     const named = got.extra.missing.map((m) => m.recipientId);
     assert.ok(named.includes(honest.deviceId));
-    assert.ok(named.includes(`rec_${honest.memberId}`));
+    // INVERTED 2026-08-29 — finding E2E3-8. `rec_${honest.memberId}` used to be named here too.
+    // A FAMILY rotation no longer owes it, because no client can build that wrap without wrapping
+    // to an UNSIGNED `Member.recoveryPubKex` and handing the relay the family key. The attack
+    // this row is about — omitting a whole member — is still refused, on her device.
+    assert.equal(named.includes(`rec_${honest.memberId}`), false,
+      'a family recovery wrap is permitted, not required (ADR 002 §4.2 step 2, amended)');
 
     // A refused rotation that had consumed e+1 would wedge the family for ever: the honest
     // rotator that comes next would get `epoch_taken` for an epoch nobody holds a key for.
@@ -472,7 +487,10 @@ for (const adapter of ADAPTERS) {
     // Everyone reached, nobody backfilled. This is the attack that reads as an optimisation, and
     // its victim is the person who just joined: Oma's birthday, entered in epoch 1, silently
     // stops rendering and there is no error anywhere (ADR 002 §4.3 / §7.1 step 5 / A4 / R11).
-    const rs = requiredRecipients(await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId));
+    const rs = requiredRecipients(
+    await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId),
+    (await srv.store.getSpace(spaceId)).kind,
+  );
     const got = await expectFail(
       () => srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, { epoch: 2, wraps: rs.map((r) => wrap(r, 2)) }),
       409, 'incomplete_coverage', 'epoch 2 only');
@@ -740,7 +758,10 @@ test('§D ATTACK satisfy the coverage check with NOISE / SUCCEEDS — 20.2\'s co
     // `spaces.js` says so in as many words — "the server still cannot read a wrap, cannot tell a
     // good wrap from 156 bytes of noise". Every wrap in this whole test file is noise; that is
     // why the rest of them are still valid tests of the shape rule. Here it is the payload.
-    const rs = requiredRecipients(await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId));
+    const rs = requiredRecipients(
+    await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId),
+    (await srv.store.getSpace(spaceId)).kind,
+  );
     const victimRecipients = new Set([honest.deviceId, `rec_${honest.memberId}`]);
     const hostile = [];
     for (const r of rs) {
@@ -750,8 +771,10 @@ test('§D ATTACK satisfy the coverage check with NOISE / SUCCEEDS — 20.2\'s co
         hostile.push({ recipientId: r, epoch: e, wrapped: b64u(rnd(156)) });
       }
     }
-    assert.equal(hostile.filter((w) => victimRecipients.has(w.recipientId)).length, 4,
-      'the victim IS addressed — that is what makes this pass the check');
+    assert.equal(hostile.filter((w) => victimRecipients.has(w.recipientId)).length, 2,
+      'the victim IS addressed — that is what makes this pass the check. Two rows rather than '
+      + 'four since finding E2E3-8 withdrew the FAMILY `rec_<memberId>` demand; the attack is '
+      + 'unchanged, because it was never about the recovery wrap.');
 
     const res = await srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, { epoch: 2, wraps: hostile });
     assert.equal(res.status, 200, 'the coverage check refused a full-shaped ring — it does not');
@@ -764,7 +787,7 @@ test('§D ATTACK satisfy the coverage check with NOISE / SUCCEEDS — 20.2\'s co
     assert.equal(hers.status, 200);
     assert.equal(hers.body.currentEpoch, 2);
     assert.equal(hers.body.keysPending, false, 'the ONE signal a client has says everything is fine');
-    assert.equal(hers.body.wraps.length, 4);
+    assert.equal(hers.body.wraps.length, 2, 'two epochs of unopenable rows, addressed to her device');
 
     // …and she can still pull every op the attacker writes at epoch 2, as ciphertext she will
     // never open. Not one status code in this sequence is anything but 200.
@@ -971,75 +994,129 @@ test('§D ATTACK grief the family by filling every invite slot / SUCCEEDS, and i
   })).status, 200);
 });
 
-test('§D THE WIRE GAP — `GET /spaces/:id/keys` cannot carry what `admitWraps` REQUIRES', async () => {
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §D THE WIRE GAP — INVERTED 2026-08-29.  Findings E2E3-1 … E2E3-7.
+//
+// The row that stood here proved the seam did not meet, and it was right about every clause:
+//
+//   > `assert.deepEqual(MODEL_COLUMNS.KeyWrap, ['spaceId','epoch','recipientId','wrapped'])`
+//   > `assert.equal(r.senderKexPubRaw, undefined, 'the receiving-side S1 check has no input')`
+//   > `assert.equal(d.attestation, undefined, 'the relay publishes no attestation — E2-207-B')`
+//   > `assert.throws(() => familyRecipients(roster…), /has no attestation blob/,
+//   >   'the recipient set is buildable from the wire — it is not')`
+//   > "Both positions are defensible. Together they are a rotation nobody can build."
+//   > "Left as a test so the day someone adds `senderKexPubRaw` to the schema, the first two
+//   >  assertions here are what tells them the other three lines exist."
+//
+// This is that day. Every one of those assertions is inverted below, in place, and the row is
+// now what it was written to become: a REAL family key rotation, end to end, over the real
+// router, with real ECDH wraps that really open on the other Mac.
+//
+// ⚠ THE THING THIS ROW EXISTS TO PREVENT, AND IT IS NOT A FIELD CHECK. `server/dev/two-client.js`
+// ran a "working" rotation across this same seam for weeks by hand-rolling `packWrap` and
+// carrying the sender's public key BY COURIER — its own comment says "STAND-IN: the wire carries
+// no attestation". So this test may use NO courier: every value the second Mac uses to admit a
+// key must have arrived in an HTTP response body, and the only functions allowed to build or
+// read the wire are the shipping ones in `src/js/crypto/spacekeys.js`. If a future edit passes
+// anything from `admin` to `honest` other than through `srv.call`, this row has stopped testing
+// what it is for.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+test('§D THE WIRE MEETS — a real family rotation, end to end, no courier (E2E3-1..7)', async () => {
   const c = clock(start);
   const srv = server((k) => memoryStore({ now: k.now }), c);
   const { admin, honest, spaceId } = await family(srv);
 
-  // ADR 002 §4.2 step 6, the S1 amendment of 2026-08-28: before a wrap row from this endpoint is
-  // unwrapped, the RECEIVER must verify who sent it, and `src/js/crypto/spacekeys.js` enforces it
-  // by making `ctx.senders` a required parameter and `row.senderKexPubRaw` the index into it.
-  //
-  // The relay's key-wrap row has four columns and none of them is a sender.
-  assert.deepEqual(MODEL_COLUMNS.KeyWrap, ['spaceId', 'epoch', 'recipientId', 'wrapped']);
+  const sk = await import('../../src/js/crypto/spacekeys.js');
 
-  // `admin` holds the epoch-1 wraps `POST /spaces` required; `honest` joined under D9 and holds
-  // none yet, which is the designed waiting state and not what this test is about.
-  const rows = (await srv.call(admin, 'GET', `/spaces/${spaceId}/keys`, {}, undefined)).body.wraps;
-  assert.ok(rows.length > 0);
-  for (const r of rows) {
-    assert.deepEqual(Object.keys(r).sort(), ['epoch', 'recipientId', 'wrapped']);
-    assert.equal(r.senderKexPubRaw, undefined, 'the receiving-side S1 check has no input on this wire');
-  }
+  // ── 1. The column exists, and it is a STAMPED device id rather than a client-chosen key ─────
+  assert.deepEqual(MODEL_COLUMNS.KeyWrap, ['spaceId', 'epoch', 'recipientId', 'wrapped', 'senderDeviceId']);
 
-  // And the write side refuses to accept one, so a client cannot supply it either: `readWraps`
-  // takes exactly {recipientId, epoch, wrapped} and a fifth key is a 400.
+  // …and the write side still refuses a client that tries to name the sender itself. E2E3-3's
+  // decision in one assertion: the relay derives this, it does not accept it.
   await expectFail(async () => srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, {
     epoch: 2,
     wraps: (await fullCoverage(srv, spaceId, 2)).map((w) => ({ ...w, senderKexPubRaw: admin.kexPubRaw })),
-  }), 400, 'bad_request', 'a wrap carrying its sender key');
+  }), 400, 'bad_request', 'a wrap that names its own sender');
+  await expectFail(async () => srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, {
+    epoch: 2,
+    wraps: (await fullCoverage(srv, spaceId, 2)).map((w) => ({ ...w, senderDeviceId: admin.deviceId })),
+  }), 400, 'bad_request', 'nor under the column name');
 
-  // ── THE OTHER HALF: the SENDER SET cannot be built from anything this relay publishes ──────
-  //
-  // `admitWraps` is the only door a wrap may enter a key ring through, and it refuses to run
-  // without `ctx.senders` — a branded `Recipient[]`, obtainable only from `familyRecipients()`.
-  // A client that has just called `GET /spaces/:id/keys` and has nothing else therefore cannot
-  // call it at all.
-  const { admitWraps, familyRecipients, createKeyRing, SpaceKeyError } =
-    await import('../../src/js/crypto/spacekeys.js');
-  const ring = createKeyRing([]);
-  const kex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  await assert.rejects(
-    () => admitWraps(ring, rows, { spaceId, myKexPriv: kex.privateKey }),
-    (e) => e instanceof SpaceKeyError && /ctx\.senders/.test(e.message),
-    'admitWraps must refuse a relay row with no sender set — it does, and there is no way to build one');
-
-  // And `familyRecipients` — the one constructor — throws on the member list the relay actually
-  // serves, because `members.js` DELIBERATELY does not publish `Device.attestation`
-  // ("the relay's device rows are a hint about who to wrap to; the log is the authority") while
-  // `familyRecipients` requires it ("Every recipient is verified before a key is wrapped to it").
-  // Both positions are defensible. Together they are a rotation nobody can build.
+  // ── 2. THE ROSTER IS NOW A RECIPIENT SET — E2E3-6, and it is one call ───────────────────────
   const roster = (await srv.call(admin, 'GET', `/spaces/${spaceId}/members`, {}, undefined)).body.members;
-  assert.ok(roster.length >= 2);
+  assert.equal(roster.length, 2);
   for (const m of roster) {
-    // Everything else IS there — E3-2's `recoveryPubKex` included. It is exactly one field short.
     assert.equal(typeof m.recoveryPubSig, 'string');
     assert.equal(typeof m.recoveryPubKex, 'string');
-    for (const d of m.devices) {
-      assert.equal(typeof d.deviceId, 'string');
-      assert.equal(typeof d.kexPubRaw, 'string');
-      assert.equal(d.attestation, undefined, 'the relay publishes no attestation — E2-207-B');
-    }
+    for (const d of m.devices) assert.equal(typeof d.attestation, 'string', 'the blob is published — E2E3-6');
   }
-  assert.throws(() => familyRecipients(roster.map((m) => ({
-    memberId: m.memberId,
-    recoveryPubSig: m.recoveryPubSig,
-    recoveryKexPubRaw: m.recoveryPubKex,
-    removedAt: m.removedAt,
-    devices: m.devices.map((d) => ({ deviceId: d.deviceId, kexPubRaw: d.kexPubRaw, revokedAt: d.revokedAt })),
-  }))), /has no attestation blob/, 'the recipient set is buildable from the wire — it is not');
+  // No translation layer: the response object IS the argument. That is finding E2E3-5 closed —
+  // `familyRecipients` reads `recoveryPubKex`, the name the relay actually publishes.
+  const recipients = sk.familyRecipients(roster);
+  assert.equal(recipients.length, 2, 'one attested device per member, and no unsigned recovery key');
+  assert.deepEqual(recipients.map((r) => r.deviceId).sort(), [admin.deviceId, honest.deviceId].sort());
+  const report = sk.familyRecipientsReport(roster);
+  assert.deepEqual(report.missingRecoveryKex, [],
+    'E2E3-5: the column was published all along; the reader was looking for the wrong name');
+  assert.equal(report.recipients.every((r) => r.role === 'device'), true,
+    'E2E3-8 stays open BY CHOICE: nothing signs recoveryPubKex, so nothing wraps to it');
 
-  // Recorded as a capability of nobody: this is not an attack that succeeds, it is a wire that
-  // does not meet. Left as a test so the day someone adds `senderKexPubRaw` to the schema, the
-  // first two assertions here are what tells them the other three lines exist.
+  // Every recipient really verifies — the blob the relay handed back is the blob that was signed.
+  for (const r of recipients) assert.equal(await sk.recipientProblem(r), null);
+
+  // ── 3. ADMIN ROTATES, using only functions that ship ────────────────────────────────────────
+  const ring = sk.createKeyRing();
+  ring.put(spaceId, 1, await sk.createSpaceKey());
+  const rotation = await sk.rotateSpace({ ring, spaceId, myKexPriv: admin.kexPriv, recipients });
+  assert.equal(rotation.epoch, 2);
+
+  const body = sk.rotationBody(rotation);
+  assert.deepEqual(Object.keys(body).sort(), ['epoch', 'wraps'],
+    'E2E3-4: `invites` never reaches the wire — the relay refreshes them itself');
+  assert.deepEqual([...new Set(body.wraps.map((w) => Object.keys(w).sort().join(',')))],
+    ['epoch,recipientId,wrapped'], 'E2E3-1 and E2E3-2: the relay\'s spelling, and bytes not objects');
+
+  const rot = await srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, body);
+  assert.equal(rot.status, 200, JSON.stringify(rot.body));
+  assert.equal(rot.body.currentEpoch, 2);
+  assert.equal(rot.body.wrapsStored, 4, 'two members × epochs 1..2');
+
+  // ── 4. HONEST COLLECTS, AND OPENS — the sender arrives on the wire (E2E3-3) ─────────────────
+  const keys = sk.parseKeysResponse((await srv.call(honest, 'GET', `/spaces/${spaceId}/keys`, {}, undefined)).body);
+  assert.equal(keys.dropped, 0);
+  assert.equal(keys.keysPending, false);
+  assert.equal(keys.rows.length, 2, 'epochs 1 and 2, both addressed to her device');
+  for (const r of keys.rows) {
+    assert.equal(r.senderKexPubRaw, admin.kexPubRaw,
+      'the relay joined KeyWrap.senderDeviceId to Device.kexPubRaw — ADR 002 §4.2 step 6\'s field');
+  }
+
+  // Her sender set is built from the SAME response — not handed to her by the test.
+  const hersRoster = (await srv.call(honest, 'GET', `/spaces/${spaceId}/members`, {}, undefined)).body.members;
+  const hersRing = sk.createKeyRing();
+  const admitted = await sk.admitWraps(hersRing, keys.rows, {
+    spaceId, myKexPriv: honest.kexPriv, senders: sk.familyRecipients(hersRoster),
+  });
+  assert.deepEqual(admitted.admitted, [1, 2], 'BOTH epochs opened — the backfill is what A4 rests on');
+  assert.equal(admitted.refused, 0);
+  assert.equal(admitted.unauthorized, 0);
+
+  // THE PROOF, and it is not a field comparison: the key she unwrapped is the key he minted.
+  const mine = new Uint8Array(await S.exportKey('raw', rotation.key));
+  const hers = new Uint8Array(await S.exportKey('raw', hersRing.get(spaceId, 2)));
+  assert.deepEqual([...hers], [...mine], 'one FSK_2, on two Macs, over a relay that never saw it');
+  assert.deepEqual(hersRing.originOf(spaceId, 2), { how: 'admitted', deviceId: admin.deviceId, memberId: admin.memberId },
+    'and she can say WHICH verified device delivered it');
+
+  // ── 5. AND THE S1 REFUSAL STILL BITES — a stranger's row is `unauthorized`, not admitted ────
+  const stranger = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const strangerRaw = b64u(new Uint8Array(await S.exportKey('raw', stranger.publicKey)));
+  const forged = keys.rows.map((r) => ({ ...r, senderKexPubRaw: strangerRaw }));
+  const emptyRing = sk.createKeyRing();
+  const got = await sk.admitWraps(emptyRing, forged, {
+    spaceId, myKexPriv: honest.kexPriv, senders: sk.familyRecipients(hersRoster),
+  });
+  assert.deepEqual(got.admitted, []);
+  assert.equal(got.unauthorized, 2, 'a relay that rewrites the sender causes a refusal, never an admission');
 });

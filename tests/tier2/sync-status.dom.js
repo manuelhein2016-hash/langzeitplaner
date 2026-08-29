@@ -513,3 +513,304 @@ test('unmounting removes the glyph, the subscription and the timer', () => {
   // And the styles were injected exactly once across everything above.
   assert.equal($$(`#${status.SYNC_CSS_ID}`).length, 1, 'the stylesheet was injected more than once');
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 8 · SILENCE MUST *MEAN* HEALTH — the convergence adversary's second conclusion
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Everything above tests that this module renders the engine's word faithfully. The convergence
+// adversary's finding is that the word was wrong:
+//
+//   > In every finding this round, BOTH MACS REPORT `healthy`. Story 19.3's "silence is the
+//   > design" is a promise that SILENCE MEANS HEALTH. At present silence means only that the
+//   > engine's own two in-memory maps are empty.
+//
+// `sync/status.js` folds `tests/helpers/sync-domains.js`'s domain S4 — the enumeration of what
+// can be observed — over the engine's reading AND `store.diagnostics()`. These rows are that
+// promise, one enumerated failure state at a time. Every one of them mounts an engine that says
+// `healthy`, because that is the exact situation each finding produces.
+//
+// The store is a fake for the same reason the engine is: this file owns what a person SEES.
+// `tests/property/sync-domains.test.js` owns whether the store's four fields are true, against
+// two real Macs and a real relay.
+
+/**
+ * The durable half of the reading, as `store.js` now supplies it. Note what it does NOT have:
+ * `apply`, `txn`, `persistNow`, `replaceAll`. The chrome cannot write to the board, and cannot
+ * grow the ability by accident.
+ */
+function makeStore(sync = {}, warnings = []) {
+  const warnListeners = new Set();
+  let diag = {
+    warnings: [...warnings],
+    sync: {
+      armed: true, personalSpaceId: 'psp_x', logWritable: true, outbox: 0, cursor: '7',
+      rejoin: false, pendingRetractions: 0, parked: 0, refused: 0, lost: 0, chain: null, ...sync,
+    },
+  };
+  return {
+    reads: 0,
+    port: {
+      diagnostics() { return diag; },
+      subscribeWarnings(fn) { warnListeners.add(fn); return () => warnListeners.delete(fn); },
+    },
+    set(patch) { diag = { ...diag, sync: { ...diag.sync, ...patch } }; },
+    warn(msg) {
+      diag = { ...diag, warnings: [...diag.warnings, msg] };
+      for (const fn of [...warnListeners]) fn(msg, diag.warnings);
+    },
+    get listeners() { return warnListeners.size; },
+  };
+}
+
+test('L-2 — a DURABLY PARKED op is visible, over an engine that says healthy', () => {
+  // The state F-6's ladder is designed to produce: the line is on disk with `park:"attestation"`
+  // and it survives every relaunch. `sync.status()` derives its three states from
+  // `store.outboxSize()` and two in-memory Maps, so it cannot see it and says `healthy`.
+  const engine = makeEngine({ state: 'healthy', pendingOps: 0 });
+  const store = makeStore({ parked: 1 });
+  const c = mount(engine, { store: store.port });
+
+  assert.equal(engine.port.status().state, 'healthy', 'the engine must still be saying healthy');
+  settle(c);
+
+  const s = status.syncStatusState();
+  assert.equal(s.state, 'pending', 'a held op is invisible — L-2 is open');
+  // `pending` and NOT `error`: a held op is not a fault, it is work outstanding — the same thing
+  // an unacknowledged outbox line is, and `sync-domains.js` S4-held says so by name.
+  assert.equal(s.observables.map((o) => o.id).join(), 'parked');
+  assert.equal(s.observables[0].row, 'S4-held');
+  assert.equal(s.silent, false, 'a Mac holding an op claimed silence');
+
+  // One hollow ring in the toolbar, and NOT a badge count. 19.3's design note files this feature
+  // with the „neu" dot and the update hint: a dot, not a numeral.
+  const g = glyph();
+  assert.ok(g, 'nothing was drawn');
+  assert.equal(g.classList.contains('pending'), true);
+  assert.equal(g.classList.contains('error'), false);
+  assert.equal(g.textContent, '', 'a count reached the chrome');
+  assert.equal(/\d/.test(g.textContent), false);
+  // The SENTENCE is the cause-free one, and that is deliberate: `syncPendingDetail` reads „wartet
+  // auf die VERBINDUNG", and a held op is not waiting on the network — it is waiting on an
+  // attestation, a key or an app update. Naming the connection would be the app inventing a cause.
+  assert.equal(g.title, i18n.t('syncErrGeneric'));
+  assert.notEqual(g.title, i18n.t('syncPendingDetail', 1), 'a held op was blamed on the network');
+  // The outbox, which really IS waiting on the network, still gets the sentence written for it.
+  // `pendingOps` is the ENGINE's count — in the shipped app it is `store.outboxSize()` — so it is
+  // set here where the product sets it, and the two sentences cannot be confused for each other.
+  engine.set({ pendingOps: 1 });
+  status.refreshSyncChrome();
+  assert.equal(glyph().title, i18n.t('syncPendingDetail', 1));
+  engine.set({ pendingOps: 0 });
+  status.refreshSyncChrome();
+
+  // …and it goes away by itself when the cure lands. Nothing here is sticky.
+  store.set({ parked: 0 });
+  status.refreshSyncChrome();
+  assert.equal(glyph(), null, 'the ring outlived the hold');
+  assert.equal(status.syncStatusState().silent, true, 'silence was not given back');
+
+  unmount();
+});
+
+test('L-1 — a terminal refusal fills the ring, and healthy cannot argue it down', () => {
+  // The refusal is CORRECT; the record of it is the finding. ADR 003 §8.2 releases the cursor
+  // past a terminal, so the relay will never offer the op again and this record is all that is
+  // left. Once the engine's per-session Map is gone, the engine says `healthy` for ever.
+  const engine = makeEngine({ state: 'healthy' });
+  const store = makeStore({ refused: 2 });
+  const c = mount(engine, { store: store.port });
+  settle(c);
+
+  const s = status.syncStatusState();
+  assert.equal(s.state, 'error');
+  assert.equal(s.errorKind, 'quarantine', 'the sentence written for this case was not chosen');
+  assert.equal(s.observables[0].row, 'S4-refused');
+  // Same slot, filled — no second glyph, no bar, no modal. Section 3 asserts the geometry; this
+  // asserts that a NEW reason reuses the one slot rather than inventing a signal.
+  assert.equal($$('.sync-dot').length, 1);
+  assert.equal(glyph().classList.contains('error'), true);
+  assert.equal(glyph().title, i18n.t('syncErrQuarantine'));
+
+  unmount();
+});
+
+test('E5-2 / P-4 — a folded-away line and a forked chain are both errors, and both say the board still works', () => {
+  for (const [field, row] of [['lost', 'S4-lost'], ['chain', 'S4-diverged']]) {
+    const engine = makeEngine({ state: 'healthy' });
+    const store = makeStore({ [field]: field === 'chain' ? { forkedAt: '42' } : 1 });
+    const c = mount(engine, { store: store.port });
+    settle(c);
+
+    const s = status.syncStatusState();
+    assert.equal(s.state, 'error', `${field} was reported as healthy`);
+    assert.equal(s.observables[0].row, row);
+    // The one sentence both of these get is the true one, and its second half is the half that
+    // matters to the person reading it: nothing on THIS Mac is lost or broken.
+    assert.equal(s.sentence, i18n.t('syncErrGeneric'));
+    assert.equal(glyph().classList.contains('error'), true);
+    unmount();
+  }
+});
+
+test('F-8 — `store.warnings` finally has a consumer, and a warning between redraws moves the glyph', () => {
+  // `_warn` has fired for every refusal, every park, every coercion and every quarantine since
+  // LZP-30x; `subscribeWarnings()` has been the seam the whole time; NOTHING HAS EVER SUBSCRIBED.
+  const engine = makeEngine({ state: 'healthy' });
+  const store = makeStore();
+  const c = mount(engine, { store: store.port });
+  settle(c);
+  assert.equal(glyph(), null, 'a quiet store is not quiet');
+  assert.equal(store.listeners, 1, 'nothing subscribed to the warnings channel — F-8 is open');
+
+  // Written between two redraws, with nothing else happening. Without the subscription this is
+  // observable only by luck of timing.
+  store.warn('op log: the tail could not be compacted; ops.jsonl keeps growing');
+  c.advance(status.SYNC_DEBOUNCE_MS);
+
+  // ── WHAT THE CONSUMER DOES WITH IT, AND WHAT IT DELIBERATELY DOES NOT ────────────────────
+  //
+  // The channel is READ — that is F-8, and the two assertions below are it. The channel does not
+  // light the INDICATOR, and that is `sync/status.js`'s `warnings` row: `store.warnings` is mixed
+  // prose. `_warn` fires for a refusal and a quarantine, and equally for a reconciliation after a
+  // crash ("expected", in its own text), a §9.3 re-join ("nothing is lost"), a settings repair,
+  // and `unparkAttested`'s "held ops are now authorised and have been applied" — the sound of a
+  // fix WORKING. An indicator that lit whenever the app had anything to say would break story
+  // 19.3 in the other direction, which the `S4-quiet` control exists to catch.
+  //
+  // So: the sentence reaches the settings sheet, and the toolbar stays quiet until there is SHARP
+  // evidence — a parked line, a refusal, a lost line, a forked chain. Those four raise it, and
+  // the rows above and below this one measure each of them.
+  assert.equal(glyph(), null,
+    'a warning alone lights the indicator — see `sync/status.js`\'s `warnings` row before '
+    + 'changing this: the channel carries good news too');
+  assert.equal(status.syncStatusState().observables.map((o) => o.id).join(), 'warnings',
+    'but the fold REPORTS it — the consumer F-8 was missing');
+  assert.equal(status.syncStatusState().silent, false,
+    'and silence is no longer claimed: 19.3 promises quiet MEANS nothing to tell you, and there '
+    + 'is now something to tell');
+
+  // And the subscription dies with the mount — a live one would keep a dead module redrawing.
+  unmount();
+  assert.equal(store.listeners, 0, 'the warnings subscription survived the unmount');
+});
+
+test('silence is EARNED: a store that cannot answer, or that throws, is not healthy-by-default', () => {
+  // THE DISTINCTION IS THE WHOLE FINDING. A missing field means "nobody can answer this
+  // question", and folding that into zero is exactly the move that turns "I cannot see a parked
+  // op" into "there are no parked ops".
+  const engine = makeEngine({ state: 'healthy' });
+
+  // An OLD store — the four fields simply are not there.
+  const old = { diagnostics: () => ({ warnings: [], sync: { outbox: 0 } }), subscribeWarnings: () => () => {} };
+  mount(engine, { store: old });
+  let s = status.syncStatusState();
+  assert.equal(s.state, 'healthy', 'a blind spot is not by itself a fault');
+  assert.deepEqual([...s.blind], ['parked', 'refused', 'lost', 'chain']);
+  assert.equal(s.silent, false, 'a build that has not looked claimed there is nothing to tell');
+  unmount();
+
+  // A store that THROWS. Every row is blind; the module does not crash and does not lie.
+  const broken = { diagnostics() { throw new Error('disk'); }, subscribeWarnings: () => () => {} };
+  mount(engine, { store: broken });
+  s = status.syncStatusState();
+  assert.equal(s.blind.length, 6);
+  assert.equal(s.silent, false);
+  unmount();
+
+  // THE CONTROL, and it is what stops a "fix" that reports something for ever: a whole store with
+  // every field present and every field empty is SILENT, and silence stays free.
+  mount(engine, { store: makeStore().port });
+  s = status.syncStatusState();
+  assert.equal(s.state, 'healthy');
+  assert.deepEqual([...s.blind], []);
+  assert.equal(s.silent, true, 'a settled Mac could not earn silence — silence is not free');
+  assert.equal(glyph(), null);
+  unmount();
+});
+
+test('the judge only ever RAISES: an engine error survives a perfectly clean store', () => {
+  // The merge is a max over a ladder, not a choice between two opinions. An engine that saw a 401
+  // happen knows something the disk cannot, and a store with nothing to add may not talk it down.
+  const engine = makeEngine({ state: 'error', errorKind: 'auth' });
+  const c = mount(engine, { store: makeStore().port });
+  settle(c);
+  const s = status.syncStatusState();
+  assert.equal(s.state, 'error');
+  assert.equal(s.errorKind, 'auth', 'the engine\'s own kind was overwritten by the enumeration');
+  assert.equal(s.sentence, i18n.t('syncErrAuth'));
+
+  // …and the enumeration may not talk a pending engine down either. The de-escalation waits out
+  // the window like every other transition that is not "back to healthy" — §5's asymmetry.
+  engine.set({ state: 'pending', errorKind: null, pendingOps: 3 });
+  settle(c);
+  assert.equal(status.syncStatusState().state, 'pending');
+  unmount();
+});
+
+test('the settings section names every reason at once, in both languages, and still offers nothing to press', () => {
+  // The one place in the app where more than one thing is said, and the right place: the sheet is
+  // where somebody has gone looking. Collapsing two reasons into one here would be the same lie
+  // in miniature that `status()` was telling.
+  const engine = makeEngine({ state: 'healthy', lastPullAt: 1_800_000_000_000 });
+  // `outbox: 1` is here on purpose: it is a PRESENT row of the enumeration that must NOT get a
+  // line of its own, because the sentence beside the dot is already about it. Three observables,
+  // two reasons.
+  const store = makeStore({ parked: 2, refused: 1, outbox: 1 });
+  const c = mount(engine, { store: store.port });
+  settle(c);
+
+  const body = document.createElement('div');
+  status.buildSyncSection(body, {});
+  assert.equal(status.syncStatusState().observables.length, 3);
+  // Three observables, and every one of them is SAID — but each sentence exactly once. The
+  // refusal supplied the headline beside the dot, so it is not repeated below it; the hold gets
+  // its own line; the outbox is the subject of the headline's own count and never gets one.
+  assert.includes(body.textContent, i18n.t('syncErrQuarantine'));
+  assert.includes(body.textContent, i18n.t('syncErrGeneric'));
+  assert.equal($$('.sync-reason', body).length, 1,
+    'the reasons were collapsed, duplicated, or the outbox was double-counted');
+  const said = body.textContent.split(i18n.t('syncErrQuarantine')).length - 1;
+  assert.equal(said, 1, 'the headline sentence was printed twice — one fault read as two');
+  // 19.2 is an acceptance criterion and the new lines may not smuggle a control past it.
+  assert.equal($$('button, input, select', body).length, 0, 'a reason line offered a control');
+  // Nothing animates, and nothing new is on the board.
+  assert.equal($$('.board .sync-dot, .board .sync-reason').length, 0);
+
+  // English, and no German leaks through — the raw `_warn` sentences are German prose and are
+  // deliberately NOT rendered here; they stay in `diagnostics().warnings` for a support bundle.
+  i18n.setLang('en');
+  const en = document.createElement('div');
+  status.buildSyncSection(en, {});
+  assert.includes(en.textContent, i18n.t('syncErrQuarantine'));
+  assert.equal(en.textContent.includes('Abgleich'), false, 'German leaked into the English sheet');
+  assert.equal(en.textContent.includes('Abgleich steht'), false, 'German leaked into the English sheet');
+
+  // A SETTLED Mac gets its three lines and not a fourth reassuring one. Silence, in the sheet.
+  i18n.setLang('de');
+  store.set({ parked: 0, refused: 0, outbox: 0 });
+  const calm = document.createElement('div');
+  status.buildSyncSection(calm, {});
+  assert.equal($$('.sync-reason', calm).length, 0, 'a healthy Mac was given something to read');
+  assert.includes(calm.textContent, i18n.t('syncHealthy'));
+
+  unmount();
+});
+
+test('solo mode still reaches nothing — no diagnostics read, no warnings subscription', () => {
+  // 21.5: the board stays on this Mac. With no engine there is no sync to report on, so the
+  // durable half is not consulted either — the module\'s original promise, unchanged.
+  const store = makeStore({ parked: 3, refused: 3, lost: 3 });
+  let asked = 0;
+  const spy = {
+    diagnostics() { asked += 1; return store.port.diagnostics(); },
+    subscribeWarnings: store.port.subscribeWarnings,
+  };
+  mount(null, { store: spy });
+  status.refreshSyncChrome();
+  assert.equal(asked, 0, 'solo mode read the store');
+  assert.equal(store.listeners, 0, 'solo mode subscribed to something');
+  assert.equal(glyph(), null);
+  assert.equal(status.syncStatusState().sentence, i18n.t('syncSolo'));
+  unmount();
+});

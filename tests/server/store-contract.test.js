@@ -406,8 +406,8 @@ test('the file adapter flushes EVERY mutating method — all 25 survive a restar
   await a.setLastSeenSeq('S1', 4n);                                          // 12
   await a.setLastPushedSeq('S1', 3n);                                        // 13
   await a.putKeyWraps([                                                      // 14
-    { spaceId: 'fsp_1', epoch: 1, recipientId: 'dev_1', wrapped: B(156) },
-    { spaceId: 'fsp_1', epoch: 1, recipientId: 'dev_9', wrapped: B(156) },
+    { spaceId: 'fsp_1', epoch: 1, recipientId: 'dev_1', wrapped: B(156), senderDeviceId: 'dev_1' },
+    { spaceId: 'fsp_1', epoch: 1, recipientId: 'dev_9', wrapped: B(156), senderDeviceId: 'dev_1' },
   ]);
   await a.deleteKeyWrapsForDevices('fsp_1', ['dev_9']);                      // 15
   await a.putInvite(invite('inv_1'));                                        // 16

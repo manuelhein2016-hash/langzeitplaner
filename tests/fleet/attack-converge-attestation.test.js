@@ -168,11 +168,28 @@ describe('§2 · SUCCEEDED (as designed) · the deferral ladder releases the cur
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// 3. THE FINDING — THE PARK HAS NO REAPER
+// 3. THE FINDING, CLOSED — THE PARK HAS A REAPER (L-3)
+//
+// INVERTED, NOT REPAIRED, and the row below said so in advance: "ONE explicit
+// `store.unparkAttested()` fixes it. THE FINDING IS THAT NOTHING CALLS IT. If this ever needs no
+// such call, invert this test rather than deleting it."
+//
+// Two call sites landed, and they are two because the cure can arrive by two routes:
+//
+//   `store.init()`          — the launch. `useIdentity()` has already filled `_peerDevices` by
+//                             the time `init()` runs, so the line is re-judged before the board
+//                             is even drawn. This is the route THIS row takes.
+//   `sync/personal.js` pullNow — the pairing that completes mid-session, and the case that has no
+//                             launch to wait for: once the ladder has released the cursor the
+//                             parked line is the only copy this Mac can reach, so no batch will
+//                             ever arrive to trigger `applyRemote`'s own sweep.
+//
+// The arrangement is UNCHANGED — same fleet, same forgotten peers, same ladder, same relaunch.
+// Only the verdict is the other way round.
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§3 · FAILED · after the ladder, nothing ever re-judges the held op again', () => {
-  test('a permanent single-op divergence with `healthy` on both Macs and no warning left', async () => {
+describe('§3 · CLOSED (L-3) · the next launch re-judges the held op, and the Macs converge', () => {
+  test('the ladder runs, the cursor is released, and the relaunch still delivers the edit', async () => {
     const f = await twoMacs();
     const A = f.device('A');
     const B = f.device('B');
@@ -183,39 +200,33 @@ describe('§3 · FAILED · after the ladder, nothing ever re-judges the held op 
     await B.push();
     for (let i = 0; i <= MAX_DEFERRALS; i++) await A.pull();
     assert.equal(A.quarantined().length, 1, 'the ladder has run and the cursor is released');
+    assert.deepEqual(A.parked().map((l) => l.park), ['attestation'],
+      'and the LINE is parked — which is the whole reason the op is still recoverable');
 
     // THE NEXT LAUNCH. `family/engine.js:141` supplies `peerDeviceIds` from the peers list, so by
     // now the device set is CORRECT — modelled directly, because `dev.open()` skips
     // `useIdentity()` once the identity is durable, exactly as a real relaunch does.
-    await A.relaunch();
     restore();
+    await A.relaunch();
     await A.catchUp();
     await f.settle();
 
-    assert.deepEqual(A.parked().map((l) => l.park), ['attestation'],
-      'the op is still held — and nothing on any launch path re-judges a parked line. '
-      + '`store.useIdentity()` does not call `unparkAttested()`; nor does `store.init()`; '
-      + "`family/mount.js:289` does, but only when a NEW peer is adopted, which this launch is not.");
-    assert.equal(A.state.notes[0].text, 'Anfang', 'so the cancellation never lands');
+    assert.deepEqual(A.parked().map((l) => l.park), [],
+      'NOTHING IS STILL HELD. `store.init()` calls `unparkAttested()` and the line was re-judged '
+      + 'against the peer set this launch actually has — no explicit call from anybody, and no '
+      + 'new batch needed. Reverting either call site turns this row red (finding L-3).');
+    assert.equal(A.state.notes[0].text, 'Termin abgesagt', 'so the cancellation lands');
     assert.equal(B.state.notes[0].text, 'Termin abgesagt');
-    assert.equal(boardsAgree([A, B]).equal, false, 'a permanent divergence');
-
-    assert.deepEqual([A.status().state, B.status().state], ['healthy', 'healthy'],
-      'and the engine\'s `quarantined` map died with the old session, so §2\'s `error` indicator '
-      + 'is gone: the ONE place that knew is a per-session Map.');
-    assert.deepEqual(A.warnings(), [],
-      'and `store.warnings` is emptied by the launch, so the last record of it is gone too');
-
-    // It is still RECOVERABLE — which is what makes this a missing call and not a lost op.
-    const cured = await A.run(() => A.store.unparkAttested());
-    assert.deepEqual(cured.length, 1,
-      'ONE explicit `store.unparkAttested()` fixes it. THE FINDING IS THAT NOTHING CALLS IT. If '
-      + 'this ever needs no such call, invert this test rather than deleting it.');
-    assert.equal(A.state.notes[0].text, 'Termin abgesagt');
-    await A.persist();
-    await f.settle();
-    await f.settle();
     assert.equal(boardsAgree([A, B]).equal, true, boardsAgree([A, B]).detail);
+
+    // AND THE REFUSAL IS NOT FORGOTTEN (L-1). The ladder's quarantine was correct — it happened,
+    // and the cursor is past that delivery for ever — so the record of it rides in the checkpoint
+    // and this launch can still name it, even though the op itself arrived by the other route.
+    assert.ok(A.storeDiagnostics().sync.refused > 0,
+      'the refusal the previous session made survives the quit — `checkpoint().lzp.refusals`, '
+      + 'not a per-session Map (finding L-1)');
+    assert.notDeepEqual(A.warnings(), [],
+      'and the launch says so out loud rather than starting silent (finding F-8)');
   });
 
   test('SUCCEEDED · re-pulling a held op does not duplicate its line or grow the log', async () => {

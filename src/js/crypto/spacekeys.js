@@ -642,21 +642,50 @@ export function personalRecipients(me) {
 /**
  * **Every non-removed member's attested, non-revoked devices.** BARRIER 2's family half.
  *
- * ⚠ NO RECOVERY RECIPIENTS, AND THAT IS A REPORTED GAP, NOT AN OVERSIGHT.
- * ADR 002 §4.2 step 2 says a rotation wraps "plus each member's `RK_kex`". There is **no wire
- * field that carries another member's `RK_kex` public key**: `MemberRowDb` (server.contract.js
- * §4) holds `recoveryPubSig` and nothing else, and the `dev.*` attestations cover DEVICE keys.
- * Wrapping a family key to an unauthenticated public key someone hands you is precisely the
- * key-injection channel `crypto.contract.js` §2 warns about ("`kexPubRaw` is what §4.2 wraps the
- * space key to"), so this function wraps to attested devices only and reports every member whose
- * recovery key it could not include on `familyRecipientsReport().missingRecoveryKex`. When a
- * published, attested `RK_kex` exists, this is the one place that changes.
+ * ⚠ NO RECOVERY RECIPIENTS, AND THAT IS A REPORTED GAP, NOT AN OVERSIGHT — finding E2E3-8.
+ * ADR 002 §4.2 step 2 says a rotation wraps "plus each member's `RK_kex`". The WIRE FIELD now
+ * exists — finding E3-2 added `Member.recoveryPubKex` and `handlers/members.js` publishes it —
+ * and this function still refuses to use it, because **nothing signs it**.
+ *
+ * That asymmetry is the whole argument and it is worth stating precisely. `recoveryPubSig` is
+ * also just a relay column, but it is *self-checking in use*: swap it and every device
+ * attestation of that member stops verifying, `assertRecipients` throws, and the rotation stops.
+ * Loud. `recoveryPubKex` is checked by nothing at all: swap it alone and every attestation stays
+ * genuine, the member list looks exactly right, nobody's signature fails, and the next rotation
+ * wraps `FSK_{e+1}` to a key the relay chose. That is not ADR 002 §8.5's accepted,
+ * UI-surfaceable phantom member — it is a silent, unattributable key injection into the family
+ * key, and it is a live break of stories 21.1 and 21.2. It is the same class as finding S1, one
+ * door further along.
+ *
+ * So this function wraps to attested DEVICES only and reports every member whose recovery key it
+ * could not include on `familyRecipientsReport().missingRecoveryKex`. `recipientProblem()`
+ * additionally REFUSES a family-scoped recovery recipient by name, so a future change cannot
+ * open this door by accident — and `requiredRecipients()` on the relay no longer demands the row,
+ * so the refusal costs a family nothing but ADR 002 §7.3's A2 delivery path.
+ *
+ * **What closes it** is one signed artefact, and ADR 002 §2.3 specifies it: `recoveryPubKex` as
+ * an OPTIONAL SEVENTH FIELD of `DeviceAttestation`. Extra fields are already tolerated by
+ * `parseAttestationBlob` and already covered by the signature; the relay already accepts the
+ * field (`assertAttestationClosed` in `handlers/spaces.js`). It needs `attestDevice()` in
+ * `identity.js` to sign it and one comparison here. Until then, this is the one place that
+ * changes, and closing this gap means BUILDING THAT — not calling `rawOf(m.recoveryPubKex)`.
  *
  * It also cannot be handed one member's own identity: it takes an ARRAY of member records, each
  * carrying its own `recoveryPubSig`, and every recipient it produces is branded `'family'`.
  *
+ * ⚠ **THIS FUNCTION TAKES THE RELAY'S MEMBER ROW, VERBATIM.** Its field names are the ones
+ * `GET /api/v1/spaces/:id/members` publishes — `recoveryPubSig`, `recoveryPubKex`, `devices[]`
+ * with `deviceId`, `kexPubRaw`, `attestation`, `revokedAt` — so a caller pipes the response in
+ * without translating, and a translation step is exactly where finding E2E3-5 lived: this used
+ * to read `recoveryKexPubRaw`, which no server ever emitted, so `missingRecoveryKex` named every
+ * member of every family for a column that was there all along.
+ *
+ * `personalRecipients` reads `recoverySigPubRaw`/`recoveryKexPubRaw` and that is NOT a second
+ * spelling of the same field: its argument is MY OWN identity, assembled locally from my own
+ * key store, and it never comes off a relay. Two different objects, each internally consistent.
+ *
  * @param {Array<{memberId:string, removedAt?:*, recoveryPubSig:Uint8Array|string,
- *                recoveryKexPubRaw?:Uint8Array|string,
+ *                recoveryPubKex?:Uint8Array|string,
  *                devices:Array<{deviceId:string, kexPubRaw:Uint8Array|string,
  *                               attestation:string, revokedAt?:*}>}>} members
  * @returns {Recipient[]}
@@ -696,7 +725,8 @@ export function familyRecipientsReport(members) {
       continue;
     }
     const housing = rawOf(m.recoveryPubSig, who, `member ${memberId} recoveryPubSig`);
-    if (m.recoveryKexPubRaw === undefined || m.recoveryKexPubRaw === null) missingRecoveryKex.push(memberId);
+    // Finding E2E3-5: the relay's spelling, which is the only one that ever arrives here.
+    if (m.recoveryPubKex === undefined || m.recoveryPubKex === null) missingRecoveryKex.push(memberId);
 
     const devices = Array.isArray(m.devices) ? m.devices : null;
     if (!devices) throw new SpaceKeyError(`${who}: member ${memberId} has no devices array`);
@@ -749,7 +779,30 @@ export async function recipientProblem(r, ports) {
       'are the only two scopes that exist (ADR 002 §3 barrier 2, §11 rule 10)'
     );
   }
-  if (r.role === 'recovery') return null; // my own key, held locally, never off the wire
+  if (r.role === 'recovery') {
+    // ── THE BYPASS IS SCOPED, AND THE SCOPE IS THE ARGUMENT — finding E2E3-8 ─────────────────
+    // "my own key, held locally, never off the wire" is true of a PERSONAL recovery recipient,
+    // which `personalRecipients()` builds from `me.recoveryKexPubRaw` after refusing every device
+    // that is not mine. It is false of a FAMILY one, whose only possible source is
+    // `Member.recoveryPubKex` — a relay column NOTHING SIGNS. Waving that through here would
+    // wrap `FSK_{e+1}` to whatever key the relay put in that column, silently, with every
+    // attestation still verifying and the member list still looking right.
+    //
+    // `familyRecipients()` builds no such recipient today, so this is defence in depth rather
+    // than a live check — which is precisely why it is here: the next agent who makes rotation
+    // "work" by constructing one gets a named refusal instead of a green suite and a broken 21.2.
+    if (recipientScope(r) === SPACE_KIND.FAMILY) {
+      return (
+        `REFUSING a family recovery recipient for member ${r.memberId}: its key can only have ` +
+        'come from `Member.recoveryPubKex`, a relay column NOTHING signs. Swapping it is silent ' +
+        '(every device attestation still verifies, the member list still looks right) and it ' +
+        'hands the relay the family key — finding E2E3-8, the S1 class one door along. Bind ' +
+        '`recoveryPubKex` into the DeviceAttestation payload first (ADR 002 §2.3); until then a ' +
+        'family rotation covers devices only and the relay does not demand more.'
+      );
+    }
+    return null; // my own key, held locally, never off the wire
+  }
   if (!(r.housingRecoveryPubRaw instanceof Uint8Array)) return 'no housing recovery public key to verify under';
 
   let recSigPub;
@@ -1439,6 +1492,169 @@ export async function buildRotation(spaceId, nextEpoch, spaceKeysByEpoch, myKexP
     invites,
     coveredDevices: [...new Set(wraps.map((w) => w.deviceId))].sort(),
   });
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 10b. THE WIRE — the ONE place this module speaks the relay's JSON.  Findings E2E3-1/2/3/4.
+//
+// ═══ WHY THIS SECTION EXISTS AT ALL ═══
+//
+// It did not, and that was the whole of the E2↔E3 seam. `buildRotation()` returns a `Rotation`
+// in this module's own vocabulary; `POST /api/v1/spaces/:id/epoch` takes a body in the relay's.
+// Nothing converted between them, so every caller converted by hand — and there was exactly one
+// caller, `server/dev/two-client.js`, which hand-rolled its own `packWrap` and carried the sender's
+// public key BY COURIER (its own comment: "STAND-IN: the wire carries no attestation"). A
+// courier steps over every gap instead of hitting one, which is why both sides stayed green
+// while four field mismatches sat between them:
+//
+//   E2E3-1  the client said `deviceId`; the relay requires `recipientId` — and the relay is
+//           right, because a recipient may be `rec_<memberId>`, which is not a device id at all.
+//   E2E3-2  the client emitted the `WrapBlob` OBJECT; the relay requires base64url BYTES, because
+//           `OPAQUE_FIELDS.KeyWrap` refuses a String in that column and that refusal is what
+//           makes RULE 1 ("a future handler cannot store a readable note") structural. So the
+//           encoding moves to the client, not the column to the wire.
+//   E2E3-3  `admitWraps` requires `row.senderKexPubRaw`; nothing carried it. The relay now
+//           STAMPS the depositor it authenticated and publishes it as this exact field.
+//   E2E3-4  `Rotation.invites` is refused by the relay as `retired_by_d9`. It stays a LOCAL
+//           report — it is what refuses an invite arriving with key material — and never travels.
+//
+// ═══ THE RULE THIS SECTION IS ═══
+//
+//     ONE FUNCTION PER DIRECTION, AND NO OTHER CODE IN THIS MODULE KNOWS THE RELAY'S SPELLING.
+//
+// `rotationBody()` and `createSpaceWraps()` write it; `parseKeysResponse()` reads it. The
+// internal `Recipient.deviceId` keeps its own name, which is fine precisely because it never
+// crosses. A second translator anywhere is this bug again.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * `WrapBlob` → the base64url string the `KeyWrap.wrapped` column takes.
+ *
+ * (Named `encodeWrap`/`decodeWrap` rather than the obvious `packWrap`/`unpackWrap` for one
+ * concrete reason: `tests/tier1/crypto-spacekeys.test.js`'s rule-6 guard asserts that no export
+ * of this module matches `/kw/i`, because AES-KW over a P-256 private key is ADR 002 §1 rule 6's
+ * trap and a prototype that only ever wraps a 32-byte AES key would never hit it. `pac{kW}rap`
+ * trips that scan. The guard is worth more than the name.)
+ *
+ * Canonical JSON, so the same blob is the same bytes on both Macs and in the column — the blob
+ * is not signed, but it IS an idempotency target (`putKeyWraps` upserts on
+ * `(spaceId, epoch, recipientId)`), and two spellings of one value are two rows waiting to
+ * happen. `canonicalBytes` is the same serialiser ADR 002 §2.3 and ADR 001 use.
+ *
+ * @param {WrapBlob} blob @returns {string}
+ */
+export function encodeWrap(blob) {
+  if (!parseWrapBlob(blob)) {
+    throw new SpaceKeyError('encodeWrap: not a WrapBlob — refusing to put unrecognised bytes on the wire');
+  }
+  return b64u(canonicalBytes({ v: WRAP_V, salt: blob.salt, iv: blob.iv, ct: blob.ct }));
+}
+
+/**
+ * The inverse. **Peer data: `null`, never a throw** — the same contract as `parseWrapBlob`, and
+ * for the same reason. Every failure has one answer: do not admit a key (§4.4).
+ * @param {unknown} packed @returns {WrapBlob|null}
+ */
+export function decodeWrap(packed) {
+  if (typeof packed !== 'string' || packed.length === 0 || packed.length > 4096) return null;
+  let bytes;
+  try {
+    bytes = ub64(packed);
+  } catch (err) {
+    if (err instanceof CodecError) return null;
+    throw err;
+  }
+  let blob;
+  try {
+    blob = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+  return parseWrapBlob(blob) ? blob : null;
+}
+
+/**
+ * `wrapToRecipients`/`wrapRingToRecipients` output → the relay's `wraps[]`.
+ *
+ * The rename is the fix for E2E3-1 and it is a correction, not a concession: `Recipient.deviceId`
+ * already holds `rec_<memberId>` for a recovery recipient, so `recipientId` is the true name and
+ * the relay had it right. Nothing else in this module changes name.
+ *
+ * @param {Array<{deviceId:string, epoch:number, wrapped:WrapBlob}>} wraps
+ * @returns {Array<{recipientId:string, epoch:number, wrapped:string}>}
+ */
+export function wireWraps(wraps) {
+  if (!Array.isArray(wraps)) throw new SpaceKeyError('wireWraps: expected the wrap rows from wrapToRecipients()');
+  return wraps.map((w) => ({ recipientId: w.deviceId, epoch: w.epoch, wrapped: encodeWrap(w.wrapped) }));
+}
+
+/**
+ * A `Rotation` → the exact JSON body of `POST /api/v1/spaces/:id/epoch`.
+ *
+ * **`invites` is deliberately absent** (finding E2E3-4). ADR 002 §4.2 step 3 predates PO decision
+ * D9: an invite carries no key material, so there is nothing for a client to re-wrap, and the
+ * relay refreshes every open invite's epoch itself. `rotateEpoch` refuses the KEY's presence —
+ * not a non-empty list, the key — so a body spread from a `Rotation` was a 400 even with every
+ * other field repaired. `Rotation.invites` survives as the local guard it is: `buildRotation`
+ * REFUSES an invite object carrying `wrappedKeys`, which is how a caller still believing in the
+ * pre-D9 seven-day read window finds out.
+ *
+ * **`senderDeviceId` is deliberately absent too** (finding E2E3-3, the other half). The relay
+ * stamps the depositor from the request it authenticated; a client may not name it, and
+ * `readWraps`'s closed field set 400s a body that tries. That is what makes the sender a fact
+ * the relay observed rather than a claim it was handed.
+ *
+ * @param {Rotation} rotation @returns {{epoch:number, wraps:Array<Object>}}
+ */
+export function rotationBody(rotation) {
+  if (!rotation || typeof rotation !== 'object') throw new SpaceKeyError('rotationBody: expected a Rotation');
+  assertEpoch(rotation.epoch, 'rotationBody');
+  return { epoch: rotation.epoch, wraps: wireWraps(rotation.wraps) };
+}
+
+/**
+ * The `wraps` half of a `POST /api/v1/spaces` body. Same encoding, different envelope: creation
+ * carries epoch 1 only, and the coverage rule is established there rather than checked.
+ * @param {Array<{deviceId:string, epoch:number, wrapped:WrapBlob}>} wraps
+ */
+export const createSpaceWraps = wireWraps;
+
+/**
+ * `GET /api/v1/spaces/:id/keys` → the rows `admitWraps` takes.
+ *
+ * A row the relay mangled is DROPPED here rather than passed on as a shape `admitWraps` would
+ * have to re-check: this function's whole job is to be the boundary, and a boundary that forwards
+ * garbage is not one. Dropping is safe because it is indistinguishable, to the caller, from the
+ * relay never having sent the row — which the relay can do anyway, and which §4.4's park already
+ * covers.
+ *
+ * `senderKexPubRaw` is passed through UNTOUCHED and untrusted. `admitWraps` looks it up in a set
+ * this module verified; it selects a sender and can never supply one (§6b).
+ *
+ * @param {unknown} body the parsed JSON response
+ * @returns {{spaceId:string|null, currentEpoch:number|null, keysPending:boolean,
+ *            rows:Array<{epoch:number, wrapped:WrapBlob, senderKexPubRaw:string|null}>,
+ *            dropped:number}}
+ */
+export function parseKeysResponse(body) {
+  const out = { spaceId: null, currentEpoch: null, keysPending: true, rows: [], dropped: 0 };
+  if (!body || typeof body !== 'object') return out;
+  if (typeof body.spaceId === 'string') out.spaceId = body.spaceId;
+  if (isEpoch(body.currentEpoch)) out.currentEpoch = body.currentEpoch;
+  out.keysPending = body.keysPending !== false;
+  const rows = Array.isArray(body.wraps) ? body.wraps : [];
+  for (const r of rows) {
+    if (!r || typeof r !== 'object' || !isEpoch(r.epoch)) { out.dropped++; continue; }
+    const wrapped = decodeWrap(r.wrapped);
+    if (wrapped === null) { out.dropped++; continue; }
+    out.rows.push({
+      epoch: r.epoch,
+      recipientId: typeof r.recipientId === 'string' ? r.recipientId : null,
+      wrapped,
+      senderKexPubRaw: typeof r.senderKexPubRaw === 'string' ? r.senderKexPubRaw : null,
+    });
+  }
+  return out;
 }
 
 /**

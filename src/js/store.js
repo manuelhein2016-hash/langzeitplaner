@@ -127,6 +127,12 @@ export const SCHEMA_VERSION = 1;
 const UNDO_LIMIT = 50;
 /** How many warnings the channel holds before it stops growing (F-8). */
 const WARN_LIMIT = 1000;
+/**
+ * How many terminal refusals ride in `checkpoint.json` (L-1). The ledger is EVIDENCE, not a log:
+ * one entry is enough to stop reporting `healthy`, and a device under a hostile relay must not be
+ * able to grow this file without bound. Most recent kept — see `_syncRefusalsForDisk`.
+ */
+const REFUSAL_LEDGER_CAP = 200;
 const SNAPSHOT_LIMIT = 7;
 const SAVE_DEBOUNCE = 700;
 
@@ -1253,6 +1259,32 @@ class Store {
     /** Set by `init()` when an op log was refused. Inspectable, never written back to disk. */
     this.quarantine = null;
 
+    // ── THE SYNC LEDGER — the two things the ENGINE knows and the disk did not (L-1, P-4) ─────
+    //
+    // `diagnostics().sync` derives `parked` and `lost` from the log and the checkpoint, which are
+    // already durable. The other two cannot be derived from anything, because they are facts
+    // about bytes that are GONE:
+    //
+    //   `syncRefusals`  a terminal refusal — a bad signature, a failed AEAD, a malformed
+    //                   envelope. The refusal is CORRECT and the cursor is released past the op
+    //                   (ADR 003 §8.2), so the relay will never offer it again and this record is
+    //                   the only thing left in the world that remembers the divergence. Kept in
+    //                   `sync/personal.js`'s per-session `Map` it was visible for minutes and
+    //                   then `healthy` for ever — finding L-1.
+    //   `syncChain`     ADR 002 §5.4's chain witness said the relay's page does not add up: a
+    //                   gap, a mismatch, or a `nextCursor` beyond the last row it actually
+    //                   served. `null` means "verified, or nothing to verify" — finding P-4.
+    //
+    // BOTH ARE THE STORE'S, NOT THE ENGINE'S, and they are declared here rather than created by
+    // the first engine that writes one: an engine that adds properties to the store it was
+    // injected with is how two files stop agreeing about what the store is. `syncRefusals` RIDES
+    // IN THE CHECKPOINT (`_stampedCheckpoint` writes `lzp.refusals`, `init()` reads it back), so
+    // it survives the quit — an array on an instance dies with the process exactly as the Map did.
+    /** @type {Array<{oid:string, seq:string, reason:string, at:number}>} */
+    this.syncRefusals = [];
+    /** @type {{ok:false, findings:Array, at:number}|null} */
+    this.syncChain = null;
+
     // ── ADR 006 — the board/log binding ────────────────────────────────────────
     /** The lineage this board's log belongs to, or null in solo mode (where no log is durable). */
     this._lineageId = null;
@@ -1768,6 +1800,12 @@ class Store {
     this.clearWarnings();
     this.quarantine = null;
     this.bootFailure = null;
+    // The ledger is re-read from the checkpoint below, once it is known whether that checkpoint
+    // was believed. Emptying it here rather than there means a refused log cannot leave last
+    // session's refusals standing as if they were this board's.
+    this.syncRefusals = [];
+    this.syncChain = null;
+    this._e52Warned = false;
     this._toldAboutReadOnly = false;
     this._adopted = null;
     this._recovered = false;
@@ -1895,6 +1933,26 @@ class Store {
         'the history beside this board was refused, so this device RE-JOINS: its whole board is '
         + 'republished at fresh stamps (ADR 006 §9.3). Nothing is lost and nothing on your peers '
         + 'is deleted — the two boards merge.');
+    }
+    // ── L-1 · the refusal ledger, read back off the checkpoint that was actually believed ──────
+    // `this.quarantine` is the whole gate: a log this launch refused takes its ledger with it.
+    if (!this.quarantine) this._restoreSyncLedger(checkpoint);
+    // ── L-3 · THE PARK HAS A REAPER, AND THIS IS ITS FIRST RUN ────────────────────────────────
+    //
+    // `unparkAttested()` re-judges a line held for a missing device attestation, and before this
+    // it was called from exactly one place in the product — `family/mount.js`, on the adoption of
+    // a NEW peer. So a Mac that learned about its sibling on Monday and quit still held Monday's
+    // op on Tuesday, and on every launch after that, for ever: the cursor had long since been
+    // released past it (ADR 003 §8.2 bounds the hold), which makes the parked line the ONLY copy
+    // this Mac can reach and nothing was looking at it.
+    //
+    // HERE, because here is where the two preconditions are first both true: `useIdentity()` has
+    // already filled `_peerDevices` (it must run before `init()`, and warns if it does not), and
+    // the log has just been loaded. It is a no-op with nothing parked and costs one `parkedOps()`
+    // call otherwise. The engine calls it again on every pull — see `sync/personal.js` — which is
+    // what covers the pairing that completes mid-session.
+    try { this.unparkAttested(); } catch (e) {
+      this._warn(`held ops could not be re-judged on launch (${e.name}: ${e.message}); they stay parked`);
     }
     this.ready = true;
     this.emit('init');
@@ -2690,6 +2748,39 @@ class Store {
         rejoin: this._rejoined,
         pendingRetractions: Array.isArray(this.publisher?.pendingRetractions)
           ? this.publisher.pendingRetractions.length : 0,
+        // ── THE FOUR FIELDS DOMAIN S4 REQUIRES ─────────────────────────────────────────────
+        //
+        // `sync-domains.js` S4 is the enumeration of "what the user and the system can observe",
+        // and its verdict on this build was that the answer is `healthy` in every row, because
+        // there was no field here to say anything else with. `sync/status.js`'s
+        // `SYNC_DIAGNOSTIC_FIELDS` names exactly these four and folds over them; the names are
+        // the domain's, not this file's, so a fix is expressible in the product's own vocabulary
+        // rather than in a new seam nobody else knows about.
+        //
+        // ALL FOUR MUST SURVIVE A RELAUNCH — that is the requirement, not a nicety. Two of them
+        // do so by DERIVATION from what is already on disk (below); two are RECORDED by the sync
+        // engine, and until it records them durably they read `0`/`null`, which is honest: this
+        // file will not invent evidence it does not have. What it will not do any more is omit
+        // the field, because an absent field reads as `healthy` to every consumer, and
+        // `sync/status.js`'s `blindSpots()` exists precisely to refuse that.
+        //
+        //   parked   DERIVED. `_log.parkedOps()` — durable by construction: a parked line rides
+        //            in `checkpoint().parked` with its reason (ADR 001 §7.4). Closes L-2's store
+        //            half; `S4-held`'s `storeReports: 'sync.parked'`.
+        //   refused  RECORDED by the engine (L-1). `sync/personal.js`'s `quarantined` Map is
+        //            per-session, so a terminal refusal is visible for minutes and then for ever
+        //            reported as `healthy`, with the cursor already past the op. The engine owner
+        //            appends to `syncRefusals`; this seam only counts.
+        //   lost     DERIVED. See `_syncLostOps()` — E5-2's own signature, read back off the
+        //            checkpoint, so it survives every relaunch after the fold.
+        //   chain    RECORDED by the engine (P-4). ADR 002 §5.4's chain witness. `sync/chain.js`
+        //            implements it and `src/` imports it from nowhere, so this is `null` until
+        //            `pullNow` calls `verifyChain`; the field is here so that wiring it is one
+        //            assignment rather than a new seam.
+        parked: this._personalSpaceId === null ? 0 : this._log.parkedOps().length,
+        refused: Array.isArray(this.syncRefusals) ? this.syncRefusals.length : 0,
+        lost: this._syncLostOps().length,
+        chain: this.syncChain ?? null,
       },
       lineage: {
         id: this._lineageId,
@@ -2711,6 +2802,75 @@ class Store {
         }
         : null,
     };
+  }
+
+  /**
+   * ── `diagnostics().sync.lost` — E5-2, READ BACK OFF THE DISK ─────────────────────────────────
+   *
+   * THE FACT THIS RECOVERS. `_outboxHorizonCap()` exists to stop a persist folding past the
+   * oldest line the relay has not acknowledged. When it fails to — and its `cap === null` arm
+   * stands the cap down in the state every compaction leaves behind — the line is folded away for
+   * real: `outbox()` returns 0, the board keeps the value, and the other Mac will never see it.
+   * The user loses nothing ON THIS MAC. What is lost is the FACT, and the fact is what
+   * `sync-domains.js` S4-lost requires this layer to be able to report.
+   *
+   * WHY THIS IS A DERIVATION AND NOT A LEDGER. A ledger written at the moment of the fold would
+   * be a per-session note in memory (E5-2's existing `_e52Warned` is exactly that, and `_warn`'s
+   * array is emptied by the next `init()` — F-8). The fold, by contrast, leaves a PERMANENT
+   * signature in the two files this store already writes, and re-reading it costs one pass:
+   *
+   *   an opId that
+   *     · writes a live register of a PERSONAL-space entity      (`note`/`bar`/`cat`/`pad`;
+   *       `pref` is `local`-space and is never synced — story 17.7, rule U6 — so a settings write
+   *       is unacknowledged for ever by design and must not be counted),
+   *     · was minted by THIS device                              (`stamp.slice(-16) === _short`,
+   *       the same test `outbox()` uses; a peer's op carries the peer's short and arrived WITH a
+   *       seq, and a migration op carries the all-zeros short and never travels — ADR 001 §8.1),
+   *     · carries NO server seq                                  (`_log.seqOfOp`, which rides in
+   *       `checkpoint().seqs` keyed by opId since attack A7), and
+   *     · has NO LINE LEFT in the log                            (a line would BE the outbox
+   *       entry; `outbox()` would offer it and the next push would send it)
+   *
+   *   is an op this Mac authored, never got acknowledged for, and can no longer offer.
+   *
+   * Every clause is load-bearing and each one is a false positive that would otherwise light the
+   * amber ring on a healthy Mac. Registers and seqs both ride in the checkpoint, so the answer is
+   * identical before and after a quit — which is the half of S4-lost the engine cannot supply.
+   *
+   * Solo installs return `[]` without touching the registers: with no personal space there is no
+   * relay to be unacknowledged by.
+   *
+   * @returns {string[]} the opIds, in register order. Read-only; nothing branches on it.
+   */
+  _syncLostOps() {
+    if (this._personalSpaceId === null) return [];
+    const regs = this._log.registers();
+    if (!regs || typeof regs.values !== 'function') return [];
+
+    const online = new Set();
+    for (const line of this._log.lines()) if (line?.op?.id) online.add(line.op.id);
+
+    const lost = [];
+    const seen = new Set();
+    for (const [key, cells] of regs) {
+      if (typeof key !== 'string') continue;
+      // The entity kind is the prefix of `core/entities.js`'s `localKey`. Parsed by hand rather
+      // than with `parseEntityKey` so that this seam adds no import to a file another owner is
+      // editing this round; the four kinds below are `OP_KINDS`' `space: 'personal'` entities.
+      const kind = key.slice(0, key.indexOf(':'));
+      if (kind !== 'note' && kind !== 'bar' && kind !== 'cat' && kind !== 'pad') continue;
+      if (!cells || typeof cells.values !== 'function') continue;
+      for (const cell of cells.values()) {
+        const id = cell && typeof cell.op === 'string' ? cell.op : '';
+        if (!id || seen.has(id) || online.has(id)) continue;
+        const ts = cell.stamp;
+        if (!isStamp(ts) || isGenesisStamp(ts) || ts.slice(-16) !== this._short) continue;
+        if (this._log.seqOfOp(id) !== null) continue;
+        seen.add(id);
+        lost.push(id);
+      }
+    }
+    return lost;
   }
 
   // ── subscription ───────────────────────────────────────────────────────────
@@ -3612,12 +3772,41 @@ class Store {
    * takes the byte-identical path it took before — including `compact()`'s own `'advance'` mode,
    * which R5-4e depends on to bound `ops.jsonl`.
    *
-   * THE RECEDING GUARD. `oplog.resolveHorizon` throws if a horizon moves backwards, and a
-   * checkpoint written by a build without this cap can legitimately already fold an
-   * unacknowledged op. Nothing can put that line back, so the cap stands down and says so.
+   * THE RECEDING GUARD, AND THE SECOND HALF OF E5-2 — the arm that re-opened this finding.
    *
-   * @returns {string|undefined} `undefined` — no cap, use the log's own defaults. A stamp — fold
-   *          no further than this. `ZERO_STAMP` — fold nothing at all this time.
+   * `oplog.resolveHorizon` throws if a horizon moves backwards, and a checkpoint written by a
+   * build without this cap can legitimately already fold an unacknowledged op. Nothing can put
+   * that line back, so the cap stands down and says so.
+   *
+   * **The condition for that stand-down is a fact about the FLOOR, not about the CAP.** The
+   * round that landed this method asked `cap === null || cmp(cap, held) < 0` and returned
+   * `undefined` — no cap at all — which is the opposite of standing down: it hands the log back
+   * its own defaults and folds the unacknowledged line for real.
+   *
+   * And `cap === null` is not a rare state. It is the state EVERY compaction leaves behind: once
+   * a checkpoint has folded everything below the outbox floor, there is by definition no live
+   * line strictly below it any more, so `cap` is null on the next persist and every persist after
+   * it. `compact ▸ author offline ▸ compact` therefore folded the edit away, `outbox()` returned
+   * 0, `status()` said `healthy`, and the two Macs diverged for ever. That is E5-2, re-opened by
+   * `tests/fleet/attack-converge-outbox.test.js` §1 and by `sync-domains.js`'s `S2s-compact-
+   * sandwich`, `S2-R1L0A0O0`, `S3-unacked` and `S4-lost`.
+   *
+   * THE THREE STATES, SEPARATED. `held` is the persisted horizon: everything at or below it is
+   * already folded into `regs` and its lines are already gone.
+   *
+   *   1 `held >= floor` — the persisted checkpoint ALREADY folds the unacknowledged op. This and
+   *     only this is the unrecoverable case the guard was written for. Warn once, stand down.
+   *   2 `cap === null` (and `held < floor`) — nothing live below the floor. The correct cap is
+   *     the persisted horizon itself: it is already folded, so it cannot recede, and it is below
+   *     the floor, so it cannot fold the line. `ZERO_STAMP` when there is no horizon yet.
+   *   3 otherwise — `cap`, raised to `held` if `held` is higher, for the same no-receding reason.
+   *
+   * In every one of 2 and 3 the answer is a STAMP BELOW THE FLOOR, which is the invariant this
+   * method exists to maintain, and `undefined` — "no cap" — is never one of them.
+   *
+   * @returns {string|undefined} `undefined` — no cap, use the log's own defaults; reached only in
+   *          state 1 and when there is no outbox at all. A stamp — fold no further than this.
+   *          `ZERO_STAMP` — fold nothing at all this time.
    */
   _outboxHorizonCap() {
     let floor = null;
@@ -3627,14 +3816,10 @@ class Store {
     }
     if (floor === null) return undefined;
 
-    // Fold up to the greatest live stamp STRICTLY below the floor, and no further.
-    let cap = null;
-    for (const o of this._log.ops()) {
-      if (!isStamp(o?.ts) || cmp(o.ts, floor) >= 0) continue;
-      if (cap === null || cmp(o.ts, cap) > 0) cap = o.ts;
-    }
     const held = this._log.horizon();
-    if (held !== null && (cap === null || cmp(cap, held) < 0)) {
+
+    // ① The persisted horizon already folds the unacknowledged op. Unrecoverable; say so once.
+    if (held !== null && cmp(held, floor) >= 0) {
       if (!this._e52Warned) {
         this._e52Warned = true;
         this._warn(
@@ -3644,7 +3829,18 @@ class Store {
       }
       return undefined;
     }
-    return cap === null ? ZERO_STAMP : cap;
+
+    // Fold up to the greatest live stamp STRICTLY below the floor, and no further.
+    let cap = null;
+    for (const o of this._log.ops()) {
+      if (!isStamp(o?.ts) || cmp(o.ts, floor) >= 0) continue;
+      if (cap === null || cmp(o.ts, cap) > 0) cap = o.ts;
+    }
+
+    // ② and ③. `held` is below the floor here, so raising the cap to it is always safe and is
+    // never a recession. Both arms return a stamp; neither returns "no cap".
+    if (cap === null) return held === null ? ZERO_STAMP : held;
+    return held !== null && cmp(cap, held) < 0 ? held : cap;
   }
 
   /**
@@ -3673,8 +3869,74 @@ class Store {
         boardHash: hash ?? null,
         horizon: cp.horizon,
         at: Date.now(),
+        // ── L-1 · THE REFUSAL LEDGER RIDES HERE ──────────────────────────────────────────────
+        // `lzp` is the STORE's half of the checkpoint — `core/oplog.js` neither writes nor reads
+        // it — which makes it the one place a fact the LOG has no line for can be made durable.
+        // A refused envelope is exactly that: it never became an op, so there is nothing for
+        // `parked` or `regs` to carry, and the cursor is already past it.
+        //
+        // It rides BELOW the commit point for the same reason the cursor does (ADR 006 §9.1 W1):
+        // `_persistOps` runs strictly after `saveBoardText`, so a crash between the two loses the
+        // record and re-pulls the op, which re-derives the same refusal. Losing it in that
+        // direction is free; the direction that is not free is losing it at every quit.
+        refusals: this._syncRefusalsForDisk(),
       },
     };
+  }
+
+  /**
+   * The refusal ledger, bounded for the disk.
+   *
+   * `REFUSAL_LEDGER_CAP` entries, MOST RECENT KEPT. A device being fed forged envelopes by a
+   * hostile relay would otherwise grow `checkpoint.json` without bound, and the hundredth
+   * identical refusal tells the user nothing the first one did not. The count under-reports past
+   * the cap and that is stated rather than hidden: every consumer of `diagnostics().sync.refused`
+   * asks `> 0`, and the cap does not change that answer.
+   */
+  _syncRefusalsForDisk() {
+    const all = Array.isArray(this.syncRefusals) ? this.syncRefusals : [];
+    const kept = all.length > REFUSAL_LEDGER_CAP ? all.slice(all.length - REFUSAL_LEDGER_CAP) : all;
+    return kept.map((r) => ({
+      oid: String(r && r.oid), seq: String(r && r.seq), reason: String(r && r.reason),
+      at: Number.isFinite(r && r.at) ? r.at : 0,
+    }));
+  }
+
+  /**
+   * ── L-1, THE OTHER HALF: READ THE LEDGER BACK ────────────────────────────────────────────────
+   *
+   * Called from `init()` with the checkpoint that was actually adopted, and ONLY then. A
+   * quarantined log's checkpoint is bytes this store has just refused to believe about the board;
+   * believing its refusal ledger instead would be reporting an error on the authority of a file
+   * the same launch decided it could not trust.
+   *
+   * A malformed entry is DROPPED rather than thrown on: this runs inside `init()`, and A3-H1
+   * ("anything thrown on the way in is a quarantine, never a dead app") applies to a diagnostics
+   * ledger with more force than it does to the log itself.
+   */
+  _restoreSyncLedger(checkpoint) {
+    const lzp = checkpoint && typeof checkpoint === 'object' ? checkpoint.lzp : null;
+    const rows = lzp && typeof lzp === 'object' && Array.isArray(lzp.refusals) ? lzp.refusals : [];
+    const out = [];
+    for (const r of rows) {
+      if (!r || typeof r !== 'object') continue;
+      if (typeof r.oid !== 'string' || typeof r.reason !== 'string') continue;
+      out.push({
+        oid: r.oid,
+        seq: typeof r.seq === 'string' ? r.seq : String(r.seq ?? '0'),
+        reason: r.reason,
+        at: Number.isFinite(r.at) ? r.at : 0,
+      });
+      if (out.length >= REFUSAL_LEDGER_CAP) break;
+    }
+    this.syncRefusals = out;
+    if (out.length) {
+      this._warn(
+        `sync: ${out.length} change${out.length === 1 ? '' : 's'} from another device `
+        + `${out.length === 1 ? 'was' : 'were'} refused by an earlier session and cannot be `
+        + 'fetched again. Nothing here was changed, and nothing was lost on the device that made '
+        + `${out.length === 1 ? 'it' : 'them'} (finding L-1).`);
+    }
   }
 
   /**

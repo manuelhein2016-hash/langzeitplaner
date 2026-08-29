@@ -55,7 +55,9 @@ import { createRelay, simClock, SERVER_LIMITS } from '../helpers/loopback.js';
 import {
   createPersonalSync, createPersonalPublisher, LIMITS, CADENCE,
   CURABLE_PARKS, CURABLE_REFUSALS, isCurable, PersonalSyncError,
+  PARK_HANDLING, parkHandlingOf,
 } from '../../src/js/sync/personal.js';
+import { ENVELOPE_PARK } from '../../src/js/crypto/envelope.js';
 
 const DAY = '2026-08-29';
 const MEM = { allowMemoryCustody: true };
@@ -793,6 +795,315 @@ describe('§4 F-6 — first contact does not lose data', () => {
     for (const final of ['shape', 'notMyAct', 'writeOnce', 'notOwner', 'localSpace', 'foreignSpace']) {
       assert.equal(isCurable(final), false, `${final} is final — re-pulling gives the same answer`);
     }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §4b  P-8 — EVERY PARK REASON HAS A DECIDED FATE, AND A PARK IS NEVER A DROP
+//
+// F-6's prose above was right for a year and the code under it never ran: `pullNow` tested
+// `out.parked` on an object whose discriminator is `out.status`, so the whole branch was dead and
+// EVERY park fell through into `terminal()` — quarantined as "openOp returned no op", cursor
+// released, op destroyed. `tests/attack/privacy-e5-scope.test.js` §6 is the inverted adversary
+// row; this block is the domain, so that the next reason `crypto/envelope.js` learns to emit
+// cannot be the one nobody added a branch for.
+//
+// The method is `tests/helpers/sync-domains.js`'s: enumerate the INPUT DOMAIN — here the six
+// values of `ENVELOPE_PARK` — and decide every one of them, rather than naming two branches.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('§4b P-8 — the park domain, decided rather than branched', () => {
+  test('the table covers exactly the reasons the envelope layer can emit', () => {
+    // THE TOTALITY CHECK, and the one assertion that would have prevented P-8's second half.
+    // `CURABLE_PARKS` used to BE the engine's whole knowledge of parks, so a reason that was not
+    // one of its two members had no handling at all. Now the table is the knowledge and
+    // `CURABLE_PARKS` is a projection of it, so a new `ENVELOPE_PARK` member is a RED TEST here
+    // rather than a silently destroyed op in the field.
+    assert.deepEqual(Object.keys(PARK_HANDLING).sort(), Object.values(ENVELOPE_PARK).sort());
+    for (const [reason, h] of Object.entries(PARK_HANDLING)) {
+      assert.ok(['session', 'update'].includes(h.curedBy), `${reason}: curedBy ${h.curedBy}`);
+      assert.equal(typeof h.note, 'string');
+      assert.ok(h.note.length > 40, `${reason}: the note has to say what the entry is FOR`);
+      assert.equal(Object.isFrozen(h), true);
+    }
+    // The two classes are both non-empty. Without this, a table that said `'session'` everywhere
+    // would satisfy every row below while meaning nothing.
+    const bySession = Object.values(PARK_HANDLING).filter((h) => h.curedBy === 'session');
+    const byUpdate = Object.values(PARK_HANDLING).filter((h) => h.curedBy === 'update');
+    assert.ok(bySession.length > 0 && byUpdate.length > 0, 'the classification is vacuous');
+  });
+
+  test('`CURABLE_PARKS` is DERIVED from the table, not restated beside it', () => {
+    assert.deepEqual([...CURABLE_PARKS],
+      Object.keys(PARK_HANDLING).filter((r) => PARK_HANDLING[r].curedBy === 'session'));
+    assert.deepEqual([...CURABLE_PARKS], ['attestation', 'epoch']);
+    assert.equal(isCurable('attestation'), true);
+    assert.equal(isCurable('epoch'), true);
+    // …and the update-curable reasons are NOT `isCurable`, because that word means "a re-pull in
+    // this session can change the answer". They are still HELD; see the rows below.
+    assert.equal(isCurable('version'), false);
+    assert.equal(isCurable('unknownKind'), false);
+  });
+
+  test('`parkHandlingOf` is TOTAL — a reason from a newer build is still a park', () => {
+    // The one input class this file cannot enumerate, because it is by definition the one this
+    // build has never heard of. A park reason a NEWER `crypto/envelope.js` emits must not fall
+    // off the table into `terminal()` — that is P-8's exact failure mode, one version later.
+    for (const unknown of ['somethingNew', '', 'PARKED', 'attestation ', null, undefined, 7, {}]) {
+      const h = parkHandlingOf(unknown);
+      assert.equal(h.known, false, `${JSON.stringify(unknown)} should not be a known reason`);
+      assert.equal(h.curedBy, 'update', 'an unknown reason must be HELD, never dropped');
+    }
+    for (const known of Object.values(ENVELOPE_PARK)) {
+      assert.equal(parkHandlingOf(known).known, true, `${known} is not in the table`);
+    }
+    // `hasOwnProperty`, not `in`: `parkHandlingOf('toString')` must not resolve to Object.prototype.
+    assert.equal(parkHandlingOf('toString').known, false, 'the table is reachable through the prototype');
+    assert.equal(parkHandlingOf('constructor').known, false);
+  });
+
+  // ── the behavioural half: each park driven through the REAL engine ─────────────────────────
+
+  let relay;
+  let F;
+
+  beforeEach(async () => {
+    F = FLEET;
+    relay = makeRelay();
+    await seedRelay(relay, F);
+    await bootMac(F.B, F);
+    await bootMac(F.A, F);          // A KNOWS B here — the only thing withheld is per-row
+  });
+
+  /**
+   * B authors one note and pushes it; A pulls under `arrange`. Returns what A did with it.
+   *
+   * Nothing is hand-built: the op is minted by B's own `apply()`, sealed with B's own signing key
+   * and pulled back through the real relay and the real `openOp` (A3-H4).
+   */
+  async function fateOf(arrange = {}) {
+    const eB = engineFor(F.B, F, relay);
+    await on(F.B, () => {
+      F.B.store.apply('createNotePopover', {
+        id: `p8-${Math.random().toString(36).slice(2, 8)}`, date: '2026-11-11',
+        text: 'geparkt', categoryId: 'c1',
+      });
+    });
+    await on(F.B, () => eB.pushNow());
+    const eA = engineFor(F.A, F, relay, arrange);
+    const r = await on(F.A, () => eA.pullNow());
+    return {
+      pull: r,
+      held: eA.deferredOps(),
+      quarantined: eA.quarantined(),
+      cursor: F.A.store.cursor(F.spaceId),
+      status: eA.status(),
+      applied: F.A.store.state.notes.some((n) => n.text === 'geparkt'),
+    };
+  }
+
+  /** A transport that serves A's pulls with one field of every envelope edited. */
+  function editingTransport(edit) {
+    const inner = loopbackTransport(relay, {
+      origin: ORIGIN,
+      deviceShort: F.A.id.forStore.deviceShort,
+      sign: F.A.id.sign,
+      clientVersion: '2.0.0',
+      now: () => relay.ctx.now(),
+      random: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+      subtle: S,
+    });
+    return {
+      origin: ORIGIN,
+      async request(method, path, query, body, headers) {
+        const res = await inner.request(method, path, query, body, headers);
+        if (method === 'GET' && path === '/api/v1/ops' && res.json && Array.isArray(res.json.ops)) {
+          for (const e of res.json.ops) edit(e);
+        }
+        return res;
+      },
+    };
+  }
+
+  test('P1 ATTESTATION — held, cursor held, nothing quarantined', async () => {
+    const got = await fateOf({ attestationOf: () => null });
+    assert.equal(got.pull.deferred, 1, 'the park branch did not run — P-8 is back');
+    assert.deepEqual(got.held.map((h) => h.why), [ENVELOPE_PARK.ATTESTATION],
+      'held under the ENUM `openOp` emitted, never under its human sentence');
+    assert.deepEqual(got.quarantined, [], 'a park is a deferral, never a quarantine');
+    assert.equal(got.cursor, '0', 'THE CURSOR MOVED PAST AN OP THIS MAC COULD NOT READ');
+    assert.equal(got.applied, false);
+  });
+
+  test('P4 EPOCH — held, cursor held (ADR 002 §4.4, offline across a rotation)', async () => {
+    const ring = { get: () => null, currentEpoch: () => 1 };
+    const got = await fateOf({ keyring: ring });
+    assert.equal(got.pull.deferred, 1);
+    assert.deepEqual(got.held.map((h) => h.why), [ENVELOPE_PARK.EPOCH]);
+    assert.deepEqual(got.quarantined, []);
+    assert.equal(got.cursor, '0');
+  });
+
+  test('VERSION — an envelope from a newer build is held, not destroyed', async () => {
+    // ADR 003 §4: "a client keeps the ability to OPEN every Envelope.v it has ever seen", and ADR
+    // 002 §1 is "versioning, not negotiation". Both are promises about the op still being there
+    // after the update, and before this fix `v: 99` was the reason an op was silently deleted.
+    //
+    // NO `parkStore` IS INJECTED HERE, and that is the configuration this row measures: the
+    // retention is per-session, so the cursor is HELD. That is the documented fail-safe — between
+    // two silent losses this engine takes the recoverable one — and the next row measures the
+    // other half, where the port exists and the cursor is released as ADR 003 §8.2 requires.
+    const got = await fateOf({ transport: editingTransport((e) => { e.v = 99; }) });
+    assert.equal(got.pull.deferred, 1);
+    assert.deepEqual(got.held.map((h) => h.why), [ENVELOPE_PARK.VERSION]);
+    assert.deepEqual(got.quarantined, []);
+    assert.equal(got.cursor, '0');
+  });
+
+  test('VERSION with a DURABLE park — the cursor is RELEASED, and the envelope is on disk', async () => {
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // P-8's third axis, and the reason ADR 003 §8.2 demands it. A cursor pinned behind an envelope
+    // only a NEW BINARY can read blocks every later op on the space until the user updates — and
+    // a hostile relay would wedge this device with a single `v: 99` row. So the cursor must be
+    // released. Releasing it is only safe once the envelope is retained DURABLY, because after the
+    // release the retained copy is the only one this Mac can reach.
+    //
+    // `sync/outbox.js`'s `createParkingLot` is that retention, behind the `parkStore` port. The
+    // condition is the LOT'S OWN ANSWER about itself (`durable`), never an assumption: the row
+    // above is the same input with no port, and it still holds the cursor.
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    let rows = [];
+    const parkStore = {
+      durable: true,
+      async loadRecords() { return rows; },
+      async saveRecords(next) { rows = next; },
+    };
+    const got = await fateOf({ transport: editingTransport((e) => { e.v = 99; }), parkStore });
+
+    assert.deepEqual(got.held.map((h) => h.why), [ENVELOPE_PARK.VERSION], 'still HELD, not refused');
+    assert.deepEqual(got.quarantined, [], 'and not quarantined');
+    assert.notEqual(got.cursor, '0',
+      'THE CURSOR IS RELEASED. Reverting the `dormant` arm in `defer()` pins it at 0 again and a '
+      + 'single unreadable envelope blocks the space for ever (ADR 003 §8.2).');
+
+    // …and the bytes are on disk, with the reason, which is what makes the release safe.
+    assert.equal(rows.length, 1, 'the sealed envelope was retained');
+    assert.equal(rows[0].reason, ENVELOPE_PARK.VERSION, 'with its park reason');
+    assert.deepEqual(Object.keys(rows[0].env).sort(),
+      ['ct', 'dv', 'ep', 'iv', 'oid', 'sig', 'sp', 'v', 'wit'],
+      'and as an ENVELOPE — the relay\'s `seq`/`chain` framing is not part of the sealed thing, '
+      + 'and a tenth field would be a channel into a file this device replays for weeks');
+  });
+
+  test('a held op reports WHAT WOULD CURE IT, so a UI can write the right sentence', async () => {
+    // "Held until your other Mac finishes pairing" and "held until you update the app" are the
+    // same STATE and two different things to tell a person. `curedBy` is recorded at the moment
+    // of the hold, off `PARK_HANDLING`, so the classification has exactly one home — the failure
+    // mode this whole pass is about is two places disagreeing about one taxonomy.
+    const session = await fateOf({ attestationOf: () => null });
+    assert.deepEqual([...new Set(session.held.map((h) => h.curedBy))], ['session']);
+    // The SAME store, one pull later: the cursor is still held at 0, so this pull re-delivers the
+    // op above as well — which is the retry path working, and why the assertion is over the set.
+    const update = await fateOf({ transport: editingTransport((e) => { e.v = 99; }) });
+    assert.deepEqual([...new Set(update.held.map((h) => h.curedBy))], ['update']);
+    assert.ok(update.held.length >= 1);
+    // A curable REFUSAL is `'session'` by definition — `CURABLE_REFUSALS` means "a later op".
+    assert.equal(PARK_HANDLING[ENVELOPE_PARK.VERSION].curedBy, 'update');
+    assert.equal(PARK_HANDLING[ENVELOPE_PARK.ATTESTATION].curedBy, 'session');
+  });
+
+  test('a held op is `pending`, never `healthy` — story 19.3 means what it says', async () => {
+    // "Stille bedeutet Gesundheit" is a PROMISE, and the promise is not "the indicator is quiet",
+    // it is "quiet means there is nothing to tell you". An op this Mac is holding is work
+    // outstanding, exactly as an unacknowledged outbox line is — so `pending`, and NOT `error`,
+    // because nothing has failed.
+    const got = await fateOf({ attestationOf: () => null });
+    assert.equal(got.status.state, 'pending');
+    assert.equal(got.status.deferredOps, 1);
+    assert.equal(got.status.errorKind, null, 'a held op is not a fault');
+  });
+
+  test('the hold is BOUNDED, and its end is a named quarantine (ADR 003 §8.2)', async () => {
+    // The control that stops "hold the cursor" being read as "hold it for ever". A cursor pinned
+    // behind one unreadable envelope blocks every later op on the space, which is both worse for
+    // the user than the loss it was avoiding and how a hostile relay would wedge this device.
+    const eB = engineFor(F.B, F, relay);
+    await on(F.B, () => {
+      F.B.store.apply('createNotePopover', { id: 'p8-nie', date: '2026-11-12', text: 'nie', categoryId: 'c1' });
+    });
+    await on(F.B, () => eB.pushNow());
+    const eA = engineFor(F.A, F, relay, { attestationOf: () => null, maxDeferrals: 2 });
+    for (let i = 0; i < 4; i += 1) await on(F.A, () => eA.pullNow());
+
+    assert.deepEqual(eA.deferredOps(), [], 'the ladder never ended');
+    assert.deepEqual(eA.quarantined().map((q) => q.reason),
+      [`still ${ENVELOPE_PARK.ATTESTATION} after 2 attempts`],
+      'and its end must NAME the reason it gave up on');
+    assert.equal(eA.status().state, 'error');
+    assert.notEqual(F.A.store.cursor(F.spaceId), '0', 'only now is the cursor released');
+  });
+
+  test('an envelope with NO `oid` still leaves a record — the one cell nothing could report', async () => {
+    // `sync-domains.js` S1-terminal-malformed's own note: `terminal()` was guarded on
+    // `typeof oid === 'string'`, so a header-less envelope was refused (correctly) and then
+    // dropped with the cursor released AND with no record in the session either. A refusal that
+    // leaves no trace is the whole shape of this pass's findings, so it is filed under its seq.
+    const got = await fateOf({ transport: editingTransport((e) => { delete e.oid; }) });
+    assert.equal(got.applied, false, 'a header-less envelope was applied');
+    assert.equal(got.quarantined.length, 1, 'the refusal left no record at all');
+    assert.match(got.quarantined[0].oid, /^seq:\d+$/, 'and the record is filed under its seq');
+    assert.match(got.quarantined[0].reason, /envelope:/);
+  });
+
+  test('`applyRemote` answers for EVERY op it is handed — the claim the cursor rests on', async () => {
+    // ── THE REACHABILITY CLAIM BEHIND `pullNow`'s `notReported` GUARD ─────────────────────────
+    //
+    // The commit point is computed from the ops the engine knows the fold DECIDED. An op that
+    // came back in neither `applied` nor `refused` would slip past that computation and the
+    // cursor would be released over it, silently — which is P-8's shape one seam further down.
+    // The guard that holds such an op is deliberately unreachable today, and this row is why:
+    // `store.applyRemote` partitions its input. `store.js` has one arm that warns and reports
+    // neither ("not a well-formed op"), and nothing `openOp` returns can take it, because
+    // `isOpId(op.id)` has already run inside `openOp`.
+    //
+    // THE ROW IS THE PIN. If `applyRemote` ever stops answering for an input, this goes red here
+    // rather than as a lost note on somebody's second Mac — and the guard stops being dead code.
+    await on(F.A, () => {
+      const s = F.A.store;
+      const mk = (uuid, over) => noteSet({
+        act: s._me, dev: s._device, gid: newGid(), mint: () => s._clock.tick(),
+        newOpId, newGid, space: F.spaceId, familySpaceId: null, regs: s.registers(),
+        ...over,
+      }, uuid, { text: 'Partition' }, { born: true });
+      const batch = [
+        mk('p8-part-a', {}),                                       // ordinary, admissible
+        mk('p8-part-b', { space: mkSpaceId('personal') }),         // a foreign personal space
+        prefSet({                                                  // the `local` space (F-7)
+          act: s._me, dev: s._device, gid: newGid(), mint: () => s._clock.tick(),
+          newOpId, newGid, space: F.spaceId, familySpaceId: null, regs: s.registers(),
+        }, { rowHeight: 41 }),
+      ];
+      const r = s.applyRemote(batch);
+      const answered = new Set([...r.applied, ...r.refused.map((x) => x.id)]);
+      for (const op of batch) {
+        assert.equal(answered.has(op.id), true,
+          `applyRemote answered for neither list on ${op.k} in ${op.space} — the cursor rule `
+          + 'in `pullNow` rests on this partition being total');
+      }
+      assert.ok(r.applied.length > 0 && r.refused.length > 0,
+        'the batch exercised only one side of the partition, so the check is vacuous');
+    });
+  });
+
+  test('CONTROL — an honest pull still applies, holds nothing and moves the cursor', async () => {
+    // Without this every row above is equally satisfied by an engine that defers everything for
+    // ever, which would be a green suite and a product that never syncs.
+    const got = await fateOf();
+    assert.equal(got.applied, true, 'the ordinary case stopped working');
+    assert.deepEqual(got.held, []);
+    assert.deepEqual(got.quarantined, []);
+    assert.notEqual(got.cursor, '0');
+    assert.equal(got.status.state, 'healthy', 'and silence is still FREE (19.3)');
   });
 });
 

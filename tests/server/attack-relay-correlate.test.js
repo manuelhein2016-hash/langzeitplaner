@@ -32,6 +32,7 @@ import {
 import { fixtures, StoreShapeError } from '../../server/core/store-interface.js';
 import { HANDLER_FINDINGS } from '../../server/core/handlers/spaces.js';
 import { rateKey } from '../../server/core/limits.js';
+import { attestDevice, buildDeviceAttestation, importKexPublic } from '../../src/js/crypto/identity.js';
 
 const PERSONAL = 'psp_CORRELATEpersonalAAAxy';
 const FAMILY_A = 'fsp_CORRELATEfamilyAaaaaxy';
@@ -78,7 +79,19 @@ test('FAILED — one Mac cannot appear in two spaces, so there is no device join
       },
       device: {
         deviceId: deviceId(4243), deviceShort: mac.deviceShort,
-        sigPubRaw: b64u(mac.sigPubRaw), kexPubRaw: b64u(mac.kexPubRaw), attestation: b64u(new Uint8Array(64)),
+        sigPubRaw: b64u(mac.sigPubRaw), kexPubRaw: b64u(mac.kexPubRaw),
+        // A REAL attestation, minted with the shipping `buildDeviceAttestation`/`attestDevice`
+        // and signed by the very key this body declares as `recoveryPubSig`. Finding E2E3-7 made
+        // `POST /spaces` verify the blob, so 64 zero bytes now stops at the door — and stopping
+        // at the door would make this row prove the wrong refusal. The attack still has to reach
+        // the `deviceShort` uniqueness check, which is what it is about.
+        attestation: await attestDevice(
+          await buildDeviceAttestation(
+            { memberId: memberId(4244), deviceId: deviceId(4243), createdAt: '2026-08-29' },
+            mac.pair.publicKey, await importKexPublic(mac.kexPubRaw),
+          ),
+          mac.pair.privateKey,
+        ),
       },
       wraps: [{ recipientId: deviceId(4243), epoch: 1, wrapped: b64u(new Uint8Array(156)) }],
     },
@@ -109,7 +122,7 @@ test('FAILED — and the member id cannot span two spaces either: `Member.id` is
 // §2 The join E2-203-1's fix would create
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-test('SUCCEEDED (LATENT — finding against E2-203-1 and 21.3) — the proposed fix hands T1 a cross-space join key', async () => {
+test('SUCCEEDED (LATENT — finding against E2-203-1; 21.3 now DOCUMENTED) — the proposed fix hands T1 a cross-space join key', async () => {
   const clock = fakeClock(T0);
   const h = A.make(clock);
 
@@ -158,16 +171,22 @@ test('SUCCEEDED (LATENT — finding against E2-203-1 and 21.3) — the proposed 
   assert.equal(/correlat|link|across spaces|privacy/i.test(f.fix + f.consequence), false,
     'E2-203-1 now mentions the correlation consequence of its own fix — fold this into the finding '
     + 'and rename this test');
-  assert.equal(documents(['across spaces']) || documents(['two circles']) || documents(['cross-space']), false,
-    'server-metadata.md now discusses cross-space correlation — move these phrases into '
-    + 'an assertDocumented call');
+  // INVERTED — the CAPABILITY is unchanged; the SILENCE is what closed. `server-metadata.md` §7's
+  // fifth inference now says that three joins work across spaces and names `deviceShort` as the
+  // first of them. The finding against E2-203-1 stands (its `fix` field still does not mention
+  // the consequence of its own fix) and is asserted above; this half is 21.3's and is now met.
+  assertDocumented(assert, 'cross-space correlation by deviceShort', [
+    'cross-space correlation',
+    'across spaces',
+    'unique per machine',
+  ]);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // §3 The recovery key is a latent join and no constraint forbids it
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-test('SUCCEEDED (LATENT — 21.3) — the same 65-byte recovery point may sit in two spaces\' Member rows', async () => {
+test('SUCCEEDED (LATENT; 21.3 now DOCUMENTED) — the same 65-byte recovery point may sit in two spaces\' Member rows', async () => {
   const clock = fakeClock(T0);
   const h = A.make(clock);
 
@@ -205,8 +224,14 @@ test('SUCCEEDED (LATENT — 21.3) — the same 65-byte recovery point may sit in
   // the database".
   assert.ok(documents(['stable identifiers for as long as the member exists']),
     'the sentence this finding is about must still be in the document');
-  assert.equal(documents(['recoveryPubSig', 'across']) && documents(['join']), false,
-    'server-metadata.md now says a recovery key joins two spaces — rename this test');
+  // INVERTED — §7's fifth inference quotes §2's sentence, agrees that both halves are true, and
+  // then says the thing §2 leaves out: a stable identifier is exactly what a JOIN needs, and the
+  // scope that matters is the whole database rather than one member's lifetime.
+  assertDocumented(assert, 'the recovery point as a latent cross-space join', [
+    'recoveryPubSig',
+    'stable identifier is exactly what a JOIN needs',
+    'across every space in the database',
+  ]);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -287,8 +312,12 @@ test('SUCCEEDED — two unrelated member ids in two households, linked by arriva
   // households — that two circles with no column in common can be attached to one person by
   // arrival times alone, with no cryptography and no IP address.
   assert.ok(documents(['when a person is actually editing']), 'the raw material is documented');
-  assert.equal(documents(['two circles']) || documents(['between households']) || documents(['cross-space']), false,
-    'server-metadata.md now says timing links two households — rename this test');
+  // INVERTED — §7's fifth inference now states the conclusion §5 stopped short of: the rhythm is a
+  // link BETWEEN households as well as a portrait of one, with no cryptography and no IP address.
+  assertDocumented(assert, 'timing alone as a link between two households', [
+    'between households',
+    'two circles with no column in common',
+  ]);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════

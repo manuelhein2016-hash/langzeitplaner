@@ -24,8 +24,14 @@
 // FOUR THINGS ARE ASSERTED HERE, AND THE FOURTH IS THE ONE THAT KEEPS THE OTHER THREE HONEST:
 //   §1  no network identifier appears anywhere under `src/js/` outside `platform/net.js`
 //   §2  `net.js` is unreachable from the boot / first-run / main import graph (gate 2)
-//   §3  the shipped CSP still forbids off-origin traffic in SOLO mode (gate 4)
+//   §3  the shipped CSP still forbids off-origin traffic in SOLO mode (gate 4), the one origin
+//       is reached over TLS or is this Mac (finding **P-7**), and a bridge reply that came from
+//       somewhere else is refused (finding **P-5**)
 //   §4  the scanner can actually find a call site — planted ones, in every spelling
+//
+// §3's last two rows arrived in WP-9 and are here rather than only in `tests/attack/` for the
+// reason the round-5 and round-7 FINDINGS updates both had to correct: "the row lived only in
+// tests/attack/" is how a rule gets removed by a one-line convenience patch nobody reviews.
 //
 // §4 exists because every gate of this shape has the same failure mode: it goes green the day
 // its regex stops matching anything, and nobody notices, because green is what it looked like
@@ -42,7 +48,9 @@ import {
 import {
   pathToPrefix, staticPathToPrefix, dynamicDoorsFrom, reachableFrom,
 } from '../helpers/importgraph.js';
-import { PATH_RE, PATH_PREFIX } from '../../src/js/platform/net.js';
+import {
+  PATH_RE, PATH_PREFIX, normalizeOrigin, isLoopbackHost, createBridgeTransport, NetError,
+} from '../../src/js/platform/net.js';
 
 // ═════════════════════════════════════════════════════════════════════════════
 // §1. GATE 1 — one call site, in the whole shipped tree
@@ -209,6 +217,79 @@ describe('gate 4 — the shipped CSP', () => {
     ]) {
       assert.equal(PATH_RE.test(bad), false, `${bad} must NOT be reachable`);
     }
+  });
+
+  test('and the one origin is reached over TLS, or it is this Mac — finding P-7', () => {
+    // GATE 4's OTHER HALF, and it is not the CSP's.
+    //
+    // The CSP row above is about what the DOCUMENT may connect to, and for family mode the
+    // answer is "nothing new" — the shell transports (gate 3), so there is no host to allowlist.
+    // That leaves the question the CSP was never going to answer: the origin is a FREE-TEXT
+    // FIELD, saved on every keystroke, and it alone decides where the whole personal board goes.
+    // `normalizeOrigin` used to accept `http://` for every host, which made
+    // `server-metadata.md` §8's "TLS in transit" false for one mistyped scheme — and false about
+    // everything §2 and §5 enumerate: the space id, the deviceShort, the read cursor, the op and
+    // byte counts, the timing of every edit, the `Authorization` header. The content survives
+    // (it is sealed before it reaches a transport); the metadata does not.
+    //
+    // `platform/updater.js`'s `checkUrl` has refused anything but `https:` by name since E1 for
+    // a single signed manifest. This is that rule at the larger exposure, with the one carve-out
+    // the updater does not need: a loopback host is this Mac talking to itself and is where
+    // `node dev-server.mjs` lives.
+    //
+    // It is in TIER 1 and not only in the adversary suite because it is the kind of rule a
+    // future "just let me point it at my LAN box" patch removes in one line.
+    for (const remote of [
+      'http://relay.example', 'http://192.0.2.7:8787', 'http://127.0.0.1.evil.example',
+      'http://localhost.evil.example', 'http://[2001:db8::1]', 'http://128.0.0.1',
+    ]) {
+      assert.throws(() => normalizeOrigin(remote), (e) => e instanceof NetError && e.kind === 'config',
+        `normalizeOrigin accepted ${remote} — the board's metadata would cross the wire in the clear`);
+    }
+    for (const mine of [
+      'http://127.0.0.1:8788', 'http://127.9.9.9', 'http://localhost:5173',
+      'http://relay.localhost:8787', 'http://[::1]:8788',
+    ]) {
+      assert.equal(normalizeOrigin(mine), mine, `${mine} is this Mac and must stay reachable`);
+    }
+    assert.equal(normalizeOrigin('https://relay.example'), 'https://relay.example');
+    assert.equal(normalizeOrigin('app://localhost'), 'app://localhost');
+
+    // The predicate is over `URL.hostname` and not over the raw string, which is the difference
+    // between a rule and a substring match. Both directions, so a loosened regex is caught.
+    for (const yes of ['localhost', 'a.localhost', '127.0.0.1', '127.0.0.255', '[::1]']) {
+      assert.equal(isLoopbackHost(yes), true, yes);
+    }
+    for (const no of ['127.0.0.1.evil.example', 'localhost.evil.example', '127.0.0.256', '::1', '']) {
+      assert.equal(isLoopbackHost(no), false, no);
+    }
+  });
+
+  test('the bridge reply says where it came from, and a stranger is refused — finding P-5', async () => {
+    // GATE 3 IS THE SHELL'S, AND THIS IS THE PAGE'S HALF OF IT.
+    //
+    // On the `fetch` path `redirect: 'error'` makes the platform refuse a 302, so the signed
+    // request cannot be replayed at a destination the relay chose. On the SHIPPING path — the
+    // bridge — that was a sentence in a comment: the reply carried a status and a body and not
+    // the URL they came from, so a shell that followed a redirect (`URLSession` follows them by
+    // default) was undetectable from JS. The reply now carries the final url and a mismatch is
+    // `blocked` before the body is parsed.
+    const mk = (reply) => createBridgeTransport({
+      origin: 'https://relay.example', deviceShort: 'CHFBZPVRBG6M14TJ',
+      sign: async () => new Uint8Array(64), clientVersion: '2.0.3',
+      subtle: globalThis.crypto.subtle, now: () => 1787836800000, random: (n) => new Uint8Array(n),
+      invoke: async () => reply,
+    });
+    const OK = { status: 200, headers: {}, body: '{}' };
+    await assert.rejects(
+      () => mk({ ...OK, url: 'https://evil.example/api/v1/meta' }).request('GET', '/api/v1/meta'),
+      (e) => e instanceof NetError && e.kind === 'blocked');
+    await assert.rejects(
+      () => mk({ ...OK, redirected: true }).request('GET', '/api/v1/meta'),
+      (e) => e instanceof NetError && e.kind === 'blocked');
+    assert.deepEqual(
+      await mk({ ...OK, url: 'https://relay.example/api/v1/meta' }).request('GET', '/api/v1/meta'),
+      { status: 200, headers: {}, json: {} });
   });
 });
 

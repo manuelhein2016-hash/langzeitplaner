@@ -349,7 +349,9 @@ async function createSpaceOnRelay(fleet, dev, spaceKey) {
       deviceShort: k.forStore.deviceShort,
       sigPubRaw: devSigPub,
       kexPubRaw: devKexPub,
-      attestation: b64u(TE.encode(k.blob)),
+      // Finding E2E3-7: `POST /spaces` takes the blob STRING now, exactly as `POST /devices`
+      // always did, and verifies it under `member.recoveryPubSig`. One spelling, one contract.
+      attestation: k.blob,
     },
     // REAL wraps, so the relay's ADR 002 §4.2 coverage check runs against real bytes.
     wraps,
@@ -527,6 +529,26 @@ function makeDevice(fleet, { name, tag, keys, ring, sigPubRaw, kexPubRaw, maxDef
           isOnline: () => st.online,
           schedule: () => null,
           unschedule: () => {},
+          // P-8's durable park, on THIS device's disk, so a relaunch reads back what the previous
+          // session retained — the same `disk` every other file of this Mac lives in. Modelled on
+          // `family/engine.js`'s `parkedEnvelopeStore()`, which is the shipping implementation.
+          parkStore: {
+            durable: true,
+            async loadRecords() {
+              try { return JSON.parse(disk.getItem('langzeitplaner.parked') || '[]'); }
+              catch { return []; }
+            },
+            async saveRecords(rows) { disk.setItem('langzeitplaner.parked', JSON.stringify(rows)); },
+          },
+          // P-4's durable chain anchor, on THIS device's disk. Modelled on `family/engine.js`'s
+          // `chainHeadStore()`. It is NOT the transport cursor — that stays in the checkpoint.
+          chainStore: {
+            async loadCursors() {
+              try { return JSON.parse(disk.getItem('langzeitplaner.chainheads') || '{}'); }
+              catch { return {}; }
+            },
+            async saveCursors(all) { disk.setItem('langzeitplaner.chainheads', JSON.stringify(all)); },
+          },
           ...(maxDeferrals ? { maxDeferrals } : {}),
         });
         return dev;
@@ -647,6 +669,14 @@ function makeDevice(fleet, { name, tag, keys, ring, sigPubRaw, kexPubRaw, maxDef
     warnings() { return [...st.store.warnings]; },
     logOps({ includeParked = false } = {}) { return st.store._log.ops({ includeParked }); },
     parked() { return st.store._log.lines().filter((l) => l.park !== null && l.park !== undefined); },
+    /**
+     * The SEALED envelopes the ENGINE is retaining, with their park reasons — P-8's third axis.
+     * `parked()` above is the LOG's park (ops this Mac can read and will not apply);
+     * `sync/outbox.js`'s parking lot is the other one (bytes it cannot read yet, because P1, P4
+     * or the version gate refused before the decrypt). A fresh process answers this the same way,
+     * which is the whole point of it.
+     */
+    heldEnvelopes() { return st.sync.heldEnvelopes(); },
   };
   return dev;
 }

@@ -203,6 +203,8 @@ export async function startEngine(store, armed, ports) {
     isOnline: p.isOnline,
     onStatus: p.onStatus,
     envelopeStore: sealedEnvelopeStore(),
+    parkStore: parkedEnvelopeStore(),
+    chainStore: chainHeadStore(),
   });
 
   // ADR 004 §3 / the WP-3 obligation. `nullPublisher()` RECORDS retractions rather than
@@ -407,6 +409,8 @@ export async function attestPeer(peer, recSig, createdAt) {
 const LS_RING = (spaceId) => `langzeitplaner.ring.${spaceId}`;
 const LS_PEERS = (spaceId) => `langzeitplaner.peers.${spaceId}`;
 const LS_SEALED = 'langzeitplaner.sealed';
+const LS_PARKED = 'langzeitplaner.parked';
+const LS_CHAIN = 'langzeitplaner.chainheads';
 
 function readJSON(key, fallback) {
   try {
@@ -470,6 +474,44 @@ function sealedEnvelopeStore() {
   return {
     load(spaceId) { return readJSON(`${LS_SEALED}.${spaceId}`, []); },
     save(spaceId, envs) { writeJSON(`${LS_SEALED}.${spaceId}`, envs); },
+  };
+}
+
+/**
+ * The `parkStore` port — P-8's third axis, and the INBOUND twin of `sealedEnvelopeStore` above.
+ *
+ * That one keeps the sealed bytes this device still owes the relay. This one keeps the sealed
+ * bytes the relay has already handed over and this device cannot open YET: an op from a Mac whose
+ * attestation has not arrived, an epoch whose key has not been fetched, an envelope version or an
+ * op kind only a newer build knows. ADR 002 §5.2.5 and ADR 003 §4 both say those are PARKED and
+ * never dropped, and `core/oplog.js` cannot hold them — three of the four park reasons are
+ * decided BEFORE the decrypt, so there is no op to give it.
+ *
+ * Same shape as every other record store here, one key per space. `sync/outbox.js`'s
+ * `createParkingLot` owns the cap, the replay order and the refuse-rather-than-drop rule; this is
+ * only the I/O `src/js/sync/` may not do for itself (ADR 005 §2).
+ */
+function parkedEnvelopeStore() {
+  return {
+    durable: true,
+    async loadRecords() { return readJSON(LS_PARKED, []); },
+    async saveRecords(rows) { writeJSON(LS_PARKED, rows); },
+  };
+}
+
+/**
+ * The `chainStore` port — where ADR 002 §5.4's verified chain HEAD is kept between launches.
+ *
+ * NOT a transport cursor. ADR 006 §9.1 W1 keeps that in `checkpoint().cursors`, written by
+ * `store.js` below the board, and `sync/personal.js` still reads `store.cursor()` and nothing
+ * else as `since`. What lives here is the chain value the witness verified up to, so a relay that
+ * forks the stream ACROSS a relaunch is caught on the first page rather than adopted as the new
+ * truth. `sync/cursor.js` owns the record shape and its hostile-input reading.
+ */
+function chainHeadStore() {
+  return {
+    async loadCursors() { return readJSON(LS_CHAIN, {}); },
+    async saveCursors(all) { writeJSON(LS_CHAIN, all); },
   };
 }
 

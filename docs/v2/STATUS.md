@@ -1,14 +1,29 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-29 · **Stopped at:** **E5 — own-device sync — is built and integrated,
-and milestone M1 „Zwei Macs" is DEMONSTRATED** (LZP-501…505, LZP-1002): two real browser contexts
-with two distinct durable identities, paired over the real rendezvous with a six-digit SAS
-compared on both screens, syncing a whole private board through `node server/dev-server.mjs` over
-real HTTP — including an offline divergence that converged.
-**Resume by reading:** this file (start at the **E5 addendum** at the bottom), then
-**`docs/v2/E5-VERIFICATION.md`** (§3 is the demonstration, §6 is FINDINGS §3's disposition), then
-`docs/v2/FINDINGS.md` **§3 / §3b**, then `docs/v2/E3-VERIFICATION.md` for E3-1, then `PLAN.md`.
+**Last session:** 2026-08-29 · **Stopped at:** **round 8 — the OP LIFECYCLE, enumerated, and E5's
+two adversaries answered.** M1 „Zwei Macs" was demonstrated; two adversaries then attacked it and
+found **no confidentiality break** — 21.1 and 21.2 both held — but found that **the engine lost ops
+silently and reported `healthy` while doing it**. Four fixers worked in parallel against
+`tests/helpers/sync-domains.js` (253 entries, five domains, zero imports) and one integration pass
+landed the cross-file work.
 
+**All six suites are green**, the property that walks the domain is **85/85 with 0 UNEXPECTED and
+0 STALE**, and the headline the convergence adversary asked for holds at **128 seeds**:
+
+> for every op set and every interleaving of partition, reorder, duplication, **compaction**,
+> restart and quarantine, the two Macs' register digests agree — or the Mac that lost something
+> SAYS SO.
+
+**Resume by reading:** this file (start at the **round-8 addendum** at the bottom), then
+`docs/v2/FINDINGS.md` **§3c** (the six new rows), **§7a-round8** (the fourteen mutants) and
+**§7d-2** (the second domain, and the two cautions it earned), then `docs/v2/E5-VERIFICATION.md`
+§7, then `PLAN.md`.
+
+**The one thing to carry forward before E6:** *a module is not dead because nothing imports it; it
+is dead because nothing NEEDS it.* Four modules this register had filed as dead code turned out to
+contain three defences the product was designed to have and did not — the chain witness, a durable
+park for sealed envelopes, and a durable chain anchor. One file was genuinely dead and was deleted;
+it was the only importer of the other four, which is the whole reason they looked dead.
 ---
 
 ## 1. One-paragraph state
@@ -33,21 +48,27 @@ register blocking a family-mode release: finding E3-1**, and it is an input to *
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-# CURRENT — re-measured 2026-08-29 at the close of the E5 integration pass. SIX suites now:
-# `test:fleet` is new (tests/fleet/'s 60 rows had no script and were not in test:all).
-npm test              # tier 1, pure logic          → 1956 pass / 0 fail   (162 suites)
-npm run test:attack   # adversarial corpus          →  648 pass / 0 fail   ( 91 suites)
-npm run test:property # property harness + domains  →   70 pass / 0 fail   ( 12 suites)
-npm run test:server   # the sync server             →  799 pass / 0 fail
-npm run test:fleet    # two Macs, real handlers     →   60 pass / 0 fail   ( 13 suites)  ← NEW
-npm run test:dom      # real headless WKWebView     → 26 files, 430 pass / 1 fail / 1 skip
+# CURRENT — re-measured 2026-08-29 at the close of the ROUND-8 integration pass. ALL SIX GREEN.
+npm test              # tier 1, pure logic          → 1929 pass / 0 fail
+npm run test:attack   # adversarial corpus          →  706 pass / 0 fail
+npm run test:property # property harness + domains  →   85 pass / 0 fail   ← sync-domains: 0 UNEXPECTED, 0 STALE
+npm run test:server   # the sync server             →  815 pass / 0 fail
+npm run test:fleet    # two Macs, real handlers     →  103 pass / 0 fail
+npm run test:dom      # real headless WKWebView     → 26 files, tier 2 PASS
 ```
 
-**The one tier-2 failure is still E3-10** — `dom-rendering.dom.js:38` reads the real wall clock and
-fails every Saturday, Sunday and Ferien day. 2026-08-29 is a Saturday. Not E5's, not new.
-**The one skip is named:** `network-audit.dom.js` §1's vacuity guard stands down inside WKWebView,
-which records no Resource Timing entries for the shell's `app:` scheme; the same measurement over
-`http:` is in `E5-VERIFICATION.md` §4.3.
+**tier 1 went 1956 → 1929 and that is a DELETION, not a regression.**
+`tests/tier1/sync-client.test.js` (46 rows) went with `src/js/sync/client.js`, LZP-501's
+superseded engine; three rows were added in its place (`core-oplog.test.js` ×2 for L-4,
+`sync-personal.test.js` ×1 for P-8's cursor release). Every other suite grew.
+
+**`test:dom` tier 2 now PASSES**, including the E3-10 Saturday row that had been red on every
+weekend run — closed by the E2↔E3 seam pass, not by this one.
+
+```bash
+# 2026-08-29, the E5 integration pass — superseded
+npm test → 1956 · test:attack → 648 · test:property → 70 · test:server → 799 · test:fleet → 60
+```
 
 ```bash
 # 2026-08-29, the E3 verification pass — superseded
@@ -858,3 +879,57 @@ and a chain hash.
 
 **E3-1 is unchanged and is still the row that stops a family-mode release.** E5 was told not to
 edit `src/js/crypto/` and did not.
+
+---
+
+# Round-8 addendum — 2026-08-29 · THE OP LIFECYCLE, ENUMERATED
+
+M1 was demonstrated; two adversaries then attacked it. **Nothing they found was a confidentiality
+break — 21.1 and 21.2 both held.** What they found was worse in a different way: **the engine lost
+ops silently and reported `healthy` while doing it.** Four fixers worked in parallel against an
+enumerated input domain and one integration pass landed the cross-file work.
+
+## What was closed
+
+| id | severity | what it was |
+|---|---|---|
+| **E5-2** | CRITICAL | **RE-OPENED and closed twice.** Its own clamp stood down on `cap === null`, which is the state EVERY compaction leaves behind — so `compact ▸ author offline ▸ compact` folded the unacknowledged line for real, with no adversary and no old file. |
+| **L-4** | CRITICAL | **NEW.** `oplog.load()` fed each tail line the `seq` its BYTES carry, and a tail line is written before any ack exists. The durable ack rides in `checkpoint().seqs`. An acknowledged op came back looking unacknowledged, the outbox floor sank below the persisted horizon, and E5-2's one unrecoverable arm was reached on any Mac that quits after a compaction. **This is why the 24-seed sweep still lost an op on 2 seeds after E5-2's own fix.** |
+| **P-8** | CRITICAL | Every park was a DROP: `pullNow` read `out.parked`, a field `openOp` never sets, so the whole branch was dead code and every held op was quarantined with the cursor released. Fixed as a domain (`PARK_HANDLING`, TOTAL), then given durable retention, then allowed to release the cursor for the two reasons ADR 003 §8.2 requires it. |
+| **L-1** | HIGH | **NEW.** A terminal refusal lived in a per-session `Map`: `error` for minutes, `healthy` for ever, with the cursor already past the op. Now rides in `checkpoint().lzp.refusals` — and is WITHDRAWN when the world later falsifies it. |
+| **L-2** | HIGH | **NEW.** Nothing could see a held op. `diagnostics().sync` gained `parked`/`refused`/`lost`/`chain`; `sync/status.js` folds over the enumeration; a MISSING field is `unknown` and never `0`. |
+| **L-3** | HIGH | **NEW.** The park had no reaper — `unparkAttested()` was called from one place, on the adoption of a NEW peer. Two call sites now: `init()` and `pullNow`. |
+| **L-5** | MEDIUM | **NEW, and found by this pass walking into it.** Folding `store.warnings` into `error` lit a fault on every launch that had anything to say — the channel carries repairs, re-joins and successful cures. It reports without raising. |
+| **P-4** | HIGH | Seven modules reachable from nothing, three of them defences. Five `sync/` rows closed: four WIRED, one DELETED. |
+| **F-8** | MEDIUM | The warnings channel has a consumer. |
+| **P-2** (doc half) | — | `server-metadata.md` names the second remote. |
+
+## The headline, at 128 seeds
+
+`tests/fleet/attack-converge-disorder.test.js` §2, alphabet unchanged and un-narrowed:
+
+- **128/128 converge** with `compact` in the alphabet — content, register digests cell by cell,
+  stable, nothing lost, nothing extra. `_e52Warned` fires on **no seed**.
+- **128/128 with a QUARANTINE event** (a flipped ciphertext byte, so AES-GCM refuses the op and
+  the cursor is released past it): **no run ended divergent and `silent`.** Convergence is not the
+  right property there — a forged envelope must not be applied — so the property is the one that
+  makes the bar meaningful: *either they converge, or the Mac that lost something says so.*
+
+## Is M1 "proved" rather than "demonstrated"?
+
+**For loss: yes, and that is a change of kind.** The demonstration was one scripted run on two
+machines. The property is 128 generated interleavings of partition, reorder, duplication,
+compaction, restart and quarantine, run against the real store, the real op log, the real
+`openOp`, the shipped engine and all 23 server handlers — plus a 253-entry enumeration of the op
+lifecycle whose every cell is decided, and fourteen mutants each naming the row that dies.
+
+**For the product: no, and the gaps are named.** They are not about losing ops:
+
+- **E5-6** is unchanged and is still what M1 does not deliver — a paired Mac receives none of the
+  pre-space board, categories included.
+- **E1 owes `sync_request`** in both shells. The demonstration ran on `fetch` in a browser; the
+  shipped app has no family transport at all until that lands.
+- **The two-Mac evidence is still fleet-level.** The 128-seed sweep is two real store modules with
+  two real disks over the real handlers — it is not two real machines. §7d-2's method makes that a
+  much smaller gap than it was, but it is not zero.
+

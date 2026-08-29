@@ -81,9 +81,39 @@ export async function fetchKeys(req, ctx) {
   const forDevice = await ctx.store.getKeyWraps(spaceId, auth.deviceId);
   const forRecovery = await ctx.store.getKeyWraps(spaceId, recoveryRecipientId(auth.memberId));
 
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // `senderKexPubRaw` — ADR 002 §4.2 step 6's field, published by JOIN.  Finding E2E3-3.
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // Step 6 makes the receiving device verify WHO SENT a wrap before it derives a KEK against it,
+  // and E3 shipped that as a required `ctx.senders` on `admitWraps`, indexed by this field.
+  // Nothing on the wire carried it, so `admitWraps` threw on every honest row and §4.2 was
+  // unimplementable end to end.
+  //
+  // The relay stores the sender as a DEVICE ID it stamped itself (`KeyWrap.senderDeviceId`,
+  // never a body field) and publishes it here as the ADR's `senderKexPubRaw`, joined from the
+  // `Device.kexPubRaw` it already holds and already publishes in the member list. The client
+  // side and the ADR wording are therefore both unchanged, and the column carries no
+  // client-chosen bits.
+  //
+  // `null` when the sender's device row is gone — a member removal cascades its devices away
+  // while their deposits are still being purged. `SenderSet.lookup(null)` answers `null`, which
+  // `admitWraps` counts as `unauthorized`, which is the RIGHT answer: a key deposited by a
+  // device this space no longer admits must not be admitted (§4.2 step 6's table). The rotation
+  // that follows the removal re-deposits epochs 1..e+1 under a live sender, so this heals.
+  //
+  // A relay that lies here can cause a refusal and never an admission: the bytes only SELECT
+  // among keys the receiver imported from verified attestations (spacekeys.js §6b).
+  const kexBySender = new Map();
+  for (const d of await ctx.store.listDevices(spaceId)) kexBySender.set(d.id, d.kexPubRaw);
+
   const wraps = [...forDevice, ...forRecovery]
     .sort((a, b) => a.epoch - b.epoch || (a.recipientId < b.recipientId ? -1 : 1))
-    .map((w) => ({ epoch: w.epoch, recipientId: w.recipientId, wrapped: bytesToB64u(w.wrapped) }));
+    .map((w) => ({
+      epoch: w.epoch,
+      recipientId: w.recipientId,
+      wrapped: bytesToB64u(w.wrapped),
+      senderKexPubRaw: kexBySender.has(w.senderDeviceId) ? bytesToB64u(kexBySender.get(w.senderDeviceId)) : null,
+    }));
 
   if (typeof ctx.log === 'function') {
     ctx.log({ route: req.routeName, spaceId, deviceShort: auth.deviceShort, opCount: wraps.length, status: 200 });

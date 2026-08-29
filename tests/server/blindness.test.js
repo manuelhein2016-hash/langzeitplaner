@@ -59,6 +59,7 @@ import { createHandlers, handlers, HANDLER_OWNERS, REQUIRED_CTX_NAMES } from '..
 import { authenticate, assertMember, b64u } from '../../server/core/auth.js';
 import { LIMITS, createLog, LOG_FIELD_NAMES, LOG_FIELDS, LOG_ROUTES } from '../../server/core/limits.js';
 import { DEVICE_PROJECTION, MEMBER_PROJECTION } from '../../server/core/handlers/members.js';
+import { attestDevice, buildDeviceAttestation } from '../../src/js/crypto/identity.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -193,8 +194,14 @@ test('§2 exactly ONE justified String is content rather than an id, and it is t
   // `@@unique([spaceId, colorRef])` cannot be evaluated inside ciphertext. If a second such row
   // ever appears, the Datenschutz copy (21.3) has to gain a sentence — so this test exists to
   // make that a decision rather than a diff.
+  // `senderDeviceId` joins the identifier list rather than the content list, and the distinction
+  // is the one this test is about: it is a DEVICE ID the relay assigned and then observed itself
+  // when it authenticated the rotation request (finding E2E3-3). It carries no client-chosen
+  // bits — `readWraps` refuses a body that names it — so it states nothing the relay did not
+  // already know. Compare `Member.colorRef`, which is a user's CHOICE and is why that row needs
+  // a sentence in the Datenschutz copy.
   const content = Object.keys(PLAINTEXT_STRINGS).filter(
-    (k) => !/(^|\.)(id|spaceId|memberId|deviceShort|opId|recipientId|createdBy|rid|nonce|key|kind)$/.test(k));
+    (k) => !/(^|\.)(id|spaceId|memberId|deviceShort|opId|recipientId|senderDeviceId|createdBy|rid|nonce|key|kind)$/.test(k));
   assert.deepEqual(content, ['Member.colorRef']);
   assert.match(PLAINTEXT_STRINGS['Member.colorRef'], /DELIBERATE LEAK/);
   assert.match(PLAINTEXT_STRINGS['Member.colorRef'], /21\.3/);
@@ -296,9 +303,23 @@ async function person(colorRef) {
     recoveryPubSig: b64u(await rawOf(recSig.publicKey)),
     recoveryPubKex: b64u(await rawOf(recKex.publicKey)),
   };
-  // The attestation is opaque to the relay (ADR 002 §2.3). It is deliberately filled with a
-  // corpus word here: if any handler or adapter ever decided to look inside it, §3 would say so.
-  p.attestation = b64u(TE.encode(JSON.stringify({ deviceShort: p.deviceShort, note: 'Großmutter Käthe' })));
+  // ── THE SMUGGLING ATTEMPT MOVED, IT DID NOT GO AWAY — finding E2E3-6 / E2E3-7 ─────────────
+  // This used to be `{deviceShort, note: 'Großmutter Käthe'}`, base64url, unverified: the relay
+  // accepted it, stored it and never looked, and §3 proved a corpus word inside it never reached
+  // a response. `GET /spaces/:id/members` now PUBLISHES the attestation (E2E3-6), so "stored and
+  // never read" stopped being the answer and the door had to become one.
+  //
+  // Two things changed and both are asserted below rather than assumed:
+  //   1. the blob is now REAL — minted by the shipping `buildDeviceAttestation`/`attestDevice`,
+  //      verified server-side by `verifyDeviceClaim` on every write path; and
+  //   2. its payload is a CLOSED FIELD SET at the door (`assertAttestationClosed`), so the
+  //      smuggling attempt is REFUSED rather than merely unread — see '§2 an attestation cannot
+  //      carry a note' below, which is the corpus word's new home.
+  const att = await buildDeviceAttestation(
+    { memberId: p.memberId, deviceId: p.deviceId, createdAt: '2026-08-29' }, sig.publicKey, kex.publicKey,
+  );
+  p.attestation = await attestDevice(att, recSig.privateKey);
+  p.recSigPriv = recSig.privateKey;
   return p;
 }
 const wireDevice = (p) => ({
@@ -353,7 +374,8 @@ async function request(p, method, urlPath, query, body, at) {
  * Everything a family does in its first ten minutes, over the real router. Returns the responses,
  * the log lines and a handle on the raw store, so §3-§5 can search all three.
  */
-async function session(makeStore) {
+/** The router, a store and a `call` — everything `session()` is built out of, on its own. */
+function serverOnly(makeStore) {
   const c = clock(1787900000000);
   const store = makeStore(c);
   const route = createHandlers();
@@ -376,6 +398,11 @@ async function session(makeStore) {
     responses.push({ route: `${method} ${urlPath}`, res });
     return res;
   };
+  return { c, store, ctx, call, logLines, responses };
+}
+
+async function session(makeStore) {
+  const { c, store, ctx, call, logLines, responses } = serverOnly(makeStore);
 
   const papa = await person('gruen');
   const mama = await person('blau');
@@ -680,6 +707,13 @@ const JUSTIFIED_WIRE_FIELDS = Object.freeze({
   devices: 'the nested device list',
   recoveryPubSig: 'a PUBLIC key — verifies device attestations (ADR 002 §7.3)',
   recoveryPubKex: 'a PUBLIC key — finding E3-2: a rotation must wrap to each member RK_kex',
+  attestation: 'a SIGNED blob whose every field is a value the relay already holds in a column '
+    + '(memberId, deviceId, deviceShort, sigPubRaw, kexPubRaw) or a DAY that is coarser than '
+    + 'Device.addedAt. Finding E2E3-6: `familyRecipients()` cannot build a recipient without it, '
+    + 'so without this field no family key rotation is buildable by anyone. Published as a HINT '
+    + 'and verified under the housing member\'s recoveryPubSig before it decides anything; the '
+    + 'log remains the authority for ADMISSIBILITY (ADR 002 §2.3), this is DISTRIBUTION. NOT on '
+    + 'the pull piggyback — see the §7 subset row.',
   deviceId: 'the address a KeyWrap.recipientId is written to',
   deviceShort: 'derived from the PUBLIC signing key (ADR 001 §1.2)',
   sigPubRaw: 'a PUBLIC key',
@@ -736,19 +770,94 @@ test('§7 the pull piggyback is a strict SUBSET of the full projection, in both 
   assert.equal(live.pullDevice.includes('deviceId'), false);
 });
 
-test('§7 no projection publishes the attestation — ADR 002 §2.3 keeps it in the E2EE stream', async () => {
+// ── INVERTED 2026-08-29 — finding E2E3-6, and this row named its own inversion in advance ────
+// It read: "FINDING E2-207-B … `Device.attestation` is written by three routes and read back by
+// NONE, so ADR 002 §4.4's bootstrap roster ('the `dev.*` blobs') cannot be built from the wire.
+// This assertion is what the fix would have to change, deliberately."
+//
+// This is that change. What replaces it is not a weaker assertion — it is a STRONGER one, and it
+// is the reason the publication is free: every field of the published blob is a value the relay
+// already holds in a column of its own, because the payload's field set is closed at the door.
+// A leak needs a free bit; there is not one.
+test('§7 the attestation IS published — and it can carry nothing the relay does not already hold', async () => {
   const live = await liveShapes();
-  const all = [
-    ...MEMBER_PROJECTION, ...DEVICE_PROJECTION,
-    ...live.pullMember, ...live.pullDevice, ...live.fullMember, ...live.fullDevice,
-  ];
-  assert.equal(all.includes('attestation'), false);
-  // FINDING E2-207-B, pinned here rather than described: `Device.attestation` is written by three
-  // routes and read back by NONE, so ADR 002 §4.4's bootstrap roster ("the `dev.*` blobs") cannot
-  // be built from the wire. This assertion is what the fix would have to change, deliberately —
-  // see docs/v2/E2-VERIFICATION.md finding E2-207-B. Owner: WP-9 / ADR 002 §2.3.
+  assert.ok(DEVICE_PROJECTION.includes('attestation'), 'the full member list carries it (E2E3-6)');
+  assert.ok(live.fullDevice.includes('attestation'), 'and the endpoint really sends it');
+  // NOT on the hot path. `GET /ops` piggybacks the member list every 45 seconds for every device
+  // in every space; the rotation roster is a membership-change path. `members.js` keeps the two
+  // projections apart for that reason and this is the half that must stay narrow.
+  assert.equal(live.pullDevice.includes('attestation'), false,
+    'the pull piggyback stays four device fields — ADR 003 §3.2');
+
   assert.ok(MODEL_COLUMNS.Device.includes('attestation'), 'the column exists');
-  assert.ok(OPAQUE_FIELDS.Device.includes('attestation'), 'and it is opaque, so it is stored, unread');
+  assert.ok(OPAQUE_FIELDS.Device.includes('attestation'),
+    'and it is still an OPAQUE column: the relay stores bytes it does not interpret. Publishing '
+    + 'is not reading — nothing in server/core/ branches on what is inside the blob except the '
+    + 'signature check that refuses a forged one.');
+
+  // The measurement. Every payload field is pinned to a column, or is a DAY.
+  const { responses } = await session(ADAPTERS[0].make);
+  const full = responses.find((r) => r.route.endsWith('/members')).res.body.members;
+  for (const m of full) {
+    for (const d of m.devices) {
+      const payload = JSON.parse(new TextDecoder().decode(
+        Uint8Array.from(atob(d.attestation.split('.')[0].replace(/-/g, '+').replace(/_/g, '/')), (ch) => ch.charCodeAt(0))));
+      assert.deepEqual(Object.keys(payload).sort(),
+        ['createdAt', 'deviceId', 'deviceShort', 'kexPubRaw', 'memberId', 'sigPubRaw']);
+      assert.equal(payload.memberId, m.memberId);
+      assert.equal(payload.deviceId, d.deviceId);
+      assert.equal(payload.deviceShort, d.deviceShort);
+      assert.equal(payload.sigPubRaw, d.sigPubRaw);
+      assert.equal(payload.kexPubRaw, d.kexPubRaw);
+      assert.match(payload.createdAt, /^\d{4}-\d{2}-\d{2}$/,
+        'a DAY — strictly coarser than Device.addedAt, which the relay keeps to the millisecond');
+    }
+  }
+});
+
+test('§2 an attestation cannot carry a note — the corpus word is REFUSED at the door, not merely unread', async () => {
+  // Where 'Großmutter Käthe' lived until 2026-08-29: inside an unverified, unread blob. Now that
+  // the blob is published, "unread" is not a defence, so the door refuses a payload with any
+  // field the six ADR 002 §2.3 names do not cover — and refuses a `createdAt` that is not a day.
+  const { call } = serverOnly(ADAPTERS[0].make);
+  // The router lets an `HttpError` out; every other row here only ever provokes 200s.
+  const attempt = async (...a) => {
+    try { return await call(...a); } catch (e) { return { status: e.status, body: { error: e.code, ...(e.extra || {}) } }; }
+  };
+  const smuggler = await person('ocker');
+  const payload = TE.encode(JSON.stringify({
+    memberId: smuggler.memberId, deviceId: smuggler.deviceId, deviceShort: smuggler.deviceShort,
+    sigPubRaw: smuggler.sigPubRaw, kexPubRaw: smuggler.kexPubRaw, createdAt: '2026-08-29',
+    note: 'Großmutter Käthe',
+  }));
+  const sig = new Uint8Array(await S.sign({ name: 'ECDSA', hash: 'SHA-256' }, smuggler.recSigPriv, payload));
+  const blob = `${b64u(payload)}.${b64u(sig)}`;
+  const res = await attempt(smuggler, 'POST', '/spaces', {}, {
+    spaceId: `fsp_${b64u(globalThis.crypto.getRandomValues(new Uint8Array(16)))}`,
+    kind: 'FAMILY', colorRef: 'ocker',
+    member: wireMember(smuggler),
+    device: { ...wireDevice(smuggler), attestation: blob },
+    wraps: [{ recipientId: smuggler.deviceId, epoch: 1, wrapped: b64u(new Uint8Array(156)) }],
+  });
+  assert.equal(res.status, 400, JSON.stringify(res.body));
+  assert.equal(res.body.reason, 'attestation_unknown_field');
+  assert.equal(JSON.stringify(res.body).includes('Käthe'), false, 'and the error does not echo it back');
+
+  // The same for `createdAt`, the only required field not pinned to a column.
+  const chatty = TE.encode(JSON.stringify({
+    memberId: smuggler.memberId, deviceId: smuggler.deviceId, deviceShort: smuggler.deviceShort,
+    sigPubRaw: smuggler.sigPubRaw, kexPubRaw: smuggler.kexPubRaw, createdAt: 'Zahnarzt 14:30',
+  }));
+  const sig2 = new Uint8Array(await S.sign({ name: 'ECDSA', hash: 'SHA-256' }, smuggler.recSigPriv, chatty));
+  const res2 = await attempt(smuggler, 'POST', '/spaces', {}, {
+    spaceId: `fsp_${b64u(globalThis.crypto.getRandomValues(new Uint8Array(16)))}`,
+    kind: 'FAMILY', colorRef: 'mint',
+    member: wireMember(smuggler),
+    device: { ...wireDevice(smuggler), attestation: `${b64u(chatty)}.${b64u(sig2)}` },
+    wraps: [{ recipientId: smuggler.deviceId, epoch: 1, wrapped: b64u(new Uint8Array(156)) }],
+  });
+  assert.equal(res2.status, 400);
+  assert.equal(res2.body.reason, 'attestation_createdAt');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════

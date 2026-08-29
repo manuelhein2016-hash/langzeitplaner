@@ -43,6 +43,7 @@ import { ROUTE_NAMES, ROUTES, SPACE_SCOPED, matchRoute } from '../../server/core
 import { withLimits, RATE_COVERAGE, LIMITS, createLog } from '../../server/core/limits.js';
 import { authenticate, assertMember, b64u } from '../../server/core/auth.js';
 import { memoryStore } from '../../server/adapters/memory.js';
+import { attestedPerson, attestedDeviceFor } from './_attested-person.js';
 import { fileStore } from '../../server/adapters/file.js';
 import { requiredRecipients } from '../../server/core/handlers/spaces.js';
 
@@ -170,22 +171,28 @@ const rawOf = async (k) => new Uint8Array(await S.exportKey('raw', k));
 const rnd = (n) => globalThis.crypto.getRandomValues(new Uint8Array(n));
 
 async function person(colorRef) {
-  const sig = await S.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const kex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  const recSig = await S.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
-  const recKex = await S.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-  const sigPubRaw = await rawOf(sig.publicKey);
+  // Finding E2E3-7: `POST /spaces` and `POST /invites/redeem` now run ADR 002 §2.3's checks that
+  // `POST /devices` has always run, and `GET /members` publishes the blob (E2E3-6). A person made
+  // of `b64u(rnd(120))` is refused at the door — so this mints with the SHIPPING
+  // `buildDeviceAttestation` + `attestDevice`, exactly what a Mac does.
+  const p = await attestedPerson({ colorRef });
   return {
     colorRef,
-    memberId: `mem_${b64u(rnd(16))}`,
-    deviceId: `dev_${b64u(rnd(16))}`,
-    deviceShort: await shortOf(sigPubRaw),
-    sigPriv: sig.privateKey,
-    sigPubRaw: b64u(sigPubRaw),
-    kexPubRaw: b64u(await rawOf(kex.publicKey)),
-    recoveryPubSig: b64u(await rawOf(recSig.publicKey)),
-    recoveryPubKex: b64u(await rawOf(recKex.publicKey)),
-    attestation: b64u(rnd(120)),
+    memberId: p.memberId,
+    deviceId: p.deviceId,
+    deviceShort: p.deviceShort,
+    sigPriv: p.sigPriv,
+    sigPub: p.sigPub,
+    kexPriv: p.kexPriv,
+    kexPub: p.kexPub,
+    sigPubRaw: p.sigPubRawB64,
+    kexPubRaw: p.kexPubRawB64,
+    recPriv: p.recPriv,
+    recoveryPubSig: p.recoveryPubSigB64,
+    recoveryPubKex: p.recoveryPubKexB64,
+    recoveryPubKexBytes: p.recoveryPubKex,
+    attestation: p.attestation,
+    attestationBytes: p.attestationBytes,
   };
 }
 const wireDevice = (p) => ({
@@ -336,28 +343,58 @@ for (const adapter of ADAPTERS) {
 
     // The honest rotation then succeeds at the SAME epoch number — proving 2 was not burned.
     const honestWraps = requiredRecipients(
-      await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId))
+      await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId), 'FAMILY')
       .flatMap((r) => [wrap(r, 1), wrap(r, 2)]);
     const ok = await srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, { epoch: 2, wraps: honestWraps });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal(ok.body.currentEpoch, 2);
   });
 
-  T('§3 …nor while omitting her RECOVERY key — finding E3-2, the wrap A2 depends on', async () => {
+  // ── INVERTED 2026-08-29 — finding E2E3-8 ────────────────────────────────────────────────
+  // This row demanded `rec_<honest>` of a FAMILY rotation and its reasoning is still exactly
+  // right: without ADR 002 §4.2 step 2's recovery wrap, a member who later loses every device
+  // has nothing left to recover the space key with. The demand was nevertheless unsatisfiable —
+  // `familyRecipients()` builds no recovery recipient — and the only way to satisfy it is to
+  // wrap `FSK_{e+1}` to `Member.recoveryPubKex`, a relay column NOTHING signs. Swap it and the
+  // relay reads the family board, silently, with every attestation still verifying.
+  //
+  // So the rotation is now ACCEPTED, the loss is stated where it will be read, and the row keeps
+  // its teeth by asserting the mechanism that will close it rather than deleting the concern.
+  T('§3 …but NOT her recovery key: the wrap A2 depends on is unbuildable — E2E3-8, open', async () => {
     const c = clock(1787900000000);
     const srv = server(adapter.make, c);
     const { admin, honest, spaceId } = await family(srv, c);
 
-    // Every DEVICE covered, `rec_<honest>` missing. Without ADR 002 §4.2 step 2's recovery wrap,
-    // a member who later loses every device has nothing left to recover the space key with — and
-    // that is exactly the member an admin would most want to lock out.
     const noRecovery = [admin.deviceId, `rec_${admin.memberId}`, honest.deviceId]
       .flatMap((r) => [wrap(r, 1), wrap(r, 2)]);
-    const got = await expectFail(
-      () => srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, { epoch: 2, wraps: noRecovery }),
-      409, 'incomplete_coverage', 'omitting a recovery key');
-    assert.ok(got.extra.missing.some((m) => m.recipientId === `rec_${honest.memberId}`));
-    assert.equal((await srv.store.getSpace(spaceId)).currentEpoch, 1);
+    const ok = await srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, { epoch: 2, wraps: noRecovery });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal((await srv.store.getKeyWraps(spaceId, `rec_${honest.memberId}`)).length, 0,
+      'nobody wrapped to her recovery key, and the relay no longer pretends somebody could');
+
+    // THE GUARD THAT KEEPS THIS FROM BEING "FIXED" THE CHEAP WAY. The client-side constructor
+    // refuses a family recovery recipient BY NAME, so an agent who closes the gap by building
+    // one gets a refusal that says why instead of a green suite and a broken story 21.2.
+    const sk = await import('../../src/js/crypto/spacekeys.js');
+    const roster = (await srv.call(admin, 'GET', `/spaces/${spaceId}/members`, {}, undefined)).body.members;
+    assert.equal(sk.familyRecipients(roster).every((r) => r.role === 'device'), true);
+    // A spread loses barrier 2's non-enumerable brand, so an outsider's hand-built recipient is
+    // refused one step earlier still — that is the first line, and it holds:
+    assert.match(
+      await sk.recipientProblem({ ...sk.familyRecipients(roster)[0], role: 'recovery' }),
+      /unbranded/, 'barrier 2 still refuses an object literal, however it is dressed');
+    // …and the SECOND line, which is the one E2E3-8 turns on: a recipient that really does carry
+    // the family brand — what an in-module change would produce, and what prototype inheritance
+    // produces here — is refused BY NAME rather than waved through as "my own key".
+    const branded = Object.create(sk.familyRecipients(roster)[0], {
+      role: { value: 'recovery', enumerable: true },
+      deviceId: { value: `rec_${honest.memberId}`, enumerable: true },
+    });
+    assert.equal(sk.recipientScope(branded), 'family', 'the brand really is inherited');
+    assert.match(
+      await sk.recipientProblem(branded),
+      /REFUSING a family recovery recipient/,
+      'closing E2E3-8 means BINDING recoveryPubKex into the attestation (ADR 002 §2.3), not this');
   });
 
   T('§3 …nor while omitting the SHARED HISTORY — epoch 1 is owed to the joiner too', async () => {
@@ -369,7 +406,7 @@ for (const adapter of ADAPTERS) {
     // as an optimisation: the new key reaches everybody, and Oma's birthday — entered in epoch 1
     // — silently stops rendering for the person who just joined (ADR 002 §4.3, story A4, R11).
     const onlyCurrent = requiredRecipients(
-      await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId)).map((r) => wrap(r, 2));
+      await srv.store.listMembers(spaceId), await srv.store.listDevices(spaceId), 'FAMILY').map((r) => wrap(r, 2));
     const got = await expectFail(
       () => srv.call(admin, 'POST', `/spaces/${spaceId}/epoch`, {}, { epoch: 2, wraps: onlyCurrent }),
       409, 'incomplete_coverage', 'omitting epoch 1');

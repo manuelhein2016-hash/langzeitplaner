@@ -1026,12 +1026,39 @@ export function createOpLog(ports = {}) {
         if (Array.isArray(cp.spliced)) for (const s of cp.spliced) if (typeof s === 'string') spliced.add(s);
         if (Array.isArray(cp.parked)) parkedLines = cp.parked;
       }
+      /**
+       * ── L-4 · THE ACK AND THE LINE MUST COME BACK AGREEING ──────────────────────────────────
+       *
+       * A tail line is written to `ops.jsonl` at the moment it is authored, which is BEFORE any
+       * server has seen it — so the bytes on disk say `seq: null` by construction. The ack
+       * arrives later, through `ack()`, which updates the live entry and `seqById` IN MEMORY and
+       * never rewrites the line. `seqById` is what rides in `checkpoint().seqs` and is therefore
+       * the durable record; the tail is a byte stream that predates it.
+       *
+       * Feeding `line.seq` blindly threw that record away on every launch: an op the relay had
+       * acknowledged came back with `seq === null`, so `lines()` said unacknowledged, `seqOfOp()`
+       * said acknowledged, and `store.outbox()` — which reads `lines()` — re-offered it for ever.
+       * The re-push itself is harmless (§3.1 treats `duplicate` as `accepted`), but the OUTBOX
+       * FLOOR is the input to `store._outboxHorizonCap()`, and a floor pinned below the persisted
+       * horizon by a phantom outbox entry made that method stand its cap down — which is E5-2's
+       * unrecoverable arm, reached with no adversary and no old file, on any Mac that quits after
+       * a compaction. Two of twenty-four seeds of `attack-converge-disorder.test.js` §2 still
+       * lost an op here after E5-2's own arm was fixed; that is how this was found.
+       *
+       * `cp.seqs` is read above, so `seqById` is already populated when this runs. The line's own
+       * `seq` still WINS when it has one — a tail written by a future build that does record acks
+       * is not overridden by this log's index — and `ack()`'s own "never move backwards" rule is
+       * untouched, because this is a load and not an ack.
+       */
       const feed = (line) => {
         if (line === null || typeof line !== 'object') { api.append(line); return; }
         if (!line.op) { api.append(line); return; }
         const reason = typeof line.park === 'string' ? line.park : (typeof line.reason === 'string' ? line.reason : null);
+        const known = line.seq === null || line.seq === undefined
+          ? (typeof line.op.id === 'string' ? seqById.get(line.op.id) ?? null : null)
+          : line.seq;
         api.append(line.op, {
-          seq: line.seq,
+          seq: known,
           ...(reason === PARK_REASONS.EPOCH ? { haveEpochKey: false } : {}),
           // The other reason the classifier cannot re-derive (ADR 002 §5.2.5). Without this an op
           // parked because its device had no attestation comes back LIVE and APPLIED on the next

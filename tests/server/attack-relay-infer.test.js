@@ -138,7 +138,7 @@ test('SUCCEEDED — a per-machine activity histogram from `Op.receivedAt`, and t
   ]);
 });
 
-test('SUCCEEDED (UNDOCUMENTED — 21.3) — a member living in another time zone is visible as a shifted activity window', async () => {
+test('SUCCEEDED (now DOCUMENTED — 21.3 §7.2) — a member living in another time zone is visible as a shifted activity window', async () => {
   const clock = fakeClock(T0);
   const { h, r, members } = await household(clock);
   const key = await spaceKey();
@@ -191,9 +191,14 @@ test('SUCCEEDED (UNDOCUMENTED — 21.3) — a member living in another time zone
   // between two members' windows locates one of them in a different time zone, i.e. tells the
   // operator that somebody in this household is not at home. For a family product whose
   // Datenschutz page is written from this file, that is a sentence that is missing.
-  assert.equal(documents(['time zone']) || documents(['timezone']) || documents(['zeitzone']), false,
-    'server-metadata.md now discusses time zones — rename this test to SUCCEEDED and add the phrase '
-    + 'to an assertDocumented call, so the capability stays covered');
+  // INVERTED — the capability is unchanged and is now WRITTEN DOWN. §7's second inference names
+  // the offset, names the conclusion (`time zone`) and names who it is about. The row stays here
+  // and stays green by asserting the document, which is what keeps the capability covered: delete
+  // the sentence from §7 and this test goes red again.
+  assertDocumented(assert, "a member's time zone, from the offset between two activity windows", [
+    'time zone',
+    'the offset between two',
+  ]);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -206,7 +211,7 @@ test('SUCCEEDED (UNDOCUMENTED — 21.3) — a member living in another time zone
 // column" and server-metadata.md §3 lists "no role or admin column" among the things that cannot
 // be added quietly. Both are true about COLUMNS. Neither is true about the DUMP.
 
-test('SUCCEEDED (UNDOCUMENTED — 21.3) — a dump names the admin four independent ways, and never says so', async () => {
+test('SUCCEEDED (now DOCUMENTED — 21.3 §7.1) — a dump names the admin four independent ways, and now says so', async () => {
   const clock = fakeClock(T0);
   const { h, r, members } = await household(clock);
   const papa = members[0];        // the founder, therefore the admin (15.2)
@@ -264,10 +269,16 @@ test('SUCCEEDED (UNDOCUMENTED — 21.3) — a dump names the admin four independ
   // page is written from — does not include the admin. It should, because in a household the
   // admin is a specific person and "the relay can tell which of the five of you is in charge" is
   // exactly the kind of sentence 21.3 exists to say out loud.
-  assert.equal(documents(['admin']) && (documents(['identify the admin']) || documents(['which member is admin'])),
-    false,
-    'server-metadata.md now names the admin inference — rename this test and move the phrases into '
-    + 'an assertDocumented call');
+  // INVERTED — §7's first inference now lists all four routes by name, and says out loud the
+  // sentence 21.3 exists for: in a household the admin is a specific person. §3's "no role or
+  // admin column" is untouched and still true; it was always a claim about columns.
+  assertDocumented(assert, 'which member is admin, four independent ways', [
+    'which member is admin',
+    'the earliest `Member.joinedAt`',
+    '`Invite.createdBy` records it',
+    '["memberRemove","mem_…"]',
+    '`POST /members/transfer` stores nothing',
+  ]);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -447,7 +458,7 @@ test('SUCCEEDED — the holes a purge leaves in `seq` say how much the departed 
 // §6 The application log is a labelled action timeline
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-test('SUCCEEDED (UNDOCUMENTED — 21.3) — `route` turns the log into a NAMED per-member event feed', async () => {
+test('SUCCEEDED (now DOCUMENTED — 21.3 §7.4) — `route` turns the log into a NAMED per-member event feed', async () => {
   const clock = fakeClock(T0);
   const { r, members } = await household(clock);
   const papa = members[0];
@@ -479,11 +490,16 @@ test('SUCCEEDED (UNDOCUMENTED — 21.3) — `route` turns the log into a NAMED p
   // `LOG_ROUTES` is a closed enum of exactly those 23 verbs. `renameSpace` is the sharpest case
   // — the handler stores nothing and is documented as storing nothing, and the log still records
   // that the family renamed its circle on 25 July.
-  assert.equal(documents(['the log line', 'names the event']) || documents(['action timeline']), false,
-    'server-metadata.md now explains what a log route name discloses — rename this test');
+  // INVERTED — §7's fourth inference now says what the seven allowlisted fields mean TOGETHER,
+  // and §8's bullet points at it so a reader of the log paragraph cannot miss it.
+  assertDocumented(assert, 'the application log route as a named per-member event feed', [
+    'the log line',
+    'names the event',
+    'enum of 23 verbs',
+  ]);
 });
 
-test('SUCCEEDED (UNDOCUMENTED — 21.3) — `RateBucket` keys are a per-member action record, at rest, unswept', async () => {
+test('SUCCEEDED (now DOCUMENTED — 21.3 §7.3) — `RateBucket` keys are a per-member action record, at rest, unswept', async () => {
   const clock = fakeClock(T0);
   const { h, r, members } = await household(clock);
   const papa = members[0];
@@ -512,8 +528,14 @@ test('SUCCEEDED (UNDOCUMENTED — 21.3) — `RateBucket` keys are a per-member a
   // indefinitely"). The member-keyed rules survive identically and say something different: not
   // "somebody at this address", but "this member did this thing".
   assert.ok(documents(['survives', 'indefinitely']), 'the survival itself IS documented');
-  assert.equal(documents(['memberRemove', 'names the actor']) || documents(['a per-member action record']), false,
-    'server-metadata.md now says what the MEMBER-keyed buckets disclose — rename this test');
+  // INVERTED — §7's third inference separates the two readings §11 had collapsed into one: the
+  // IP-keyed rules say "somebody at this address", the member-keyed rules say "this member did
+  // this thing", and only the second names the actor.
+  assertDocumented(assert, 'the member-keyed RateBucket rows as a per-member action record', [
+    'a per-member action record',
+    'names the actor',
+    '["memberRemove","mem_…"]',
+  ]);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════

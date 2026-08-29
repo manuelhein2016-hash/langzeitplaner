@@ -63,25 +63,58 @@
 // when the CSS owner next opens `app.css`, `SYNC_CSS` moves there verbatim and `ensureCss()` is
 // deleted. Every token used is one `app.css` already defines.
 
+// ═════════════════════════════════════════════════════════════════════════════
+// WHAT THE CONVERGENCE ADVERSARY CHANGED HERE
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Everything above still holds. What it rested on did not:
+//
+//   > In every finding this round, BOTH MACS REPORT `healthy`. Story 19.3's "silence is the
+//   > design" is a promise that SILENCE MEANS HEALTH. At present silence means only that the
+//   > engine's own two in-memory maps are empty.
+//
+// This file rendered, in one slot, the word the engine handed it — and the word was wrong, for a
+// durably parked line (L-2), for a terminal refusal after the process ended (L-1), for a line a
+// compaction folded away unacknowledged (E5-2) and for a forked relay (P-4). Rendering it
+// faithfully made this module a faithful renderer of a false claim.
+//
+// The judgement still does not live here. It moved UP, into `sync/status.js`, which is a leaf and
+// folds `tests/helpers/sync-domains.js`'s domain S4 — the ENUMERATION of what can be observed —
+// over the engine's reading AND the durable evidence in `store.diagnostics()`. This file's
+// contract is unchanged in shape: it renders, in one slot, the word it is handed. The word is now
+// the honest one, and `judgeSyncStatus().silent` is the promise as a boolean, so the settings
+// section can say "there is nothing to tell you" and mean it.
+//
+// THE THREE RULES ARE UNCHANGED AND ARE WHAT KEEPS THIS FROM BECOMING A WARNING TRIANGLE:
+// healthy is still NOTHING, pending is still one 6 px hollow ring, error is still the same slot
+// filled in amber-brown, and there is still no spinner, no badge count and no button. The new
+// states are not new signals — they are new REASONS for the two signals that already existed.
+
 import { t, getLang } from '../i18n.js';
 import { el } from '../ui.js';
+import { store as appStore } from '../store.js';
+import {
+  SYNC_STATE as JUDGED_STATE, SYNC_ERROR_KINDS as JUDGED_ERROR_KINDS, judgeSyncStatus,
+} from '../sync/status.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. The three states, and the numbers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** `sync.contract.js` §4's `SyncState`, mirrored. Healthy is the absence of a glyph. */
-export const SYNC_STATE = Object.freeze({ healthy: 'healthy', pending: 'pending', error: 'error' });
+/**
+ * `sync.contract.js` §4's `SyncState`. RE-EXPORTED from `sync/status.js` rather than declared
+ * again: the two copies of this object were identical by inspection and by nothing else, and a
+ * renderer whose state vocabulary can drift from the judge's is how a fourth state ends up
+ * rendering as `healthy`.
+ */
+export const SYNC_STATE = JUDGED_STATE;
 
 /**
- * `sync.contract.js` §4's `errorKind` domain. Mirrored rather than imported, because
- * `docs/v2/contracts/` is a contract document and not a shipped module — nothing under `src/`
- * may import from `docs/`. Every kind has a sentence in `i18n.js`; `SYNC_ERROR_KEY` below is the
- * mapping, and an unknown kind falls back to the generic sentence rather than to a blank line.
+ * `sync.contract.js` §4's `errorKind` domain, from the same single source. Every kind has a
+ * sentence in `i18n.js`; `SYNC_ERROR_KEY` below is the mapping, and an unknown kind falls back to
+ * the generic sentence rather than to a blank line.
  */
-export const SYNC_ERROR_KINDS = Object.freeze(
-  ['offline', 'auth', 'protocol', 'quarantine', 'decrypt', 'clockSkew']
-);
+export const SYNC_ERROR_KINDS = JUDGED_ERROR_KINDS;
 
 const SYNC_ERROR_KEY = Object.freeze({
   offline: 'syncErrOffline',
@@ -139,9 +172,35 @@ export const syncDebounceMs = () => debounceMs;
  *   the host calls `refreshSyncChrome()` itself after a txn, exactly as `update-ui.js` is driven.
  */
 
+/**
+ * @typedef {Object} SyncObservabilityPort  the DURABLE half of the reading. Two methods, both
+ *   already on `store.js`: `diagnostics()` for the enumerated evidence and `subscribeWarnings()`
+ *   for the push notification. It is a narrowing for the same reason the engine port is one —
+ *   nothing here can write to the board, save, import or mutate a single op.
+ * @property {() => Object} diagnostics
+ * @property {(fn:(msg:string, all:string[]) => void) => (() => void)} [subscribeWarnings]
+ */
+
 /** @type {SyncStatusPort|null} */
 let sync = null;
+/**
+ * @type {SyncObservabilityPort|null}
+ *
+ * WHY THIS DEFAULTS TO THE APP'S OWN STORE AND IS STILL INJECTABLE. `family/mount.js` builds the
+ * engine and hands it over; the store is a singleton that is already loaded, already reachable
+ * from every entry point and has no gate to cross (ADR 003 §7's gate 2 is about `sync/` and
+ * `crypto/`, and `sync/status.js` is a leaf with no imports at all). Defaulting to it means
+ * F-8's missing consumer exists in the SHIPPED app rather than only where a host remembers to
+ * wire it — which is the exact failure mode F-8 is: a seam with no consumer.
+ *
+ * IT IS ONLY EVER READ WHILE AN ENGINE IS MOUNTED. Solo mode passes no engine, so solo mode
+ * reads no diagnostics, subscribes to nothing and shows nothing — the module's original promise,
+ * unchanged. A test that wants the store out of the way passes `store: null` and gets exactly
+ * that.
+ */
+let observability = null;
 let unsubscribe = null;
+let unsubscribeWarnings = null;
 let nowFn = () => Date.now();
 let scheduleFn = (ms, fn) => setTimeout(fn, ms);
 let unscheduleFn = (h) => clearTimeout(h);
@@ -164,14 +223,21 @@ let debounceTimer = null;
  *          schedule?:(ms:number, fn:Function) => any, unschedule?:(h:any) => void,
  *          mount?:string, debounce?:number}} deps
  */
-export function initSyncStatus({
-  sync: s = null, now = null, schedule = null, unschedule = null, mount = null, debounce = null,
-} = {}) {
+export function initSyncStatus(deps = {}) {
+  const {
+    sync: s = null, now = null, schedule = null, unschedule = null, mount = null, debounce = null,
+  } = deps;
   if (unsubscribe) { try { unsubscribe(); } catch { /* a dead engine is not an error */ } }
   unsubscribe = null;
+  if (unsubscribeWarnings) { try { unsubscribeWarnings(); } catch { /* ditto */ } }
+  unsubscribeWarnings = null;
   if (debounceTimer != null) { try { unscheduleFn(debounceTimer); } catch { /* fired */ } }
   debounceTimer = null;
   sync = s;
+  // `'store' in deps` and not `deps.store ?? appStore`: passing `store: null` must MEAN null.
+  // Without the `in` test there would be no way to mount an engine and deliberately keep the
+  // durable half out, which is what the tier 2 fakes need and what a support tool wants.
+  observability = 'store' in deps ? deps.store : appStore;
   nowFn = typeof now === 'function' ? now : () => Date.now();
   scheduleFn = typeof schedule === 'function' ? schedule : (ms, fn) => setTimeout(fn, ms);
   unscheduleFn = typeof unschedule === 'function' ? unschedule : (h) => clearTimeout(h);
@@ -184,17 +250,50 @@ export function initSyncStatus({
   if (sync && typeof sync.subscribe === 'function') {
     try { unsubscribe = sync.subscribe(() => refreshSyncChrome()); } catch { unsubscribe = null; }
   }
+  // ── F-8 · THE CONSUMER ─────────────────────────────────────────────────────────────────────
+  //
+  // `store.warnings` has held every sentence this app writes about what it lost, refused,
+  // coerced or quarantined since LZP-30x, `subscribeWarnings()` has been the seam the whole time,
+  // and NOTHING HAS EVER SUBSCRIBED. This line is the consumer. It does not read the sentences —
+  // the fold in `sync/status.js` counts them and the settings section says so — it exists so that
+  // a warning written between two redraws still moves the glyph, the way an engine notification
+  // does. Without it the channel would be observable only by luck of timing.
+  if (sync && observability && typeof observability.subscribeWarnings === 'function') {
+    try { unsubscribeWarnings = observability.subscribeWarnings(() => refreshSyncChrome()); }
+    catch { unsubscribeWarnings = null; }
+  }
 }
 
 /** Present only where an engine has been mounted. Solo mode: absent, not silent-because-broken. */
 export const syncSupported = () => !!sync;
 
-/** The raw reading, normalised, with an honest answer when there is no engine at all. */
+/**
+ * The DURABLE half of the reading — `store.diagnostics()`, or null when there is nothing to ask.
+ *
+ * Only consulted while an engine is mounted; see `observability`'s note. A store that throws on
+ * `diagnostics()` is reported as `null`, which `sync/status.js` renders as SIX BLIND SPOTS and
+ * therefore as `silent: false`. That is the intended reading: a build that cannot answer the
+ * question has not earned silence.
+ */
+function diagnosticsRaw() {
+  if (!sync || !observability || typeof observability.diagnostics !== 'function') return null;
+  try { return observability.diagnostics(); } catch { return null; }
+}
+
+/**
+ * The raw reading, normalised, with an honest answer when there is no engine at all.
+ *
+ * SINCE THE CONVERGENCE ROUND THIS IS A MERGE, NOT A RELAY. `sync/status.js`'s `judgeSyncStatus`
+ * folds domain S4 over the engine's word and the store's durable evidence and returns the louder
+ * of the two — it can only ever RAISE the state, never lower one the engine reported. Every
+ * failure this round is a case where the engine says `healthy` and the disk says otherwise.
+ */
 export function syncStatusRaw() {
   if (!sync) {
     return Object.freeze({
       state: SYNC_STATE.healthy, pendingOps: 0, consecutiveFailures: 0,
       lastPullAt: null, errorKind: null, detail: null, supported: false,
+      observables: Object.freeze([]), blind: Object.freeze([]), silent: true,
     });
   }
   let r;
@@ -205,17 +304,34 @@ export function syncStatusRaw() {
     // the visible one. Swallowing it into `healthy` would be the quiet signal lying.
     r = { state: SYNC_STATE.error, errorKind: null, detail: null };
   }
-  const state = r.state === SYNC_STATE.pending || r.state === SYNC_STATE.error
+  const engineState = r.state === SYNC_STATE.pending || r.state === SYNC_STATE.error
     ? r.state
     : SYNC_STATE.healthy;
+  const j = judgeSyncStatus({
+    engine: {
+      state: engineState,
+      pendingOps: r.pendingOps,
+      consecutiveFailures: r.consecutiveFailures,
+      lastPullAt: r.lastPullAt,
+      errorKind: SYNC_ERROR_KINDS.includes(r.errorKind) ? r.errorKind : null,
+      detail: typeof r.detail === 'string' && r.detail ? r.detail : null,
+    },
+    diagnostics: diagnosticsRaw(),
+  });
   return Object.freeze({
-    state,
-    pendingOps: Number.isFinite(r.pendingOps) ? r.pendingOps : 0,
-    consecutiveFailures: Number.isFinite(r.consecutiveFailures) ? r.consecutiveFailures : 0,
-    lastPullAt: Number.isFinite(r.lastPullAt) ? r.lastPullAt : null,
-    errorKind: SYNC_ERROR_KINDS.includes(r.errorKind) ? r.errorKind : null,
-    detail: typeof r.detail === 'string' && r.detail ? r.detail : null,
+    state: j.state,
+    pendingOps: j.pendingOps,
+    consecutiveFailures: j.consecutiveFailures,
+    lastPullAt: j.lastPullAt,
+    errorKind: j.errorKind,
+    detail: j.detail,
     supported: true,
+    /** The rows of S4 that are PRESENT. Read by the settings section; never by the chrome. */
+    observables: j.observables,
+    /** The rows this build cannot answer. Non-empty means silence has not been earned. */
+    blind: j.blind,
+    /** 19.3's promise as a boolean, and the only thing allowed to mean "nothing to tell you". */
+    silent: j.silent,
   });
 }
 
@@ -262,16 +378,46 @@ export function syncStatusState() {
   return Object.freeze({
     supported: raw.supported,
     state,                       // what is DRAWN, after the debounce
-    rawState: raw.state,         // what the engine currently says
+    rawState: raw.state,         // what the engine AND the disk currently say, merged
     pendingOps: raw.pendingOps,
     lastPullAt: raw.lastPullAt,
     errorKind: raw.errorKind,
     detail: raw.detail,
+    observables: raw.observables,
+    blind: raw.blind,
+    silent: raw.silent,
     /** The one sentence the tooltip and the settings section both use. */
     sentence: sentenceFor(state, raw),
   });
 }
 
+/**
+ * ── THE SENTENCE, AND WHY IT ADDS NO STRING ──────────────────────────────────────────────────
+ *
+ * Four new reasons reached this module and NOT ONE new key was added to `i18n.js`. That is not
+ * frugality; `i18n.js` belongs to another owner this round and a UI that invents an untranslated
+ * sentence is worse than one that reuses a true one. Each new reason is spoken with the existing
+ * sentence that is ACTUALLY TRUE OF IT:
+ *
+ *   parked   → `syncErrGeneric` — „Der Abgleich steht gerade. Das Board auf diesem Mac
+ *              funktioniert weiter." **NOT `syncPendingDetail`,** which was the first choice and
+ *              was checked in a real browser before it was: it reads „Eine Änderung wartet auf
+ *              die VERBINDUNG", and a held op is not waiting on the network — it is waiting on an
+ *              attestation, a key or an app update. That sentence would name a cause the app has
+ *              invented, and a person who reconnects and sees it again learns nothing. The
+ *              generic sentence names no cause, is true of every park reason, and its second half
+ *              is the half that matters: nothing on this Mac is lost.
+ *   refused  → `syncErrQuarantine` — the sentence written for this case, word for word.
+ *   lost     → `syncErrGeneric` — „Der Abgleich steht gerade. Das Board auf diesem Mac
+ *              funktioniert weiter." Both halves are true and the second is the one that matters.
+ *   chain    → `syncErrGeneric`, same reading.
+ *   warnings → `syncErrGeneric`. The SENTENCES themselves are not rendered: `_warn` writes German
+ *              prose and the English sheet must not carry it (`tests/tier2/sync-status.dom.js`
+ *              asserts that). They remain in `diagnostics().warnings` for a support bundle.
+ *
+ * TWO PROPER SENTENCES ARE OWED and are reported rather than faked — one for a held op that is
+ * not merely „pending", and one for a line that will not reach the other Mac.
+ */
 function sentenceFor(state, raw) {
   if (!raw.supported) return t('syncSolo');
   if (state === SYNC_STATE.error) {
@@ -282,9 +428,22 @@ function sentenceFor(state, raw) {
     return t(SYNC_ERROR_KEY[raw.errorKind] || 'syncErrGeneric');
   }
   if (state === SYNC_STATE.pending) {
-    return raw.pendingOps > 0 ? t('syncPendingDetail', raw.pendingOps) : t('syncPendingNone');
+    // THE OUTBOX SPEAKS FIRST, and only the outbox may use the connection sentence. `pendingOps`
+    // is work waiting on the network and `syncPendingDetail` says so truthfully; a held op is not,
+    // and is given the cause-free sentence instead. The number stays a SENTENCE and never a
+    // numeral in the chrome — 19.3's design note files this feature with the „neu" dot and the
+    // update hint: a dot, not a badge count.
+    if (raw.pendingOps > 0) return t('syncPendingDetail', raw.pendingOps);
+    if (observableCount(raw, 'parked') > 0) return t('syncErrGeneric');
+    return t('syncPendingNone');
   }
   return t('syncHealthy');
+}
+
+/** How many of one enumerated observable are present, or 0. */
+function observableCount(raw, id) {
+  const o = (raw.observables || []).find((x) => x.id === id);
+  return o ? o.count : 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -384,8 +543,46 @@ export function buildSyncSection(body, api) {
     s.lastPullAt ? t('syncLastPull', formatWhen(s.lastPullAt, getLang())) : t('syncNever'));
   body.appendChild(when);
 
+  // ── THE REASONS · one line per PRESENT row of domain S4 ─────────────────────────────────────
+  //
+  // This is the only place in the app where more than one thing is said at once, and it is the
+  // right place: the sheet is where somebody has gone looking. The chrome stays one dot with one
+  // sentence; here, a Mac holding a parked line AND carrying a refusal says both, because
+  // collapsing them would be the same lie in miniature that `status()` was telling.
+  //
+  // The `healthy` guard is REDUNDANT BY CONSTRUCTION and is kept as a statement of intent: every
+  // row of the enumeration raises the state above `healthy`, so a healthy Mac has an empty
+  // `observables` and this loop has nothing to print. A settled pair of Macs gets the three lines
+  // it always got and not a fourth reassuring one — silence stays free in the sheet as well as in
+  // the chrome. (A mutant that deletes the guard therefore kills no row; the emptiness does the
+  // work. A mutant that deletes the `outbox` skip below does kill one.)
+  if (s.state !== SYNC_STATE.healthy) {
+    // DE-DUPLICATED BY SENTENCE, and that is not tidying — it is the same rule as the chrome's.
+    // The line above already says one of these things (whichever reason supplied the errorKind),
+    // and `lost` and `chain` currently share the generic sentence because `i18n.js` has no words
+    // of their own for them yet. Printing a sentence twice reads as two separate faults and
+    // inflates one problem into a list, which is precisely what 19.3 spends its budget avoiding.
+    // When the two owed strings land, these stop colliding and each gets its own line for free.
+    const said = new Set([s.sentence]);
+    for (const o of s.observables) {
+      // `outbox` is already the subject of the sentence above; repeating it would double-count
+      // the one condition this section has always reported.
+      if (o.id === 'outbox') continue;
+      const sentence = reasonSentence(o);
+      if (said.has(sentence)) continue;
+      said.add(sentence);
+      body.appendChild(el('p', `hint sync-reason sync-reason-${o.id}`, sentence));
+    }
+  }
+
   // The half a user actually needs: nothing is expected of them. 19.2 in one sentence.
   body.appendChild(el('p', 'hint sync-no-button', t('syncNoButtonHint')));
+}
+
+/** One row of S4, in the sentence that is true of it. See `sentenceFor`'s note on the mapping. */
+function reasonSentence(o) {
+  if (o.errorKind && SYNC_ERROR_KEY[o.errorKind]) return t(SYNC_ERROR_KEY[o.errorKind]);
+  return t('syncErrGeneric');
 }
 
 function formatWhen(ms, lang) {
@@ -428,8 +625,13 @@ export const SYNC_CSS = `
 #sync-dot { margin-left: 2px; }
 .sync-line { margin: 0 0 4px; font: 400 12px/1.6 var(--font); color: var(--ink-1); display: flex; align-items: baseline; }
 .sync-sentence { min-width: 0; }
-.hint.sync-when, .hint.sync-no-button { margin-left: 0; }
+.hint.sync-when, .hint.sync-no-button, .hint.sync-reason { margin-left: 0; }
 .hint.sync-when { margin-bottom: 6px; }
+/* The reasons sit under the sentence they explain, indented by exactly the width of the inline
+   dot plus its margin, so the eye reads them as belonging to it rather than as a second list. No
+   colour of their own: the dot above already carries the register, and repeating amber four times
+   would turn a calm sheet into a warning panel. */
+.hint.sync-reason { margin: 0 0 4px 13px; }
 
 /* There is no motion in this feature and there must not be: a pulsing dot is a
    spinner with a smaller footprint, and 19.3's "small, unobtrusive" is about

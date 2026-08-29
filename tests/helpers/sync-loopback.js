@@ -310,10 +310,14 @@ export async function createSpace(relay, device, kind = 'PERSONAL') {
     device: {
       deviceId: device.deviceId, deviceShort: device.deviceShort,
       sigPubRaw: device.sigPubRaw, kexPubRaw: device.kexPubRaw,
-      // `createSpace` reads the attestation as OPAQUE BYTES (`readBytes`), while `registerDevice`
-      // reads it as the `payload.sig` STRING blob and verifies it. Two spellings of one field on
-      // two endpoints — reported to the server owner as an inconsistency, encoded here.
-      attestation: b64u(TE.encode(device.attestation)),
+      // RECONCILED 2026-08-29 — finding E2E3-7, and this comment used to be the workaround:
+      //   "`createSpace` reads the attestation as OPAQUE BYTES (`readBytes`), while
+      //    `registerDevice` reads it as the `payload.sig` STRING blob and verifies it. Two
+      //    spellings of one field on two endpoints — reported to the server owner as an
+      //    inconsistency, encoded here."
+      // The server owner took the report. Both endpoints now take the blob STRING and both
+      // verify it, so the encoding step is gone rather than moved.
+      attestation: device.attestation,
     },
     wraps: [wrap(device.deviceId, 1), wrap(`rec_${m.memberId}`, 1)],
   });

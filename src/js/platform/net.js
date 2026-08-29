@@ -161,9 +161,81 @@ const TE = new TextEncoder();
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Is this host THIS MACHINE? The only place `http://` survives (see `normalizeOrigin`).
+ *
+ * Written over the hostname `URL` produced, never over the raw string: `URL` has already
+ * lower-cased it, resolved `http://127.1` to `127.0.0.1`, punycoded any unicode and put an IPv6
+ * literal back in brackets — so an attacker cannot dress a remote host as a loopback one by
+ * spelling it differently. `*.localhost` is included because RFC 6761 §6.3 reserves the whole
+ * name for the local host and both shells' dev serves use it.
+ *
+ * `127.0.0.0/8` and not `127.0.0.1` alone: the whole /8 is loopback, `node dev-server.mjs` may
+ * bind anywhere in it, and a rule that named one address would be worked around with the next.
+ *
+ * @param {string} hostname a `URL.hostname`, not a raw user string
+ * @returns {boolean}
+ */
+export function isLoopbackHost(hostname) {
+  const h = String(hostname || '');
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (h === '[::1]') return true;
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  return !!m && m.slice(1).every((o) => Number(o) <= 255);
+}
+
+/**
+ * FINDING P-7 · the one sentence a person is shown when they type `http://` at a real host.
+ *
+ * It lives here rather than in `i18n.js` for the reason `crypto/probe.js`'s `unavailableMessage`
+ * does: the module that owns the RULE owns the sentence that explains it, so the two cannot
+ * drift, and the UI picks the language. It does not say "invalid": the address is perfectly
+ * valid and the user has not made a typo they can see. It says what is lost, because that is the
+ * only thing they can act on.
+ */
+export function insecureOriginMessage() {
+  return Object.freeze({
+    de:
+      'Diese Adresse beginnt mit „http://" statt „https://". Deine Einträge blieben zwar '
+      + 'verschlüsselt, aber alles drumherum — welcher Mac gerade schreibt, wann, und wie oft — '
+      + 'wäre in jedem fremden WLAN mitlesbar. Nimm dieselbe Adresse mit „https://".',
+    en:
+      'This address starts with "http://" instead of "https://". Your entries would stay '
+      + 'encrypted, but everything around them — which Mac is writing, when, and how often — '
+      + 'would be readable to anyone on the same wifi. Use the same address with "https://".',
+  });
+}
+
+/**
  * Normalise an origin to `scheme://host[:port]`, or throw. `URL.origin` is not used: it is
  * `"null"` for non-special schemes, and `app://localhost` — the scheme the shipping shell serves
  * the page from — is exactly such a scheme.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * WHY `http://` IS REFUSED TO ANYTHING BUT THIS MACHINE — FINDING P-7, CLOSED HERE
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * There is no default relay (ADR 003 §1 names a host that does not exist yet), so this origin is
+ * a FREE-TEXT FIELD in the settings sheet, saved on every keystroke, and it alone decides where
+ * the whole personal board is sent. Until now `http:` was accepted for every host, because
+ * `node dev-server.mjs` needs it — and nothing above this function narrowed it back down.
+ *
+ * The content would survive: every op is sealed before it reaches a transport (ADR 002 §5), so
+ * `http://` costs no plaintext. What it costs is everything `server-metadata.md` §2 and §5
+ * enumerate — the personal space id, the deviceShort, the read cursor, the op and byte counts,
+ * the timing of every single edit — plus the `Authorization` header and its nonce, in the clear,
+ * to anyone on the same café wifi. `server-metadata.md` §8 states "TLS in transit" as a FACT
+ * about this product, and the Datenschutz copy inherits it; for one mistyped scheme it was false.
+ *
+ * `platform/updater.js`'s `checkUrl` — a far smaller exposure, one signed manifest — has refused
+ * anything but `https:` by name since E1. This is the same rule at the larger exposure, with the
+ * one carve-out the updater does not need: a loopback host is this Mac talking to itself, there
+ * is no wire to tap, and `node dev-server.mjs` + `node server/dev-server.mjs` live there.
+ *
+ * `app:` is untouched — it is the shell's own scheme for the page itself and never leaves the
+ * process. The *user-facing* half of this rule is `insecureOriginMessage()`, shown by
+ * `family/familysettings.js` before the field is ever used; this is the half that holds even if
+ * that sheet is bypassed, which is why both exist.
+ *
  * @param {unknown} origin @returns {string}
  */
 export function normalizeOrigin(origin) {
@@ -184,6 +256,11 @@ export function normalizeOrigin(origin) {
   }
   if (u.protocol !== 'https:' && u.protocol !== 'http:' && u.protocol !== 'app:') {
     throw new NetError('config', `net: refusing the scheme ${u.protocol}`);
+  }
+  if (u.protocol === 'http:' && !isLoopbackHost(u.hostname)) {
+    throw new NetError('config',
+      `net: refusing http:// to ${u.host} — the board's metadata would cross the wire in the clear `
+      + '(server-metadata.md §2/§5/§8, finding P-7). Use https://, or a loopback host for a dev serve.');
   }
   return `${u.protocol}//${u.host}`;
 }
@@ -399,7 +476,13 @@ export async function buildRequest(cfg, method, path, query, body, extraHeaders)
     }
   }
   if (!cfg.anonymous && !cfg.subtle) {
-    throw new NetError('config', 'net: no SubtleCrypto — family features are gated on probeCrypto()');
+    // The sentence used to end here and it was not true: NOTHING called `probeCrypto()` (finding
+    // P-4). It is true now — `family/familysettings.js`'s `assertSuiteAvailable()` runs the probe
+    // at „Familienkreis erstellen" and refuses the section's actions with one plain sentence when
+    // the suite is not there — so this throw is the belt to that braces rather than the only
+    // check, and it names the gate so a reader can go and find it.
+    throw new NetError('config',
+      'net: no SubtleCrypto — family features are gated on probeCrypto() in family/familysettings.js');
   }
 
   const auth = cfg.anonymous ? null : await signRequest({
@@ -533,14 +616,39 @@ export function createFetchTransport(deps) {
 // shell transports. The shell's contract, in full:
 //
 //   sync_request({ url, method, headers, body })
-//       → { status: Int, headers: { …lower-cased… }, body: String }        on any HTTP answer
-//       → { error: "offline" | "timeout" | "blocked" | "transport" }       otherwise
+//       → { status: Int, headers: { …lower-cased… }, body: String, url: String }
+//                                                                      on any HTTP answer
+//       → { error: "offline" | "timeout" | "blocked" | "transport" }    otherwise
 //
-//   · `url` has already been through `assertReachable`; the shell MUST check it again against
-//     its own pinned origin and MUST refuse unless `set_shell_pref: "sync_enabled"` is set —
-//     that is ADR 003 §7 gate 3, and it is the gate that survives a JS bug.
+//   · `url` (in) has already been through `assertReachable`; the shell MUST check it again
+//     against its own pinned origin and MUST refuse unless `set_shell_pref: "sync_enabled"` is
+//     set — that is ADR 003 §7 gate 3, and it is the gate that survives a JS bug.
 //   · the shell follows NO redirects and sends no cookies.
+//   · **`url` (out) is the URL the returned bytes actually came from** — see below.
 //   · the shell never inspects `body`; it is a padded, end-to-end-encrypted envelope batch.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// FINDING P-5, THE SHIPPING HALF — WHY THE REPLY CARRIES A URL
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// On the `fetch` path "no redirects" is a fact the PLATFORM enforces: `redirect: 'error'` makes
+// a 302 a rejected promise, so the signed request is never replayed at a destination the relay
+// chose. On the bridge path it was a SENTENCE IN A COMMENT — the reply carried a status and a
+// body and not the URL they came from, so a shell that followed a redirect (`URLSession` follows
+// them by default; refusing takes a delegate) would be undetectable from JS, and the page would
+// treat another host's answer as the relay's.
+//
+// So the reply carries the FINAL url and this factory refuses one that is not the url it asked
+// for. It is four lines and it turns an unverifiable promise into a checked one. `redirected:
+// true` is refused the same way, for a shell that reports the fact without the address.
+//
+// **The check is on a field that MAY be absent, and that is a deliberate half-measure with a
+// deadline, not the finished state.** Neither shell implements `sync_request` yet (below), so
+// there is no build in the world that could send the field; making it mandatory today would
+// refuse every reply in `tests/tier1/platform-net.test.js` rather than any real one. The moment
+// either shell ships the command, `reply.url` becomes REQUIRED here — one `if`, and the tier-1
+// replies grow one field. Until then a mismatch is caught and an omission is not, which is
+// strictly more than the comment that was here before.
 //
 // **OWED, and reported rather than assumed:** neither shell implements `sync_request` yet. This
 // factory is complete and unit-tested against an injected `invoke`; the two shells are owned
@@ -584,6 +692,16 @@ export function createBridgeTransport(deps) {
       }
       if (!Number.isInteger(reply.status)) {
         throw new NetError('bad_response', 'net: the shell answered without a status');
+      }
+      // FINDING P-5 — where did these bytes come from? See §6's header. A reply that names a
+      // different URL, or admits to a redirect without naming one, is not an answer from the one
+      // allowed origin and is refused BEFORE the body is parsed.
+      if (reply.redirected === true) {
+        throw new NetError('blocked', 'net: the shell followed a redirect — the signed request was replayed elsewhere');
+      }
+      if (reply.url !== undefined && reply.url !== null && reply.url !== req.url) {
+        throw new NetError('blocked',
+          `net: the answer came from ${JSON.stringify(String(reply.url))}, not from ${JSON.stringify(req.url)}`);
       }
       return { status: reply.status, headers: readHeaders(reply.headers), json: parseBody(reply.body) };
     },

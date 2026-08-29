@@ -5,38 +5,41 @@
 // THE QUESTION: WHICH LIES DOES THE CHAIN WITNESS CATCH, AND WHICH ARE INVISIBLE?
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// The answer at M1 is shorter than the design implies, and it is a fact about the IMPORT GRAPH
-// rather than about cryptography:
+// When this file was written the answer was a fact about the IMPORT GRAPH rather than about
+// cryptography: `src/js/sync/chain.js` was not on the M1 path at all. `createChainWitness` had
+// exactly one importer in the tree — `src/js/sync/client.js`, LZP-501's superseded engine — and
+// `createSyncClient` had no importer at all, so every check ADR 002 §5.4 describes was written,
+// tested in tier 1, and wired to nothing the product ran. That was finding P-4, and §4 pinned it
+// as an import-graph fact so it could not rot into a belief.
 //
-//     `src/js/sync/chain.js` IS NOT ON THE M1 PATH.
+// **IT IS ON THE PATH NOW.** `sync/personal.js` imports `verifyChain` and `pullNow` runs two
+// checks over every page:
 //
-// `createChainWitness` has exactly one importer in the whole tree, `src/js/sync/client.js`, and
-// `createSyncClient` has NO importer at all — `src/js/family/engine.js` builds
-// `createPersonalSync` from `src/js/sync/personal.js`, and `personal.js` mentions the chain only
-// to explain why it seals `wit: ''`. So every check ADR 002 §5.4 describes — recompute, and the
-// witness cross-check that is "the half a relay lying consistently to one device cannot escape" —
-// is written, tested in tier 1, and **not wired to anything the product runs.** §4 pins that as an
-// import-graph fact so it cannot rot into a belief.
+//   1. THE WITNESS — `verifyChain(rows, anchor)`, anchored on the last head this device verified
+//      (durable, in `sync/cursor.js` behind the `chainStore` port). Catches a hole INSIDE a page,
+//      a re-ordering, a fabricated `chain`, and a stream re-chained across a relaunch.
+//   2. THE PAGE CLAIM — `server/core/handlers/ops.js` states that "`nextCursor` is the seq of the
+//      last op ACTUALLY RETURNED, and when the page is empty it is `since`". A `nextCursor` past
+//      the last row served is the relay asking this device to step over rows it never sent, which
+//      is the withhold that leaves no hole to find because the hole is at the END of the page.
 //
-// With the witness out of the path, the four lies separate like this:
+// Neither check refuses an op. ADR 002 §8.6 and ADR 003 §10.6 keep the witness DIAGNOSTIC-ONLY in
+// v2 and that is respected: the rows that arrived are authentic and are applied. What the finding
+// changes is the CURSOR — the first missing seq becomes a hold — and the indicator.
+//
+// So the four lies now separate like this:
 //
 //   | lie                    | outcome | why |
 //   |---|---|---|
 //   | REORDER                | harmless | the merge is a per-cell stamp join (`registers.cmpWrites`), so arrival order decides nothing. `pullNow` also re-sorts the page by `seq`, but that is belt: removing the sort in a scratch tree does NOT redden §1, while making the join order-dependent reddens four of its rows. §1 |
 //   | REPLAY / DUPLICATE     | harmless | idempotent by `opId` (ADR 001 §6). §1 |
 //   | STALE / REWOUND CURSOR | harmless | the client bounds its own pull loop and loses nothing. §1 |
-//   | **WITHHOLD**           | **PERMANENT, SILENT, AND IT SURVIVES THE RELAY BECOMING HONEST AGAIN** | §2, §3 |
+//   | **WITHHOLD**           | **A DELAY, REPORTED** — the cursor never moves over an op this device was not handed, so the relay still owes it and an honest page delivers it. §2, §3 |
 //
-// The withhold is the interesting one and it is worse than "not detected". `pullNow` ends with
-//
-//     if (floor === null && nextCursor !== null && nextCursor > commit) commit = nextCursor;
-//
-// — i.e. the client advances to the cursor the relay hands it **whether or not the page that came
-// with it contained anything**. So a relay that answers `{ops: [], nextCursor: 42}` does not delay
-// those ops, it CONSUMES them: the `since` filter will never offer them again, and the fork
-// outlives the attack. §2 shows it one-sided (the ADR's own "Mama cancelled the appointment"
-// example); §3 shows it two-sided, which is the fork ADR 002 §5.4 names, and shows that healing
-// the relay does not heal the boards.
+// §2 is the one-sided withhold (the ADR's own "Mama cancelled the appointment" example); §3 is
+// the two-sided one, which is the fork ADR 002 §5.4 names; §4 is the import-graph fact, inverted;
+// §5 is the ANCHOR — what the witness remembers across a quit, and the rule that a MISSING anchor
+// re-anchors rather than accusing an honest relay.
 
 import '../helpers/env.js';
 import test, { describe } from 'node:test';
@@ -156,7 +159,26 @@ describe('§1 · SUCCEEDED · reorder, replay and a rewound cursor are latency, 
 // 2. THE WITHHOLD — ONE-SIDED, PERMANENT, AND ANNOUNCED AS `healthy`
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§2 · FAILED · a relay that withholds from ONE Mac takes those ops permanently', () => {
+// INVERTED, NOT REPAIRED, and this row named its own trigger: "If this row ever reads 'Zahnarzt
+// ABGESAGT', the client has learned to notice a cursor that outruns its page and this test should
+// be inverted."
+//
+// It has. `sync/personal.js`'s `pullNow` now imports `sync/chain.js` — P-4's sharp half — and runs
+// TWO checks over every page:
+//
+//   1. `verifyChain(rows, anchor)` — ADR 002 §5.4's witness. Catches a hole INSIDE a page, a
+//      re-ordering, and a fabricated `chain` value.
+//   2. THE PAGE CLAIM. `server/core/handlers/ops.js` says in its own words that "`nextCursor` is
+//      the seq of the last op ACTUALLY RETURNED, and when the page is empty it is `since`". A
+//      `nextCursor` past the last row served is the relay asking this device to step over rows it
+//      never sent — the withhold that leaves no hole to find, because the hole is at the END of
+//      the page. That is exactly the mechanism this row measured, and it is the only one of the
+//      two that can cause a LOSS, so it is the only one that touches the cursor.
+//
+// Neither check refuses the ops that DID arrive: they are individually authenticated, and refusing
+// them would let a hostile relay wedge the device with one bad `chain` byte. What the finding does
+// is stop the cursor — so the relay keeps owing the op — and light `error`.
+describe('§2 · CLOSED (P-4) · a withhold is now a DELAY: the cursor is held and the ops come back', () => {
   test('"it serves Mac B every op except the one where Mama cancelled the appointment"', async () => {
     // The sentence is `src/js/sync/chain.js`'s own, from the header of the module that exists to
     // catch this and is not on this path.
@@ -173,25 +195,34 @@ describe('§2 · FAILED · a relay that withholds from ONE Mac takes those ops p
     await f.settle();
 
     assert.equal(A.state.notes[0].text, 'Zahnarzt ABGESAGT');
-    assert.equal(B.state.notes[0].text, 'Zahnarzt 14:30', 'the laptop still shows the old time');
-    assert.equal(B.status().state, 'healthy', 'and reports itself in sync');
-    assert.deepEqual(B.warnings(), [], 'with no warning of any kind');
-    assert.equal(B.cursor(), A.cursor(),
-      'THE MECHANISM: `pullNow` takes `nextCursor` from the relay even when the page it came with '
-      + 'was emptied, so B\'s cursor is level with A\'s and the `since` filter will never offer '
-      + 'those ops again');
+    assert.equal(B.state.notes[0].text, 'Zahnarzt 14:30',
+      'the laptop still shows the old time WHILE THE RELAY IS LYING — that part is unchanged, and '
+      + 'no client-side check can conjure bytes it was not sent');
+    assert.equal(B.status().state, 'error',
+      'AND IT SAYS SO. `sync/chain.js` is on the path now; reverting either the import or the '
+      + 'page-claim check turns this back to `healthy` (finding P-4).');
+    assert.ok(B.storeDiagnostics().sync.chain,
+      'and the store can name it: `diagnostics().sync.chain` carries the witness\'s finding');
+    assert.equal(B.storeDiagnostics().sync.chain.kind, 'withheld',
+      'by the kind the mechanism actually is — a cursor claim past the last row served');
+    assert.ok(B.warnings().some((w) => /does not add up/.test(w)),
+      'in a sentence, once, not once a pull');
+    assert.notEqual(B.cursor(), A.cursor(),
+      'THE MECHANISM, INVERTED: `pullNow` takes `nextCursor` only while the relay\'s claim about '
+      + 'the page is sound, so B\'s cursor stops BELOW the withheld op and the relay still owes it.');
 
-    // The relay stops lying. Nothing is repaired.
+    // The relay stops lying, and the ops arrive. A withhold is a DELAY again.
     f.wire.honest();
     await f.settle();
     await f.settle();
     await B.catchUp(8);
-    assert.equal(B.state.notes[0].text, 'Zahnarzt 14:30',
-      'THE FINDING: an honest relay does not undo it. The withhold is not a delay, it is a '
-      + 'consumption. If this row ever reads "Zahnarzt ABGESAGT", the client has learned to notice '
-      + 'a cursor that outruns its page and this test should be inverted.');
-    assert.equal(boardsAgree([A, B]).equal, false);
-    assert.deepEqual([A.status().state, B.status().state], ['healthy', 'healthy']);
+    assert.equal(B.state.notes[0].text, 'Zahnarzt ABGESAGT',
+      'an honest relay DOES undo it: the withhold was never a consumption, because the cursor was '
+      + 'never moved over an op this device had not been handed');
+    assert.equal(boardsAgree([A, B]).equal, true, boardsAgree([A, B]).detail);
+    assert.deepEqual([A.status().state, B.status().state], ['healthy', 'healthy'],
+      'and the verdict CLEARS on positive evidence — a page that verifies — so a fork that healed '
+      + 'does not light the indicator for ever');
   });
 
   test('SUCCEEDED (control) · a relay that DELAYS instead of withholding costs nothing', async () => {
@@ -221,8 +252,8 @@ describe('§2 · FAILED · a relay that withholds from ONE Mac takes those ops p
 // 3. THE FORK
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§3 · FAILED · a two-sided withhold is ADR 002 §5.4\'s fork, and it is permanent', () => {
-  test('each Mac is self-consistent, both are `healthy`, and the family silently has two boards', async () => {
+describe('§3 · CLOSED (P-4) · a two-sided withhold is ADR 002 §5.4\'s fork, and BOTH Macs see it', () => {
+  test('each Mac is self-consistent, both report `error`, and neither cursor moved over the fork', async () => {
     const f = await twoMacs();
     const A = f.device('A');
     const B = f.device('B');
@@ -236,19 +267,24 @@ describe('§3 · FAILED · a two-sided withhold is ADR 002 §5.4\'s fork, and it
 
     assert.deepEqual(A.state.notes.map((n) => n.id).sort(), ['ax', 'n1']);
     assert.deepEqual(B.state.notes.map((n) => n.id).sort(), ['bx', 'n1']);
-    assert.deepEqual([A.status().state, B.status().state], ['healthy', 'healthy']);
-    assert.deepEqual([A.warnings(), B.warnings()], [[], []],
-      'neither Mac has anything to say — the fork is entirely silent');
+    assert.deepEqual([A.status().state, B.status().state], ['error', 'error'],
+      'THE FORK IS NO LONGER SILENT. ADR 002 §5.4 names chain-witness verification as the one '
+      + 'mechanism for detecting this, and `pullNow` runs it now. Reverting the wiring turns both '
+      + 'of these back to `healthy` (finding P-4).');
+    assert.ok(A.warnings().some((w) => /does not add up/.test(w))
+      && B.warnings().some((w) => /does not add up/.test(w)),
+    'and BOTH Macs have something to say — the fork is reported on both sides of it');
 
     f.wire.honest();
     await f.settle();
     await f.settle();
     await A.catchUp(8);
     await B.catchUp(8);
-    assert.deepEqual(A.state.notes.map((n) => n.id).sort(), ['ax', 'n1'],
-      'and it survives the relay becoming honest');
-    assert.deepEqual(B.state.notes.map((n) => n.id).sort(), ['bx', 'n1']);
-    assert.equal(boardsAgree([A, B]).equal, false);
+    assert.deepEqual(A.state.notes.map((n) => n.id).sort(), ['ax', 'bx', 'n1'],
+      'AND IT HEALS the moment the relay stops: neither cursor was ever moved over an op the '
+      + 'device had not been handed, so nothing was consumed and both halves are still owed');
+    assert.deepEqual(B.state.notes.map((n) => n.id).sort(), ['ax', 'bx', 'n1']);
+    assert.equal(boardsAgree([A, B]).equal, true, boardsAgree([A, B]).detail);
   });
 
   test('SUCCEEDED · the relay still cannot READ, FORGE or RE-ATTRIBUTE — only omit', async () => {
@@ -287,32 +323,125 @@ describe('§3 · FAILED · a two-sided withhold is ADR 002 §5.4\'s fork, and it
 // 4. THE REASON — THE WITNESS IS NOT ON THE PATH
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§4 · FAILED · `sync/chain.js` is unreachable from the engine the product runs', () => {
-  test('the import graph, not an opinion: nothing the app loads can reach the chain witness', () => {
+describe('§4 · CLOSED (P-4) · `sync/chain.js` is on the path the product actually runs', () => {
+  test('the import graph, not an opinion: the engine reaches the chain witness', () => {
     // `reachableFrom` follows STATIC and DYNAMIC edges alike, so this is the strongest form of
-    // the claim: not "it is lazily loaded", but "there is no edge at all".
+    // the claim in both directions: it was not "lazily loaded", there was no edge at all — and
+    // now the edge is a STATIC import in the one file the design ever named as its call site.
     const from = (entry) => new Set(reachableFrom(entry).reached);
 
     const engine = from('src/js/family/engine.js');
     assert.equal(engine.has('src/js/sync/personal.js'), true,
       "the product's engine is `personal.js` — the control that makes the next line mean something");
-    assert.equal(engine.has('src/js/sync/chain.js'), false,
-      'THE FINDING: no path from the engine to the chain witness');
+    assert.equal(engine.has('src/js/sync/chain.js'), true,
+      'and it reaches the chain witness. If this goes false again, §2 and §3 above go silent with '
+      + 'it, because ADR 002 §5.4 names no other mechanism (finding P-4).');
+    assert.deepEqual(pathToPrefix('src/js/sync/personal.js', 'src/js/sync/chain.js'),
+      ['src/js/sync/personal.js', 'src/js/sync/chain.js'],
+      'by a DIRECT import from `pullNow`\'s own module — not through a fourth file');
 
-    assert.equal(from('src/js/family/mount.js').has('src/js/sync/chain.js'), false,
-      'nor from the one door `main.js` opens into family mode');
-    assert.equal(from('src/js/main.js').has('src/js/sync/chain.js'), false);
-    assert.equal(from('src/js/boot.js').has('src/js/sync/chain.js'), false);
+    assert.equal(from('src/js/family/mount.js').has('src/js/sync/chain.js'), true,
+      'and from the one door `main.js` opens into family mode');
+    assert.equal(from('src/js/main.js').has('src/js/sync/chain.js'), true);
 
-    // …because the only importer of `chain.js` is `client.js`, and nothing imports THAT.
-    assert.deepEqual(pathToPrefix('src/js/sync/client.js', 'src/js/sync/chain.js'),
-      ['src/js/sync/client.js', 'src/js/sync/chain.js'],
-      'one importer, and it is the engine that is never built');
-    for (const entry of ['src/js/main.js', 'src/js/boot.js', 'src/js/family/mount.js', 'src/js/family/engine.js']) {
-      assert.equal(from(entry).has('src/js/sync/client.js'), false,
-        `${entry} does not reach sync/client.js either`);
-    }
-    // ADR 002 §5.4 says the witness is detection-only and never blocks sync in v2. This is
-    // stronger than that, and it is what §2 and §3 are the consequence of: at M1 it never RUNS.
+    // THE HALF THAT MUST NOT BE READ AS "SO DELETE THE ROW". ADR 003 §7 gate 2 requires the sync
+    // modules to sit behind exactly ONE dynamic door, so a solo LAUNCH evaluates none of them.
+    // `reachableFrom` deliberately follows dynamic edges (a walk that ignored them would report
+    // the design as a defect), so `boot.js` reaches this too — through `main.js`'s single
+    // `await import()` of `family/mount.js`, and through nothing else. That is the property, and
+    // it is stated as a path rather than as an absence:
+    assert.deepEqual(pathToPrefix('src/js/boot.js', 'src/js/sync/chain.js'),
+      ['src/js/boot.js', 'src/js/main.js', 'src/js/family/mount.js', 'src/js/family/engine.js',
+        'src/js/sync/personal.js', 'src/js/sync/chain.js'],
+      'the ONLY route is through the family door — `tests/attack/privacy-e5-silence.test.js` is '
+      + 'where the door itself is pinned as dynamic and single');
+
+    // The old importer, `client.js`, is LZP-501's superseded engine and is now deleted; nothing
+    // reaches it because it no longer exists. `sync-domains.js` S5 carries that as data.
+    assert.equal(from('src/js/family/engine.js').has('src/js/sync/client.js'), false,
+      'and the dead engine is not back');
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 5. THE ANCHOR — WHAT THE WITNESS REMEMBERS ACROSS A QUIT
+//
+// `verifyChain` verifies a RUN against a known point. Where that point comes from decides what a
+// relaunch costs, and the two rows below are the two halves of getting it right. They exist
+// because a mutation pass found both of them unpinned: removing the durable anchor, and removing
+// the rule that a MISSING anchor may not be treated as genesis, each killed no test at all.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('§5 · the chain anchor is durable, and a missing one accuses nobody', () => {
+  test('a relay that forks the stream ACROSS a relaunch is caught on the first page after it', async () => {
+    // WITHOUT a durable anchor this is the relay's free move: quit, and the first page of the new
+    // session is adopted as the truth, whatever it says. `sync/cursor.js` keeps the verified head
+    // beside the sync position — its own header's argument for why the two belong together — so
+    // the first page after the quit is checked against what the LAST session verified.
+    const f = await twoMacs();
+    const A = f.device('A');
+    const B = f.device('B');
+    await f.settle();
+    await A.apply('editNotePopover', { id: 'n1', text: 'vor dem Neustart' });
+    await f.settle();
+    assert.equal(B.state.notes[0].text, 'vor dem Neustart', 'B verified a page and stored its head');
+    assert.equal(B.status().state, 'healthy', 'and has nothing to report');
+
+    await B.relaunch();
+
+    // The relay now re-chains the stream: every `chain` value is replaced. Nothing else changes —
+    // the envelopes are the same authentic bytes, so no signature and no AEAD tag can see this.
+    f.wire.hostile.onResponse = MUTATORS.rewriteChain((o, i) => b64uOfIndex(i));
+    await A.apply('editNotePopover', { id: 'n1', text: 'nach dem Neustart' });
+    await f.settle();
+    await f.settle();
+
+    assert.equal(B.status().state, 'error',
+      'THE FORK IS CAUGHT. Reverting the `chainAnchor = cursors.head(spaceId)` line in '
+      + '`loadLot()` makes this `healthy`: the first row of the first page is adopted as the '
+      + 'anchor and the re-chained stream becomes the new truth (finding P-4).');
+    assert.ok(B.storeDiagnostics().sync.chain, 'and the store can name it');
+    f.wire.honest();
+  });
+
+  test('a MISSING anchor re-anchors rather than accusing — an honest relay is never blamed', async () => {
+    // THE OTHER HALF, and the reason the row above cannot be closed by "verify from genesis
+    // always". `verifyChain(rows, null)` computes `SHA-256(∅ ‖ oid)` for the first row, which is
+    // right for a device pulling from `since = 0` and WRONG for every other page — a device
+    // resuming at seq 40 is handed a chain over rows it never saw. `chain.js`'s own answer to an
+    // anchor it cannot use is "re-anchor on the next row rather than reporting a fork this device
+    // cannot prove", and this is that rule one layer up.
+    //
+    // Reached by nothing exotic: a device upgrading from a build with no anchor store, or one
+    // whose anchor write failed (`cursor.js` reports that and keeps going, deliberately).
+    const f = await twoMacs();
+    const A = f.device('A');
+    const B = f.device('B');
+    await f.settle();
+    await A.apply('editNotePopover', { id: 'n1', text: 'erste Seite' });
+    await f.settle();
+    assert.notEqual(B.cursor(), '0', 'B is resuming mid-stream, which is the whole point');
+
+    await B.close();
+    B.disk.removeItem('langzeitplaner.chainheads');       // the upgrade, or the failed write
+    await B.open();
+
+    await A.apply('editNotePopover', { id: 'n1', text: 'zweite Seite' });
+    await f.settle();
+    await f.settle();
+
+    assert.equal(B.state.notes[0].text, 'zweite Seite', 'the page is applied …');
+    assert.equal(B.status().state, 'healthy',
+      '… and NOBODY IS ACCUSED. Removing the re-anchor branch in `pullNow` makes this `error` on '
+      + 'a perfectly honest relay, on the first pull after every such launch — a defence that '
+      + 'cries wolf is a defence that gets turned off.');
+    assert.equal(B.storeDiagnostics().sync.chain, null);
+  });
+});
+
+/** A syntactically valid, wrong, base64url chain value — 32 bytes, distinct per row. */
+function b64uOfIndex(i) {
+  const b = new Uint8Array(32);
+  b[0] = (i + 1) & 0xff;
+  return Buffer.from(b).toString('base64url');
+}

@@ -11,7 +11,7 @@
 //   §3  THE CURSOR — can a cursor cross spaces?
 //   §4  IMPORT AND RE-JOIN — does `replaceAll` publish the right thing to the right stream?
 //   §5  THE POSITIVE CONTROL — a private entry really does reach my other Mac.
-//   §6  THE SEAM THAT EATS AN OP — finding P-8. This is the important part of this file.
+//   §6  THE SEAM THAT ATE AN OP — finding P-8, CLOSED and inverted. Still the important part.
 //
 // SUCCEEDED / FAILED are from the adversary's point of view.
 
@@ -21,7 +21,9 @@ import assert from 'node:assert/strict';
 
 import { createFleet, boardsAgree } from '../helpers/fleet.js';
 import { recordWire, repoFile } from '../helpers/privacy-audit.js';
-import { createPersonalSync, createPersonalPublisher, CURABLE_PARKS } from '../../src/js/sync/personal.js';
+import {
+  createPersonalSync, createPersonalPublisher, CURABLE_PARKS, PARK_HANDLING, MAX_DEFERRALS,
+} from '../../src/js/sync/personal.js';
 import { ENVELOPE_PARK } from '../../src/js/crypto/envelope.js';
 
 const BOARD = () => ({
@@ -304,52 +306,53 @@ describe('§5 · the promise has a positive half, and it must be true too', () =
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §6 — THE SEAM THAT EATS AN OP. THIS IS THE FINDING.
+// §6 — THE SEAM THAT ATE AN OP.  **INVERTED 2026-08-29 — P-8 IS CLOSED AT THIS SEAM.**
+//
+// The row below is the SAME scenario, the same fleet, the same withheld attestation, asserting
+// the opposite outcome. It is inverted rather than deleted, because a finding whose row is
+// deleted is a finding nothing stops from coming back — and this one came back once already, as
+// the code half of F-6 while F-6's prose sat correct and unread three screens above it.
+//
+// WHAT THE FINDING WAS. `openOp` reports a park as
+//
+//     { status: 'park', parkReason: 'attestation'|'epoch'|'version'|…, reason: '<a sentence>' }
+//
+// and `pullNow` read it as
+//
+//     if (out && out.parked) {
+//       if (CURABLE_PARKS.includes(out.reason)) defer(item, out.reason);
+//
+// `out.parked` is never set — the field is `out.status` — so the whole branch was DEAD CODE.
+// Every parked envelope fell through to the next guard, which found no `op.id` on a park object,
+// and was sent to `terminal()`: quarantined as "openOp returned no op", cursor RELEASED past it.
+// The second mistake was inside the dead branch and would have defeated it even if it had run:
+// `CURABLE_PARKS` holds the enum values and `out.reason` is the human sentence.
+//
+// WHAT IT COST, before the fix: first contact between two Macs — P1 ATTESTATION, the ORDINARY
+// case since there is no causal delivery — destroyed the op; P4 EPOCH lost every op of a new key
+// epoch on the first pull after a rotation (ADR 002 §4.4); VERSION lost every op from a newer
+// build. And it was silent: one relaunch and the engine's `Map` was empty, `sync.status()` said
+// `healthy`, the cursor was past the op, and the two Macs were permanently, invisibly different.
+//
+// WHAT THE FIX IS, and why it is a table rather than two words. Two words would have been
+// `out.status === 'park'` and `out.parkReason` — and a two-element allow-list is exactly the
+// shape that lost `version` and `unknownKind` in the first place. `sync/personal.js` §0 now
+// carries `PARK_HANDLING`, keyed off `ENVELOPE_PARK` itself, with `parkHandlingOf()` TOTAL over
+// reasons this build has never heard of, and §9 of `tests/tier1/sync-personal.test.js` asserts
+// the table and the enum agree. `CURABLE_PARKS` is DERIVED from it.
+//
+// ⚠ WHAT IS STILL OPEN, so the inversion is not read as more than it is. The op is retained by
+// HOLDING THE CURSOR, which makes the RELAY the durable copy (ADR 006 §9.1 W1) — that is what
+// closes M1's first contact, and §6a measures it end to end across a relaunch. What it is not is
+// a durable LOCAL park: `openOp` parks `attestation`, `epoch` and `version` BEFORE it decrypts,
+// so there is no op to hand `oplog.park()` and no line shape for a sealed envelope. Domain
+// `S1-park-*`'s third axis (`survives: 'park-reason'`) therefore still fails, and it is owed by
+// `core/oplog.js` + `store.js`, not by this seam. See §6c, which pins that gap as a row of its own
+// so it cannot be quietly forgotten now that the loud half is green.
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('§6 · what happens to an op that arrives before the thing that would let it be read', () => {
-  test('SUCCEEDED — an op parked by openOp is DESTROYED, not deferred: F-6 is open at this seam', async () => {
-    // ═══════════════════════════════════════════════════════════════════════════════════════
-    // FINDING P-8 · CRITICAL · story 19.6 / 21.2 / finding F-6 · `src/js/sync/personal.js`.
-    //
-    // THE BUG, in two lines. `openOp` reports a park as
-    //
-    //     { status: 'park', parkReason: 'attestation'|'epoch'|'version'|…, reason: '<a sentence>' }
-    //
-    // and `pullNow` reads it as
-    //
-    //     if (out && out.parked) {
-    //       if (CURABLE_PARKS.includes(out.reason)) defer(item, out.reason);
-    //
-    // `out.parked` is never set — the field is `out.status` — so the whole branch is DEAD CODE.
-    // Every parked envelope falls through to the next guard, which finds no `op.id`, and is sent
-    // to `terminal()`: quarantined, reported as "openOp returned no op", and the cursor is
-    // released past it. The second mistake is inside the dead branch and would defeat it even if
-    // it ran: `CURABLE_PARKS` holds the enum values, and `out.reason` is the human sentence, so
-    // `includes()` could never match. `out.parkReason` is the field it meant.
-    //
-    // WHAT IT COSTS. This is not a corner: it is the first contact between two Macs, which is
-    // the whole of M1.
-    //
-    //   · P1 ATTESTATION — an op from my other Mac arriving before that Mac's attestation has
-    //     been learned. `family/mount.js` even warns "its ops will park" when the roster has no
-    //     `kexPubRaw` yet. They do not park. They are destroyed.
-    //   · P4 EPOCH — an op sealed under a key epoch this device has not fetched. ADR 002 §4.4's
-    //     whole design for a device offline across a rotation is "hold the cursor, fetch the
-    //     key, re-read". Instead every op of the new epoch is lost on the first pull.
-    //   · VERSION — an op from a newer build, which should be re-read after an update.
-    //
-    // AND IT IS SILENT. Measured below: after the attestation arrives, the note is still absent;
-    // after a relaunch the quarantine — which lives only in the engine's memory — is EMPTY, the
-    // indicator says `healthy`, the cursor is past the op so it is never re-pulled, and the two
-    // Macs are permanently, invisibly different. A user sees a note on the desktop that does not
-    // exist on the laptop, with no error anywhere and nothing to click.
-    //
-    // The fix is two words (`out.status === 'park'`, `out.parkReason`) and it is `personal.js`'s.
-    // The reason it is CRITICAL rather than HIGH is the silence: `store._warn` fires once, into a
-    // warnings array, with a sentence that says "nothing here was changed" — which is true, and
-    // is the opposite of what the user needs to be told.
-    // ═══════════════════════════════════════════════════════════════════════════════════════
+  test('FAILED — an op parked by openOp is HELD and lands when the cure arrives (P-8 closed)', async () => {
     const fleet = await createFleet({ board: BOARD() });
     await fleet.settle(1);
 
@@ -364,55 +367,126 @@ describe('§6 · what happens to an op that arrives before the thing that would 
     await fleet.A.push();
     const pulled = await fleet.B.pull();
 
-    // (1) It was NOT deferred, which is what F-6 says must happen.
-    assert.equal(pulled.deferred, 0, 'if this is 1, P-8 is fixed — the park branch runs');
-    assert.deepEqual(fleet.B.deferredOps(), []);
+    // (1) It IS deferred, which is what F-6 says must happen.
+    assert.equal(pulled.deferred, 1, 'if this is 0, P-8 has come back — the park branch is dead again');
+    assert.deepEqual(fleet.B.deferredOps().map((h) => h.why), [ENVELOPE_PARK.ATTESTATION],
+      'and it is held under the ENUM value openOp emitted, not under a human sentence');
 
-    // (2) It was quarantined, with a reason that names no park at all.
-    const q = fleet.B.quarantined();
-    assert.equal(q.length, 1);
-    assert.equal(q[0].reason, 'openOp returned no op',
-      'the reason changed — re-read P-8 before adjusting this string');
+    // (2) Nothing was quarantined. The op was never refused; it was not yet readable.
+    assert.deepEqual(fleet.B.quarantined(), [], 'a park is a deferral, never a quarantine');
 
-    // (3) The cursor was RELEASED past it, so the op will never be offered again.
-    assert.equal(fleet.B.cursor(), q[0].seq, 'the cursor is past the op it could not read');
+    // (3) THE CURSOR IS HELD BELOW IT, which is what makes the relay the durable copy: the op is
+    //     re-offered on every pull until it can be read (ADR 006 §9.1 W1).
+    assert.equal(fleet.B.cursor(), '0', 'the cursor moved past an op this Mac could not read');
 
-    // (4) The cure arrives — and cures nothing.
+    // (4) The cure arrives — and cures it, which is the whole of M1's first contact.
     fleet.attestations.set(fleet.A.short, attestation);
     await fleet.B.catchUp(6);
-    assert.deepEqual(fleet.B.store.state.notes.map((n) => n.text).sort(), ['Zahnarzt'],
-      'if "vom anderen Mac" appears here, P-8 is fixed');
+    assert.deepEqual(fleet.B.store.state.notes.map((n) => n.text).sort(),
+      ['Zahnarzt', 'vom anderen Mac'], 'the held op did not land when its attestation arrived');
+    assert.deepEqual(fleet.B.deferredOps(), [], 'and the hold was released');
 
-    // (5) A relaunch clears the only trace, and the app then calls itself healthy.
+    // (5) A relaunch changes nothing, because the op is on the board and in the log.
     await fleet.B.relaunch();
     await fleet.B.catchUp(6);
-    assert.deepEqual(fleet.B.quarantined(), [], 'the quarantine survived a relaunch');
-    assert.equal(fleet.B.status().state, 'healthy', 'the indicator is not silent — good news');
-    assert.deepEqual(fleet.B.store.state.notes.map((n) => n.text).sort(), ['Zahnarzt']);
-
-    // (6) …while Mac A still has it. Two Macs, permanently different, both reporting healthy.
-    assert.deepEqual(fleet.A.store.state.notes.map((n) => n.text).sort(),
+    assert.equal(fleet.B.status().state, 'healthy', 'and silence is TRUE again — 19.3');
+    assert.deepEqual(fleet.B.store.state.notes.map((n) => n.text).sort(),
       ['Zahnarzt', 'vom anderen Mac']);
+
+    // (6) …and the two Macs agree. This is the assertion the finding inverted.
     const agree = boardsAgree(fleet.all);
-    assert.equal(agree.equal, false, 'the boards agree — P-8 is fixed, invert this row');
+    assert.equal(agree.equal, true, `the two Macs disagree on: ${agree.detail}`);
   });
 
-  test('SUCCEEDED — the two lines, read out of the source, so the finding cannot be argued about', () => {
-    // The behavioural row above is the proof; this is the diagnosis, pinned so that a fix is
-    // visible as a change here and not only as a change in a fleet outcome.
-    const src = repoFile('src/js/sync/personal.js');
-    assert.match(src, /if \(out && out\.parked\) \{/,
-      'the park branch changed — re-verify P-8');
-    assert.match(src, /if \(CURABLE_PARKS\.includes\(out\.reason\)\) defer\(item, out\.reason\);/);
+  test('FAILED — a cure that never arrives is BOUNDED and VISIBLE, never a silent spin', async () => {
+    // THE CONTROL FOR THE ROW ABOVE, and the one that stops "hold the cursor" being read as
+    // "hold the cursor for ever". ADR 003 §8.2: "a permanently rejected op must never silently
+    // spin forever" — and a cursor pinned behind one unreadable envelope is also how a hostile
+    // relay would wedge this device. So the ladder ends, loudly, and the stream is not wedged.
+    const fleet = await createFleet({ board: BOARD() });
+    await fleet.settle(1);
+    const attestation = fleet.attestations.get(fleet.A.short);
+    fleet.attestations.delete(fleet.A.short);
 
-    // What `openOp` actually returns, from its own module, so the mismatch is stated in both
-    // directions rather than inferred.
+    await fleet.A.apply('createNotePopover', {
+      id: 'nie-lesbar', date: '2027-05-07', text: 'nie lesbar', categoryId: 'c1',
+    });
+    await fleet.A.push();
+    for (let i = 0; i <= MAX_DEFERRALS; i++) await fleet.B.pull();
+
+    assert.deepEqual(fleet.B.deferredOps(), [], 'the hold is bounded');
+    assert.deepEqual(fleet.B.quarantined().map((q) => q.reason),
+      [`still ${ENVELOPE_PARK.ATTESTATION} after ${MAX_DEFERRALS} attempts`],
+      'and its end is a NAMED quarantine, not silence');
+    assert.equal(fleet.B.status().state, 'error', 'which the indicator shows (ADR 003 §8.3)');
+    assert.equal(fleet.B.status().errorKind, 'quarantine');
+
+    // (4) …AND THE STREAM IS NOT WEDGED. The cursor was released past the quarantined op, so
+    //     once the attestation does arrive a LATER op still crosses. This is the half that makes
+    //     the bound worth having: a hold that never ends would cost the user every future edit
+    //     from the other Mac, not just the one op nobody could read.
+    fleet.attestations.set(fleet.A.short, attestation);
+    await fleet.A.apply('createNotePopover', {
+      id: 'danach', date: '2027-05-08', text: 'danach', categoryId: 'c1',
+    });
+    await fleet.settle(2);
+    assert.equal(fleet.B.store.state.notes.some((n) => n.id === 'danach'), true,
+      'one unreadable envelope wedged the whole stream');
+    assert.equal(fleet.B.store.state.notes.some((n) => n.id === 'nie-lesbar'), false,
+      'and the released op does NOT come back — the cursor is past it, which is exactly why the '
+      + 'quarantine record above has to outlive the session (finding L-1)');
+  });
+
+  test('SUCCEEDED — the park is retained in MEMORY and in the CURSOR, never on disk', () => {
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    // THE HALF OF P-8 THAT IS NOT `sync/personal.js`'s TO CLOSE, pinned as its own row.
+    //
+    // `sync-domains.js` S1's rule is "whatever the park reason, the envelope must be RETAINED —
+    // DURABLY, with its reason". This engine retains it two ways, and neither is on disk:
+    //
+    //   · the `deferred` Map — dies with the session;
+    //   · the CURSOR — which is durable, and is why §6a survives a relaunch: the relay still
+    //     holds the op and still offers it. That is retention, but it is retention BY THE RELAY.
+    //
+    // What is missing is a local durable park for a SEALED ENVELOPE. `openOp` parks
+    // `attestation`, `epoch` and `version` BEFORE it decrypts, so there is no op object to hand
+    // `oplog.park(op, reason)` and `core/oplog.js` has no line shape for ciphertext. Until it
+    // does, `S1-park-attestation/epoch/version/unknownKind`'s third axis reads `nothing`, and
+    // two consequences follow that this row exists to keep visible:
+    //
+    //   1. an `unknownKind` park could be durable TODAY at almost no cost — the plaintext IS
+    //      decrypted by then — if `crypto/envelope.js`'s `park()` returned the `op` it already
+    //      has in scope for its three post-decrypt reasons. One field. **Owner: `crypto/`.**
+    //   2. `version` and `unknownKind` ought to RELEASE the cursor (their cure is an app update,
+    //      and a cursor pinned for that long blocks every later op) — but releasing it is only
+    //      safe once the envelope is durable, so `PARK_HANDLING` holds the cursor for them and
+    //      says so. **The day the durable park exists, that changes and this row is re-measured.**
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    const src = repoFile('src/js/sync/personal.js');
+
+    // The dead branch is gone, and the discriminator is the one `openOp` actually sets.
+    assert.equal(/if \(out && out\.parked\)/.test(src), false,
+      'the dead `out.parked` branch is back — P-8 has regressed');
+    assert.match(src, /if \(out && out\.status === 'park'\) \{/);
+    assert.match(src, /parked\(item, out\.parkReason\);/);
+
+    // `openOp`'s side of the contract, read out of its own module, so the two are pinned
+    // together rather than one of them being inferred.
     const env = repoFile('src/js/crypto/envelope.js');
     assert.match(env, /const out = \{ status: 'park', parkReason, reason \};/);
-    assert.equal(/\bparked:\s*true/.test(env), false, 'openOp now sets `parked` — close P-8');
+    assert.equal(/\bparked:\s*true/.test(env), false, 'openOp now sets `parked` — re-read P-8');
 
-    // And the two constants the dead branch compares against are enum values, never sentences.
+    // AND THE GAP ITSELF, measured rather than described: `park()` does not carry the op, so a
+    // post-decrypt park cannot be handed to `oplog.park()`. Invert this line the day it does.
+    assert.equal(/const out = \{ status: 'park', parkReason, reason, op \}/.test(env), false,
+      'crypto/envelope.js now returns the op with a post-decrypt park — `unknownKind` can be '
+      + 'parked DURABLY. Wire it in `pullNow` and invert this row.');
+
+    // `CURABLE_PARKS` is still the two session-curable reasons — but DERIVED from the table now,
+    // so it can never again be the whole of what the engine knows about parks.
     assert.deepEqual([...CURABLE_PARKS], [ENVELOPE_PARK.ATTESTATION, ENVELOPE_PARK.EPOCH]);
     assert.deepEqual([...CURABLE_PARKS], ['attestation', 'epoch']);
+    assert.deepEqual(Object.keys(PARK_HANDLING).sort(), Object.values(ENVELOPE_PARK).sort(),
+      'the park table no longer covers exactly the reasons the envelope layer can emit');
   });
 });

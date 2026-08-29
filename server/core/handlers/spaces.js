@@ -71,6 +71,11 @@
 
 import { fail } from '../errors.js';
 import { clientIp, rateKey, enforceFor } from '../limits.js';
+// ADR 002 §2.3's server-side half, written ONCE in `devices.js` so that `POST /devices`,
+// `POST /devices/adopt`, `POST /spaces` and `POST /invites/redeem` cannot drift from each other.
+// The import runs spaces → devices, the same direction `keys.js` already imports in; devices.js
+// imports only `errors.js` and `limits.js`, so there is no cycle.
+import { parseAttestationBlob, verifyDeviceClaim } from './devices.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 0. What this handler needs from `ctx` that docs/v2/contracts/server.contract.js §1 does not
@@ -363,7 +368,12 @@ export function readInt(obj, key, where, range) {
 
 /** Public-key material as it crosses the wire. 65-byte raw P-256 points (ADR 002 §2.1). */
 const P256_RAW_LEN = 65;
-/** An attestation is a canonical-JSON blob plus a signature; opaque here (ADR 002 §2.3). */
+/**
+ * An attestation is `b64u(canonicalJSON(payload)) + '.' + b64u(sig)` — ADR 002 §2.3. It is
+ * OPAQUE in the sense that matters (the relay cannot read the family's data through it) and it
+ * is emphatically NOT opaque in the sense E2 first read it: it has a shape, six named fields,
+ * and a signature the relay can and does check, because `Member.recoveryPubSig` is a column.
+ */
 const ATTESTATION_MAX = 4096;
 /** A WrapBlob is ~156 bytes of JSON (ADR 002 §3). A kilobyte is four times the honest size. */
 export const WRAP_MAX_BYTES = 1024;
@@ -484,8 +494,37 @@ const DEVICE_FIELDS = ['deviceId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'att
 const MEMBER_FIELDS = ['memberId', 'recoveryPubSig', 'recoveryPubKex'];
 
 /**
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * ONE SPELLING OF `device.attestation`, ON EVERY ROUTE THAT WRITES ONE — finding E2E3-7
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * It used to be two. `POST /devices` took the blob STRING and stored `TextEncoder.encode(blob)`
+ * after `verifyDeviceClaim` checked P2, S1 and S2; `POST /spaces` (and `POST /invites/redeem`,
+ * which shares this reader) took base64url and ran it through `readBytes`, verifying **nothing**.
+ * So `Device.attestation` had no type: the same column held UTF-8 of a dotted blob on one path
+ * and arbitrary decoded bytes on another, and a reader could not tell which without guessing.
+ *
+ * That was survivable only for as long as nobody READ the column. `GET /spaces/:id/members` now
+ * publishes it (finding E2E3-6 — it is the roster `familyRecipients()` is built from), and a
+ * publication of a field with two encodings publishes two different things.
+ *
+ * **The `/devices` contract wins**, in both halves:
+ *
+ *   · the wire carries the blob STRING and the column holds its UTF-8 bytes, everywhere; and
+ *   · the blob must PARSE and must be SELF-CONSISTENT with the device row it arrives in.
+ *
+ * The second half is enforced here, synchronously, because this reader is shared with
+ * `invites.js` — which calls it without `await` — and because it is exactly the part of ADR 002
+ * §2.3's check that needs no key: does the signed payload say the same thing as the request?
+ * `verifyDeviceClaim`'s S2, minus the `memberId` clause, which needs the member row.
+ *
+ * **What this reader still does NOT do is verify the SIGNATURE.** That is P2 + S1 and it is
+ * async, so it lives in `readAttestedDevice` below, which `createSpace` calls. `redeemInvite`
+ * does not yet call it — see the note on `readAttestedDevice`.
+ *
  * @param {unknown} raw @param {string} where
- * @returns {{deviceId:string, deviceShort:string, sigPubRaw:Uint8Array, kexPubRaw:Uint8Array, attestation:Uint8Array}}
+ * @returns {{deviceId:string, deviceShort:string, sigPubRaw:Uint8Array, kexPubRaw:Uint8Array,
+ *            attestation:Uint8Array, attestationBlob:string}}
  */
 export function readDevice(raw, where) {
   const d = readObject(raw, DEVICE_FIELDS, DEVICE_FIELDS, where);
@@ -493,13 +532,130 @@ export function readDevice(raw, where) {
   // reserved `rec_<memberId>` (extension E2-I5); a device allowed to name itself `rec_mem_…`
   // could therefore be handed the wraps addressed to another member's recovery key. `dev_` + 22
   // b64url is the only accepted spelling, so the two namespaces cannot meet.
-  return {
+  const out = {
     deviceId: readId(d, 'deviceId', DEVICE_ID_RE, where),
     deviceShort: readId(d, 'deviceShort', DEVICE_SHORT_RE, where),
     sigPubRaw: readBytes(d, 'sigPubRaw', where, { len: P256_RAW_LEN }),
     kexPubRaw: readBytes(d, 'kexPubRaw', where, { len: P256_RAW_LEN }),
-    attestation: readBytes(d, 'attestation', where, { maxLen: ATTESTATION_MAX }),
+    attestationBlob: readAttestationBlob(d, where),
   };
+  const parsed = parseAttestationBlob(out.attestationBlob);
+  if (!parsed) throw fail('bad_request', { field: safeField(`${where}.attestation`), reason: 'attestation_shape' });
+  const a = parsed.att;
+  assertAttestationClosed(a, where);
+  // S2 without the member clause. Every field the relay is about to STORE must be the field the
+  // member SIGNED — otherwise the row and the blob describe two different devices, and the blob
+  // is the half every client verifies.
+  if (a.deviceId !== out.deviceId) throw fail('bad_request', { field: safeField(`${where}.attestation`), reason: 'attestation_deviceId' });
+  if (a.deviceShort !== out.deviceShort) throw fail('bad_request', { field: safeField(`${where}.attestation`), reason: 'attestation_deviceShort' });
+  if (a.sigPubRaw !== bytesToB64u(out.sigPubRaw)) throw fail('bad_request', { field: safeField(`${where}.attestation`), reason: 'attestation_sigPubRaw' });
+  if (a.kexPubRaw !== bytesToB64u(out.kexPubRaw)) throw fail('bad_request', { field: safeField(`${where}.attestation`), reason: 'attestation_kexPubRaw' });
+  out.attestation = new TextEncoder().encode(out.attestationBlob);
+  if (out.attestation.length > ATTESTATION_MAX) throw fail('payload_too_large', { field: safeField(`${where}.attestation`) });
+  return out;
+}
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * THE ATTESTATION PAYLOAD IS A CLOSED FIELD SET — and this is what makes publishing it free
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * `parseAttestationBlob` deliberately TOLERATES extra fields, and it is right to: a v2.1
+ * attestation must stay readable by a v2.0 client, and those extra fields are covered by the
+ * signature, so re-serialising the six known ones would drop them and fail every future blob.
+ * That tolerance is a property of the PARSER. It must not become a property of the DOOR.
+ *
+ * The reason is story 21.1. `Device.attestation` is now published (`GET /spaces/:id/members`,
+ * finding E2E3-6), so anything a client can put inside the blob is a readable string the relay
+ * stores in the clear and hands to every member — which is precisely the channel
+ * `FORBIDDEN_COLUMN_TOKENS`, `MODEL_COLUMNS` and `readObject`'s closed field set exist to close
+ * everywhere else. `tests/server/blindness.test.js` used to smuggle „Großmutter Käthe" into an
+ * attestation to prove the relay never echoes it; before this check, publication would have made
+ * that test's premise false.
+ *
+ * With the set closed, **every field of a published blob is a value the relay already holds in a
+ * column**: `memberId` → `Device.memberId`, `deviceId` → `Device.id`, `deviceShort`, `sigPubRaw`
+ * and `kexPubRaw` → the same columns (all four pinned field-by-field above), and `createdAt` → a
+ * DAY, strictly coarser than the `Device.addedAt` timestamp the relay keeps to the millisecond.
+ * Zero free bits. That is why the publication costs 21.1 nothing, and it is checkable rather
+ * than argued (`rotation-wire.test.js` §5).
+ *
+ * `recoveryPubKex` is the ONE optional field, and it is allowed here BEFORE anything mints it:
+ * ADR 002 §2.3 specifies it as the binding that finding E2E3-8 is open on, and the relay
+ * accepting it in advance is what lets that binding land as a client-only change. It is
+ * shape-checked, not trusted — the relay does not read it, and a client must still bind it to
+ * `Member.recoveryPubKex` itself.
+ *
+ * Forward compatibility is therefore EXPLICIT rather than automatic: a v2.1 field must be added
+ * to this list, exactly as a new column must be added to `MODEL_COLUMNS`. ADR 003 §4's N−1 rule
+ * governs the rollout.
+ *
+ * @param {Object} att the parsed payload @param {string} where
+ */
+const ATTESTATION_REQUIRED = Object.freeze(['memberId', 'deviceId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'createdAt']);
+const ATTESTATION_OPTIONAL = Object.freeze(['recoveryPubKex']);
+
+function assertAttestationClosed(att, where) {
+  const field = safeField(`${where}.attestation`);
+  for (const k of Object.keys(att)) {
+    if (!ATTESTATION_REQUIRED.includes(k) && !ATTESTATION_OPTIONAL.includes(k)) {
+      throw fail('bad_request', { field, reason: 'attestation_unknown_field' });
+    }
+  }
+  // `createdAt` is the only required field not pinned to a column above, so it is the only one
+  // that could carry anything. ADR 002 §2.3 types it 'YYYY-MM-DD'; that is now enforced.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(att.createdAt)) {
+    throw fail('bad_request', { field, reason: 'attestation_createdAt' });
+  }
+  if (att.recoveryPubKex !== undefined) {
+    b64uToBytes(att.recoveryPubKex, `${where}.attestation.recoveryPubKex`, { len: P256_RAW_LEN });
+  }
+}
+
+/** The blob, as a bounded ASCII string. @param {Object} d @param {string} where @returns {string} */
+function readAttestationBlob(d, where) {
+  const v = d.attestation;
+  const field = `${where}.attestation`;
+  if (typeof v !== 'string' || v.length === 0 || v.length > ATTESTATION_MAX) {
+    throw fail('bad_request', { field: safeField(field), reason: 'bad_shape' });
+  }
+  // ASCII only, so `TextEncoder`/`TextDecoder` round-trip the column byte for byte and
+  // `GET /members` republishes exactly what was signed. A blob is base64url plus one dot.
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v)) {
+    throw fail('bad_request', { field: safeField(field), reason: 'bad_shape' });
+  }
+  return v;
+}
+
+/**
+ * `readDevice` plus the two checks that need a key: **P2** (the short is derived from the signing
+ * key) and **S1** (the blob is signed by the housing member's recovery key). ADR 002 §2.3's four
+ * acceptance conditions, minus condition (1), which is a log-level fact the relay never sees.
+ *
+ * ⚠ **`POST /invites/redeem` MUST call this too and does not yet** — it calls `readDevice`
+ * directly (`invites.js:219`), so a joiner can register a device whose attestation is signed by
+ * nothing. That is not merely a weak row: it is a family-wide denial of service, because
+ * `familyRecipients()` THROWS on a device whose attestation does not verify, so one bad joiner
+ * makes every subsequent rotation unbuildable for everybody. `invites.js` is another pass's file;
+ * the change is two lines — read the member keys first, then `await readAttestedDevice(body.device,
+ * member, 'device')` — and it is reported as a cross-file need rather than reached into.
+ *
+ * @param {unknown} raw
+ * @param {{memberId?:string, id?:string, recoveryPubSig:Uint8Array}} member the HOUSING member —
+ *        either the row from the store or the `readMemberKeys` result of the same request
+ * @param {string} where
+ */
+export async function readAttestedDevice(raw, member, where) {
+  const device = readDevice(raw, where);
+  await verifyDeviceClaim({
+    member: { id: member.memberId ?? member.id, recoveryPubSig: member.recoveryPubSig },
+    deviceId: device.deviceId,
+    deviceShort: device.deviceShort,
+    sigPubRaw: device.sigPubRaw,
+    kexPubRaw: device.kexPubRaw,
+    attestation: device.attestationBlob,
+  });
+  return device;
 }
 
 /** @param {unknown} raw @param {string} where */
@@ -517,10 +673,37 @@ export function readMemberKeys(raw, where) {
  * joiner (epochs 1..e) alongside the new epoch's wraps (e+1) and the two are not distinguishable
  * by position.
  *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * `senderDeviceId` IS STAMPED, NOT READ — finding E2E3-3
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * ADR 002 §4.2 step 6 makes the RECEIVING device verify who sent a wrap before it derives a KEK
+ * against it, and `admitWraps` (E3's fix for finding S1) takes that sender as a REQUIRED index
+ * into its own verified set. Nothing on this wire carried one: no column, no response field, and
+ * `readObject`'s closed field set 400s a client that tries to add one. So every honest wrap was
+ * refused by the receiver and the whole of §4.2 was unimplementable over this API.
+ *
+ * The fix is not to widen this reader. `senderDeviceId` stays OUT of the allowed field set — a
+ * client may not name the sender — and the caller passes the device the request was
+ * AUTHENTICATED as. Three consequences, all of them the point:
+ *
+ *   · a client cannot lie about who deposited a row, because it does not get to say;
+ *   · the relay learns nothing new (it authenticated that device to accept the request at all),
+ *     so `PLAINTEXT_STRINGS` grows by a fact ADR 003 §5.2's inventory already implies; and
+ *   · a relay that LIES about it can cause a refusal and never an admission, because the bytes
+ *     the receiver derives against come from the sender's own verified attestation and this value
+ *     only selects among them (spacekeys.js §6b).
+ *
  * @param {unknown} raw @param {number} maxEpoch @param {string} spaceId
- * @returns {Array<{spaceId:string, epoch:number, recipientId:string, wrapped:Uint8Array}>}
+ * @param {string} senderDeviceId the AUTHENTICATED depositor — never a body field
+ * @returns {Array<{spaceId:string, epoch:number, recipientId:string, wrapped:Uint8Array, senderDeviceId:string}>}
  */
-export function readWraps(raw, maxEpoch, spaceId) {
+export function readWraps(raw, maxEpoch, spaceId, senderDeviceId) {
+  if (typeof senderDeviceId !== 'string' || !DEVICE_ID_RE.test(senderDeviceId)) {
+    // Our bug, not the client's: a caller that forgot to say who is depositing. 500, because a
+    // wrap with no sender is a wrap no receiver can ever admit (store contract case C62).
+    throw fail('internal');
+  }
   if (!Array.isArray(raw)) throw fail('bad_request', { field: 'wraps', reason: 'not_an_array' });
   if (raw.length === 0) throw fail('bad_request', { field: 'wraps', reason: 'empty' });
   if (raw.length > MAX_WRAPS) throw fail('payload_too_large', { field: 'wraps' });
@@ -537,7 +720,7 @@ export function readWraps(raw, maxEpoch, spaceId) {
     // would win silently, which is a coin flip over which key ring a member ends up holding.
     if (seen.has(key)) throw fail('bad_request', { field: safeField(where), reason: 'duplicate_recipient_epoch' });
     seen.add(key);
-    out.push({ spaceId, epoch, recipientId, wrapped });
+    out.push({ spaceId, epoch, recipientId, wrapped, senderDeviceId });
   }
   return out;
 }
@@ -557,20 +740,54 @@ export function readRecipientId(v, field) {
 /**
  * Who is owed a wrap. Pure, so it can be read and tested on its own.
  *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * WHY `rec_<memberId>` IS REQUIRED OF A PERSONAL SPACE AND ONLY PERMITTED OF A FAMILY ONE
+ * Finding E2E3-8 — and this is the one place this pass REFUSES the obvious fix.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * ADR 002 §4.2 step 2 says a rotation wraps to every device "plus each member's `RK_kex`", and
+ * this function demanded exactly that, of every member of every space. `familyRecipients()` in
+ * `src/js/crypto/spacekeys.js` produces **no recovery recipient at all**, and says so in its own
+ * header. So every family rotation was `409 incomplete_coverage` — an obligation no client in
+ * the world could discharge, which from the user's chair is indistinguishable from a client that
+ * will not. It survived because the two halves were written against two different clauses of the
+ * same section and each is right about its own.
+ *
+ * **The obvious repair is a live break of 21.1 and 21.2.** Building the family recovery recipient
+ * from `Member.recoveryPubKex` would make every suite green and would hand the relay the family
+ * key, because NOTHING SIGNS `recoveryPubKex`. Swapping `recoveryPubSig` is loud — every device
+ * attestation of that member then fails to verify and rotation stops — but swapping
+ * `recoveryPubKex` alone is SILENT: every attestation stays genuine, the member list looks
+ * normal, and the next rotation wraps `FSK_{e+1}` to a key the relay chose. That is not ADR 002
+ * §8.5's accepted, UI-surfaceable phantom member; it is an unattributable key injection.
+ *
+ * So the family recovery wrap is **permitted and not required** until `recoveryPubKex` is bound
+ * to `recoveryPubSig` by a signature (ADR 002 §2.3 specifies the binding: an OPTIONAL seventh
+ * signed field in `DeviceAttestation`). A client that can bind it may send the row and it lands;
+ * a client that cannot, does not, and the rotation still succeeds. The coverage check keeps all
+ * of its teeth where they matter — on DEVICES, which is what stops the hostile admin rotating to
+ * a ring that omits an honest member.
+ *
+ * A **personal** space is unaffected and still requires it: `personalRecipients()` builds that
+ * recipient from `me.recoveryKexPubRaw`, my own key, held locally, which never came off the relay
+ * at all. Same clause of the same ADR; different provenance; different answer.
+ *
  * @param {Array<Object>} members every member row of the space, removed ones included
  * @param {Array<Object>} devices every device row of the space, revoked ones included
+ * @param {'PERSONAL'|'FAMILY'} kind the space kind — `Space.kind`, which the relay holds
  * @returns {string[]} recipient ids, sorted, unique
  */
-export function requiredRecipients(members, devices) {
+export function requiredRecipients(members, devices, kind) {
+  if (kind !== 'PERSONAL' && kind !== 'FAMILY') throw fail('internal');
   const active = new Set();
   const out = new Set();
   for (const m of members) {
     if (m.removedAt !== null && m.removedAt !== undefined) continue;
     active.add(m.id);
-    // ADR 002 §4.2 step 2: "for each [device], plus each member's RK_kex". Omitting this is
-    // finding E3-2 — and it is the wrap that makes A2 recovery of a family space possible at
-    // all, because a member who has lost every device has only RK_kex left.
-    out.add(recoveryRecipient(m.id));
+    // ADR 002 §4.2 step 2: "for each [device], plus each member's RK_kex". Omitting this for the
+    // PERSONAL space would be finding E3-2 again — and it is the wrap that makes A2 recovery
+    // possible at all, because a member who has lost every device has only RK_kex left.
+    if (kind === 'PERSONAL') out.add(recoveryRecipient(m.id));
   }
   for (const d of devices) {
     if (!active.has(d.memberId)) continue;
@@ -675,8 +892,17 @@ export async function createSpace(req, ctx) {
 
   const colorRef = readId(body, 'colorRef', COLOR_REF_RE, '');
   const member = readMemberKeys(body.member, 'member');
-  const device = readDevice(body.device, 'device');
-  const wraps = readWraps(body.wraps, 1, spaceId);
+  // Finding E2E3-7. This route used to read the attestation as base64url and verify NOTHING,
+  // while `POST /devices` read the blob string and verified P2 + S1 + S2. One contract now, and
+  // it is the verifying one. The recovery key it verifies under arrives in the same body, so
+  // this is a SELF-CONSISTENCY check and not a trust anchor — exactly as at `/devices`, where
+  // `Member.recoveryPubSig` was itself self-declared when the member was created. What it buys
+  // is that the blob this space is FOUNDED on can be verified by everybody else afterwards.
+  // Without it a founder could plant a blob nothing verifies, `familyRecipients()` would throw
+  // on the roster forever, and the space could never rotate — a wedge with no route out.
+  const device = await readAttestedDevice(body.device, member, 'device');
+  // The founder's own device is the depositor of the epoch-1 wraps. Nobody else exists yet.
+  const wraps = readWraps(body.wraps, 1, spaceId, device.deviceId);
 
   // The budget is charged BEFORE the signature is verified, for the reason `limits.js` gives its
   // `pre-auth` phase: verifying a P-256 signature is the expensive half of the request, so a
@@ -738,7 +964,7 @@ export async function createSpace(req, ctx) {
       if (!known.has(w.recipientId)) throw fail('bad_request', { field: 'wraps', reason: 'unknown_recipient' });
     }
     await tx.putKeyWraps(wraps);
-    await assertCoverage(tx, spaceId, 1, requiredRecipients(members, devices));
+    await assertCoverage(tx, spaceId, 1, requiredRecipients(members, devices, kind));
     return { members: members.length };
   });
 
@@ -800,7 +1026,11 @@ export async function rotateEpoch(req, ctx) {
   // epoch 0 and asks for 1 — gets the ADR's `409 epoch_taken` and the "re-fetch your wraps" path,
   // instead of a shape error it has no rule for. Zero, a fraction and a string are still 400.
   const epoch = readInt(body, 'epoch', '', { min: 1, max: 1000000 });
-  const wraps = readWraps(body.wraps, epoch, spaceId);
+  // The depositor is the device this request was AUTHENTICATED as, and there is no body field
+  // for it (finding E2E3-3). `requireActiveMember` has already resolved it off the stored row,
+  // so it is the relay's own observation and not a claim.
+  if (typeof auth.deviceId !== 'string' || !DEVICE_ID_RE.test(auth.deviceId)) throw fail('not_a_member');
+  const wraps = readWraps(body.wraps, epoch, spaceId, auth.deviceId);
   // ADR 002 §4.2 step 3 listed `invites` because the pre-D9 rotation re-wrapped the invite blobs.
   // D9 deleted the blobs, so there is nothing for a client to send: the server refreshes every
   // open invite's epoch itself, below, and refuses the field rather than accepting a list whose
@@ -834,7 +1064,7 @@ export async function rotateEpoch(req, ctx) {
 
     await tx.putKeyWraps(wraps);
     const purged = await tx.deleteKeyWrapsForDevices(spaceId, staleRecipients(members, devices));
-    await assertCoverage(tx, spaceId, epoch, requiredRecipients(members, devices));
+    await assertCoverage(tx, spaceId, epoch, requiredRecipients(members, devices, space.kind));
 
     // First writer wins (ADR 002 §4.2, `@@unique([spaceId, epoch])`). Claimed AFTER the coverage
     // check so a refused rotation leaves no trace at all — belt and braces on top of the

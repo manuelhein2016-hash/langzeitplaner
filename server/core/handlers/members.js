@@ -31,10 +31,57 @@
 // field to this ticket. Here it is. Without it the coverage check in spaces.js would demand a
 // wrap for `rec_<memberId>` that the rotating client has no public key to build.
 //
-// The attestation is deliberately NOT published. ADR 002 §2.3 puts it inside the E2EE stream, and
-// its whole point is that "a malicious relay cannot fabricate a device row for an existing
-// member" — a client that verified the relay's copy instead of the log's would hand that property
-// back. The relay's device rows are a hint about who to wrap to; the log is the authority.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHY `attestation` IS ON THE WIRE  (finding E2E3-6 — this reverses a decision, deliberately)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE PARAGRAPH THAT STOOD HERE SAID THE OPPOSITE, and it was right about the danger and wrong
+// about the conclusion. It read:
+//
+//   > The attestation is deliberately NOT published. ADR 002 §2.3 puts it inside the E2EE stream,
+//   > and its whole point is that "a malicious relay cannot fabricate a device row for an existing
+//   > member" — a client that verified the relay's copy instead of the log's would hand that
+//   > property back. The relay's device rows are a hint about who to wrap to; the log is the
+//   > authority.
+//
+// Every sentence of that is still true. What it missed is that `src/js/crypto/spacekeys.js`'s
+// `familyRecipients()` — the ONLY constructor of the branded recipient/sender set that ADR 002
+// §3 barrier 2 and §4.2 step 6 are built out of — THROWS on a device with no attestation blob.
+// So the roster this endpoint serves could not be turned into a recipient set, family key
+// rotation could not be built over this API by anybody, and the two positions together were "a
+// rotation nobody can build".
+//
+// ── THE 21.1 COST, MEASURED RATHER THAN ARGUED: NIL. ────────────────────────────────────────
+// The blob is a SIGNED payload, not ciphertext, and every field inside it is already a column
+// the relay holds and already publishes: `memberId` → `Device.memberId`, `deviceId` →
+// `Device.id`, `deviceShort`, `sigPubRaw`, `kexPubRaw`, and `createdAt` — a DAY, coarser than
+// the `addedAt` timestamp the relay keeps to the millisecond. The relay already STORES the blob
+// (`Device.attestation`, an opaque column since E2). And every member can already read the same
+// blob out of the E2EE stream: ADR 002 §2.3 says so in as many words — "the blob is inside the
+// E2EE stream, so every member can read it". Publishing it to members of the same space
+// therefore tells the relay nothing it did not know and tells a member nothing they could not
+// fold for themselves. It is not a metadata reduction and it is not a metadata increase.
+//
+// ── WHAT KEEPS "THE LOG IS THE AUTHORITY" TRUE ──────────────────────────────────────────────
+// The blob is published as a HINT and is never authority for anything, because the only code
+// that reads it verifies it first: `recipientProblem()` re-checks the signature under the
+// HOUSING member's `recoveryPubSig`, re-checks P2, and binds `att.kexPubRaw` to the very key the
+// wrap would be addressed to. A relay that fabricates a blob fails that signature. A relay that
+// fabricates a blob AND a recovery key has invented a whole MEMBER, which surfaces in this very
+// list as somebody nobody invited — ADR 002 §8.5's already-accepted, UI-surfaceable phantom
+// member, and precisely the residual §4.2 step 6 states for the bootstrap.
+//
+// The distinction ADR 002 §2.3 already draws is the one that resolves this: what the relay's
+// device rows support is KEY DISTRIBUTION, not ADMISSIBILITY. Admissibility is still the log's,
+// still the fold's, and nothing here changes stage 0b. And this is the roster ADR 002 §4.2 step
+// 6 already specified — "its roster must come from relay coordination data
+// (`MemberRowDb.recoveryPubSig` plus the `dev.*` blobs)". This file was out of step with its own
+// ADR rather than with a preference.
+//
+// ── WHERE IT IS NOT PUBLISHED, AND THAT IS STILL DELIBERATE ─────────────────────────────────
+// Not on `GET /ops`. That projection is re-derived in `ops.js` and stays four device fields; see
+// the note on `memberProjection` below for why the two shapes are different on purpose. The
+// rotation roster is a cold path (a membership change); the pull piggyback runs every 45 seconds
+// for every device in every space.
 //
 // PURITY (ADR 003 §9). Clock through `ctx.now()`, storage through `ctx.store`, nothing ambient.
 
@@ -53,7 +100,7 @@ import {
  * enforces, which is a different object with the same name; the identity that decides anything
  * remains the pair (member record, `deviceShort`).
  */
-export const DEVICE_PROJECTION = Object.freeze(['deviceId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'revokedAt']);
+export const DEVICE_PROJECTION = Object.freeze(['deviceId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'attestation', 'revokedAt']);
 
 /** The member fields a member list publishes. */
 export const MEMBER_PROJECTION = Object.freeze([
@@ -113,6 +160,11 @@ export async function memberProjection(store, spaceId) {
       deviceShort: d.deviceShort,
       sigPubRaw: bytesToB64u(d.sigPubRaw),
       kexPubRaw: bytesToB64u(d.kexPubRaw),
+      // The blob string, byte for byte as it was signed. `readDevice`/`verifyDeviceClaim` admit
+      // only base64url-dot-base64url on every write path (finding E2E3-7), so the column is
+      // always ASCII and this round-trips exactly — which it must, because the client verifies a
+      // signature over these bytes and a re-encoding would fail every one of them.
+      attestation: new TextDecoder().decode(d.attestation),
       revokedAt: iso(d.revokedAt),
     });
   }

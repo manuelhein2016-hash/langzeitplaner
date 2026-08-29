@@ -18,7 +18,8 @@ import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  createFetchTransport, normalizeOrigin, NetError, PATH_PREFIX, HDR, AUTH_SCHEME,
+  createFetchTransport, createBridgeTransport, normalizeOrigin, isLoopbackHost,
+  insecureOriginMessage, NetError, PATH_PREFIX, HDR, AUTH_SCHEME,
 } from '../../src/js/platform/net.js';
 import { createFleet } from '../helpers/fleet.js';
 import { recordWire, repoFile } from '../helpers/privacy-audit.js';
@@ -129,39 +130,95 @@ describe('§2 · what the transport tells the platform, and what it does with an
     assert.ok(init.signal, 'no abort signal — a hung request never times out');
   });
 
-  test('SUCCEEDED — a 30x that a transport DOES return is not followed, but nothing verifies that it was not', () => {
+  test('FAILED (held) — the bridge reply must name the URL it came from, and a stranger is refused', async () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
-    // FINDING P-5 · MEDIUM · story 21.5 · ADR 003 §7 gate 3.
+    // FINDING P-5 · MEDIUM · story 21.5 · ADR 003 §7 gate 3. **JS half CLOSED by WP-9; the
+    // SHELL half is still owed and is named at the bottom of this row.** Inverted, not deleted.
     //
-    // Two halves, and only the first is closed.
+    // WHAT IT WAS. On the `fetch` path "no redirects" is a fact the PLATFORM enforces:
+    // `redirect: 'error'` makes a 302 a rejected promise, so the signed request is never
+    // replayed at a destination the relay chose. On the SHIPPING path — `createBridgeTransport`
+    // handing `{url, method, headers, body}` to a native `sync_request` — it was a SENTENCE IN A
+    // COMMENT. The reply carried a status and a body and not the URL they came from, so a shell
+    // that followed a redirect (`URLSession` follows them by default; refusing takes a delegate)
+    // was undetectable from JS, and the page would have read another host's answer as the
+    // relay's.
     //
-    // CLOSED: on the `fetch` path, `redirect: 'error'` makes the platform reject and
-    // `sync/personal.js` reads `res.status` and never `res.headers.location` — so a 302 is a
-    // failed pull and nothing follows it. Asserted below.
+    // WHAT LANDED. The reply carries the FINAL url; the transport refuses one that is not the
+    // url it asked for, and refuses `redirected: true` for a shell that reports the fact without
+    // the address. Both are refused BEFORE the body is parsed.
     //
-    // OPEN: the SHIPPING path is `createBridgeTransport`, which hands `{url, method, headers,
-    // body}` to a native `sync_request` command and trusts the reply. `net.js`'s own contract
-    // says "the shell follows NO redirects and sends no cookies" — and **neither shell
-    // implements `sync_request` at all** (E5's report, §6, owed to E1). So the redirect defence
-    // that will actually ship is a sentence in a comment, in a command nobody has written, and
-    // there is nothing on the JS side that could detect a shell which followed one: the reply
-    // carries a status and a body, not the URL it came from.
-    //
-    // The cheap hardening, if the PO wants one: have `sync_request` return the FINAL url and
-    // have `createBridgeTransport` refuse a reply whose url is not the one it asked for. That is
-    // four lines and it turns an unverifiable promise into a checked one.
+    // WHAT IS STILL OWED, AND WHY THE FIELD IS OPTIONAL. Neither shell implements `sync_request`
+    // yet, so no build in the world can send the field; requiring it today would refuse every
+    // reply in `tests/tier1/platform-net.test.js` rather than any real one. The last row below
+    // pins that as a deliberate, dated half-measure rather than an oversight — the day either
+    // shell ships the command, `reply.url` becomes required and this row grows one assertion.
     // ═══════════════════════════════════════════════════════════════════════════════════════
-    const bridge = repoFile('src/js/platform/net.js');
-    const factory = bridge.slice(bridge.indexOf('export function createBridgeTransport'));
-    assert.equal(/reply\.url|finalUrl|redirected/.test(factory), false,
-      'the bridge transport now checks where the answer came from — close finding P-5');
-    assert.match(factory, /sync_request/);
+    const mk = (reply) => createBridgeTransport({
+      origin: 'https://relay.test', deviceShort: 'CHFBZPVRBG6M14TJ',
+      sign: async () => new Uint8Array(64), clientVersion: '2.0.0', subtle: S,
+      now: () => 1787836800000, random: (n) => new Uint8Array(n),
+      invoke: async () => reply,
+    });
+    const OK = { status: 200, headers: {}, body: '{}' };
 
-    // And the JS half that is closed: nothing anywhere reads a Location header.
+    // A stranger's answer is `blocked`, not a parsed anything.
+    await assert.rejects(
+      () => mk({ ...OK, url: 'https://evil.example/api/v1/meta' }).request('GET', '/api/v1/meta'),
+      (e) => e instanceof NetError && e.kind === 'blocked' && /evil\.example/.test(e.message),
+      'a reply from another host was accepted — P-5 has been reverted');
+    // Same host, different path — the relay choosing which endpoint answered is the same attack.
+    await assert.rejects(
+      () => mk({ ...OK, url: 'https://relay.test/api/v1/ops' }).request('GET', '/api/v1/meta'),
+      (e) => e instanceof NetError && e.kind === 'blocked');
+    // A shell that admits the redirect without naming the destination is refused too.
+    await assert.rejects(
+      () => mk({ ...OK, redirected: true }).request('GET', '/api/v1/meta'),
+      (e) => e instanceof NetError && e.kind === 'blocked' && /redirect/.test(e.message));
+    // And the honest answer still goes through, url and all.
+    const good = await mk({ ...OK, url: 'https://relay.test/api/v1/meta' }).request('GET', '/api/v1/meta');
+    assert.deepEqual(good, { status: 200, headers: {}, json: {} });
+
+    // The refusal happens BEFORE the body is read: a hostile answer must not be parsed at all.
+    await assert.rejects(
+      () => mk({ status: 200, headers: {}, body: 'not json', url: 'https://evil.example/api/v1/meta' })
+        .request('GET', '/api/v1/meta'),
+      (e) => e.kind === 'blocked', 'the body was parsed before the origin was checked');
+
+    // And the JS half that was always closed: nothing anywhere reads a Location header.
     for (const f of ['src/js/sync/personal.js', 'src/js/platform/net.js', 'src/js/family/engine.js']) {
       assert.equal(/location['"\]]|\bLocation\b/i.test(repoFile(f).replace(/globalThis\.location|location\?\.reload/g, '')),
         false, `${f} reads a Location header`);
     }
+  });
+
+  test('SUCCEEDED (reduced) — a bridge reply that omits `url` is still accepted, because no shell sends one yet', async () => {
+    // THE REMAINING HALF OF P-5, PINNED SO IT CANNOT BE FORGOTTEN. The check above catches a
+    // MISMATCH and not an OMISSION, which means a shell that simply never sends the field
+    // disables it silently — exactly the shape of defence this suite exists to distrust.
+    //
+    // It is a half-measure with a stated deadline rather than the finished state: `sync_request`
+    // is implemented by NEITHER shell (`net.js` §6, owed to E1), so requiring the field today
+    // would refuse every reply in `tests/tier1/platform-net.test.js` and no real one. This row
+    // is the receipt. The day either shell ships the command, `reply.url` becomes required in
+    // `createBridgeTransport`, the tier-1 replies grow one field, and this row inverts.
+    const t = createBridgeTransport({
+      origin: 'https://relay.test', deviceShort: 'CHFBZPVRBG6M14TJ',
+      sign: async () => new Uint8Array(64), clientVersion: '2.0.0', subtle: S,
+      now: () => 1787836800000, random: (n) => new Uint8Array(n),
+      invoke: async () => ({ status: 200, headers: {}, body: '{}' }),
+    });
+    assert.deepEqual(await t.request('GET', '/api/v1/meta'), { status: 200, headers: {}, json: {} });
+
+    // The shell contract that has to grow the field is written down, in the file that will be
+    // read when somebody finally writes the Swift. If this line moves, the command moved with it.
+    const bridge = repoFile('src/js/platform/net.js');
+    assert.match(bridge, /body: String, url: String/,
+      'the sync_request contract no longer promises a final url — P-5 cannot be closed without it');
+    // The deadline, in the file, not only in this comment. When this sentence goes, the field
+    // becomes required and this row inverts.
+    assert.match(bridge, /neither shell implements `sync_request` yet/,
+      'a shell now implements sync_request — make `reply.url` REQUIRED and invert this row');
   });
 
   test('FAILED — an HTML error page is a bad_response, not a parsed anything', async () => {
@@ -269,49 +326,107 @@ describe('§3 · the request surface, and who decides it', () => {
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('§4 · the one allowed origin is chosen by the user, in a text box', () => {
-  test('SUCCEEDED — `http://` is accepted everywhere, so one typo drops TLS for the whole stream', () => {
+  test('FAILED (held) — `http://` reaches nothing but this Mac, and the sheet says why first', () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
-    // FINDING P-7 · MEDIUM · story 21.3 · `server-metadata.md` §8 ("TLS in transit").
+    // FINDING P-7 · MEDIUM · CLOSED by WP-9. INVERTED, not deleted — this row now guards the
+    // fix, and it is written so that reverting either half turns it red.
     //
-    // There is no default relay (ADR 003 §1 names a host that does not exist yet), so the origin
-    // is a free-text field in the settings sheet, saved on every keystroke, and it is the ONLY
-    // thing that decides where the whole personal board is sent. `normalizeOrigin` accepts
-    // `http:` deliberately — `node dev-server.mjs` needs it, and so does `app:` for the shell —
-    // and NOTHING above it narrows that back down for a shipping build. The field's placeholder
-    // says `https://…` and its validation is `if (!origin)`.
+    // WHAT IT WAS. There is no default relay (ADR 003 §1 names a host that does not exist yet),
+    // so the origin is a free-text field in the settings sheet, saved on every keystroke, and it
+    // is the ONLY thing that decides where the whole personal board is sent. `normalizeOrigin`
+    // accepted `http:` for EVERY host — `node dev-server.mjs` needs it, and `app:` for the shell
+    // — and nothing above it narrowed that back down. The field's placeholder said `https://…`
+    // and the opt-in button's whole validation was `if (!origin)`.
     //
-    // What a `http://` origin costs, given that the payload is end-to-end encrypted: the CONTENT
-    // is still safe, and everything in `server-metadata.md` §2 and §5 — the personal space id,
-    // the device short, the read cursor, the op count, the byte count, the timing of every edit
-    // — travels in the clear to anyone on the same café wifi, plus the `Authorization` header
-    // and the 16-byte nonce. `server-metadata.md` §8 states "TLS in transit" as a fact about the
-    // product; for an `http://` origin it is false, and the Datenschutz copy would inherit that.
+    // WHAT IT COST. The payload is end-to-end encrypted, so the CONTENT was never the exposure.
+    // Everything in `server-metadata.md` §2 and §5 was: the personal space id, the deviceShort,
+    // the read cursor, the op count, the byte count, the timing of every single edit — plus the
+    // `Authorization` header and its nonce — in the clear to anyone on the same café wifi. §8
+    // states "TLS in transit" as a FACT about this product and the Datenschutz copy inherits it;
+    // for one mistyped scheme it was false.
     //
-    // Two honest fixes, both small: refuse a non-`https:` origin unless the host is a loopback
-    // literal, or accept it and say so in the sheet in one red line. Owner: WP-9 (the field) or
-    // whoever holds `net.js` (the guard).
+    // WHAT LANDED. Both halves of the fix the finding named, because either alone is weak: a
+    // guard with no sentence produces an error the user cannot act on, and a sentence with no
+    // guard is a suggestion.
+    //
+    //   1. `normalizeOrigin` refuses a non-loopback `http://` outright — the rule, in the one
+    //      function every transport is built through, so a caller that never opens the sheet is
+    //      covered too.
+    //   2. `familysettings.js`'s opt-in button asks that same function BEFORE anything is minted
+    //      and shows `insecureOriginMessage()`, which says what would be readable rather than
+    //      „ungültig" at an address the user can see nothing wrong with.
+    //
+    // The carve-out is loopback and only loopback: `node dev-server.mjs` + `node
+    // server/dev-server.mjs` live there, and a host that is this machine has no wire to tap.
     // ═══════════════════════════════════════════════════════════════════════════════════════
-    assert.equal(normalizeOrigin('http://relay.example'), 'http://relay.example');
-    assert.equal(normalizeOrigin('http://192.0.2.7:8787'), 'http://192.0.2.7:8787');
+
+    // ── 1. THE RULE ────────────────────────────────────────────────────────────────────────
+    for (const remote of [
+      'http://relay.example', 'http://192.0.2.7:8787', 'http://127.0.0.1.evil.example',
+      'http://localhost.evil.example', 'http://[2001:db8::1]:8787', 'http://128.0.0.1',
+      'http://12.7.0.0.1', 'http://xn--127-0-0-1-9zg.example',
+    ]) {
+      assert.throws(() => normalizeOrigin(remote), (e) => e instanceof NetError && e.kind === 'config',
+        `normalizeOrigin still accepts ${remote} — P-7 has been reverted`);
+    }
+    // …and the carve-out is exactly this machine, in every spelling `URL` normalises to it.
+    assert.equal(normalizeOrigin('http://127.0.0.1:8788'), 'http://127.0.0.1:8788');
+    assert.equal(normalizeOrigin('http://127.9.9.9'), 'http://127.9.9.9');
+    assert.equal(normalizeOrigin('http://localhost:5173'), 'http://localhost:5173');
+    assert.equal(normalizeOrigin('http://relay.localhost:8787'), 'http://relay.localhost:8787');
+    assert.equal(normalizeOrigin('http://[::1]:8788'), 'http://[::1]:8788');
+    // https and the shell's own scheme are untouched.
     assert.equal(normalizeOrigin('https://relay.example'), 'https://relay.example');
     assert.equal(normalizeOrigin('app://localhost'), 'app://localhost');
 
-    // Nothing in the UI or the engine narrows it. The opt-in button's whole validation is
-    // emptiness, and `https` appears in that file exactly twice: in a prose comment and as the
-    // input's PLACEHOLDER — which is a hint, not a check.
+    // ── 2. THE SENTENCE, BEFORE THE BUTTON DOES ANYTHING ──────────────────────────────────
     const sheet = repoFile('src/js/family/familysettings.js');
-    const handler = sheet.slice(sheet.indexOf("go.addEventListener('click'"), sheet.indexOf('acts.appendChild'));
-    assert.match(handler, /if \(!origin\) \{ toast\(t\('familyNeedRelay'\)\); return; \}/);
-    assert.equal(/https|protocol|scheme|startsWith/.test(handler), false,
-      'the opt-in button now checks the scheme — close finding P-7');
-    assert.deepEqual(sheet.match(/https/g), ['https', 'https'], 'a third https appeared — re-read P-7');
-    assert.match(sheet, /input\.placeholder = 'https:\/\/…';/);
-    assert.equal(/https/.test(repoFile('src/js/family/engine.js').replace(/\/\/[^\n]*/g, '')), false,
-      'the engine now demands https — close finding P-7');
+    const handler = sheet.slice(sheet.indexOf("go.addEventListener('click'"), sheet.indexOf('acts.appendChild(go)'));
+    assert.match(handler, /normalizeOrigin\(origin\)/,
+      'the opt-in button no longer asks the one function that decides — P-7 has been reverted');
+    assert.match(handler, /insecureOriginMessage\(\)/, 'the button refuses without saying why');
+    // It must refuse BEFORE the button is disabled and before anything is minted: a refused
+    // address has to leave the sheet usable, because fixing it is the very next thing.
+    assert.ok(handler.indexOf('normalizeOrigin(origin)') < handler.indexOf('go.disabled = true'),
+      'the scheme is checked after the button commits');
+    assert.ok(handler.indexOf('normalizeOrigin(origin)') < handler.indexOf('hooks.onOptIn'),
+      'the space is created before the scheme is checked');
 
-    // The comparison that makes the finding concrete: the UPDATER, which is a far smaller
-    // exposure, refuses anything but https by name.
+    // The sentence itself is `net.js`'s, in both languages, and it names the scheme rather than
+    // an algorithm — the same discipline `probe.js`'s `unavailableMessage` uses.
+    const msg = insecureOriginMessage();
+    assert.deepEqual(Object.keys(msg).sort(), ['de', 'en']);
+    for (const lang of ['de', 'en']) {
+      assert.match(msg[lang], /http:\/\//);
+      assert.match(msg[lang], /https:\/\//);
+      assert.ok(msg[lang].length > 80, `the ${lang} sentence explains nothing`);
+    }
+
+    // The comparison that made the finding concrete, kept: the UPDATER — a far smaller exposure,
+    // one signed manifest — has refused anything but https by name since E1. This is now the
+    // same rule at the larger exposure.
     assert.match(repoFile('src/js/platform/updater.js'), /u\.protocol !== 'https:'/);
+  });
+
+  test("FAILED (held) — the loopback carve-out is a HOSTNAME test, not a string that can be dressed up", () => {
+    // The way a rule of this shape dies: `origin.startsWith('http://localhost')` or
+    // `/127\.0\.0\.1/.test(origin)`, and `http://127.0.0.1.evil.example` walks through it. The
+    // predicate is written over `URL.hostname` — already lower-cased, already punycoded, with
+    // `http://127.1` already resolved to `127.0.0.1` — so a remote host cannot be spelled as a
+    // local one. Asserted directly, and over the whole /8 rather than one address.
+    for (const yes of ['localhost', 'a.localhost', '127.0.0.1', '127.9.9.9', '127.0.0.255', '[::1]']) {
+      assert.equal(isLoopbackHost(yes), true, `${yes} is this machine`);
+    }
+    for (const no of [
+      '127.0.0.1.evil.example', 'localhost.evil.example', 'evil.example', '128.0.0.1',
+      '1270.0.0.1', '127.0.0.256', '::1', '[2001:db8::1]', 'notlocalhost', '', 'LOCALHOST',
+    ]) {
+      assert.equal(isLoopbackHost(no), false, `${no} is not this machine and must not pass`);
+    }
+    // `LOCALHOST` is false ON PURPOSE and is not a hole: the predicate is fed `URL.hostname`,
+    // which is already lower-cased, so the only way to reach it in upper case is to call it with
+    // a raw user string — which is the bug this row would catch.
+    assert.equal(new URL('http://LOCALHOST:1/').hostname, 'localhost');
   });
 
   test('FAILED — an origin may not carry a path, a query, a fragment or credentials', () => {

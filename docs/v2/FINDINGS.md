@@ -82,6 +82,34 @@ Four things in this update are worth reading before the rows:
   way it gets worked around in practice is by hiding the specifier from the walker — which turns a
   real gate into a vacuous one. The gate now counts the doors instead: exactly one, named.
 
+**Updated 2026-08-29 by the ROUND-8 integration pass — the op lifecycle, enumerated.** E5's two
+adversaries attacked M1 and found **no confidentiality break**: 21.1 and 21.2 both held. What they
+found was that the engine **lost ops silently and reported `healthy` while doing it**. Four fixers
+worked in parallel against `tests/helpers/sync-domains.js` — 253 entries, five domains, zero
+imports, §7d's method applied to the OP LIFECYCLE rather than the op kinds — and this pass landed
+the cross-file work. **49 rows → 55.** All six suites green; the property that walks the domain is
+**85/85, 0 UNEXPECTED, 0 STALE**. The rows are §3c and the mutants are §7a-round8.
+
+Four things in this update are worth reading before the rows:
+
+- **E5-2 was recorded as fixed and was not.** Its own clamp asked about the CAP where the
+  unrecoverable condition is about the FLOOR, and the arm it got wrong is the state EVERY
+  compaction leaves behind. Re-opened, and closed twice — because a second, independent defect
+  (**L-4**) was hiding behind it and became visible only once the first was fixed. The 24-seed
+  convergence sweep still lost an op on 2 seeds in between, which is a rate that reads as "it
+  works" on most runs; the headline now runs at **128 seeds**.
+- **`sync/client.js` was the only importer of four modules this register had filed as dead code**,
+  and three of them were defences the product was designed to have and did not: the chain witness,
+  a durable park for sealed envelopes, and a durable chain anchor. One was deleted; three were
+  wired. **A module is not dead because nothing imports it; it is dead because nothing needs it.**
+- **A fix that reports errors for ever is the same failure in the other direction**, and this pass
+  walked into it: folding `store.warnings` — which carries repairs, re-joins and successful cures
+  — into `error` lit a fault on every launch that had anything to say. → **L-5**. The `S4-quiet`
+  and `S4-pending` controls caught it, which is what non-vacuity controls are for.
+- **Two rows of the ENUMERATION were internally contradictory** and no build could satisfy both
+  (§3c, L-5). They are corrected in the probe, not in the `expect`, and recorded — a domain that
+  cannot be satisfied is a work order that lies.
+
 **Status vocabulary**
 
 | status | means |
@@ -102,12 +130,19 @@ closed: invert the row, do not repair the test.** Rows that have already been th
 
 | severity | open | accepted | decision | fixed | total |
 |---|---|---|---|---|---|
-| **CRITICAL** | — | — | — | 3 | **3** |
-| **HIGH** | 3 | — | 1 | 7 | **11** |
-| **MEDIUM** | 8 | — | 1 | 8 | **17** |
+| **CRITICAL** | — | — | — | 5 | **5** |
+| **HIGH** | 3 | — | 1 | 11 | **15** |
+| **MEDIUM** | 8 | — | 1 | 10 | **19** |
 | **LOW** | 5 | 3 | 1 | 4 | **13** |
 | **INFO / gap** | 2 | 2 | — | 1 | **5** |
-| | **18** | **5** | **3** | **23** | **49** |
+| | **18** | **5** | **3** | **29** | **55** |
+
+*(Recomputed 2026-08-29 by the **round-8 integration pass**: 49 → **55**. Six new rows — **L-1**,
+**L-2**, **L-3** (HIGH), **L-4** (CRITICAL), **L-5** (MEDIUM), and **P-8** (CRITICAL), which had
+lived only in `tests/attack/privacy-e5-scope.test.js`. **P-4** moves from open to fixed. **E5-2**
+was re-opened and closed again; it is counted once, as fixed. Three of the six were opened BY the
+enumeration and had no `tests/attack/` row at all before it — which is the argument for
+enumerating an input domain rather than reviewing branches, made a second time.)*
 
 *(Recomputed from the rows on 2026-08-27 by the **round-7 integration pass**: 39 → **49**. Ten new
 rows — R6-2, R6-3, R6-4, R6-5, R6-6, R6-7, R6-7e, R6-10, R6-11, and **R7-1**, which this pass
@@ -1405,6 +1440,260 @@ takes `haveEpochKey`, `load()` feeds the reason back, and `unpark()` re-asserts 
 and `PARK_REASONS_NEEDED` should be emptied. The two agree in VALUE — asserted — so nothing is
 broken; it is a duplicate constant.
 
+### 3c. Round 8 — THE OP LIFECYCLE, enumerated. E5's two adversaries, answered.
+
+*Ran:* 2026-08-29, after M1 („Zwei Macs") was demonstrated. Four fixers in parallel against an
+**enumerated input domain**, then one integration pass. **Nothing the adversaries found was a
+confidentiality break — 21.1 and 21.2 both held.** What they found was worse in a different way:
+**the engine lost ops silently and reported `healthy` while doing it.**
+
+**The domain is `tests/helpers/sync-domains.js` — 253 entries, five domains, zero imports.** It is
+§7d's method applied to a second area, and the sentence that chose the area is the convergence
+adversary's own: *"the domain here is the OP LIFECYCLE, not the op kinds."* `domains.js`
+enumerates what an op IS; this enumerates what happens TO it — the outcome of `openOp`, what the
+engine does with that outcome, what survives a relaunch, what a compaction does to it, and what
+anybody is able to SEE. The property that walks it is `tests/property/sync-domains.test.js`, and
+it is **green: 85/85, 0 UNEXPECTED, 0 STALE.**
+
+Two things in this round are corrections to *earlier entries in this register*:
+
+- **E5-2 was not closed.** Its own fix — `_outboxHorizonCap()` — asked the wrong question in one
+  arm, and that arm is the state EVERY compaction leaves behind. The row is re-opened below and
+  closed again, twice over, because a **second, independent** defect (L-4) was hiding behind it
+  and was only visible once the first was fixed.
+- **F-8's "no consumer" was half the finding.** The channel now has one — and mapping the whole of
+  `store.warnings` to `error` was measured turning three green rows red, because the channel
+  carries repairs, re-joins and successful cures as well as faults. See L-5.
+
+#### E5-2 — RE-OPENED, and closed twice · CRITICAL · **fixed**
+
+*Re-opened by:* `tests/fleet/attack-converge-outbox.test.js` §1 and `sync-domains.js`
+`S2s-compact-sandwich` / `S3-unacked` / `S4-lost`. *Owner:* `src/js/store.js`, `src/js/core/oplog.js`.
+
+The clamp landed. Its stand-down did not. `_outboxHorizonCap()` returned `undefined` — **no cap at
+all** — when `cap === null || cmp(cap, held) < 0`, on the reasoning that a receding horizon is
+unrecoverable. But `cap === null` means only *"no live line strictly below the outbox floor"*, and
+that is the state every log is in immediately after any compaction: once a checkpoint has folded
+everything below the floor there is by definition nothing live below it. So `compact ▸ author
+offline ▸ compact` handed the log back its own defaults and folded the unacknowledged line for
+real, `outbox()` returned 0, and both Macs said `healthy` — E5-2 exactly, reached by ADR 001
+§7.2's ordinary tail policy and no adversary at all.
+
+**Fix (a).** The stand-down belongs to a fact about the FLOOR, not the CAP: only `held >= floor` —
+the persisted checkpoint already folds the unacknowledged op — is unrecoverable. `cap === null`
+answers with the persisted horizon itself (already folded, so not receding; below the floor, so it
+folds nothing owed), or `ZERO_STAMP`. Every arm now returns a STAMP BELOW THE FLOOR; `undefined`
+is reachable only from state ①.
+
+**Fix (b) — L-4, and it is the reason (a) alone was not enough.** With (a) in place the 24-seed
+convergence sweep still lost an op on seeds 3 and 10. See L-4.
+
+**Mutants:** restoring the old condition reddens `attack-converge-outbox.test.js` §1 (all four
+rows), `attack-converge-disorder.test.js` §2, and every one of S1–S4 in the property suite.
+
+#### L-4 — the ACK and the LINE come back from disk disagreeing · CRITICAL · **fixed**
+
+*Found by:* instrumenting the two seeds that still diverged after E5-2's own arm was fixed.
+*Owner:* `src/js/core/oplog.js`. *Closed:* 2026-08-29.
+
+`store.outbox()`'s own docblock states the invariant: *"an op leaves the outbox when the server
+reports it … which rides in `checkpoint().seqs` and so survives a relaunch."* It did not. A tail
+line is written to `ops.jsonl` **at the moment the op is authored** — before any server has seen
+it — so `line.seq` on disk is `null` by construction, and `ack()` updates the live entry and
+`seqById` **in memory** and never rewrites the line. `oplog.load()` fed the BYTES and dropped the
+index.
+
+The consequence was not a lost op *here*. It was a **phantom outbox entry**: an op the relay had
+acknowledged came back looking unacknowledged, so `lines()` and `seqOfOp()` disagreed, and the
+OUTBOX FLOOR — the input to `_outboxHorizonCap()` — sank below the persisted horizon. That pushed
+the cap into E5-2's one genuinely unrecoverable arm, with no adversary, no old file, and no
+hostile relay: **any Mac that quits after a compaction.**
+
+**Fix:** `load()` falls back to `seqById` (populated from `cp.seqs` immediately above) when a tail
+line carries no seq of its own. A line's own seq still wins, so a tail written by a future build
+that does record acks is not overridden.
+
+**Mutant:** revert the lookup → `tests/tier1/core-oplog.test.js` *"L-4 · `load()` restores a tail
+line's ack from `checkpoint().seqs`"* dies, and so does the 128-seed convergence sweep.
+
+#### P-8 — every park was a drop, and the park was not durable · CRITICAL · **fixed**
+
+*Found by:* `tests/attack/privacy-e5-scope.test.js` §6; enumerated as S1's four park rows.
+*Owner:* `src/js/sync/personal.js`. *Closed:* 2026-08-29, in three parts.
+
+**(a) The branch was dead code.** `pullNow` read `out.parked`, which `openOp` never sets, so EVERY
+park fell through to `terminal()`: quarantined, cursor released, op destroyed. The second mistake
+was inside the dead branch and would have defeated it anyway — `CURABLE_PARKS` compared enum values
+against `out.reason`, a human sentence. Fixed as a DOMAIN rather than two words: `PARK_HANDLING`
+is one entry per value of `ENVELOPE_PARK`, `parkHandlingOf()` is TOTAL (a reason a newer
+`crypto/envelope.js` emits is still held, never dropped), and `CURABLE_PARKS` is derived from it.
+
+**(b) The retention was a session `Map`.** Held ops survived nothing. `sync/outbox.js`'s
+`createParkingLot` — a durable, capped, storage-backed retention of SEALED envelopes with their
+reasons, which **refuses at its cap rather than dropping** and tells the caller to hold the cursor
+— was already written and was reachable from nothing (it was counted a P-4 orphan and this file's
+own domain first called it *dead*). It is not superseded: `store.outbox()` replaces `createOutbox`
+and nothing replaces this. Wired behind a `parkStore` port (`family/engine.js`'s
+`parkedEnvelopeStore()`). `core/oplog.js` cannot do this job — P1, P4 and the version gate all
+refuse BEFORE the decrypt, so there is no op to hand `oplog.park()`.
+
+**(c) The cursor.** With durable retention, `PARK_HANDLING`'s `curedBy: 'update'` rows now RELEASE
+the cursor, as ADR 003 §8.2 requires — a cursor pinned behind an envelope only a new binary can
+read blocks every later op on the space, and is how a hostile relay would wedge a device with one
+`v: 99` row. The release is gated on the lot's OWN answer about itself (`durable`), never an
+assumption: with no port injected the cursor is held exactly as before, and both configurations
+are pinned in tier 1.
+
+**Mutants:** `out.status === 'park'` → `out.parked` kills five §4b rows including *"P1 ATTESTATION
+— held, cursor held"* (M1's first contact) and S1a. Never writing the lot kills S1a and S1b.
+Removing the `dormant` arm kills *"VERSION with a DURABLE park — the cursor is RELEASED"*.
+
+#### L-1 — the engine's quarantine was a per-session `Map` · HIGH · **fixed**
+
+*Opened by:* the enumeration (S1's three terminal rows, S3-quarantined, S4-refused).
+*Owner:* `src/js/store.js` + `src/js/sync/personal.js`.
+
+A terminal refusal — a bad signature, a failed AEAD, a malformed envelope — is CORRECT and final,
+and ADR 003 §8.2 releases the cursor past it, so the relay will never offer that op again and the
+record of the refusal is **the only thing left in the world that remembers the divergence**. It
+lived in a `Map`: `error` for minutes, then `healthy` for ever.
+
+**Fix:** `store.syncRefusals`, written by `terminal()`, riding in `checkpoint().lzp.refusals` —
+the store's own half of the checkpoint, which `core/oplog.js` neither reads nor writes and which
+is therefore the one place a fact the LOG has no line for can be made durable. Read back by
+`init()`, and only from a checkpoint this launch actually believed (a quarantined log takes its
+ledger with it). Capped at 200, most recent kept, stated rather than hidden.
+
+**And the converse, which the enumeration forced:** a refusal the world later falsifies is
+withdrawn. The ladder's terminal is a statement about ONE DELIVERY; when the STORE's own parked
+copy is later promoted, the row is dropped from the ledger rather than lighting `error` for ever
+over an op that is on the board.
+
+**Mutant:** stop writing `refusals` into the checkpoint → S1a, S1b, S3a, S4a and
+`attack-converge-attestation.test.js` §3 all die.
+
+#### L-2 — nothing could see a held op · HIGH · **fixed**
+
+*Opened by:* the enumeration (S4-held). *Owner:* `src/js/store.js`, `src/js/sync/status.js`,
+`src/js/sync/personal.js`.
+
+`sync.status()` derived its three states from `store.outboxSize()` and the engine's two in-memory
+Maps; `diagnostics().sync` reported `outbox`, `cursor` and three booleans. Neither reported
+`_log.parkedOps()`. A line parked under `attestation` is DURABLE and was INVISIBLE — and story
+19.3's "silence is the design" is a promise that silence MEANS health.
+
+**Fix:** `diagnostics().sync` gained `parked`, `refused`, `lost` and `chain`; `sync/status.js`
+transcribes domain S4 into the product as `SYNC_OBSERVABLES` and folds over it; `personal.js`'s
+`status()` merges the engine's reading with the store's by `max` over the ladder, so it can only
+ever RAISE a state. `blindSpots()` is the load-bearing half: a MISSING field is `unknown`, never
+`0`, because folding *"I cannot see a parked op"* into *"there are no parked ops"* is this finding
+in one line of arithmetic.
+
+**Mutant:** make `status()` relay the engine instead of folding → S4a and
+`attack-converge-clock.test.js` §2 die.
+
+#### L-3 — the park had no reaper · HIGH · **fixed**
+
+*Opened by:* the enumeration (S3-parked); pinned by `attack-converge-attestation.test.js` §3.
+*Owner:* `src/js/store.js`, `src/js/sync/personal.js`.
+
+`store.unparkAttested()` re-judges a line held for a missing device attestation and was called
+from exactly one place in the product — `family/mount.js`, on the adoption of a NEW peer. A Mac
+that learned about its sibling on Monday and quit still held Monday's op on Tuesday, and on every
+launch after that, for ever. By then the ladder had released the cursor, so the parked line was
+the only copy this Mac could reach and nothing was looking at it.
+
+**Fix:** two call sites, because the cure arrives by two routes — `store.init()` (the launch;
+`useIdentity()` has already filled `_peerDevices`) and `pullNow` (the pairing that completes
+mid-session, which has no launch to wait for). A promotion is committed synchronously with the
+pull that caused it rather than left to the autosave debounce.
+
+**Mutant:** remove both → S3a and `attack-converge-attestation.test.js` §3 die.
+
+#### L-5 — `store.warnings` is a MIXED channel, and folding it into `error` breaks 19.3 the other way · MEDIUM · **fixed**
+
+*Found by:* this integration pass, wiring F-8's consumer. *Owner:* `src/js/sync/status.js`.
+
+`sync/status.js` enumerated `warnings` as an `error` observable. `_warn` fires for a refusal and a
+quarantine — faults — and equally for a reconciliation after a crash (*"expected"*, in its own
+text), a §9.3 re-join (*"nothing is lost and nothing on your peers is deleted"*), a settings
+repair, and `unparkAttested`'s *"held ops are now authorised and have been applied"*, which is the
+sound of a fix WORKING. Measured, that mapping turned three green rows red and lit a fault on
+every launch that had anything to say — which is exactly what S4's `S4-quiet` and `S4-pending`
+controls exist to catch, one row over.
+
+**Fix:** the `warnings` row is `healthy` and still COUNTS. A non-empty channel puts a row in
+`observables`, so `silent` is false and the settings sheet gets the sentences; only the SHARP rows
+— a parked line, a refusal, a lost line, a forked chain — raise the indicator. *"There is nothing
+to tell you"* and *"the indicator is quiet"* are different claims and this is the line between them.
+
+**A second half of this finding is in the ENUMERATION, not the build.** `S4-refused` requires this
+device, at this moment, to answer `sync.refused`; `S4-warnings` requires the same device at the
+same moment to answer `warnings`; `storeReportsOf` is first-match-wins. **No implementation can
+satisfy both.** It was invisible while L-1 was open, because a refusal that died with the session
+left `warnings` as the only surviving answer. Neither `expect` was relaxed: S4-warnings now asks
+its own question, which is what its `value` says it is about.
+
+#### P-4 — seven shipped modules reachable from nothing, three of them DEFENCES · HIGH · **fixed**
+
+*Found by:* `tests/attack/privacy-e5-silence.test.js` §5. *Closed:* 2026-08-29.
+
+The two `crypto/` defences were wired by WP-9 (`probe.js` and `backup.js`, from
+`family/familysettings.js`). This pass closed the five `sync/` rows, and **only one of them by
+deletion** — which is the outcome the row existed to make impossible:
+
+- **`sync/chain.js`** — ADR 002 §5.4's chain witness, the ONE mechanism the design names for
+  detecting a relay that withholds, reorders or renumbers. `pullNow` now imports it and runs it
+  over every page, plus a PAGE-CLAIM check: `server/core/handlers/ops.js` states that `nextCursor`
+  is *"the seq of the last op ACTUALLY RETURNED"*, so a `nextCursor` past the last row served is
+  the relay asking this device to step over rows it never sent — the withhold that leaves no hole
+  to find, because the hole is at the END of the page. The first missing seq becomes a cursor
+  HOLD. Neither check refuses an op: ADR 002 §8.6 / ADR 003 §10.6 keep the witness
+  diagnostic-only, and refusing on its word would let one bad `chain` byte wedge the device.
+- **`sync/outbox.js`** — `createParkingLot`. See P-8(b).
+- **`sync/cursor.js`** — the durable chain ANCHOR, so a relay that forks the stream ACROSS a
+  relaunch is caught on the first page after it rather than adopted as the new truth. It is **not**
+  a second transport cursor: ADR 006 §9.1 W1 keeps that in the log, `store.cursor()` is still the
+  only value read as `since`, and what the module contributes is its ONE WRITE PATH — `advance()`
+  runs the commit first and persists only if it resolves, with `store.noteCursor` inside that
+  commit.
+- **`sync/protocol.js`** — reached through `chain.js`, which needs its seq helpers.
+- **`sync/client.js`** — LZP-501's superseded ENGINE and nothing else. **DELETED**, with
+  `tests/tier1/sync-client.test.js`. It was the only importer of the other four, which is the whole
+  reason they looked dead.
+
+**A rule this round earned:** *a module is not dead because nothing imports it; it is dead because
+nothing NEEDS it.* Four of these five were filed as dead code and three of them were mechanisms
+the product was designed to have and did not.
+
+**Mutants:** stop calling `verifyChain` and the page claim → `attack-converge-relay.test.js`
+§2/§3, `fleet-harness.test.js` §2a and S4a die. Drop the gap→hold conversion → §2a dies. Never
+read the durable anchor → §5's cross-relaunch fork row dies. Remove the mid-stream re-anchor →
+§5's *"a MISSING anchor accuses nobody"* row dies.
+
+#### THE HEADLINE — the property the convergence adversary said was missing
+
+> for every op set and every interleaving of partition, reorder, duplication, **compaction**,
+> restart and quarantine, the two Macs' register digests agree
+
+`tests/fleet/attack-converge-disorder.test.js` §2, **128 seeds × 30 steps**, alphabet unchanged and
+un-narrowed:
+
+- **Without a quarantine event: 128/128 converge** — on content, on the register digests cell by
+  cell, stably, with nothing the script performed missing from either board and nothing on either
+  board the script never performed. `_e52Warned` fires on **no seed**: this build never writes a
+  checkpoint that folds past its own outbox floor.
+- **With a quarantine event** (a flipped ciphertext byte, so AES-GCM refuses the op and the cursor
+  is released past it) convergence is not the property to assert — a forged envelope must not be
+  applied. The property is the one that makes the bar meaningful: **either the two Macs converge,
+  or the Mac that lost something SAYS SO.** 128/128: **no run ended divergent and `silent`.** The
+  converse control holds too — converged runs are still allowed to be, and are, silent.
+
+The number that matters: before this round the same sweep at 24 seeds diverged on **the majority**;
+after E5-2's own arm was fixed it still diverged on **2 of 24**, which is a rate a 24-seed sweep
+reports as "it works" on most runs. That is why the headline runs at 128.
+
+
 ---
 
 ---
@@ -1919,6 +2208,44 @@ passing when the D4 fix is applied, which is what proves those domain rows are n
 (R5-3a, R6-5a/b/c/d/e/f/g, R6-6a/b). Story 11.5 is now load-bearing on the disaster path, which is
 what §5.6 always claimed and nothing previously checked.
 
+### 7a-round8. Round 8 — fourteen mutants, in one clean scratch tree
+
+Every row below was applied to a **fresh copy of `src/` at the round-8 head**
+(`…/scratchpad/mut`, never in the repo, `src/` restored between rows) and the named suites re-run.
+**Baseline in that copy: 0 fail in every suite listed.** The three the brief names by hand are
+**M3** (P-8's park branch → the two-Mac first-contact row), **M4** (the cursor rule → *"the cursor
+is held with it"*), and **M5** (the chain wiring → a withholding-relay row **through the product's
+own pull path**, not the fleet's direct `verifyChain` import).
+
+| # | mutation | the row that dies |
+|---|---|---|
+| **M1** | `_outboxHorizonCap()` — restore the old stand-down (`cap === null` ⇒ no cap) | `attack-converge-outbox.test.js` §1, all four rows; `sync-domains` S1a, S1b, S2a, S2b, S3a, S4a |
+| **M2** | `oplog.load()` — feed the tail line its own `seq: null`, drop `seqById` (L-4) | `core-oplog.test.js` *"L-4 · `load()` restores a tail line's ack from `checkpoint().seqs`"*; `attack-converge-disorder.test.js` §2 (both rows); `attack-converge-outbox.test.js` §1 |
+| **M3** | `pullNow` — `out.status === 'park'` → `out.parked` (the dead field) | `sync-personal.test.js` §4b *"P1 ATTESTATION — held, cursor held, nothing quarantined"*, *"P4 EPOCH"*, *"VERSION"*, *"a held op reports WHAT WOULD CURE IT"*, *"the hold is BOUNDED"*; `sync-domains` S1a |
+| **M4** | `defer()` — a hold no longer puts its seq in `holds` (the cursor rule) | `sync-personal.test.js` §4 *"the op is HELD, the cursor is held with it, and it lands the moment pairing completes"*; §4b ×3; `sync-domains` S1a |
+| **M5** | `pullNow` — `verifyChain` never runs and the page claim is never checked | `attack-converge-relay.test.js` §2 *"it serves Mac B every op except the one where Mama cancelled the appointment"* and §3; `fleet-harness.test.js` §2a; `sync-domains` S4a |
+| **M6** | `_stampedCheckpoint` — the refusal ledger stops riding in `lzp` (L-1) | `sync-domains` S1a, S1b, S3a, S4a; `attack-converge-attestation.test.js` §3 |
+| **M7** | both `unparkAttested()` call sites removed (L-3) | `attack-converge-attestation.test.js` §3; `sync-domains` S3a |
+| **M8** | `status()` relays the engine instead of folding `diagnostics()` (L-2) | `attack-converge-clock.test.js` §2; `sync-domains` S4a |
+| **M9** | `pullNow` — the parking lot is never written (P-8's retention) | `sync-domains` S1a **and** S1b |
+| **M10** | `defer()` — the `dormant` arm removed, so `'update'` parks pin the cursor | `sync-personal.test.js` §4b *"VERSION with a DURABLE park — the cursor is RELEASED"*; `sync-domains` S1a |
+| **M11** | `sync/status.js` — `warnings` mapped back to `error` (L-5) | `attack-converge-rejoin.test.js` §2; `sync-domains` S3a |
+| **M12** | `pullNow` — a chain GAP no longer becomes a cursor hold | `fleet-harness.test.js` §2a (the withhold-in-the-middle) |
+| **M13** | `pullNow` — the mid-stream re-anchor removed | `attack-converge-relay.test.js` §5 *"a MISSING anchor re-anchors rather than accusing"* |
+| **M14** | `loadLot()` — the durable anchor is loaded and never read | `attack-converge-relay.test.js` §5 *"a relay that forks the stream ACROSS a relaunch is caught"* |
+
+**M13 and M14 SURVIVED on the first pass** and are the reason this table is fourteen rows rather
+than twelve. Both halves of the chain anchor were unpinned: nothing tested that a fork across a
+relaunch is caught, and nothing tested that a MISSING anchor re-anchors instead of accusing an
+honest relay of a fork it did not commit. `attack-converge-relay.test.js` §5 was written for them
+and both now die. A defence that cries wolf is a defence that gets turned off, so the second row
+is as load-bearing as the first.
+
+**One artefact, recorded rather than hidden.** M5 also reddens two rows of
+`privacy-e5-silence.test.js` §1, which greps `src/` for `fetch(` call sites: the mutation is
+applied as `if (false)` and changes the source TEXT those rows count. It is a property of the
+mutation's form, not evidence about the fix.
+
 ### 7b. The one that survived, and what was done about it
 
 Row 23 is a correction, not a fix. The A3-H3 pass wrapped `this._clock.observe(op.ts)` and
@@ -2001,7 +2328,7 @@ asserting `_persistOps()` never appends, which A3-M5's closure made false, and i
 | R3-20 | `round3-doors.test.js` | 27 of 36 hostile inputs THROW out of `apply()` | F-2 |
 | R3-21 | `round3-doors.test.js` | the throw is not always an `OpError` — `EntityKeyError` too | F-2 |
 | R3-25 | `round3-doors.test.js` | a peer's over-length value is REFUSED where the diff door truncates | F-2 |
-| R3-27 | `round3-doors.test.js` | `store.warnings` is write-only — nothing in `src/` reads it | F-8 |
+| ~~R3-27~~ | `round3-doors.test.js` | `store.warnings` is write-only — nothing in `src/` reads it | **F-8 CLOSED 2026-08-29** — `family/syncstatus.js` subscribes and `sync/status.js` enumerates the channel. See **L-5** for why it reports without lighting the indicator. |
 | R3-40 | `round3-persistence.test.js` | two Macs agree on stamps, not on **authors** | A3-H4 — **still true of a store with no `useIdentity()`; that is now the SOLO case and it is correct** |
 | R3-41 | `round3-persistence.test.js` | the other Mac's ops are refused `notMyAct` | A3-H4 — as above; `store-identity.test.js` §1–§2 is the paired case |
 | R4-11b | `round4-coercion-oracle.test.js` | `board.json` still not a fixed point after "clear a scratchpad" | F-1 residual |
@@ -2033,6 +2360,31 @@ them rather than opening new accepted defects, because every defect it found it 
 E5-5, E5-6 and E5-7, which are owned by `server/` and by WP-9 and have no `tests/attack/` row to
 be green over.
 
+**Rows inverted by round 8's integration pass (2026-08-29) — thirteen, across six files.** Every
+one of them was green BECAUSE a defect existed, and every one names its own inversion trigger in
+the text that was there before it was flipped:
+
+| file | row | closed by |
+|---|---|---|
+| `attack-converge-outbox.test.js` §1 | *"compact ▸ author offline ▸ compact — the edit is destroyed"* and the story-19.6-scale twin | E5-2 + L-4 |
+| `attack-converge-disorder.test.js` §2 | *"a permanent, stable content divergence, with `healthy` on both Macs"* → 128 seeds converge | E5-2 + L-4 |
+| `attack-converge-attestation.test.js` §3 | *"after the ladder, nothing ever re-judges the held op again"* | L-3 |
+| `attack-converge-clock.test.js` §2 | *"a fast Mac syncs nothing, and neither Mac is told"* → the peer now says `pending` | L-2 |
+| `attack-converge-rejoin.test.js` §2 | *"…and nothing anywhere reports a loss"* (the silence half; the DATA half is still the finding) | F-8 |
+| `attack-converge-relay.test.js` §2, §3, §4 | the one-sided withhold, the two-sided fork, and *"`sync/chain.js` is unreachable"* | P-4 |
+| `fleet-harness.test.js` §2a | *"a relay that withholds ops from ONE Mac takes them PERMANENTLY"* → it only delays them | P-4 |
+| `privacy-e5-silence.test.js` §4, §5 | P-2's documentation half; the door row; the orphan set; the sharp-half row | P-2 (doc), P-4 |
+
+**Rows added by round 8:** `attack-converge-outbox.test.js` *"L-4 · the ack survives the quit"*;
+`attack-converge-disorder.test.js` §2's second row (*"a QUARANTINE in the alphabet costs data — and
+never costs it SILENTLY"*); `attack-converge-relay.test.js` §5's two anchor rows;
+`core-oplog.test.js`'s two L-4 rows; `sync-personal.test.js` *"VERSION with a DURABLE park — the
+cursor is RELEASED"*. **Four of the eight exist because the inverted rows are all "nothing bad
+happens"** and would otherwise be satisfied by a build that syncs nothing, reports everything for
+ever, or deletes the mechanism: the quarantine row (a loss may happen, but never silently), the
+missing-anchor row (a defence may not accuse an honest relay), the no-`parkStore` row (the
+fail-safe when the port is absent), and §2's own `silent` control.
+
 **Rows inverted by round 7:** R6-3a, R6-3b, R6-4a, R6-4b, R6-4c, R6-5a, R6-5c, R6-5d, R6-6a,
 R6-6b, R6-7a, R6-7d, R6-10a, R6-10b, R6-10c, R6-11a, R6-11b — and, in a file round 7 did not own
 but reddened, R5-11g, R5-12b and the second half of R5-12e. **Rows added:** R6-2b, R6-3c, R6-4e,
@@ -2042,6 +2394,44 @@ specifically because the inverted rows are all "nothing bad happens" and would o
 satisfied by deleting the mechanism**: R6-3c, R6-4e, R6-5h, R6-6e, R6-11c.
 
 ---
+
+## 7d-2. THE SECOND DOMAIN — the OP LIFECYCLE (round 8)
+
+§7d's method, applied a second time and to a second area. The area was chosen by the convergence
+adversary's own sentence: **"the domain here is the OP LIFECYCLE, not the op kinds."**
+`domains.js` enumerates what an op IS; **`tests/helpers/sync-domains.js`** enumerates what happens
+TO it. 792 lines, zero imports, **253 entries** over five domains, the same
+`{id, value, label, expect, openFinding}` contract, and `expect` is again the REQUIRED behaviour
+and never the current one.
+
+| domain | entries | the axes it crosses |
+|---|---|---|
+| **S1** | 8 + 160 | an op's fate end to end: 8 `openOp` outcomes × what the engine does × what survives a relaunch — and the full 8 × 5 × 4 GRID, generated rather than hand-marked, so *"a park must never become a drop"* is 32 cells whose `required` is `false` rather than a sentence in a docblock |
+| **S2** | 16 + 5 | durability across a restart: board × line × relay × outbox, all sixteen combinations with a decided answer, plus five real journeys that must land in named cells |
+| **S3** | 5 | ADR 001 §7.2's compaction crossed with every other lifecycle state |
+| **S4** | 7 | what the user and the system can OBSERVE — story 19.3's "silence must MEAN health", written as a table with two rows where silence is TRUE and must stay free |
+| **S5** | 58 | every module under `src/js/`, and whether the app can reach it from `boot.js`, `main.js` or `firstrun.js` — following DYNAMIC doors, because ADR 003 §7 gate 2 requires them |
+
+`tests/property/sync-domains.test.js` walks every entry against the real store, the real op log,
+the real `openOp`, the shipped engine and all 23 server handlers. **85/85, 0 UNEXPECTED, 0 STALE.**
+
+**What the enumeration produced that two adversary rounds did not.** Three of round 8's six new
+findings — **L-1**, **L-2**, **L-3** — had no `tests/attack/` row at all before it. They are not
+subtle: a refusal that dies with the session, a durable hold nothing can see, a park with no
+reaper. They were invisible because every previous pass asked *"is this branch right?"* and the
+answer was yes in each case — the missing thing was a whole column of the table nobody had drawn.
+
+**And two cautions this domain earned, which §7d did not have to state:**
+
+1. **A domain can be internally contradictory, and then it is a work order that lies.** `S4-refused`
+   and `S4-warnings` are measured on ONE device at ONE moment and required two different answers
+   from a first-match-wins helper. `S3-parked`'s three columns are requirements about two different
+   moments and could not all hold at once. Both were corrected in the PROBE, with the `expect`
+   untouched, and recorded (**L-5**). A domain file is an artifact and gets reviewed like one.
+2. **`predicted` goes stale, loudly, and that is the point.** S1 carries this build's measured
+   triple as data so the 160-cell grid can be generated. Every fix that moved a fate produced a
+   STALE report naming the row — which is how a fix that closes three park reasons and forgets the
+   fourth is caught by name rather than by a green suite.
 
 ## 7d. THE INPUT DOMAIN — the required method for `store.js`'s boot and coercion paths
 
@@ -2206,3 +2596,41 @@ touched.** These are the items that need one of those files, or a file no one ow
    worth writing.
 7. **`ctx.myDevices` should be derived, not plumbed** — `attestationOf` filtered by `memberId`,
    once A3-H4 lands. That removes the `act === me` degradation A3-H4 flags as a WP-8 blocker.
+
+### Owed by round 8, to whoever picks up next
+
+1. **`crypto/envelope.js` — `openOp`'s `park()` should return the op for its three post-decrypt
+   reasons.** `unknownKind`, `unknownField` and `unknownSpace` are decided AFTER the decrypt, so
+   the plaintext op is in scope at the `park()` call and is not returned. With it, `pullNow` could
+   hand those three to `oplog.park()` — the LOG's park, which folds into `checkpoint().parked` and
+   is re-judged by `unpark()` — instead of retaining sealed bytes it has already opened once. Not
+   a defect: the sealed retention is correct and closes S1. It would be strictly better.
+2. **`core/oplog.js` — one chain value beside each entry of `checkpoint().cursors`.** The chain
+   anchor is durable now, in `sync/cursor.js` behind the `chainStore` port, which is a SECOND file
+   for a fact that belongs beside the cursor. `cursor.js`'s own header makes the argument: *"two
+   persisted answers to one question is how they drift apart."* Nothing is wrong today —
+   `store.cursor()` is still the only value read as `since`, and the anchor can only lag it — but
+   the two files should become one, and `checkpoint()` is the place.
+3. **`src/js/storage.js` — two slots, both currently supplied by `family/engine.js`.**
+   `parkedEnvelopeStore()` (P-8) and `chainHeadStore()` (P-4) write through `engine.js`'s own
+   `readJSON`/`writeJSON` because `src/js/sync/` is I/O-free (ADR 005 §2) and `storage.js` was
+   another owner's file. The sealed-outbox cache has had the same note since LZP-502. Three ports,
+   one owner, one pass.
+4. **A severity on `store.warnings`.** L-5 is closed by making the channel non-raising, which is
+   right for today and is a blunt instrument: a genuine *"the tail could not be compacted"* now
+   reads exactly like *"held ops are now authorised"*. `_warn(msg, {level})` and one `level` field
+   in `diagnostics().warnings` would let `sync/status.js` fold faults and leave notices alone.
+5. **Two i18n strings, unchanged from the observability pass** (`src/js/i18n.js`): one for a HELD
+   op that is not merely pending (*„Eine Änderung wird zurückgehalten, bis dieser Mac das andere
+   Gerät kennt."*), one for a line that will not reach the other Mac. Until they land, `parked`,
+   `lost` and `chain` all speak with `syncErrGeneric`, which is why the settings sheet
+   de-duplicates by sentence — a no-op the day the strings exist.
+6. **`server/core/handlers/invites.js:218` — `readAttestedDevice`, not `readDevice`.** Carried
+   forward from the E2↔E3 seam pass and still owed: without it a joiner can plant a blob signed by
+   nothing, and because `familyRecipients()` throws on an unverifiable attestation, one bad joiner
+   wedges every future rotation for the whole family. Two lines.
+7. **`tests/tier1/platform-net.test.js`** — the day either shell ships `sync_request`, make
+   `reply.url` required in `createBridgeTransport` and invert `privacy-e5-endpoint.test.js` §2's
+   reduced row. Its assertion text is the deadline.
+8. **`src/js/family/pairingui.js`** — „Gerät koppeln" is the third moment `crypto/probe.js` names
+   and is still ungated. Pinned in `privacy-e5-silence.test.js` §5 with the line to invert.

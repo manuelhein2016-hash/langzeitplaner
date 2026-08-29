@@ -80,8 +80,23 @@ async function compact(dev) {
 // 1. E5-2, RE-OPENED
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§1 · the outbox cap stands down on the case it was written for', () => {
-  test('FAILED · compact ▸ author offline ▸ compact — the edit is destroyed, and both Macs say `healthy`', async () => {
+// INVERTED, NOT REPAIRED. Two things landed, and BOTH are needed — reverting either one turns the
+// first row below red, which is why they are named separately:
+//
+//   E5-2  `store._outboxHorizonCap()`'s stand-down asked the wrong question. `cap === null` means
+//         only "no live line strictly below the outbox floor", and that is the state EVERY
+//         compaction leaves behind — not an old file, not an adversary. Returning `undefined`
+//         there is not standing down, it is handing the log back its own defaults and folding the
+//         unacknowledged line for real. The stand-down belongs to `held >= floor` alone, and the
+//         answer this state calls for is the persisted horizon itself.
+//   L-4   `core/oplog.js` `load()` fed each tail line the `seq` its BYTES carry, and a tail line
+//         is written before any ack exists, so it always says `null`. The durable ack lives in
+//         `checkpoint().seqs`. An acknowledged op therefore came back looking unacknowledged, the
+//         outbox floor sank below the persisted horizon, and `_outboxHorizonCap` was pushed into
+//         the one arm that genuinely cannot recover — with no adversary and no old file, on any
+//         Mac that quits after a compaction.
+describe('§1 · CLOSED (E5-2, L-4) · the outbox cap holds the case it was written for', () => {
+  test('compact ▸ author offline ▸ compact — the edit SURVIVES, and reaches the other Mac', async () => {
     const f = await twoMacs();
     const A = f.device('A');
     const B = f.device('B');
@@ -97,38 +112,74 @@ describe('§1 · the outbox cap stands down on the case it was written for', () 
     await B.apply('editNotePopover', { id: 'seed', text: 'Im Zug getippt' });
     assert.equal(B.outboxSize(), 1, 'the edit is queued');
 
-    // THE CAP IS ASKED THE QUESTION AND ANSWERS `undefined` — no cap.
-    assert.equal(B.store._outboxHorizonCap(), undefined,
-      'E5-2 REOPENED: with no live line below the floor the guard stands down and imposes NO cap. '
-      + '`ZERO_STAMP` — fold nothing this time — is the answer this state calls for.');
+    // THE CAP IS ASKED THE QUESTION AND ANSWERS WITH A STAMP BELOW THE FLOOR.
+    const cap = B.store._outboxHorizonCap();
+    assert.notEqual(cap, undefined,
+      'E5-2: with no live line below the floor the cap must still be a STAMP — the persisted '
+      + 'horizon, which is already folded and is below the floor — and never `undefined`, which '
+      + 'is "no cap at all" and folds the line for real.');
+    assert.ok(B.store._log.horizon() === null || cap === B.store._log.horizon()
+      || cap === '0000000000000.000000.0000000000000000',
+      `the cap is the persisted horizon or ZERO_STAMP; measured ${cap}`);
 
     // ③ The second compaction. ADR 001 §7.2's ordinary tail policy, nothing exotic.
     await compact(B);
 
-    assert.equal(B.outboxSize(), 0,
-      'THE DEFECT: the queued edit has left the outbox without ever having been pushed');
-    assert.equal(B.logOps().length, 0, 'its line is gone from the log too');
+    assert.equal(B.outboxSize(), 1,
+      'THE FIX: the queued edit is still owed to the relay after a compaction that could see it');
+    assert.equal(B.logOps().length, 1, 'and its LINE is still in the log — that is what the outbox is');
 
-    // The store KNOWS, and says so into a channel nobody reads (F-8 has no consumer).
-    const warned = B.warnings().filter((w) => /finding E5-2/.test(w));
-    assert.equal(warned.length, 1, 'the stand-down warning fired');
-    assert.match(warned[0], /on a log written before the cap landed/,
-      'and its explanation is WRONG: this log was written by this build, three lines ago');
+    // Nothing was lost, so nothing is reported. Silence is EARNED here, which is the half a fix
+    // that reported an error for ever would also satisfy.
+    assert.deepEqual(B.warnings().filter((w) => /finding E5-2/.test(w)), [],
+      'the stand-down warning did not fire — this state is not the unrecoverable one');
+    assert.equal(B.storeDiagnostics().sync.lost, 0, 'and `diagnostics().sync.lost` agrees');
 
-    // ④ Back online, and nothing repairs it — not a sync, not a relaunch.
+    // ④ Back online, and it lands.
     B.online();
     await f.settle();
     await f.settle();
-    assert.equal(A.state.notes[0].text, 'Anfang', 'the other Mac never hears about the edit');
-    assert.equal(B.state.notes[0].text, 'Im Zug getippt', 'and this Mac still shows it');
+    assert.equal(A.state.notes[0].text, 'Im Zug getippt', 'the other Mac receives the edit');
+    assert.equal(B.state.notes[0].text, 'Im Zug getippt');
     assert.equal(B.status().state, 'healthy',
-      'STORY 19.3: the indicator draws NOTHING. The user is told the two Macs are in sync.');
+      'STORY 19.3: the indicator draws nothing — and now that is TRUE');
     assert.equal(A.status().state, 'healthy');
-    assert.equal(boardsAgree([A, B]).equal, false, 'the two Macs permanently disagree');
+    assert.equal(boardsAgree([A, B]).equal, true, boardsAgree([A, B]).detail);
 
     await B.relaunch();
     await f.settle();
-    assert.equal(A.state.notes[0].text, 'Anfang', 'a relaunch does not recover it either');
+    assert.equal(A.state.notes[0].text, 'Im Zug getippt', 'and a relaunch keeps it');
+  });
+
+  test('L-4 · the ack survives the quit, so an acknowledged op does not re-enter the outbox', async () => {
+    // THE SECOND HALF, MINIMISED. `checkpoint().seqs` is the durable ack (`store.outbox()`'s own
+    // docblock says so: "an op leaves the outbox when the server reports it … which rides in
+    // `checkpoint().seqs` and so survives a relaunch"). The tail line's bytes say `seq: null`
+    // because they were written before the push. `oplog.load()` fed the BYTES and dropped the
+    // index, so every acknowledged op came back unacknowledged — which is what dragged the outbox
+    // floor below the persisted horizon and pushed the cap into E5-2's unrecoverable arm.
+    const f = await twoMacs();
+    const A = f.device('A');
+    const B = f.device('B');
+    await f.settle();
+
+    await B.apply('editNotePopover', { id: 'seed', text: 'gesendet und bestätigt' });
+    await B.push();
+    const oid = B.logOps().find((o) => o.f && o.f.text === 'gesendet und bestätigt').id;
+    assert.equal(B.outboxSize(), 0, 'the relay acknowledged it');
+    assert.notEqual(B.store._log.seqOfOp(oid), null, 'and the log recorded the seq');
+
+    await B.relaunch();
+    assert.equal(B.outboxSize(), 0,
+      'IT IS STILL ACKNOWLEDGED after the quit — no phantom outbox entry for an op the relay has '
+      + 'had all along (finding L-4).');
+    assert.notEqual(B.store._log.seqOfOp(oid), null, 'and `seqOfOp` still answers for it');
+    // Where the LINE still exists — it does not here, because a clean quit with an empty outbox
+    // folds it — the line and the index must agree. The seam itself is minimised at
+    // `tests/tier1/core-oplog.test.js` "L-4 · `load()` restores a tail line's ack", which drives a
+    // checkpoint and a `seq: null` tail through `load()` directly and kills the mutant.
+    const line = B.store._log.lines().find((l) => l.op.id === oid);
+    if (line) assert.notEqual(line.seq, null, 'the line and the index agree');
   });
 
   test('SUCCEEDED (control) · one live line below the floor and the cap protects the edit', async () => {
@@ -160,7 +211,7 @@ describe('§1 · the outbox cap stands down on the case it was written for', () 
     assert.equal(boardsAgree([A, B]).equal, true, boardsAgree([A, B]).detail);
   });
 
-  test('FAILED · the same thing at story-19.6 scale — a fortnight of edits, all of them', async () => {
+  test('the same thing at story-19.6 scale — a fortnight of edits, ALL of them survive', async () => {
     // The reachable shape in the field: a device whose whole live set is unacknowledged, which
     // is what a laptop that quit with a full outbox looks like on its next launch, and what an
     // offline device looks like after the first `TAIL_COMPACT_AT` lines.
@@ -179,14 +230,17 @@ describe('§1 · the outbox cap stands down on the case it was written for', () 
     assert.equal(B.outboxSize(), 12);
 
     await compact(B);
-    assert.equal(B.outboxSize(), 0, 'ALL TWELVE are destroyed by one compaction');
+    assert.equal(B.outboxSize(), 12,
+      'ALL TWELVE survive the compaction. This is the reachable shape in the field — a laptop '
+      + 'whose whole live set is unacknowledged — and it was the shape that lost every one of them.');
 
     B.online();
     await f.settle();
     await f.settle();
-    assert.equal(A.state.notes.length, 1, 'the desktop receives none of the fortnight');
-    assert.equal(B.state.notes.length, 13, 'the laptop still shows every one of them');
+    assert.equal(A.state.notes.length, 13, 'the desktop receives the whole fortnight');
+    assert.equal(B.state.notes.length, 13, 'and the laptop still shows every one of them');
     assert.equal(B.status().state, 'healthy');
+    assert.equal(boardsAgree([A, B]).equal, true, boardsAgree([A, B]).detail);
   });
 });
 

@@ -107,6 +107,9 @@
  * @property {number} epoch
  * @property {string} recipientId            'dev_…' OR 'rec_<memberId>' — see DECISION E3-4 below
  * @property {Uint8Array} wrapped            {salt,iv,ct} — opaque
+ * @property {string} senderDeviceId         'dev_…' — WHO DEPOSITED IT. Stamped by the relay from
+ *                                           the request it authenticated, never read off a body.
+ *                                           See DECISION E2E3-3 below.
  */
 
 /**
@@ -151,7 +154,7 @@ export const MODEL_COLUMNS = Object.freeze({
   Device:      Object.freeze(['id', 'memberId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'attestation', 'lastSeenSeq', 'lastPushedSeq', 'addedAt', 'revokedAt']),
   Op:          Object.freeze(['spaceId', 'seq', 'opId', 'epoch', 'deviceShort', 'witness', 'chain', 'envelope', 'receivedAt']),
   Epoch:       Object.freeze(['spaceId', 'epoch', 'createdAt']),
-  KeyWrap:     Object.freeze(['spaceId', 'epoch', 'recipientId', 'wrapped']),
+  KeyWrap:     Object.freeze(['spaceId', 'epoch', 'recipientId', 'wrapped', 'senderDeviceId']),
   Invite:      Object.freeze(['id', 'spaceId', 'verifier', 'wrapSalt', 'epoch', 'createdBy', 'expiresAt', 'usedAt', 'revokedAt']),
   PairSession: Object.freeze(['rid', 'boxA', 'boxB', 'delivery', 'attempts', 'expiresAt', 'burnedAt']),
   Nonce:       Object.freeze(['deviceShort', 'nonce', 'expiresAt']),
@@ -215,6 +218,7 @@ export const PLAINTEXT_STRINGS = Object.freeze({
   'Epoch.spaceId':       'the relation',
   'KeyWrap.spaceId':     'the relation',
   'KeyWrap.recipientId': 'a device id or rec_<memberId>; addresses an opaque blob',
+  'KeyWrap.senderDeviceId': 'a device id — WHICH DEVICE DEPOSITED THIS WRAP. ADR 002 §4.2 step 6 makes the RECEIVER verify who sent a wrap before deriving a KEK against it (finding S1), and `admitWraps` needs an index into its own verified sender set. Stamped by the relay from the authenticated request, so it carries no client-chosen bits and states nothing the relay did not already observe when it checked that signature. GET /keys publishes it as the ADR spelling `senderKexPubRaw`, joined from Device.kexPubRaw.',
   'Invite.id':           'HKDF of the code; the raw code never reaches the server',
   'Invite.spaceId':      'the relation',
   'Invite.createdBy':    'a member id — 15.5 lets the issuer revoke',
@@ -461,6 +465,10 @@ export const INTERFACE_EXTENSIONS = Object.freeze([
     why: 'ADR 002 §6.2 says the rendezvous is BURNED after 5 failed decrypts. A row that is merely deleted can be re-created by replaying pair/offer, which resets the budget and makes the 60-bit code the security parameter after all. The burn is a tombstone.',
   }),
   Object.freeze({
+    id: 'E2E3-3', kind: 'added', method: 'KeyWrap.senderDeviceId',
+    why: 'ADR 002 §4.2 step 6 (the 2026-08-28 amendment for finding S1) makes the RECEIVING device verify who sent a wrap before it derives a KEK against it, and E3 shipped that as a REQUIRED `ctx.senders` parameter on `admitWraps` indexed by `row.senderKexPubRaw`. No column carried a sender, so `GET /keys` could not publish one and `POST /epoch` 400d a client that tried to send one: `admitWraps` threw on every honest row. The column is written by the RELAY from the request it authenticated — never off the body — so it carries no client-chosen bits and states no fact the relay did not already observe. `GET /keys` publishes the ADR spelling `senderKexPubRaw`, joined from Device.kexPubRaw, so the receiving client and ADR 002 §4.2 step 6 are unchanged. Finding E2E3-3.',
+  }),
+  Object.freeze({
     id: 'E2-I8', kind: 'added', method: 'Device.lastPushedSeq',
     why: 'Already normative in server.contract.js as an amendment (WRITE progress gates tombstone GC as well as READ progress); listed here because it is absent from ADR 003 §5.1 model Device and the schema now carries it.',
   }),
@@ -586,7 +594,7 @@ export const STORE_CONTRACT_CASES = Object.freeze([
       await threw(assert, () => store.addMember(fixtures.member({ recoveryPubKex: 'text' })), 'Member.recoveryPubKex');
       await store.addMember(fixtures.member());
       await threw(assert, () => store.addDevice(fixtures.device({ attestation: 'text' })), 'Device.attestation');
-      await threw(assert, () => store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_x', wrapped: 'text' }]), 'KeyWrap.wrapped');
+      await threw(assert, () => store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_x', wrapped: 'text', senderDeviceId: 'dev_sender' }]), 'KeyWrap.wrapped');
       await threw(assert, () => store.putInvite(fixtures.invite({ verifier: 'text' })), 'Invite.verifier');
       await threw(assert, () => store.putPairSession('rid1', { boxA: 'text' }, 180000), 'PairSession.boxA');
     } },
@@ -663,7 +671,7 @@ export const STORE_CONTRACT_CASES = Object.freeze([
       await store.upsertOps(SP, [fixtures.op('op1')]);
       await store.upsertOps(SP2, [fixtures.op('op2')]);
       await store.putInvite(fixtures.invite({ spaceId: SP }));
-      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_AAAAAAAAAAAAAAAAAAAAAA', wrapped: bytes(64, 13) }]);
+      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_AAAAAAAAAAAAAAAAAAAAAA', wrapped: bytes(64, 13), senderDeviceId: 'dev_sender' }]);
       await store.deleteSpace(SP);
       assert.equal(await store.getSpace(SP), null);
       assert.equal((await store.listMembers(SP)).length, 0);
@@ -958,9 +966,9 @@ export const STORE_CONTRACT_CASES = Object.freeze([
     run: async ({ makeStore, assert }) => {
       const store = await withSpace(makeStore);
       await store.putKeyWraps([
-        { spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 21) },
-        { spaceId: SP, epoch: 2, recipientId: 'dev_1', wrapped: bytes(156, 22) },
-        { spaceId: SP, epoch: 2, recipientId: 'dev_2', wrapped: bytes(156, 23) },
+        { spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 21), senderDeviceId: 'dev_sender' },
+        { spaceId: SP, epoch: 2, recipientId: 'dev_1', wrapped: bytes(156, 22), senderDeviceId: 'dev_sender' },
+        { spaceId: SP, epoch: 2, recipientId: 'dev_2', wrapped: bytes(156, 23), senderDeviceId: 'dev_sender' },
       ]);
       const w = await store.getKeyWraps(SP, 'dev_1');
       assert.deepEqual(w.map((x) => x.epoch).sort(), [1, 2],
@@ -972,8 +980,8 @@ export const STORE_CONTRACT_CASES = Object.freeze([
   { id: 'C34', title: 'putKeyWraps upserts on (spaceId, epoch, recipientId)', tags: ['keys'],
     run: async ({ makeStore, assert }) => {
       const store = await withSpace(makeStore);
-      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 24) }]);
-      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 25) }]);
+      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 24), senderDeviceId: 'dev_sender' }]);
+      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 25), senderDeviceId: 'dev_sender' }]);
       const w = await store.getKeyWraps(SP, 'dev_1');
       assert.equal(w.length, 1, 're-wrapping the same epoch to the same recipient replaces, it does not accumulate');
     } },
@@ -982,19 +990,51 @@ export const STORE_CONTRACT_CASES = Object.freeze([
     run: async ({ makeStore, assert }) => {
       const store = await withSpace(makeStore);
       await store.addMember(fixtures.member({ id: 'mem_1' }));
-      await store.putKeyWraps([{ spaceId: SP, epoch: 3, recipientId: 'rec_mem_1', wrapped: bytes(156, 26) }]);
+      await store.putKeyWraps([{ spaceId: SP, epoch: 3, recipientId: 'rec_mem_1', wrapped: bytes(156, 26), senderDeviceId: 'dev_sender' }]);
       const w = await store.getKeyWraps(SP, 'rec_mem_1');
       assert.equal(w.length, 1,
         'ADR 002 §4.2 step 2 wraps to each member RK_kex as well as to each device; a foreign key onto Device would have made that unstorable');
+    } },
+
+  { id: 'C61', title: 'a key wrap remembers WHO DEPOSITED IT — finding E2E3-3', tags: ['keys', 'E2E3-3'],
+    run: async ({ makeStore, assert }) => {
+      const store = await withSpace(makeStore);
+      await store.putKeyWraps([
+        { spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 30), senderDeviceId: 'dev_papa' },
+        { spaceId: SP, epoch: 2, recipientId: 'dev_1', wrapped: bytes(156, 31), senderDeviceId: 'dev_mama' },
+      ]);
+      const w = (await store.getKeyWraps(SP, 'dev_1')).sort((a, b) => a.epoch - b.epoch);
+      assert.deepEqual(w.map((x) => x.senderDeviceId), ['dev_papa', 'dev_mama'],
+        'ADR 002 §4.2 step 6: the receiver refuses a wrap whose sender is not admissible for this '
+        + 'space, and it cannot do that if the store forgot who deposited the row. Two rotations '
+        + 'by two different devices must not collapse to one sender.');
+      // The sender is NOT part of the key: re-depositing the same (epoch, recipient) from a
+      // DIFFERENT device replaces the row, sender and all. That is the healing path after a
+      // revocation — the rows a since-revoked device deposited become `unauthorized` on the
+      // receiving side, and the rotation that follows the revocation re-deposits epochs 1..e+1
+      // under a live sender.
+      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 32), senderDeviceId: 'dev_oma' }]);
+      const after = await store.getKeyWraps(SP, 'dev_1');
+      assert.equal(after.length, 2, 're-depositing replaces; it does not accumulate a second sender');
+      assert.equal(after.find((x) => x.epoch === 1).senderDeviceId, 'dev_oma');
+    } },
+
+  { id: 'C62', title: 'a key wrap without a sender is REFUSED at the adapter boundary', tags: ['keys', 'E2E3-3'],
+    run: async ({ makeStore, assert }) => {
+      const store = await withSpace(makeStore);
+      // Not a validation nicety. A row with no sender is a row `admitWraps` can only answer
+      // `unauthorized` for, which is a silently unreadable epoch — the exact shape of failure
+      // ADR 002 §4.4's park is designed to avoid. Required, so a handler cannot forget it.
+      await threw(assert, () => store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 33) }]), 'KeyWrap.senderDeviceId');
     } },
 
   { id: 'C36', title: 'deleteKeyWrapsForDevices removes a recipient across every epoch', tags: ['keys', '20.2'],
     run: async ({ makeStore, assert }) => {
       const store = await withSpace(makeStore);
       await store.putKeyWraps([
-        { spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 27) },
-        { spaceId: SP, epoch: 2, recipientId: 'dev_1', wrapped: bytes(156, 28) },
-        { spaceId: SP, epoch: 2, recipientId: 'dev_2', wrapped: bytes(156, 29) },
+        { spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 27), senderDeviceId: 'dev_sender' },
+        { spaceId: SP, epoch: 2, recipientId: 'dev_1', wrapped: bytes(156, 28), senderDeviceId: 'dev_sender' },
+        { spaceId: SP, epoch: 2, recipientId: 'dev_2', wrapped: bytes(156, 29), senderDeviceId: 'dev_sender' },
       ]);
       assert.equal(await store.deleteKeyWrapsForDevices(SP, ['dev_1']), 2,
         'ADR 002 §4.2 step 4: delete every KeyWrap of a removed or revoked device, for ALL epochs');
@@ -1199,7 +1239,7 @@ export const STORE_CONTRACT_CASES = Object.freeze([
       await threw(assert, () => store.tx(async (t) => {
         await t.upsertOps(SP, [fixtures.op('b'), fixtures.op('c')]);
         await t.addMember(fixtures.member({ id: 'mem_x' }));
-        await t.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_x', wrapped: bytes(16, 41) }]);
+        await t.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_x', wrapped: bytes(16, 41), senderDeviceId: 'dev_sender' }]);
         throw new Error('handler failed after writing');
       }), 'the transaction must re-throw');
       assert.equal((await store.listOps(SP, 0n, 100)).ops.length, 1, 'the ops rolled back');
@@ -1239,7 +1279,7 @@ export const STORE_CONTRACT_CASES = Object.freeze([
         const claimed = await t.claimEpoch(SP, epoch);
         if (!claimed) return null;
         await t.setCurrentEpoch(SP, epoch);
-        await t.putKeyWraps([{ spaceId: SP, epoch, recipientId: 'dev_1', wrapped: bytes(156, epoch) }]);
+        await t.putKeyWraps([{ spaceId: SP, epoch, recipientId: 'dev_1', wrapped: bytes(156, epoch), senderDeviceId: 'dev_sender' }]);
         return epoch;
       })));
       assert.equal(winners.filter((w) => w === 2).length, 1, 'first writer wins the epoch (409 epoch_taken for the rest)');

@@ -36,6 +36,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { memoryStore } from '../../server/adapters/memory.js';
+import { attestedPerson, attestedDeviceFor, deviceWire, memberWire } from './_attested-person.js';
 import { fileStore } from '../../server/adapters/file.js';
 import {
   createSpace, rotateEpoch,
@@ -150,30 +151,26 @@ async function expectFail(fn, status, code, hint) {
 
 // ── fixtures for a whole person ──────────────────────────────────────────────
 
-function person(seed) {
-  return {
-    memberId: `mem_${id22(seed)}`,
-    deviceId: `dev_${id22(seed + 1)}`,
-    deviceShort: short16(seed + 2),
-    recoveryPubSig: bytes(65, seed + 3),
-    recoveryPubKex: bytes(65, seed + 4),
-    sigPubRaw: bytes(65, seed + 5),
-    kexPubRaw: bytes(65, seed + 6),
-    attestation: bytes(120, seed + 7),
-  };
-}
-const memberBody = (p) => ({
-  memberId: p.memberId, recoveryPubSig: b64(p.recoveryPubSig), recoveryPubKex: b64(p.recoveryPubKex),
-});
-const deviceBody = (p) => ({
-  deviceId: p.deviceId, deviceShort: p.deviceShort,
-  sigPubRaw: b64(p.sigPubRaw), kexPubRaw: b64(p.kexPubRaw), attestation: b64(p.attestation),
-});
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// A PERSON IS NOW REAL, AND THAT IS THE POINT — finding E2E3-7
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// This used to be `bytes(65, seed)` standing in for a P-256 point and `bytes(120, seed)` standing
+// in for an attestation, because `POST /spaces` read the attestation with `readBytes` and
+// verified nothing at all. That is exactly why the divergence from `POST /devices` — which has
+// always run ADR 002 §2.3's P2, S1 and S2 — could not be seen from this suite: a fixture made of
+// noise cannot tell a verifying route from a credulous one.
+//
+// `_attested-person.js` mints with the SHIPPING `buildDeviceAttestation` + `attestDevice`, so
+// what this suite hands the relay is what a Mac hands the relay. The ids are still stable within
+// a run; only the entropy moved, and no assertion here ever depended on a literal id.
+const person = attestedPerson;
+const memberBody = memberWire;
+const deviceBody = deviceWire;
 const wrap = (recipientId, epoch, seed) => ({ recipientId, epoch, wrapped: b64(bytes(156, seed || 1)) });
 
-const ADMIN = person(11);
-const MOM = person(21);
-const KID = person(31);
+const ADMIN = await person({ colorRef: 'gruen' });
+const MOM = await person({ colorRef: 'blau' });
+const KID = await person({ colorRef: 'rot' });
 const SPACE = `fsp_${id22(2)}`;
 const OTHER_SPACE = `fsp_${id22(3)}`;
 
@@ -206,7 +203,7 @@ async function joinDirect(store, clock, p, colorRef, spaceId) {
   });
   await store.addDevice({
     id: p.deviceId, memberId: p.memberId, deviceShort: p.deviceShort, sigPubRaw: p.sigPubRaw,
-    kexPubRaw: p.kexPubRaw, attestation: p.attestation, lastSeenSeq: 0n, lastPushedSeq: 0n,
+    kexPubRaw: p.kexPubRaw, attestation: p.attestationBytes, lastSeenSeq: 0n, lastPushedSeq: 0n,
     addedAt: new Date(clock.now()), revokedAt: null,
   });
 }
@@ -281,7 +278,24 @@ test('a missing or absurd limit falls back to the ADR value, never to unlimited'
 // 2. The coverage arithmetic, on its own
 // ═════════════════════════════════════════════════════════════════════════════
 
-test('requiredRecipients names every live device AND every live member RK_kex (E3-2)', () => {
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// INVERTED 2026-08-29 — finding E2E3-8. The row below asserted that `requiredRecipients` owes a
+// `rec_<memberId>` wrap for EVERY member of EVERY space. That is ADR 002 §4.2 step 2 read
+// literally, it is what closed finding E3-2 for the personal space, and for a FAMILY space it
+// was an obligation no client in the world could discharge: `familyRecipients()` in
+// `src/js/crypto/spacekeys.js` produces no recovery recipient at all, and its header says so.
+// Every family rotation was `409 incomplete_coverage`.
+//
+// The obvious repair — build the family recovery recipient from `Member.recoveryPubKex` — is a
+// live break of 21.1/21.2, because NOTHING SIGNS `recoveryPubKex`. Swapping `recoveryPubSig` is
+// loud (every attestation of that member stops verifying); swapping `recoveryPubKex` alone is
+// silent, leaves every attestation genuine, is invisible in the member list, and hands the relay
+// `FSK_{e+1}`. So the demand is withdrawn for the family space and KEPT for the personal one,
+// where `personalRecipients()` builds that recipient from my own locally-held key.
+//
+// The row is not deleted: it is now asserted in both directions, and the family half carries the
+// reason it is `false` rather than being absent.
+test('requiredRecipients names every live device, and a member RK_kex only where one can be BOUND (E3-2, E2E3-8)', () => {
   const members = [
     { id: 'mem_a', removedAt: null }, { id: 'mem_b', removedAt: null },
     { id: 'mem_gone', removedAt: new Date(1) },
@@ -292,15 +306,32 @@ test('requiredRecipients names every live device AND every live member RK_kex (E
     { id: 'dev_b1', memberId: 'mem_b', revokedAt: null },
     { id: 'dev_x1', memberId: 'mem_gone', revokedAt: null },
   ];
-  assert.deepEqual(requiredRecipients(members, devices), ['dev_a1', 'dev_b1', 'rec_mem_a', 'rec_mem_b']);
-  assert.deepEqual(staleRecipients(members, devices), ['dev_a2', 'dev_x1', 'rec_mem_gone']);
+  // PERSONAL — unchanged. `personalRecipients()` REFUSES a device that is not mine and builds
+  // the recovery recipient from `me.recoveryKexPubRaw`, a key that never came off the relay.
+  assert.deepEqual(requiredRecipients(members, devices, 'PERSONAL'), ['dev_a1', 'dev_b1', 'rec_mem_a', 'rec_mem_b']);
+  // FAMILY — devices only. The recovery wrap stays PERMITTED (it is a known recipient, so a
+  // client that can bind the key may send it and it lands) and is no longer REQUIRED.
+  assert.deepEqual(requiredRecipients(members, devices, 'FAMILY'), ['dev_a1', 'dev_b1']);
+  // The teeth are all still where they matter: a hostile admin still cannot omit a live device.
+  assert.equal(requiredRecipients(members, devices, 'FAMILY').includes('dev_b1'), true);
+
+  assert.deepEqual(staleRecipients(members, devices), ['dev_a2', 'dev_x1', 'rec_mem_gone'],
+    'a removed member is still owed nothing and still keeps nothing — T2 is untouched by this');
   assert.equal(knownRecipients(members, devices).has('dev_a2'), true, 'a revoked device is still KNOWN');
+  assert.equal(knownRecipients(members, devices).has('rec_mem_a'), true,
+    'and a family recovery wrap is still PERMITTED — this is a withdrawn demand, not a ban');
   assert.equal(knownRecipients(members, devices).has('dev_stranger'), false);
+
+  // A caller that forgets the kind gets a 500, not a silently wrong obligation.
+  assert.throws(() => requiredRecipients(members, devices), (e) => e.status === 500);
 });
 
-test('an empty space requires nothing and a space with no devices still owes the recovery wrap', () => {
-  assert.deepEqual(requiredRecipients([], []), []);
-  assert.deepEqual(requiredRecipients([{ id: 'mem_a', removedAt: null }], []), ['rec_mem_a']);
+test('an empty space requires nothing; a member with no devices owes a recovery wrap only in a PERSONAL space', () => {
+  assert.deepEqual(requiredRecipients([], [], 'PERSONAL'), []);
+  assert.deepEqual(requiredRecipients([], [], 'FAMILY'), []);
+  assert.deepEqual(requiredRecipients([{ id: 'mem_a', removedAt: null }], [], 'PERSONAL'), ['rec_mem_a']);
+  assert.deepEqual(requiredRecipients([{ id: 'mem_a', removedAt: null }], [], 'FAMILY'), [],
+    'finding E2E3-8: a family member with no live device is owed nothing the wire can deliver yet');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -332,11 +363,15 @@ for (const adapter of ADAPTERS) {
     const clock = fakeClock();
     const store = adapter.make(clock);
     const ctx = asPerson(store, clock, ADMIN);
-    // The device is wrapped; the member's RK_kex is not. Under ADR 002 §4.2 step 2 that is half a
-    // rotation, and it is the half that makes A2 recovery of a family space impossible.
+    // The MEMBER is wrapped; the DEVICE is not — which is the half the coverage rule still
+    // demands of every space kind, and the half a hostile client would omit.
+    // (Inverted for finding E2E3-8: this used to omit `rec_<memberId>` from a FAMILY creation.
+    // A family space no longer owes that wrap, because no client can build it without handing
+    // the relay the family key. The personal-space case keeps the RK_kex demand and is the row
+    // 'omitting a member RK_kex is still refused where it can be BOUND' below.)
     await expectFail(
-      () => createSpace(req({ body: createBody(ADMIN, { wraps: [wrap(ADMIN.deviceId, 1, 1)] }) }), ctx),
-      409, 'incomplete_coverage', 'a key ring missing rec_<memberId>',
+      () => createSpace(req({ body: createBody(ADMIN, { wraps: [wrap(recoveryRecipient(ADMIN.memberId), 1, 1)] }) }), ctx),
+      409, 'incomplete_coverage', 'a key ring missing the creator\'s own device',
     );
     assert.equal(await store.getSpace(SPACE), null, 'the whole creation rolled back');
     assert.deepEqual(await store.listMembers(SPACE), []);
@@ -451,10 +486,17 @@ for (const adapter of ADAPTERS) {
 
     // Finding E2-203-1: one Mac, one Device row, globally. A user who already has a personal
     // space cannot create a family one. Refused with a named reason rather than a 500.
+    // MOM's member row, and a device MOM really attested that reuses ADMIN's `deviceId`. The
+    // attestation therefore VERIFIES (finding E2E3-7 made that a precondition of getting this
+    // far), so the request reaches the store check this row is about instead of stopping at 401.
+    const momsMac = await attestedDeviceFor(MOM, { deviceId: ADMIN.deviceId });
     const second = createBody(ADMIN, { spaceId: OTHER_SPACE });
     second.member = { ...memberBody(MOM) };
+    second.device = deviceWire(momsMac);
     second.wraps = [wrap(ADMIN.deviceId, 1, 1), wrap(recoveryRecipient(MOM.memberId), 1, 2)];
-    const err2 = await expectFail(() => createSpace(req({ body: second }), ctx), 400, 'bad_request');
+    const err2 = await expectFail(
+      () => createSpace(req({ body: second }), makeCtx(store, clock, { auth: { deviceShort: momsMac.deviceShort } })),
+      400, 'bad_request');
     assert.equal(err2.extra.reason, 'registered');
     assert.equal(err2.extra.field, 'device.deviceId');
   });
@@ -472,27 +514,27 @@ for (const adapter of ADAPTERS) {
     const clock = fakeClock();
     const store = adapter.make(clock);
     const limits = { ...LIMITS, spacesPerIpHour: 2 };
-    const mk = (seed, ip) => {
-      const p = person(500 + seed * 10);
+    const mk = async (seed, ip) => {
+      const p = await person({ colorRef: 'blau' });
       const ctx = makeCtx(store, clock, { auth: { deviceShort: p.deviceShort }, limits });
       const body = createBody(p, { spaceId: `fsp_${id22(600 + seed)}`, colorRef: 'blau' });
       return () => createSpace(fromIp(ip, { body }), ctx);
     };
-    assert.equal((await mk(1, '198.51.100.7')()).status, 200);
-    assert.equal((await mk(2, '198.51.100.7')()).status, 200);
-    const err = await expectFail(mk(3, '198.51.100.7'), 429, 'rate_limited');
+    assert.equal((await (await mk(1, '198.51.100.7'))()).status, 200);
+    assert.equal((await (await mk(2, '198.51.100.7'))()).status, 200);
+    const err = await expectFail(await mk(3, '198.51.100.7'), 429, 'rate_limited');
     assert.equal(err.extra.retryAfter, 3600, '429 must carry Retry-After (ADR 003 §6.1)');
     // A different IP has its own budget…
-    assert.equal((await mk(4, '198.51.100.8')()).status, 200);
+    assert.equal((await (await mk(4, '198.51.100.8'))()).status, 200);
     // …but two callers with NO usable address share ONE bucket rather than each getting a fresh
     // two. `limits.js` puts them all in the `?` identity; an unknown origin must never be handed
     // a private budget, which is what per-request keying would silently do.
-    assert.equal((await mk(5, null)()).status, 200);
-    assert.equal((await mk(6, null)()).status, 200);
-    await expectFail(mk(7, null), 429, 'rate_limited', 'an unknown origin must not mint a budget');
+    assert.equal((await (await mk(5, null))()).status, 200);
+    assert.equal((await (await mk(6, null))()).status, 200);
+    await expectFail(await mk(7, null), 429, 'rate_limited', 'an unknown origin must not mint a budget');
     // …and a header that is present but not address-shaped lands in the same shared bucket
     // rather than minting a private one per spoofed value.
-    await expectFail(mk(8, 'not-an-address'), 429, 'rate_limited', 'a junk XFF must not mint a budget');
+    await expectFail(await mk(8, 'not-an-address'), 429, 'rate_limited', 'a junk XFF must not mint a budget');
   });
 
   T('a rate-limited creation consumes no rows', async () => {
@@ -500,7 +542,7 @@ for (const adapter of ADAPTERS) {
     const store = adapter.make(clock);
     const ctx = makeCtx(store, clock, { auth: { deviceShort: ADMIN.deviceShort }, limits: { ...LIMITS, spacesPerIpHour: 1 } });
     await createSpace(req({ body: createBody(ADMIN) }), ctx);
-    const p = person(777);
+    const p = await person({ colorRef: 'blau' });
     const ctx2 = makeCtx(store, clock, { auth: { deviceShort: p.deviceShort }, limits: { ...LIMITS, spacesPerIpHour: 1 } });
     await expectFail(() => createSpace(req({ body: createBody(p, { spaceId: OTHER_SPACE }) }), ctx2), 429, 'rate_limited');
     assert.equal(await store.getSpace(OTHER_SPACE), null);
@@ -548,9 +590,12 @@ for (const adapter of ADAPTERS) {
     const selfish = [wrap(ADMIN.deviceId, 2, 1), wrap(recoveryRecipient(ADMIN.memberId), 2, 2)];
     const err = await expectFail(() => rotateEpoch(rotateReq(SPACE, { epoch: 2, wraps: selfish }), ctx), 409, 'incomplete_coverage');
     const missing = err.extra.missing.map((m) => `${m.recipientId}@${m.epoch}`).sort();
+    // INVERTED 2026-08-29 — finding E2E3-8. `rec_${MOM.memberId}@1` and `@2` used to be on this
+    // list. They are not any more, and the ATTACK this row is about is unaffected: the admin
+    // still cannot rotate while omitting Mom's DEVICE, which is the whole of 20.2's control. What
+    // is gone is a demand no client could satisfy — see `requiredRecipients` and its header.
     assert.deepEqual(missing, [
       `${MOM.deviceId}@1`, `${MOM.deviceId}@2`,
-      `rec_${MOM.memberId}@1`, `rec_${MOM.memberId}@2`,
     ], 'the client is told exactly whom it forgot, at which epochs');
 
     const space = await store.getSpace(SPACE);
@@ -585,7 +630,9 @@ for (const adapter of ADAPTERS) {
     const err = await expectFail(() => rotateEpoch(rotateReq(SPACE, { epoch: 3, wraps: onlyCurrent }), ctx), 409, 'incomplete_coverage');
     assert.deepEqual(
       err.extra.missing.map((m) => `${m.recipientId}@${m.epoch}`).sort(),
-      [`${MOM.deviceId}@1`, `${MOM.deviceId}@2`, `rec_${MOM.memberId}@1`, `rec_${MOM.memberId}@2`],
+      [`${MOM.deviceId}@1`, `${MOM.deviceId}@2`],
+      'inverted for finding E2E3-8: the HISTORY half of the coverage rule is untouched — a joiner '
+      + 'is still owed every epoch 1..e on her device, which is what keeps Oma\'s birthday visible',
     );
     assert.equal((await store.getSpace(SPACE)).currentEpoch, 2);
 
@@ -598,26 +645,64 @@ for (const adapter of ADAPTERS) {
     assert.deepEqual((await store.getKeyWraps(SPACE, MOM.deviceId)).map((w) => w.epoch).sort(), [1, 2, 3]);
   });
 
-  T('omitting a member RK_kex alone is enough to be refused (finding E3-2)', async () => {
+  // INVERTED 2026-08-29 — finding E2E3-8, and this is the row that moved rather than died.
+  // It used to rotate a FAMILY space omitting `rec_<MOM>` and assert a 409. `familyRecipients()`
+  // builds no recovery recipient, so that 409 fired on every honest client too, and the obvious
+  // repair (build it from the unsigned `Member.recoveryPubKex`) hands the relay the family key.
+  // The demand — and therefore this row — moves to the PERSONAL space, where the wrap is built
+  // from my own locally-held `RK_kex` and the E3-2 clause is still both true and dischargeable.
+  T('omitting a member RK_kex is still refused where it can be BOUND — a PERSONAL space (E3-2)', async () => {
+    const clock = fakeClock();
+    const store = adapter.make(clock);
+    const me = await person({ colorRef: 'gruen' });
+    const psp = `psp_${id22(77)}`;
+    const ctx = makeCtx(store, clock, { auth: { deviceShort: me.deviceShort } });
+    await createSpace(req({
+      body: {
+        spaceId: psp, kind: 'PERSONAL', colorRef: 'gruen',
+        member: memberBody(me), device: deviceWire(me),
+        wraps: [wrap(me.deviceId, 1, 1), wrap(recoveryRecipient(me.memberId), 1, 2)],
+      },
+    }), ctx);
+    const noRecovery = [wrap(me.deviceId, 2, 3), wrap(me.deviceId, 1, 4)];
+    const err = await expectFail(
+      () => rotateEpoch(req({ path: `/api/v1/spaces/${psp}/epoch`, params: { id: psp }, body: { epoch: 2, wraps: noRecovery } }),
+        makeCtx(store, clock, { auth: { deviceShort: me.deviceShort, deviceId: me.deviceId, memberId: me.memberId } })),
+      409, 'incomplete_coverage');
+    assert.equal(err.extra.missing.every((m) => m.recipientId === recoveryRecipient(me.memberId)), true,
+      'she keeps reading today and loses everything the day she replaces her Mac from the backup file');
+  });
+
+  // The family half of the same clause, stated as the OPEN GAP it is rather than left unsaid.
+  T('a FAMILY rotation that omits every RK_kex is ACCEPTED — finding E2E3-8, open', async () => {
     const { store, clock } = await withSpace(adapter);
     await joinDirect(store, clock, MOM, 'blau');
     const ctx = asPerson(store, clock, ADMIN);
     const noRecovery = [
-      wrap(ADMIN.deviceId, 2, 1), wrap(recoveryRecipient(ADMIN.memberId), 2, 2),
-      wrap(MOM.deviceId, 2, 3), wrap(MOM.deviceId, 1, 4),
-      // rec_MOM missing at both epochs — she keeps reading today and loses everything the day
-      // she replaces her Mac from the backup file.
+      wrap(ADMIN.deviceId, 2, 1), wrap(MOM.deviceId, 2, 3), wrap(MOM.deviceId, 1, 4),
     ];
-    const err = await expectFail(() => rotateEpoch(rotateReq(SPACE, { epoch: 2, wraps: noRecovery }), ctx), 409, 'incomplete_coverage');
-    assert.equal(err.extra.missing.every((m) => m.recipientId === recoveryRecipient(MOM.memberId)), true);
+    const ok = await rotateEpoch(rotateReq(SPACE, { epoch: 2, wraps: noRecovery }), ctx);
+    assert.equal(ok.body.currentEpoch, 2);
+    // The consequence, written down where it will be read: a family member who loses every device
+    // has no wrap addressed to her recovery key, so ADR 002 §7.3's A2 recovery of a FAMILY space
+    // waits for the next rotation by somebody else. That is the price of not wrapping to an
+    // unsigned public key, and it is reversible the moment `recoveryPubKex` is bound (ADR 002
+    // §2.3). The wrap is still PERMITTED, so a client that can bind it needs no server change:
+    const withRec = [wrap(recoveryRecipient(MOM.memberId), 3, 7), wrap(recoveryRecipient(MOM.memberId), 1, 8),
+      wrap(recoveryRecipient(MOM.memberId), 2, 9), wrap(ADMIN.deviceId, 3, 10),
+      wrap(MOM.deviceId, 3, 11), wrap(ADMIN.deviceId, 1, 12), wrap(ADMIN.deviceId, 2, 13)];
+    const ok2 = await rotateEpoch(rotateReq(SPACE, { epoch: 3, wraps: withRec }), ctx);
+    assert.equal(ok2.body.currentEpoch, 3);
+    assert.equal((await store.getKeyWraps(SPACE, recoveryRecipient(MOM.memberId))).length, 3,
+      'permitted, not banned — the row lands as soon as a client can build it');
   });
 
   T('a revoked device is not owed a wrap, and its old wraps are purged', async () => {
     const { store, clock } = await withSpace(adapter);
     await joinDirect(store, clock, MOM, 'blau');
     await store.putKeyWraps([
-      { spaceId: SPACE, epoch: 1, recipientId: MOM.deviceId, wrapped: bytes(156, 1) },
-      { spaceId: SPACE, epoch: 1, recipientId: recoveryRecipient(MOM.memberId), wrapped: bytes(156, 2) },
+      { spaceId: SPACE, epoch: 1, recipientId: MOM.deviceId, wrapped: bytes(156, 1), senderDeviceId: ADMIN.deviceId },
+      { spaceId: SPACE, epoch: 1, recipientId: recoveryRecipient(MOM.memberId), wrapped: bytes(156, 2), senderDeviceId: ADMIN.deviceId },
     ]);
     await store.revokeDevice(MOM.deviceId, clock.now());
     const ctx = asPerson(store, clock, ADMIN);
@@ -635,8 +720,8 @@ for (const adapter of ADAPTERS) {
     const { store, clock } = await withSpace(adapter);
     await joinDirect(store, clock, MOM, 'blau');
     await store.putKeyWraps([
-      { spaceId: SPACE, epoch: 1, recipientId: MOM.deviceId, wrapped: bytes(156, 1) },
-      { spaceId: SPACE, epoch: 1, recipientId: recoveryRecipient(MOM.memberId), wrapped: bytes(156, 2) },
+      { spaceId: SPACE, epoch: 1, recipientId: MOM.deviceId, wrapped: bytes(156, 1), senderDeviceId: ADMIN.deviceId },
+      { spaceId: SPACE, epoch: 1, recipientId: recoveryRecipient(MOM.memberId), wrapped: bytes(156, 2), senderDeviceId: ADMIN.deviceId },
     ]);
     await store.removeMember(MOM.memberId, clock.now());
     const ctx = asPerson(store, clock, ADMIN);
@@ -795,7 +880,7 @@ for (const adapter of ADAPTERS) {
 
   T('a rotation in one space never touches another', async () => {
     const { store, clock } = await withSpace(adapter);
-    const other = person(900);
+    const other = await person({ colorRef: 'rot' });
     const ctx2 = makeCtx(store, clock, { auth: { deviceShort: other.deviceShort } });
     await createSpace(req({
       body: createBody(other, {
@@ -825,11 +910,39 @@ for (const adapter of ADAPTERS) {
     assert.deepEqual(Object.keys(mom).sort(), ['colorRef', 'devices', 'joinedAt', 'memberId', 'recoveryPubKex', 'recoveryPubSig', 'removedAt'].sort());
     assert.equal(mom.colorRef, 'blau');
     assert.equal(mom.recoveryPubKex, b64(MOM.recoveryPubKex), 'E3-2: RK_kex is finally on the wire');
-    assert.deepEqual(Object.keys(mom.devices[0]).sort(), ['deviceId', 'deviceShort', 'kexPubRaw', 'revokedAt', 'sigPubRaw']);
-    // The attestation stays inside the E2EE stream (ADR 002 §2.3): a client that verified the
-    // relay's copy would hand back the property that a malicious relay cannot fabricate a device.
-    assert.equal(JSON.stringify(res.body).includes(b64(MOM.attestation)), false);
-    for (const forbidden of ['displayName', 'name', 'role', 'attestation', 'wrapped', 'wrappedKeys', 'verifier']) {
+    assert.deepEqual(Object.keys(mom.devices[0]).sort(), ['attestation', 'deviceId', 'deviceShort', 'kexPubRaw', 'revokedAt', 'sigPubRaw']);
+
+    // ── INVERTED 2026-08-29 — finding E2E3-6 ──────────────────────────────────────────────
+    // This row asserted `JSON.stringify(res.body).includes(b64(MOM.attestation)) === false`, on
+    // the grounds that "a client that verified the relay's copy would hand back the property
+    // that a malicious relay cannot fabricate a device". That reasoning is still right and it is
+    // still enforced — by `recipientProblem()`, which verifies the blob under the HOUSING
+    // member's `recoveryPubSig` before it decides anything. What the row missed is that
+    // `familyRecipients()`, the only constructor of the branded recipient set ADR 002 §3 barrier
+    // 2 is made of, THROWS without this field. So the roster this very endpoint serves could not
+    // be turned into a recipient set and family rotation was unbuildable by anyone.
+    //
+    // ADR 002 §4.2 step 6 had already specified this roster — "relay coordination data
+    // (`MemberRowDb.recoveryPubSig` plus the `dev.*` blobs)". The blob is published as a HINT.
+    assert.equal(mom.devices[0].attestation, MOM.attestation,
+      'byte for byte as it was signed — a re-encoding would fail every signature over it');
+
+    // AND IT COSTS 21.1 NOTHING, which is checked rather than asserted: every field inside the
+    // published blob is a value the relay already holds in a column of its own.
+    const payload = JSON.parse(new TextDecoder().decode(
+      Uint8Array.from(atob(mom.devices[0].attestation.split('.')[0].replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0))));
+    assert.deepEqual(Object.keys(payload).sort(),
+      ['createdAt', 'deviceId', 'deviceShort', 'kexPubRaw', 'memberId', 'sigPubRaw'],
+      'the payload is a CLOSED field set at the door, so there are no free bits to smuggle in');
+    assert.equal(payload.memberId, mom.memberId);
+    assert.equal(payload.deviceId, mom.devices[0].deviceId);
+    assert.equal(payload.deviceShort, mom.devices[0].deviceShort);
+    assert.equal(payload.sigPubRaw, mom.devices[0].sigPubRaw);
+    assert.equal(payload.kexPubRaw, mom.devices[0].kexPubRaw);
+    assert.match(payload.createdAt, /^\d{4}-\d{2}-\d{2}$/,
+      'a DAY — strictly coarser than the Device.addedAt the relay keeps to the millisecond');
+
+    for (const forbidden of ['displayName', 'name', 'role', 'wrapped', 'wrappedKeys', 'verifier']) {
       assert.equal(JSON.stringify(res.body).includes(forbidden), false, `${forbidden} reached the wire`);
     }
   });
