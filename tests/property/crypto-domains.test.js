@@ -80,6 +80,15 @@ function verdict(domainId, results) {
     else if (!r.ok && known) expected.push(r);
     else if (r.ok && known && !r.partial) stale.push(r);
   }
+  // THE CENSUS IS PRINTED EVEN WHEN GREEN, and that is deliberate. A domain property that says
+  // nothing when it passes cannot answer "how many inputs held, and in which domain" without
+  // someone re-deriving it by hand — which is what the E3 verification pass had to do. One TAP
+  // comment per domain, in the same three buckets the failure report uses.
+  console.log(`CENSUS ${domainId}: ${results.length} inputs · `
+    + `${results.filter((r) => r.ok && !r.carried).length} hold · `
+    + `${results.filter((r) => r.carried).length} carried · `
+    + `${expected.length} known-open · ${unexpected.length} UNEXPECTED · ${stale.length} stale`);
+
   if (!unexpected.length && !expected.length && !stale.length) return;
 
   const show = (r) => `    ${r.entry.id}  [${r.entry.openFinding ?? 'no finding'}]  ${r.entry.label}\n`

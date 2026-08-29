@@ -31,10 +31,28 @@ register blocking a family-mode release: finding E3-1**, and it is an input to *
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-npm test              # tier 1, pure logic          → 1665 pass / 0 fail   (101 suites)
-npm run test:attack   # adversarial corpus          →  566 pass / 0 fail   ( 74 suites)
-npm run test:property # property harness + domains  →   62 pass / 0 fail
-npm run test:dom      # real headless WKWebView     →   22 files, 375 pass, tier 2 PASS
+# CURRENT — re-measured 2026-08-29 by the E3 verification pass. Supersedes the block below.
+npm test              # tier 1, pure logic          → 1690 pass / 0 fail   (101 suites)
+npm run test:attack   # adversarial corpus          →  648 pass / 0 fail   ( 91 suites)
+npm run test:property # property harness + domains  →   70 pass / 0 fail
+npm run test:server   # the sync server             →  569 pass / 0 fail
+npm run test:dom      # real headless WKWebView     →   22 files, 1 fail, tier 2 FAIL  ← finding E3-10
+```
+
+**`test:dom` is red, and it is not crypto.** The single failure is
+`tests/tier2/dom-rendering.dom.js` row 38, which reads the **real wall clock** and asserts that
+today is a plain weekday: it fails every Saturday, Sunday and Ferien day, because `print.css:69`
+correctly keeps the weekend shade under print CSS. Every crypto tier-2 file is green — **104
+pass / 0 fail**. Filed as **E3-10**; owner is whoever owns that file, not E3.
+
+**Two red-team rows were also deciding their verdict on a random ciphertext byte**, which made
+`npm run test:attack` fail about one run in thirteen and is why an earlier record of "648 / 0" was
+a lucky run rather than a measurement. Filed and **fixed** as **E3-9**. Historic block follows.
+
+```bash
+# 2026-08-27, the E3 integration pass — superseded
+npm test              → 1665 pass / 0 fail   ·  npm run test:attack   →  566 pass / 0 fail
+npm run test:property →   62 pass / 0 fail   ·  npm run test:dom      →  22 files, 375 pass
 ```
 
 **Re-measured 2026-08-27 at the close of the E3 integration pass — all four fully green.**
@@ -680,7 +698,17 @@ Two of them are worth knowing about by name:
 
 ## Two things E3 did not close, on purpose
 
-- **I-3 / R5-7 is still open**, and FINDINGS §4.5 predicted exactly this: E3 shipped **P2** as a
+- ~~**I-3 / R5-7 is still open**~~ — **CLOSED 2026-08-28 in `src/js/core/authz.js`; verified
+  2026-08-29.** Everything below is still true and is *why* the answer had to come from the fold
+  rather than from P2. Option (a) was built as a **possession proof**: a `dev.<S>` register is a
+  credential only if the op that wrote it was itself stamped by the device it attests
+  (`devOf(cell.stamp) === att.deviceShort`), which is sound because `openOp`'s P2, P3 and check 4
+  together mean an op stamped with `S` was signed by `S`'s key. Reverting that one line kills
+  **M-I3b**, **M-I3c**, **M-I3d** and **M-I4** and 3 cells of domain C3. The price is a door:
+  `openOp` is now the sole enforcer of a credential, so **check 4 may not be weakened or moved
+  after the decrypt**, and **nothing may append an op that has not passed `openOp`** (row M-I5b,
+  owner WP-8). Original text follows.
+  FINDINGS §4.5 predicted exactly this: E3 shipped **P2** as a
   MUST, and **P2 buys self-consistency, not identity**. `sigPubRaw` is a public key travelling in
   the victim's own register; the squatter copies it, tells the truth about it, and passes. Option
   (a) — first-claim on `(sigPubRaw, deviceShort)` in `core/authz.js` — is still the only answer.
@@ -691,11 +719,57 @@ Two of them are worth knowing about by name:
   the checklist for the first machine with `cargo`; the first item on it is a **security**
   difference, not a style one (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`).
 
-## One decision owed from the PO
+## One decision owed from the PO — **ANSWERED 2026-08-28, verified 2026-08-29**
 
-**E3-6 — should the backup's board block be authenticated?** It is not, today. With a passphrase a
-board digest could be bound into the AAD, but **the board-only export path has no key at all**, so
-the guarantee would hold on one of two paths — worse than one stated plainly. Stated instead, in
-German and English, as `LIMITS.boardNotAuthenticated`, and pinned by a characterization row. The
-keys are unaffected: a modified file will not open at all. **Say the word and it is a small change
-plus a re-derivation of the AAD.**
+~~**E3-6 — should the backup's board block be authenticated?** It is not, today.~~ **It is now.**
+The AAD carries `board: { digest, hash }` — a SHA-256 over `boardDigestInput(file.board)`,
+recomputed on both sides, not a field of the file, so there is nothing to strip and no wire format
+to version. `sealAad` **throws** if a caller omits the digest.
+
+The objection that made this a decision was the good one and it was **answered, not overruled**:
+the board-only path still has no key, so instead of one guarantee that would have been true on one
+path and false on the other, there are **two stated guarantees** — `LIMITS.board.withIdentity`
+(„es kommt entweder dein Board zurück oder gar keins") and `LIMITS.board.boardOnly` („wer die Datei
+verändert, verändert das Board, das beim Import zurückkommt"). The second objection is answered
+too: `boardDigestInput` deliberately does **not** use `canonicalJSON`, so a float that wandered
+into `settings` cannot make the export fail. `LIMITS.boardNotAuthenticated` remains as a
+deprecated alias, because three audit documents quote it by name.
+
+Proof: row **M-B4** inverted in place, 7 cells of domain C2, and `crypto-backup.dom.js` #17/#18 in
+the shipping engine. Removing the one AAD line kills exactly those and nothing else.
+
+---
+
+# Session 7 addendum — 2026-08-29 · **verification of the E3 red-team fixes (`f5add24`)**
+
+Two workflows ran in parallel and both were cut before their final phase; their code landed
+committed and green. This session was the missing verification of the E3 half. It changed **no file
+under `src/js/`** and did not touch `server/` or `tests/server/`.
+
+**Full evidence: `docs/v2/E3-VERIFICATION.md` §0 (pass 2).** The four lines that matter:
+
+1. **The four named fixes are real, and a fifth nobody named is too.** Each dies on its named row
+   under mutation — S1's `admitWraps` sender check in **both** the personal and the family space,
+   the `(sigPubRaw, deviceShort)` first-claim binding, the backup AAD, ADR 004 barrier 4 — and so
+   does `authz.js` **stage 3c**, the receiver-side mirror of INV-R1, which is the half that matters
+   most because every other redaction barrier is author-side and the attacker owns the Mac that
+   runs `sealOp`. Table: `FINDINGS.md` §7a-e3.
+2. **The 86-entry work order is closed, and was measured rather than read.** The domain file was
+   born inside the fix commit, so there is nothing to diff; applying all five mutants at once
+   reconstructs the pre-fix build, and the property then fails exactly **30 + 7 + 3 + 35 + 11 = 86**
+   inputs — including exactly the "35 of 324 cells" ADR 004 §2.2 priced by hand. The shipped build:
+   **0 known-open, 0 UNEXPECTED, 0 STALE**, one input (`C2c-2`) **carried** to `server/`, not
+   closed. The enumeration is **587 inputs across five domains**; the figure 524 is stale.
+3. **Two suites were not actually green** — findings **E3-9** (fixed here) and **E3-10** (another
+   owner's file). See §2 above.
+4. **The verdict: 20.5 and 21.2 are now true of the code as built; 21.1 has not regressed.** The
+   residual on 20.5/21.2 is §8.5's phantom **member**, which receives `FSK_e` and never a `PSK` —
+   so it does not touch either story — and it is now UI-surfaceable rather than invisible. What a
+   removed member, an admin and the relay can still do is enumerated in `E3-VERIFICATION.md` §0.6,
+   every row green and characterized.
+
+**Still the one thing that stops a release: E3-1**, unchanged and re-confirmed. WebKit binds the
+Keychain ACL of the WebCrypto master key to the **binary's code signature**, LZP-102's updater
+replaces the bundle, and on **D1**'s unsigned path the family re-pairs after every update. It is a
+live argument for revisiting D1, which is reversible with a certificate and two GitHub secrets and
+no code change.

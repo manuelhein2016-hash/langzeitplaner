@@ -99,6 +99,14 @@ the eighteen open rows go from latent to live the moment a second device exists.
 > **WKWebView** that no review would have produced. **`E3-1` is the one to read first — it is
 > currently the only row in this register that stops a family-mode release**, and it is an input
 > to PO decision **D1**. Full evidence: `docs/v2/E3-VERIFICATION.md`.
+>
+> **Read `E3-9` and `E3-10` second, because between them they mean two of the five suites were
+> not green when they were recorded as green.** Neither is a defect in the product: E3-9 is two
+> red-team rows that decided their verdict on a random ciphertext byte (`npm run test:attack`
+> failed ~1 run in 13 — **fixed**), and E3-10 is a tier-2 rendering row that reads the wall clock
+> and therefore fails every Saturday, Sunday and Ferien day (**open, another owner's file**). A
+> suite that is green four days in seven is not a gate, and a fix recorded green off a lucky run
+> is a fix nobody checked.
 
 **All three CRITICALs are closed** — A3-C1, the R7 branch that re-opened it (R5-3), and **R6-5**,
 the classifier that guards the precondition of the whole ADR and had a hole in it on **both**
@@ -1124,9 +1132,11 @@ amount of review would have produced. Full evidence: **`docs/v2/E3-VERIFICATION.
 | **E3-3** | **`core/ops.js` has no `PARK_REASONS.ATTESTATION`** — the other half of **F-6**. | `src/js/core/ops.js`, `authz.js:671`, `store.js:699-703` | **WP-8** | **open** |
 | **E3-4** | **`KeyWrapRow.deviceId` cannot hold a recovery recipient** if it is a foreign key onto `Device`. `recoveryRecipientId` reserves `rec_<memberId>`. | server schema | **server** | **open — needs a decision** |
 | **E3-5** | **ADR 002 §6.2 and ADR 003 §6.1 publish different pairing rate limiters** — 20 `pair/get`/IP/**hour** vs 5 failed rid lookups/IP/**minute** plus 10 sessions/member/hour. Not contradictory; not interchangeable. | ADR 002 §6.2, ADR 003 §6.1 | **WP-7** | **open — reconcile into one `RateBucket`** |
-| **E3-6** | **The backup's board block is not authenticated.** Whoever edits the file edits the board that comes back. The *keys* are unaffected — a modified file will not open at all. | `src/js/crypto/backup.js` | **PO** | **decision** (see below) |
+| **E3-6** | **The backup's board block is not authenticated.** Whoever edits the file edits the board that comes back. The *keys* are unaffected — a modified file will not open at all. | `src/js/crypto/backup.js` | **PO** | **ANSWERED and CLOSED 2026-08-28 (finding S3), verified 2026-08-29** — see below |
 | **E3-7** | **ADR 002 §5.1's example `sp` did not satisfy `core/entities.js`'s `SPACE_ID_RE`** — 18 chars after the prefix where 22 is required. It had been copied into a fixture. | ADR 002 §5.1 | — | **fixed** 2026-08-27 |
 | **E3-8** | **`DESIGN-DECISIONS.md` D9 said "the admin's device must be online"**; ADR 002 §7.1 step 4 says **any existing member device**, is later, and gives the reason. | `DESIGN-DECISIONS.md` D9 | — | **fixed** 2026-08-27 |
+| **E3-9** | **Two red-team rows decided their verdict on a random ciphertext byte, so `npm run test:attack` failed ~1 run in 13 — and the E3 fix commit was recorded as green off a lucky run.** Both are "tampers" that were not guaranteed to tamper: **M-B3** rewrote the KDF salt's first character to `'A'`, a NO-OP when the salt already began with `'A'` (**1/64**, measured 18/1280), after which the row imported a *clean* file and failed asserting `cannot-open`; **M-B6b** truncated the sealed block by 8 characters, leaving `730 % 4 === 2` — a legal b64url length whose last character carries 4 **slack bits** — so `ub64`'s strictness decided between `identity-damaged` and `cannot-open` at **exactly 4 of 64** alphabet values (`A`,`Q`,`g`,`w`), i.e. **1/16**. M-B6b's own comment documents this trap and fixes it for the *bit-flip* four lines below, and not for the truncation. | `tests/attack/crypto-member-backup.test.js` | **E3 / crypto** | **fixed 2026-08-29** — both made deterministic and M-B6b **strengthened** into two cases (a length that is not a b64url length at all → the shape pass; the 8-char cut → refused by either code, key store asserted untouched). 40/40 clean runs. |
+| **E3-10** | **A tier-2 row fails on every Saturday, Sunday and Ferien day, because it asserts today is a plain weekday.** `12.3/15.4 · the Today highlight is suppressed on paper` reads the REAL `.day.today` off the wall clock and asserts `SHADE.none` under print CSS. `src/css/print.css:69` says `.day.today.we { background: var(--bg-weekend) !important; }` — correctly — so on a weekend the row measures `SHADE.weekend` and fails; line 73 would fail the `--ink-3` assertion next. **The product code is right and the row is wrong**, and the row immediately below it (`a Today that falls on a weekend or in Ferien prints as that, not as blank`) forces the classes and proves the correct behaviour. This is why `npm run test:dom` reported tier 2 **PASS** on Friday 2026-08-28 and **FAIL** on Saturday 2026-08-29. Fix: force the classes (or assert against the day's actual `we`/`fer`) instead of reading the calendar. | `tests/tier2/dom-rendering.dom.js` (≈ line 1130) | **whoever owns `tests/tier2/dom-rendering.dom.js`** — NOT touched by the E3 verification pass, one owner per file | **open — no crypto content, but it red-lights the release gate two days in seven** |
 
 ### E3-1, in full — because it is the one that stops a release
 
@@ -1172,9 +1182,39 @@ that holds on one path is worse than one stated plainly. (Binding it would also 
 **fail** on a board whose `settings` picked up a float, since `canonicalJSON` refuses non-integers;
 losing the user's export to a stray setting is the worse failure.)
 
-Left unbound, stated in German and English as `LIMITS.boardNotAuthenticated`, and pinned by a
+~~Left unbound, stated in German and English as `LIMITS.boardNotAuthenticated`, and pinned by a
 characterization row so it cannot be quietly assumed away. **If you want it bound: say so.** It is
-a small change plus a re-derivation of the AAD.
+a small change plus a re-derivation of the AAD.~~
+
+> **ANSWERED 2026-08-28 (finding S3), and the answer was BIND IT — verified 2026-08-29.** The
+> paragraph above was the state of the question, not the state of the code, and the E3 fix pass
+> resolved it while this section still read "left unbound". What it built:
+>
+> - The AAD now carries `board: { digest, hash }` — a SHA-256 over `boardDigestInput(file.board)`,
+>   recomputed on **both** sides in `sealAad()`. It is **not a field of the file**: there is
+>   nothing for an attacker to strip and no wire format to version (§7.2's `identity` shape is
+>   unchanged). `sealAad` **throws** if a caller omits the digest, so the hole cannot be rebuilt
+>   by forgetting an argument.
+> - The objection above is **answered rather than overruled**, and it was the good objection. The
+>   guarantee is stated **per path** — `LIMITS.board.withIdentity` ("either your board comes back,
+>   or none does") and `LIMITS.board.boardOnly` ("this file holds no keys… whoever edits the file
+>   edits the board that comes back") — instead of one sentence that would have been true on one
+>   path and false on the other. `LIMITS.boardNotAuthenticated` survives as a **deprecated alias**
+>   of `board.boardOnly` precisely because this document, `STATUS.md` and `E3-VERIFICATION.md`
+>   quote it by name.
+> - The second objection is answered too: `boardDigestInput()` deliberately does **not** use
+>   `canonicalJSON`, so it is a total function over everything `JSON.stringify` can write. A float
+>   that wandered into `settings` cannot cost the user their export.
+>
+> Proved by row **M-B4**, which is INVERTED in place ("the BOARD is inside the AAD now: her file
+> no longer opens at all"), by 7 cells of domain **C2**, and in the shipping engine by
+> `tests/tier2/crypto-backup.dom.js` #17 and #18. Reverting the one AAD line kills exactly M-B4
+> and those 7 C2 cells and nothing else (E3 verification, mutant M-C, 2026-08-29).
+>
+> **What is still true, and is now said in the product rather than here:** the **board-only**
+> export has no key at all and therefore no authentication. That is `LIMITS.board.boardOnly`, it
+> is in the file's own README in both languages, and it is not a residual of E3-6 — it is the
+> other path.
 
 ### What E3 explicitly did **not** close, recorded so nothing downstream is built as though it did
 
@@ -1777,6 +1817,49 @@ redundant. Row 23 in the table is that assertion's own mutant. This is the only 
 code whose entire value is that it is currently unreachable, and the alternative — leaving
 "hardened against a hostile peer" in a report when the hostile peer never gets there — is the kind
 of claim this register exists to stop.
+
+---
+
+### 7a-e3. E3 — the five crypto fixes of `f5add24`, mutation-tested by the verification pass (2026-08-29)
+
+Every row below was applied **in the working tree**, the crypto red team + the domain property +
+tier-1 crypto/authz re-run, and the tree restored with `git checkout -- src/js/` before the next
+row. Nothing under `server/` or `tests/server/` was touched. Baseline for the columns:
+crypto red team **82 pass / 0 fail**, domains **8 pass / 0 fail**, tier-1 crypto+authz
+**415 pass / 0 fail**.
+
+| # | fix reverted | red team | domains | tier1 | the rows that die |
+|---|---|---|---|---|---|
+| **M-A** | **S1** — `admitWraps` takes the sender's ECDH key off `row.senderKexPubRaw` again, as it did before `ctx.senders` | 14 | C1 (30 cells) | 3 | `crypto-relay-keyinjection` **1** (relay injects a key of its own choosing), **2** (the ring stays empty), **3** (the DoS goes with it), **4** (inbound = outbound), **5 THE PERSONAL INSTANCE — story 20.5**, **7**, **8**, **9**; `crypto-member-read` **M-R6** (personal ring, unattested *and* attested fellow member), **M-R6b** (row order no longer decides); `crypto-relay-removed` 7; `M-R5c` |
+| **M-B** | **I-3 / §4.5 (a)** — drop `devOf(cell.stamp) === att.deviceShort`, so a `dev.<S>` register is a credential again without a possession proof | 4 | C3 (3 cells) | 1 | `crypto-member-impersonate` **M-I3b**, **M-I3c**, **M-I3d**, and **M-I4** |
+| **M-C** | **S3 / E3-6** — remove `board: { digest, hash }` from `sealAad()` | 1 | C2 (7 cells) | 4 | `crypto-member-backup` **M-B4** |
+| **M-D** | **S5, author side** — `const level = declared ?? folded` restored in `envelope.js:assertProjected` | 2 | C4 (35 cells) | 2 | `crypto-member-read` **M-R7c** (the seal half) |
+| **M-D2** | **S5, clause (ii) only** — disable *just* the declared-vs-map agreement check, leaving `level = folded` | **0** | C4 | **0** | **nothing in the red team.** See below. |
+| **M-E** | **S5-R, receiver side** — disable `authz.js` **stage 3c** (INV-R1 on the receiving device) | 1 | C5 (11 cells) | 7 | `crypto-member-read` **M-R7c** (the fold half) |
+
+**All four fixes the brief named die on their named row, and in both spaces where the brief asked
+for both.** M-A kills the personal-space row (`keyinjection` 5) and the family-space rows
+(`keyinjection` 1–4) *and* `M-R6`, which asserts the personal ring against an **attested fellow
+member** as well as an unattested stranger — the two halves of story 20.5 that S1 broke together.
+
+**M-D2 is the row worth reading, because it is the one that killed nothing in the red team.**
+Barrier 4 has two clauses: (i) `level = folded`, the only assignment, and (ii) a *declared*
+`pub.level` that is present, non-null and different from the map is refused. Reverting (i) kills
+M-R7c. Reverting **(ii) alone kills no adversarial row at all** — only domain **C4** goes red.
+That is not a defect in the fix; it is a measurement of where clause (ii) is pinned: **the
+enumeration is its only guard.** If C4 is ever trimmed, clause (ii) becomes untested code. Recorded
+here rather than fixed, because adding a red-team row for it would be inventing an attack the
+enumeration already covers — but it is the reason `tests/property/crypto-domains.test.js` may not
+be treated as a duplicate of the attack suite.
+
+**The 86-entry work order, closed and measured rather than asserted.** Applying **M-A + M-B + M-C
++ M-D + M-E together** reconstructs the pre-fix build, and the domain property then reports
+exactly **30 (C1) + 7 (C2) + 3 (C3) + 35 (C4) + 11 (C5) = 86** failing inputs — the same 86 the
+enumeration opened with, and the same 35 of C4 that ADR 004 §2.2 priced by hand. In the shipped
+build all 86 hold: **0 known-open, 0 UNEXPECTED, 0 STALE**, with **one** input (`C2c-2`, "is this
+still my Kreis?") **carried** — not closed — to `POST /api/v1/devices/adopt`, because C2c-1 and
+C2c-2 are provably the *same input* and no implementation can warn on one and stay silent on the
+other. Owner: `server/`.
 
 ---
 

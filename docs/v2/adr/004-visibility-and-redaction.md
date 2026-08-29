@@ -183,12 +183,36 @@ The owner and the colour are **never fields on the entry**. One fewer thing that
    > seam and the reason this is safe to state as a hard rule. `PROJECT_CONTRACT` in
    > `src/js/crypto/envelope.js` carries it as an executable clause.
    >
-   > **Still open, and NOT this barrier's to close:** barriers 3, 4 and the backstop are all
+   > ~~**Still open, and NOT this barrier's to close:** barriers 3, 4 and the backstop are all
    > **author-side**. `geteiltOnly` (`core/ops.js` `FIELDS`) is enforced at seal time only and
    > `core/authz.js` never reads it, so a peer running a patched build still has no seal path to
    > defeat and a receiver applies whatever arrives. The mirror check belongs in the fold: refuse
    > (or null out) a `geteiltOnly` field carrying a non-null value when the entity's folded
-   > `pub.level` is not `geteilt`. Asserted as still-missing by row M-R7c.
+   > `pub.level` is not `geteilt`. Asserted as still-missing by row M-R7c.~~
+   >
+   > **CLOSED — and this paragraph was stale in the same commit that wrote it.** The mirror was
+   > built, in the seam this paragraph names: `src/js/core/authz.js` **stage 3c**, "INV-R1 on the
+   > RECEIVING device". It reads the same `FIELDS` marks the author side reads and adds no table
+   > of its own; it **drops the field and admits the op** rather than rejecting, because at Belegt
+   > a `pub.date` is not content above the level but the entire legitimate Belegt payload, and
+   > rejecting the op would destroy the booking a Geteilt→Belegt downgrade exists to keep; an
+   > explicit `null` always passes (§5's withdrawal); governing registers (`pub.level`,
+   > `pub.coEdit`, `pub.alive`, `_born`) are never dropped; and it reads the **final folded**
+   > level, so it is retroactive by construction and no non-null `geteiltOnly` value can survive
+   > in the register map while the level says otherwise, in any arrival order. What was withheld
+   > is reported on `AuthzResult.contentAboveLevel`.
+   >
+   > Row **M-R7c** now asserts the opposite of what this paragraph says it asserts, and it does so
+   > **behaviourally rather than by grep** — the attacker skips `sealOp` entirely, which is exactly
+   > the capability a patched build has and an honest one does not. The enumeration is domain
+   > **C5** in `tests/helpers/crypto-domains.js` (60 inputs, the receiving-side mirror of C4),
+   > added by the integrator for this reason; 11 of those 60 are the cells this paragraph owned.
+   > Reverting stage 3c kills M-R7c's receiver half and exactly those 11 C5 cells (E3
+   > verification, mutant M-E, 2026-08-29).
+   >
+   > **The obligation that remains** is the one every fold-side rule carries: stage 3c is a
+   > function of the folded level, so anything that materializes a family entity WITHOUT running
+   > `foldAuthorized` sees the unredacted patch. Nothing does today.
 
 ### 2.3 The failure path is loud, never swallowed
 

@@ -170,7 +170,16 @@ describe('T5 tampers with the file', () => {
         'cannot-open', `${field} is outside the AAD`);
     }
     // The identity sub-header too — memberId, iterations, salt.
-    for (const [field, value] of [['iterations', FAST + 1], ['salt', file.identity.kdf.salt.replace(/^./, 'A')]]) {
+    //
+    // THE SALT TAMPER MUST ACTUALLY CHANGE THE SALT. `replace(/^./, 'A')` was a NO-OP whenever
+    // the salt already began with 'A' — 1 export in 64, measured at 18/1280 — and the row then
+    // imported the UNTAMPERED file and failed asserting `cannot-open` against a clean restore.
+    // Same class of bug as the truncation in M-B6b below: a "tamper" that is not guaranteed to
+    // tamper. `A`↔`B` differs from whatever is there, always.
+    for (const [field, value] of [
+      ['iterations', FAST + 1],
+      ['salt', file.identity.kdf.salt.replace(/^./, (c) => (c === 'A' ? 'B' : 'A'))],
+    ]) {
       const t = clone(file);
       t.identity.kdf[field] = value;
       assert.equal(await outcomeOf(() => importBackup(t, 'Schlüsselbund-2026', memKeyStore(), opts())), 'cannot-open');
@@ -427,10 +436,38 @@ describe('T5 binds a re-join to the wrong Kreis', () => {
     assert.equal(key.extractable, false);
     // A truncated or bit-flipped sealed block cannot be salvaged into a partial identity: it is
     // refused either by `inspectBackup`'s shape pass or by the tag, and never half-restored.
+    // TRUNCATION, IN THE TWO DETERMINISTIC SHAPES — and the split is the point, because one
+    // truncation cannot assert both and this row spent the E3 pass asserting a coin flip.
+    // Cutting 8 characters off the 738-character sealed block leaves 730, and `730 % 4 === 2`
+    // is a LEGAL b64url length whose final character carries 4 SLACK bits. `ub64` is strict
+    // about them, so the outcome was `identity-damaged` when those 4 random ciphertext bits
+    // were non-zero and `cannot-open` when they were zero — exactly 4 of the 64 alphabet
+    // values (`A`, `Q`, `g`, `w`), i.e. a 1-in-16 flake of the WHOLE attack suite, and the very
+    // trap the bit-flip four lines below already documents for the other spelling.
+    // Asserting the disjunction alone would be weaker than asserting either half, so both are
+    // asserted and neither depends on a random byte:
+    //
+    //   (a) a length that is not a b64url length at all (`n % 4 === 1`) — the SHAPE pass in
+    //       `inspectBackup` refuses it before a key is derived, and that is `identity-damaged`;
+    //   (b) the 8-character cut, which is what a truncated download actually looks like. It is
+    //       refused by one of the two named codes and NOTHING is written either way. The
+    //       untouched key store is the security property; which refusal fires is arithmetic.
+    const n0 = file.identity.sealed.length;
+    const shapeCut = clone(file);
+    let cut = n0 - 8;
+    while (cut % 4 !== 1) cut -= 1;              // `n % 4 === 1` is never a b64url length
+    shapeCut.identity.sealed = shapeCut.identity.sealed.slice(0, cut);
+    assert.equal(await outcomeOf(() => importBackup(shapeCut, 'Schlüsselbund-2026', memKeyStore(), opts())),
+      'identity-damaged', 'a length that is not a b64url length must not reach the AEAD');
+
     const truncated = clone(file);
-    truncated.identity.sealed = truncated.identity.sealed.slice(0, truncated.identity.sealed.length - 8);
-    assert.equal(await outcomeOf(() => importBackup(truncated, 'Schlüsselbund-2026', memKeyStore(), opts())),
-      'identity-damaged');
+    truncated.identity.sealed = truncated.identity.sealed.slice(0, n0 - 8);
+    const ks = memKeyStore();
+    const before = (await ks.list()).sort();
+    const got = await outcomeOf(() => importBackup(truncated, 'Schlüsselbund-2026', ks, opts()));
+    assert.ok(got === 'identity-damaged' || got === 'cannot-open',
+      `a truncated sealed block must be refused; got ${got}`);
+    assert.deepEqual((await ks.list()).sort(), before, 'the refused truncation wrote something');
     // NOT THE LAST CHARACTER, AND THE REASON IS A REAL TRAP — found by this row FLAKING once in
     // sixteen runs. A base64url string whose byte length is not a multiple of 3 ends in a
     // character carrying SLACK BITS, and `ub64` is strict about them: `A`→`B` there sets a slack
