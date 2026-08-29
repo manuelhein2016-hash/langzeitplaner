@@ -157,6 +157,134 @@ const DE = {
     'Die automatische Prüfung ist aus. Von Hand suchen geht weiter jederzeit.',
   updateUnsupported:
     'Updates verwaltet die installierte App. In der Browser-Vorschau gibt es keine.',
+  // ── F19 · 19.5 — Gerätekopplung (LZP-503, Lieferobjekt 21) ────────────────
+  // Der Ton: es gibt hier kein Passwort und keinen Account. Es gibt einen Code,
+  // der drei Minuten gilt, und eine Zahl, die auf beiden Bildschirmen steht.
+  // Der einzige Satz, der laut sein darf, ist der über die sechs Ziffern —
+  // ADR 002 §6.4: sie sind der einzige Schutz gegen einen MITM, und ein Klick
+  // ohne Hinsehen nimmt ihn weg. Kein Ausrufezeichen trotzdem: der Satz trägt
+  // sich selbst.
+  pairKicker: 'Geräte koppeln',
+  // ── F19 · der Familienkreis, die Tür (LZP-505 / A10) ────────────────────────
+  familySectionTitle: 'Familienkreis',
+  familyRelay: 'Server',
+  familySpace: 'Privater Raum',
+  familyCreate: 'Einrichten',
+  familyNeedRelay: 'Bitte zuerst die Adresse des Servers eintragen.',
+  familyCreated: 'Eingerichtet. Das Fenster lädt neu.',
+  familyFailed: (why) => `Das hat nicht geklappt: ${why}`,
+  familyThisMac: (short) => `Dieser Mac: ${short}`,
+  familySectionHint:
+    'Ohne diesen Schritt bleibt alles auf diesem Mac und es geht nichts ins Netz. '
+    + 'Danach liegt Ihr Board verschlüsselt auf dem Server — lesen kann es nur, wer Ihre Schlüssel hat.',
+  pairSectionTitle: 'Meine Geräte',
+  pairAddDevice: 'Zweiten Mac hinzufügen',
+  pairHaveCode: 'Ich habe einen Code',
+  pairSectionHint:
+    'Ein zweiter Mac bekommt dein ganzes Board — auch die privaten Einträge — Ende-zu-Ende '
+    + 'verschlüsselt. Kein Passwort: ein Code, den du vom einen Mac auf den anderen tippst.',
+  pairUnsupported:
+    'Koppeln geht in der Browser-Vorschau nicht. In der installierten App ist es hier.',
+
+  pairCodeTitle: 'Diesen Code auf dem neuen Mac eintippen',
+  pairCodeLead:
+    'Öffne LangzeitPlaner auf dem zweiten Mac, wähle dort „Ich habe einen Code“ und tippe die '
+    + 'zwölf Zeichen ein. Groß- und Kleinschreibung ist egal.',
+  pairCodeWaiting: 'Dieser Mac wartet, bis der andere sich meldet.',
+  pairCodeWhy:
+    'Der Code gilt drei Minuten und nur ein einziges Mal. Danach erzeugt dieser Bildschirm '
+    + 'einen neuen — es geht dabei nichts verloren.',
+  pairCodeExpiresIn: (mmss) => `Noch ${mmss} gültig`,
+  pairCodeExpiredNow: 'Der Code ist abgelaufen.',
+
+  pairEnterTitle: 'Code vom ersten Mac eintippen',
+  pairEnterLead:
+    'Auf dem Mac, der das Board schon hat, steht ein Code aus zwölf Zeichen. Tippe ihn hier ein.',
+  pairEnterLabel: 'Kopplungscode',
+  pairEnterSubmit: 'Weiter',
+  pairEnterWrong: 'Der Code passt nicht.',
+  pairAttemptsLeft: (n) => (n === 1 ? 'Noch ein Versuch.' : `Noch ${n} Versuche.`),
+  pairEnterWhy:
+    'Nach fünf Fehlversuchen ist der Code verbraucht. Dann erzeugt der erste Mac einfach einen '
+    + 'neuen — es geht nichts verloren.',
+
+  // Die SAS-Vergleichsseite. „Ja“ ist hier kein Weiter-Knopf, sondern eine
+  // Aussage über eine bestimmte Zahl; deshalb steht die Zahl im Knopf.
+  pairSasTitle: 'Stimmen die Zahlen überein?',
+  pairSasLead:
+    'Auf beiden Macs muss jetzt dieselbe sechsstellige Zahl stehen. Sieh auf dem anderen '
+    + 'Bildschirm nach, bevor du bestätigst.',
+  pairSasWhy:
+    'Diese sechs Ziffern sind das Einzige, was verhindert, dass sich jemand zwischen die beiden '
+    + 'Macs schiebt. Stimmen sie überein, war niemand dazwischen. Ein Klick ohne Hinsehen nimmt '
+    + 'diesen Schutz weg.',
+  pairSasSelf: (short) => `Dieser Mac: ${short}`,
+  pairSasPeer: (short) => `Anderer Mac: ${short}`,
+  pairSasWait: 'Zuerst vergleichen',
+  pairSasYes: (digits) => `Ja — auf beiden steht ${digits}`,
+  pairSasNo: 'Die Zahlen sind verschieden',
+  pairSasUnsure:
+    'Unsicher? Abbrechen kostet nichts. Es wird dabei nichts übertragen, und du kannst jederzeit '
+    + 'von vorn anfangen.',
+
+  pairWorkingTitle: 'Einen Moment',
+  pairWorking: 'Die Schlüssel werden übertragen. Das dauert einen Augenblick.',
+
+  pairDoneTitle: 'Fertig',
+  pairDoneExisting:
+    'Der zweite Mac gehört jetzt dazu. Ab sofort zeigen beide dasselbe Board — verschlüsselt, '
+    + 'ohne dass du etwas tun musst.',
+  pairDoneNew:
+    'Dieser Mac gehört jetzt dazu. Das Board wird gleich geladen; bei einem vollen Jahr kann '
+    + 'das einen Moment dauern.',
+  pairDonePeer: (short) => `Gekoppelt mit ${short}.`,
+
+  pairStoppedTitle: 'Abgebrochen',
+  pairStoppedRefused:
+    'Die Zahlen waren verschieden. Genau dafür ist der Vergleich da: es saß jemand oder etwas '
+    + 'dazwischen. Versuch es noch einmal — am besten in einem Netz, dem du traust.',
+  pairStoppedExpired: 'Die drei Minuten sind vorbei.',
+  pairStoppedBurned:
+    'Zu viele Fehlversuche. Dieser Code ist verbraucht. Erzeuge auf dem ersten Mac einen neuen.',
+  pairStoppedFailed: 'Der Vorgang wurde abgebrochen.',
+  pairStoppedNothing: 'Es wurde nichts übertragen. Beide Macs sind unverändert.',
+  pairRestart: 'Neu starten',
+  pairCancel: 'Abbrechen',
+  pairClose: 'Schließen',
+
+  // ── F19 · 19.3 — Abgleich (LZP-504, Lieferobjekt 20) ──────────────────────
+  // Zwei der drei Zustände sind nichts. Was hier steht, sieht nur jemand, der
+  // in den Einstellungen nachschaut, oder als Tooltip an einem 6-px-Punkt.
+  // Kein Satz darf zum Handeln auffordern: es gibt nichts zu tun.
+  syncSectionTitle: 'Abgleich',
+  syncHealthy: 'Alles abgeglichen.',
+  syncPendingDetail: (n) =>
+    n === 1
+      ? 'Eine Änderung wartet auf die Verbindung. Sie ist auf diesem Mac gesichert.'
+      : `${n} Änderungen warten auf die Verbindung. Sie sind auf diesem Mac gesichert.`,
+  syncPendingNone: 'Keine Verbindung. Sobald wieder Netz da ist, geht es von selbst weiter.',
+  syncErrOffline:
+    'Keine Verbindung zum Netz. Deine Änderungen sind gesichert und gehen los, sobald wieder '
+    + 'Netz da ist.',
+  syncErrAuth:
+    'Dieser Mac darf nicht mehr abgleichen. Wahrscheinlich wurde er aus dem Familienkreis '
+    + 'entfernt. Das Board auf diesem Mac bleibt, wie es ist.',
+  syncErrProtocol:
+    'Diese Version ist zu alt für den Abgleich. Ein Update behebt das; bis dahin funktioniert '
+    + 'das Board hier ganz normal weiter.',
+  syncErrQuarantine:
+    'Eine Änderung ließ sich nicht übertragen und wurde zurückgestellt. Alles andere läuft weiter.',
+  syncErrDecrypt:
+    'Eine Änderung von einem anderen Gerät ließ sich nicht lesen und wurde übersprungen.',
+  syncErrClockSkew:
+    'Die Uhr dieses Macs geht deutlich falsch. Der Abgleich braucht die richtige Zeit.',
+  syncErrGeneric: 'Der Abgleich steht gerade. Das Board auf diesem Mac funktioniert weiter.',
+  syncLastPull: (d) => `Zuletzt abgeglichen: ${d}`,
+  syncNever: 'Noch nicht abgeglichen',
+  syncSolo: 'Dieser Mac arbeitet allein. Es wird nichts übertragen.',
+  syncNoButtonHint:
+    'Einen Knopf zum Abgleichen gibt es nicht — das passiert von selbst, im Hintergrund.',
+
   more: 'weitere',
   lanesFull: 'weitere Balken',
   historyHitsLabel: 'Außerhalb des Zeitraums',
@@ -310,6 +438,121 @@ const EN = {
     'Automatic checking is off. Checking by hand still works at any time.',
   updateUnsupported:
     'Updates are handled by the installed app. There are none in the browser preview.',
+  // ── F19 · 19.5 — device pairing (LZP-503, deliverable 21) ─────────────────
+  // Same register as the German: no password, no account, no wizard voice. The
+  // only sentence allowed any weight is the one about the six digits.
+  pairKicker: 'Pair devices',
+  // ── F19 · the Familienkreis, the door (LZP-505 / A10) ───────────────────────
+  familySectionTitle: 'Family circle',
+  familyRelay: 'Server',
+  familySpace: 'Private space',
+  familyCreate: 'Set up',
+  familyNeedRelay: 'Enter the address of the server first.',
+  familyCreated: 'Set up. This window will reload.',
+  familyFailed: (why) => `That did not work: ${why}`,
+  familyThisMac: (short) => `This Mac: ${short}`,
+  familySectionHint:
+    'Without this step everything stays on this Mac and nothing goes to the network. '
+    + 'Afterwards your board is stored encrypted on the server — only someone with your keys can read it.',
+  pairSectionTitle: 'My devices',
+  pairAddDevice: 'Add a second Mac',
+  pairHaveCode: 'I have a code',
+  pairSectionHint:
+    'A second Mac gets your whole board — private entries included — end-to-end encrypted. '
+    + 'No password: a code you read off one Mac and type into the other.',
+  pairUnsupported:
+    'Pairing does not work in the browser preview. In the installed app it lives here.',
+
+  pairCodeTitle: 'Type this code into the new Mac',
+  pairCodeLead:
+    'Open LangzeitPlaner on the second Mac, choose “I have a code” there, and type in the twelve '
+    + 'characters. Upper or lower case makes no difference.',
+  pairCodeWaiting: 'This Mac is waiting for the other one to answer.',
+  pairCodeWhy:
+    'The code is valid for three minutes and for one attempt only. After that this screen makes '
+    + 'a new one — nothing is lost either way.',
+  pairCodeExpiresIn: (mmss) => `Valid for another ${mmss}`,
+  pairCodeExpiredNow: 'The code has expired.',
+
+  pairEnterTitle: 'Type the code from the first Mac',
+  pairEnterLead:
+    'The Mac that already has the board is showing a twelve-character code. Type it in here.',
+  pairEnterLabel: 'Pairing code',
+  pairEnterSubmit: 'Continue',
+  pairEnterWrong: 'That code does not match.',
+  pairAttemptsLeft: (n) => (n === 1 ? 'One attempt left.' : `${n} attempts left.`),
+  pairEnterWhy:
+    'After five wrong attempts the code is spent. The first Mac then simply makes a new one — '
+    + 'nothing is lost.',
+
+  pairSasTitle: 'Do the numbers match?',
+  pairSasLead:
+    'Both Macs should now be showing the same six-digit number. Look at the other screen before '
+    + 'you confirm.',
+  pairSasWhy:
+    'These six digits are the only thing stopping someone from sitting between the two Macs. If '
+    + 'they match, nobody was in between. Clicking without looking removes that protection.',
+  pairSasSelf: (short) => `This Mac: ${short}`,
+  pairSasPeer: (short) => `Other Mac: ${short}`,
+  pairSasWait: 'Compare them first',
+  pairSasYes: (digits) => `Yes — both show ${digits}`,
+  pairSasNo: 'The numbers are different',
+  pairSasUnsure:
+    'Not sure? Cancelling costs nothing. Nothing is transferred, and you can start again at any '
+    + 'time.',
+
+  pairWorkingTitle: 'One moment',
+  pairWorking: 'The keys are being transferred. This takes a moment.',
+
+  pairDoneTitle: 'Done',
+  pairDoneExisting:
+    'The second Mac now belongs. From here on both show the same board — encrypted, and without '
+    + 'you having to do anything.',
+  pairDoneNew:
+    'This Mac now belongs. The board is loading; with a full year behind it that can take a '
+    + 'moment.',
+  pairDonePeer: (short) => `Paired with ${short}.`,
+
+  pairStoppedTitle: 'Stopped',
+  pairStoppedRefused:
+    'The numbers were different. That is exactly what the comparison is for: something or '
+    + 'someone was in between. Try again — ideally on a network you trust.',
+  pairStoppedExpired: 'The three minutes are up.',
+  pairStoppedBurned:
+    'Too many wrong attempts. This code is spent. Make a new one on the first Mac.',
+  pairStoppedFailed: 'The process was stopped.',
+  pairStoppedNothing: 'Nothing was transferred. Both Macs are unchanged.',
+  pairRestart: 'Start again',
+  pairCancel: 'Cancel',
+  pairClose: 'Close',
+
+  // ── F19 · 19.3 — sync status (LZP-504, deliverable 20) ────────────────────
+  syncSectionTitle: 'Sync',
+  syncHealthy: 'Everything is in sync.',
+  syncPendingDetail: (n) =>
+    n === 1
+      ? 'One change is waiting for a connection. It is safe on this Mac.'
+      : `${n} changes are waiting for a connection. They are safe on this Mac.`,
+  syncPendingNone: 'No connection. It picks up again on its own once there is one.',
+  syncErrOffline:
+    'No network connection. Your changes are safe and will go out as soon as there is one again.',
+  syncErrAuth:
+    'This Mac is no longer allowed to sync. It was most likely removed from the family circle. '
+    + 'The board on this Mac stays exactly as it is.',
+  syncErrProtocol:
+    'This version is too old to sync. An update fixes it; until then the board here keeps '
+    + 'working normally.',
+  syncErrQuarantine:
+    'One change could not be sent and was set aside. Everything else carries on.',
+  syncErrDecrypt: 'A change from another device could not be read and was skipped.',
+  syncErrClockSkew:
+    'This Mac’s clock is significantly wrong. Syncing needs the right time.',
+  syncErrGeneric: 'Syncing has stalled. The board on this Mac keeps working.',
+  syncLastPull: (d) => `Last synced: ${d}`,
+  syncNever: 'Not synced yet',
+  syncSolo: 'This Mac works on its own. Nothing is transmitted.',
+  syncNoButtonHint: 'There is no sync button — it happens on its own, in the background.',
+
   more: 'more',
   lanesFull: 'more bars',
   historyHitsLabel: 'Outside the visible range',

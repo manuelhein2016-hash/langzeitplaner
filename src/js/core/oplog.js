@@ -736,7 +736,7 @@ export function createOpLog(ports = {}) {
      * duplicate, which is correct, just not free.
      *
      * @param {Object} op
-     * @param {{seq?:string|number|bigint, haveEpochKey?:boolean}} [meta]
+     * @param {{seq?:string|number|bigint, haveEpochKey?:boolean, haveAttestation?:boolean}} [meta]
      * @returns {{status:string, reason?:string, parkReason?:string, fields?:string[], kept?:string}}
      */
     append(op, meta = {}) {
@@ -749,7 +749,7 @@ export function createOpLog(ports = {}) {
 
       // Classify BEFORE resolving a splice: a body that is a protocol violation is not stored at
       // all, so it may not win — or even disturb — a splice against a well-formed one.
-      const c = classifyOp(op, { nowMs: now(), haveEpochKey: meta.haveEpochKey });
+      const c = classifyOp(op, { nowMs: now(), haveEpochKey: meta.haveEpochKey, haveAttestation: meta.haveAttestation });
       if (c.status === 'reject') return result(APPEND.REJECTED, { reason: c.reason });
 
       const theirs = canonOf(op);
@@ -1033,6 +1033,11 @@ export function createOpLog(ports = {}) {
         api.append(line.op, {
           seq: line.seq,
           ...(reason === PARK_REASONS.EPOCH ? { haveEpochKey: false } : {}),
+          // The other reason the classifier cannot re-derive (ADR 002 §5.2.5). Without this an op
+          // parked because its device had no attestation comes back LIVE and APPLIED on the next
+          // launch — the gate undone by a relaunch, which is worse than the lost diagnostic
+          // `epoch` was.
+          ...(reason === PARK_REASONS.ATTESTATION ? { haveAttestation: false } : {}),
         });
       };
       for (const line of parkedLines) feed(line);
@@ -1057,7 +1062,8 @@ export function createOpLog(ports = {}) {
      * already absorbed. Between lying and losing data, this throws. The caller that genuinely
      * needs the write gone reloads from a checkpoint that predates it, or uses `forget()`.
      *
-     * @param {Object} op @param {'future'|'epoch'|'unknownKind'|'unknownField'|'version'|'unknownSpace'} reason
+     * @param {Object} op
+     * @param {'future'|'epoch'|'attestation'|'unknownKind'|'unknownField'|'version'|'unknownSpace'} reason
      * @throws {OpLogError} if the op is below the checkpoint horizon and no longer a line
      */
     park(op, reason) {
@@ -1093,9 +1099,12 @@ export function createOpLog(ports = {}) {
       const promoted = [];
       for (const [id, entry] of [...parked]) {
         if (!pred(entry.op)) continue;
-        // `haveEpochKey: true` — the caller asserting `pred` has asserted the key question. What
-        // this re-checks is what core/ CAN re-check: the vocabulary and the wall clock.
-        const c = classifyOp(entry.op, { nowMs: now(), haveEpochKey: true });
+        // `haveEpochKey: true` / `haveAttestation: true` — the caller asserting `pred` has
+        // asserted both questions core/ cannot answer. What this re-checks is what core/ CAN
+        // re-check: the vocabulary and the wall clock. For `attestation` the caller must have
+        // re-run the AUTHORIZATION fold before selecting the op — `store.unparkAttested()` does,
+        // because `classifyOp` knows nothing about devices and would admit it blindly.
+        const c = classifyOp(entry.op, { nowMs: now(), haveEpochKey: true, haveAttestation: true });
         if (c.status !== 'admit') {
           if (c.status === 'park') entry.reason = c.parkReason;
           continue;

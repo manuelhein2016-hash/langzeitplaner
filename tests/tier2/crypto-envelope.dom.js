@@ -549,9 +549,12 @@ test('the backstop refuses content above the level even with a no-op barrier 2, 
   assert.equal(sealed.v, suite.ENVELOPE_V);
 });
 
-test('the `attestation` park reason is still missing from core/ops.js in this build too (F-6, WP-8)', () => {
-  assert.equal('ATTESTATION' in ops.PARK_REASONS, false,
-    'WP-8 landed it — re-point ENVELOPE_PARK.ATTESTATION and delete this row in both tiers');
-  assert.equal(ops.isParkReason(envelope.ENVELOPE_PARK.ATTESTATION), false);
+test('E3-3 / F-6 CLOSED — the `attestation` park reason exists in the real engine too', () => {
+  // The tier-1 inversion, re-run in WebKit: the same two modules, loaded by the same page the
+  // product ships, so a build that landed the constant in node and not in the bundle is red here.
+  assert.equal('ATTESTATION' in ops.PARK_REASONS, true);
+  assert.equal(ops.PARK_REASONS.ATTESTATION, 'attestation');
+  assert.equal(ops.isParkReason(envelope.ENVELOPE_PARK.ATTESTATION), true);
+  assert.equal(envelope.ENVELOPE_PARK.ATTESTATION, ops.PARK_REASONS.ATTESTATION);
   assert.equal(envelope.ENVELOPE_PARK.EPOCH, ops.PARK_REASONS.EPOCH);
 });

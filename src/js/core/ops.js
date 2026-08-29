@@ -322,6 +322,28 @@ export const PARK_REASONS = Object.freeze({
    * stage 3a and must never treat "parked" as "previously approved".
    */
   UNSHARE_SHAPE: 'unshareShape',
+  /**
+   * **The op's device has no attestation yet — finding E3-3 / F-6, landed by E5.**
+   *
+   * ADR 002 §5.2.5 and ADR 001 §7.4: an op from a device whose `member.set{dev.*}` attestation
+   * has not arrived is PARKED, not rejected. The two are not the same claim — a rejection is
+   * permanent and a park is "ask again", and the difference is one Mac's whole first pull. A
+   * newly paired device's attestation can arrive in a LATER page than the content op it
+   * authorises, and `crypto/envelope.js` returns exactly this verdict (`ENVELOPE_PARK.ATTESTATION`,
+   * P1) when `attestationOf(env.dv)` is null — absent, or contested under §2.3's "two shorts, no
+   * winner".
+   *
+   * It could not be written into the op log before this constant existed: `oplog.park()`
+   * validates against `isParkReason`, so the reason was refused and the line was dropped instead.
+   * `envelope.js`'s `PARK_REASONS_NEEDED` recorded the obligation in code, and the value here is
+   * the one it names — the two files must agree, and a test asserts they do.
+   *
+   * RE-EVALUATED when a device attestation lands: the next pull that carries one, or the pairing
+   * flow handing one over directly, which at M1 is the only source there is (`member.set` is a
+   * family-space op kind, so a person with two Macs and no Familienkreis has nowhere in the log
+   * to record one).
+   */
+  ATTESTATION: 'attestation',
 });
 
 const PARKABLE = new Set(Object.values(PARK_REASONS));
@@ -480,7 +502,7 @@ export function validateOp(op) {
  * `nowMs` to arm it, omit it to run the pure shape checks alone.
  *
  * @param {Object} op
- * @param {{nowMs?:number, haveEpochKey?:boolean}} [ctx]
+ * @param {{nowMs?:number, haveEpochKey?:boolean, haveAttestation?:boolean}} [ctx]
  * @returns {{status:'admit'}|{status:'park', reason:string, parkReason:string, fields?:string[]}
  *          |{status:'reject', reason:string}}
  */
@@ -496,6 +518,18 @@ export function classifyOp(op, ctx = {}) {
   }
   if (ctx.haveEpochKey === false) {
     return { status: 'park', reason: 'sealed under an epoch key we do not hold yet', parkReason: PARK_REASONS.EPOCH };
+  }
+  // The SECOND verdict core/ cannot reach on its own, and it is here for the same reason `epoch`
+  // is: `load()` re-classifies every line on purpose, so a reason the classifier cannot re-derive
+  // has to be fed back in or the op comes back LIVE. For `attestation` that is not merely a lost
+  // diagnostic — it is an op from a device this build refused, applied without a gate, one
+  // relaunch later. See `PARK_REASONS.ATTESTATION`.
+  if (ctx.haveAttestation === false) {
+    return {
+      status: 'park',
+      reason: 'the authoring device has no attestation yet',
+      parkReason: PARK_REASONS.ATTESTATION,
+    };
   }
   // The 24 h clamp (ADR 001 §1.3, §7.4). `stamp.js` owns the constant; a peer with a broken clock
   // must not be able to poison every register, and must not silently lose work either.

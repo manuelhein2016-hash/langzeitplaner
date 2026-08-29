@@ -26,7 +26,7 @@ import { memberId as mkMemberId, deviceId as mkDeviceId, spaceId as mkSpaceId, i
 import { INFO, AEAD, PAD_BUCKET, RAW_PUBKEY_BYTES, PKCS8_P256_BYTES, SYMMETRIC_KEY_BYTES } from '../../src/js/crypto/suite.js';
 import * as identity from '../../src/js/crypto/identity.js';
 import { memKeyStore } from '../../src/js/platform/keystore.js';
-import { pathToPrefix, reachableFrom } from '../helpers/importgraph.js';
+import { pathToPrefix, staticPathToPrefix, reachableFrom } from '../helpers/importgraph.js';
 import { createKeyRing } from '../../src/js/crypto/spacekeys.js';
 import { pad as envelopePad, unpad as envelopeUnpad } from '../../src/js/crypto/envelope.js';
 
@@ -1198,11 +1198,22 @@ test('pairing has no revocation, and does not pretend to (§2.3, §8.2a)', () =>
   }
 });
 
-test('PRINCIPLE 7: pairing.js is not reachable from boot, first run or main', () => {
+test('PRINCIPLE 7: pairing.js is not STATICALLY reachable from boot, first run or main', () => {
+  // ── AMENDED BY E5: **STATICALLY** unreachable. ────────────────────────────────────────────
+  // ADR 002 §2.4's next sentence is "key generation happens at the family opt-in moment and
+  // nowhere else", which requires the opt-in to be able to REACH `crypto/`. E5 built that as ONE
+  // dynamic `import()` — `src/js/main.js -> src/js/family/mount.js` — which a solo launch never
+  // runs, so no module behind it is ever evaluated. A gate that forbade every KIND of edge would
+  // have forbidden the design it was written to protect, and the way that gets worked around is
+  // by hiding the specifier from the walker, which is strictly worse than one door in plain
+  // sight. `tests/tier1/network-scope.test.js` §2 owns the other half: that there is exactly one
+  // such door, and which file it is.
   for (const entry of ['src/js/boot.js', 'src/js/firstrun.js', 'src/js/main.js']) {
-    const chain = pathToPrefix(entry, 'src/js/crypto/');
-    assert.equal(chain, null, chain ? `solo mode reaches crypto: ${chain.join(' -> ')}` : '');
+    const chain = staticPathToPrefix(entry, 'src/js/crypto/');
+    assert.equal(chain, null, chain ? `solo mode statically reaches crypto: ${chain.join(' -> ')}` : '');
   }
+  assert.notEqual(staticPathToPrefix('src/js/family/mount.js', 'src/js/crypto/'), null,
+    'the static walker cannot find a static edge that exists');
   // …and the walker really does see this file, so the green above means something.
   const reached = reachableFrom('src/js/crypto/pairing.js').reached;
   assert.ok(reached.includes('src/js/crypto/identity.js'));

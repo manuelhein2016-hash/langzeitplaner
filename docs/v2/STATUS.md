@@ -1,11 +1,13 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-27 · **Stopped at:** **E3 — identity and crypto — is built, proved in the
-real WKWebView, and integrated** (LZP-302…306); round 6 fixed, integrated and verified against an
-**enumerated input domain**; the register is caught up with rounds 6 and 7
-**Resume by reading:** this file (start at the **E3 addendum** at the bottom), then
-**`docs/v2/E3-VERIFICATION.md`**, then `docs/v2/FINDINGS.md` **§2e**, §1, §4 and §7d, then
-`tests/helpers/domains.js`, then `docs/v2/adr/006-board-log-authority.md`, then `PLAN.md`.
+**Last session:** 2026-08-29 · **Stopped at:** **E5 — own-device sync — is built and integrated,
+and milestone M1 „Zwei Macs" is DEMONSTRATED** (LZP-501…505, LZP-1002): two real browser contexts
+with two distinct durable identities, paired over the real rendezvous with a six-digit SAS
+compared on both screens, syncing a whole private board through `node server/dev-server.mjs` over
+real HTTP — including an offline divergence that converged.
+**Resume by reading:** this file (start at the **E5 addendum** at the bottom), then
+**`docs/v2/E5-VERIFICATION.md`** (§3 is the demonstration, §6 is FINDINGS §3's disposition), then
+`docs/v2/FINDINGS.md` **§3 / §3b**, then `docs/v2/E3-VERIFICATION.md` for E3-1, then `PLAN.md`.
 
 ---
 
@@ -31,12 +33,25 @@ register blocking a family-mode release: finding E3-1**, and it is an input to *
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-# CURRENT — re-measured 2026-08-29 by the E3 verification pass. Supersedes the block below.
-npm test              # tier 1, pure logic          → 1690 pass / 0 fail   (101 suites)
+# CURRENT — re-measured 2026-08-29 at the close of the E5 integration pass. SIX suites now:
+# `test:fleet` is new (tests/fleet/'s 60 rows had no script and were not in test:all).
+npm test              # tier 1, pure logic          → 1956 pass / 0 fail   (162 suites)
 npm run test:attack   # adversarial corpus          →  648 pass / 0 fail   ( 91 suites)
-npm run test:property # property harness + domains  →   70 pass / 0 fail
-npm run test:server   # the sync server             →  569 pass / 0 fail
-npm run test:dom      # real headless WKWebView     →   22 files, 1 fail, tier 2 FAIL  ← finding E3-10
+npm run test:property # property harness + domains  →   70 pass / 0 fail   ( 12 suites)
+npm run test:server   # the sync server             →  799 pass / 0 fail
+npm run test:fleet    # two Macs, real handlers     →   60 pass / 0 fail   ( 13 suites)  ← NEW
+npm run test:dom      # real headless WKWebView     → 26 files, 430 pass / 1 fail / 1 skip
+```
+
+**The one tier-2 failure is still E3-10** — `dom-rendering.dom.js:38` reads the real wall clock and
+fails every Saturday, Sunday and Ferien day. 2026-08-29 is a Saturday. Not E5's, not new.
+**The one skip is named:** `network-audit.dom.js` §1's vacuity guard stands down inside WKWebView,
+which records no Resource Timing entries for the shell's `app:` scheme; the same measurement over
+`http:` is in `E5-VERIFICATION.md` §4.3.
+
+```bash
+# 2026-08-29, the E3 verification pass — superseded
+npm test → 1690 · test:attack → 648 · test:property → 70 · test:server → 569 · test:dom 22 files
 ```
 
 **`test:dom` is red, and it is not crypto.** The single failure is
@@ -253,10 +268,12 @@ Per `docs/v2/PLAN.md` §2. WP-1 and WP-2 are done.
    (`globalThis.__LZP_DEV = true`).** Honour the WP-3 obligation in §5.
 2. **WP-4** property harness extension · **WP-5** render seams behind a null family.
 3. **WP-6 crypto core** — resolve the `deviceShort` contradiction first.
-4. **WP-7 server** (runs against the memory adapter here; Vercel/Prisma need your accounts) →
-   **WP-8 sync + fleet → M1 "Zwei Macs"**.
-5. **WP-9 Familienkreis** — closes the KNOWN GAP in §5 · **WP-10 visibility** · **WP-11
-   rendering** · **WP-12 pipeline + hardening**.
+4. ~~**WP-7 server**~~ → ~~**WP-8 sync + fleet → M1 "Zwei Macs"**~~. **BOTH DONE.** M1 is
+   demonstrated: `docs/v2/E5-VERIFICATION.md` §3.
+5. **WP-9 Familienkreis** — closes the KNOWN GAP in §5, **and now also owns E5-6**, which is M1's
+   last real gap: a paired Mac receives none of the pre-space board, categories included, so
+   pairing a Mac that does not already hold the `board.json` is not delivered · **WP-10
+   visibility** · **WP-11 rendering** · **WP-12 pipeline + hardening**.
 
 Note that **E1 (the release pipeline) touches none of the same files** and can run in parallel
 with WP-3–WP-5 whenever you want distribution dogfooded early, as the sprint plan intends.
@@ -773,3 +790,71 @@ Keychain ACL of the WebCrypto master key to the **binary's code signature**, LZP
 replaces the bundle, and on **D1**'s unsigned path the family re-pairs after every update. It is a
 live argument for revisiting D1, which is reversible with a certificate and two GitHub secrets and
 no code change.
+
+
+---
+
+# Session 6 addendum — 2026-08-29 · E5, and M1 demonstrated
+
+**Read `docs/v2/E5-VERIFICATION.md` in full before touching sync.** This is the summary.
+
+## What landed
+
+`src/js/sync/` (protocol, chain, cursor, outbox, client, personal), `src/js/family/`
+(engine, pairflow, mount, familysettings, pairingui, syncstatus), `src/js/platform/net.js` and
+`device-identity.js`, the durable-identity seam in `store.js`, and the fleet harness. Six suites,
+all green apart from E3-10.
+
+## The headline: M1 is shown, not argued
+
+Two browser contexts on two different origins — two separate `localStorage` partitions and two
+separate IndexedDB key stores, which is the browser's own enforcement rather than a test
+convention — became two devices of **one member** on the relay:
+
+```
+24GK2RJ4TGC59XM2  mem__4kcZiXAdOiFt_9D7_TapA  live      ← Mac A
+8K8JXA7A3G2VAQ07  mem__4kcZiXAdOiFt_9D7_TapA  live      ← Mac B
+```
+
+They paired with a real code read off one screen and typed into the other, and **both screens
+showed `564 760`**. A note created on A appeared on B; an edit on B landed on A; a bar dragged on
+A landed on B; B went offline, both sides were edited, and on B's return the two boards
+**converged** and survived a relaunch of both. The indicator drew nothing at any checkpoint.
+
+The relay stored seven ops. A plaintext search over every byte it holds for them found **none** of
+`Blutdruck`, `Sonnenberg`, `Zahnarzt`, `Elternabend`, `Werkstatt`, `Steuerberater`, `Herbstferien`
+— nor `note.set`, nor `2026-11-03`. It knows a space id, a seq, an opId, an epoch, a device short
+and a chain hash.
+
+## The three things that were wrong, and one that still is
+
+- **E5-2 · CRITICAL, closed.** The outbox did not survive a quit: unacknowledged ops were folded
+  into `checkpoint().regs` and their LINES dropped, so five entries made on an offline laptop
+  never reached the desktop, ever, while the engine said `healthy`. **This was inside A3-M5's own
+  fix**, which is the second time a defect in this area has hidden behind a closure. One clamp;
+  its accepted-defect row is inverted.
+- **F-6 · closed**, and it took four coordinated edits rather than one — the park reason had to
+  exist (E3-3), and then it had to survive a relaunch, because `oplog.load()` re-classifies parked
+  lines and would have promoted an unattested device's op to live.
+- **Four network gates amended** from "no import edge" to "no **STATIC** import edge". The
+  stronger form forbade the design ADR 003 §7 gate 2 and ADR 002 §2.4 describe, and the way it
+  gets worked around is by hiding the specifier from the walker. The gate now counts doors:
+  exactly one, `main.js -> family/mount.js`, named.
+- **E5-6 · HIGH, OPEN, and it is what M1 does not yet deliver.** A paired Mac receives none of the
+  pre-space board — including the **categories**, so every synced note is silently remapped onto
+  the receiving Mac's own default. Owner: WP-9 / the pairing flow.
+
+## Still owed, and by whom
+
+| owner | what |
+|---|---|
+| **E1** | `sync_request` in `shell-macos/main.swift` and `src-tauri/src/lib.rs`. **Without it family mode has no transport inside the shipped app at all** — the demonstration ran on `fetch` in a browser. |
+| **WP-9** | E5-6 — the `board.json` hand-over at pairing (ADR 002 §7.2's backup file, or a payload field). |
+| **`server/`** | E5-5 (the `pairGet` budget cannot fit a polling rendezvous — two Macs in one household are one IP) and E5-7 (`device.attestation` has two spellings on two endpoints). |
+| **`src/js/crypto/`** | re-point `ENVELOPE_PARK.ATTESTATION` at `PARK_REASONS.ATTESTATION` and empty `PARK_REASONS_NEEDED`. Values already agree; it is a duplicate constant. |
+| **`src/js/storage.js`** | named slots for the key ring, the peer attestations and the sealed outbox. `family/engine.js` uses `localStorage`, which is right in a browser and wrong in a Tauri build. |
+| **`store.js`** | **F-5 / R5-5b** (the checkpoint does not pass `applyRemote`'s gate) and **F-2** — the three FINDINGS §3 rows E5 did not close. |
+| **docs** | eight ADR / contract amendments, listed in `E5-VERIFICATION.md` §7. |
+
+**E3-1 is unchanged and is still the row that stops a family-mode release.** E5 was told not to
+edit `src/js/crypto/` and did not.

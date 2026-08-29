@@ -16,6 +16,31 @@ import { MONTH_DE, MONTH_EN, todayISO, parseISO } from './dates.js';
 let notify = () => {};
 export function initSettings(onChange) { notify = onChange || (() => {}); }
 
+/**
+ * ── F19 · THE FAMILY SEAM, AND IT IS DELIBERATELY A NULL CALLBACK ───────────
+ *
+ * ADR 005 §1.5 budgets this file "~25 lines" for the whole of family mode, and this is them.
+ *
+ * `settings.js` is in the boot graph — `main.js` imports it on every launch, solo or not — so it
+ * may know that a family section EXISTS and may not know what is in it. An `import` here, static
+ * or dynamic, would put `crypto/`, `sync/` and `platform/net.js` one edge away from every solo
+ * launch, which is exactly what ADR 003 §7 gate 2 and ADR 002 §2.4 forbid and what
+ * `tests/tier1/network-scope.test.js` §2 measures.
+ *
+ * So the direction is inverted: `family/mount.js` — the ONE dynamically imported door — calls
+ * this, and until it does the sheet has one fewer section and nothing else changes. A solo
+ * install that never opens ⚙ never evaluates a line of family mode.
+ *
+ * @type {((body:HTMLElement, api:Object) => void)|null}
+ */
+let familySections = null;
+
+/** Called by `family/mount.js`. There is no other caller and there must not be. */
+export function setFamilySections(fn) {
+  familySections = typeof fn === 'function' ? fn : null;
+  rebuildSettings();
+}
+
 export function applySettingsToBody() {
   const s = store.state.settings;
   document.body.classList.toggle('ferien-hatch', !!s.layers.ferienPattern);
@@ -229,6 +254,14 @@ function build(body, api) {
   // never touches the board. Putting it next to Export/Import/Sicherungen would
   // suggest otherwise to exactly the reader least able to check.
   buildUpdateSection(body, api);
+
+  // ── F19 · Familienkreis / Meine Geräte / Synchronisation ───────────────────
+  // Null on a solo install, and null until `family/mount.js` has been loaded. See the seam's
+  // docblock at the top of this file for why this is a callback and not an import.
+  if (familySections) {
+    try { familySections(body, api); }
+    catch (e) { console.warn('[settings] the family sections did not draw:', e); }
+  }
 
   // ── data ───────────────────────────────────────────────────────────────────
   body.appendChild(el('div', 'section-title', t('data')));

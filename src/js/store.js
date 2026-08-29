@@ -87,25 +87,41 @@ import { nextFreeRef } from './palette.js';
 import * as storage from './storage.js';
 
 import {
-  PERSONAL_PLACEHOLDER, FIELDS, flattenPref,
+  PERSONAL_PLACEHOLDER, FIELDS, flattenPref, spaceClassOf, PARK_REASONS,
   noteSet, barSet, catSet, padSet, prefSet, buildMutation, mutation,
 } from './core/ops.js';
-import { isMonthKey, noteKey, barKey, catKey } from './core/entities.js';
+import { isMonthKey, noteKey, barKey, catKey, isMemberId, isDeviceId, isSpaceId } from './core/entities.js';
 import {
   opId as newOpId, groupId as newGid, memberId as mintMemberId, deviceId as mintDeviceId,
-  ZERO_DEVICE_SHORT,
+  ZERO_DEVICE_SHORT, isDeviceShort,
 } from './core/ids.js';
 import { crock32 } from './core/b64.js';
 import {
   createClock, isStamp, cmp, msOf, ctrOf, fmt as fmtStamp,
   MAX_FUTURE_DRIFT_MS, MAX_STAMP_CTR, MAX_STAMP_MS,
 } from './core/stamp.js';
-import { createOpLog } from './core/oplog.js';
+import { createOpLog, ZERO_STAMP } from './core/oplog.js';
 import { materialize, stripV2Fields, exportV1JSON } from './core/materialize.js';
 import { createUndoStacks, makeTx, captureImages, shadowContent } from './core/undo.js';
 import { migrateV1, migrateSnapshots, toV1Snapshot } from './core/migrate1to2.js';
 import { planReplaceAll } from './core/replace.js';
-import { foldAuthorized } from './core/authz.js';
+import { foldAuthorized, REJECT_REASONS } from './core/authz.js';
+
+/**
+ * THE TWO REFUSALS A LATER OP CAN CURE — finding F-6, and the reason `applyRemote` parks.
+ *
+ * `authz.js` stage 0b answers these two when it has never been shown an attestation for the
+ * op's author. That is a statement about what THIS DEVICE KNOWS, not about the op, and an
+ * attestation is itself an op — it can arrive in a later page or through pairing. Every other
+ * rejection reason is a verdict about the op that no later op can change.
+ *
+ * Spelled from `REJECT_REASONS` rather than as literals so a renamed verdict is a build error
+ * here rather than a filter that silently stops matching. `sync/personal.js` exports the same
+ * pair as `CURABLE_REFUSALS` for its cursor hold; the two must agree and `sync-personal.test.js`
+ * pins that they do — this file may not import `sync/`, because `main.js` imports this one and
+ * ADR 003 §7 gate 2 requires `sync/` to be unreachable from the boot graph.
+ */
+const CURABLE_REFUSALS = new Set([REJECT_REASONS.NOT_MY_DEVICE, REJECT_REASONS.UNATTESTED_DEVICE]);
 
 export const SCHEMA_VERSION = 1;
 const UNDO_LIMIT = 50;
@@ -667,6 +683,15 @@ const LZP_CHECKPOINT_ENVELOPE = 2;
  */
 const DEFERRED_QUARANTINE = new Set(['clock-skew']);
 
+/**
+ * Is this the stamp of a MIGRATION op — `GENESIS(i)`, whose device short is all zeros (ADR 001
+ * §8.1)? A stamp, not an op: `_born` carries one too, and only `op.ts` decides sealability.
+ * @param {unknown} ts @returns {boolean}
+ */
+function isGenesisStamp(ts) {
+  return isStamp(ts) && ts.slice(-16) === ZERO_DEVICE_SHORT;
+}
+
 /** FNV-1a, 32 bit, hex. Not a hash for security — a cheap stable fingerprint of a byte string. */
 function fnv1a(str) {
   let h = 0x811c9dc5;
@@ -1148,35 +1173,70 @@ function stackView(depth, clear) {
 
 class Store {
   constructor() {
-    // Identity. In solo mode it is EPHEMERAL — minted per launch and deliberately not
-    // persisted, because there is nowhere to persist it: `board.json` is asserted to be exactly
-    // `store.state` (11.4) and a persist is asserted to touch exactly the two v1 storage slots.
-    // Nothing observable depends on it: migrated stamps carry ZERO_DEVICE_SHORT by construction
-    // (ADR 001 §8.1), and `ownerId` / `updatedBy` are stripped out of everything that leaves
-    // this file. A durable identity arrives with the keystore when a space is created (ADR 002
-    // §2.2) — that is also where `deviceShort` stops being random and becomes a function of the
-    // signing key.
+    // ── IDENTITY (finding A3-H4 · ADR 002 §2.2 · ADR 001 §4.0) ────────────────────────────
+    //
+    // TWO MODES, AND THE DIFFERENCE IS THE WHOLE OF PRINCIPLE 7.
+    //
+    // SOLO. What is minted here: EPHEMERAL, per launch, deliberately not persisted, because
+    // there is nowhere to persist it — `board.json` is asserted to be exactly `store.state`
+    // (11.4) and a persist is asserted to touch exactly the two v1 storage slots. Nothing
+    // observable depends on it: migrated stamps carry ZERO_DEVICE_SHORT by construction (ADR 001
+    // §8.1), and `ownerId` / `updatedBy` are stripped out of everything that leaves this file.
+    // **No key is generated and no probe is run to get here** (ADR 002 §2.4, story 15.1): these
+    // three values are a uuid and 10 random bytes, and `src/js/crypto/` is not imported by this
+    // file, transitively or otherwise — `tests/tier1/crypto-identity.test.js`'s PRINCIPLE 7 gate
+    // walks the graph from `boot.js` and fails if it ever is.
+    //
+    // FAMILY / PAIRED. `useIdentity()` replaces all four with the DURABLE identity the keystore
+    // holds — `ensureDeviceIdentity` via `src/js/platform/device-identity.js`, whose `deviceId`
+    // and key-derived `deviceShort` survive a relaunch. The store never reaches for it: crypto
+    // is INJECTED, at the family opt-in moment and nowhere else, which is what keeps solo mode
+    // from being able to generate a key even by accident.
+    //
+    // WHY THIS IS A CONVERGENCE BLOCKER AND NOT A TIDINESS ITEM (A3-H4 / R3-41): `foldAuthorized`
+    // gates a personal-space op on `op.act === me`, and an ephemeral `me` means Mac B refuses
+    // every op Mac A ever wrote. Two Macs over one board cannot converge AT ALL until this is
+    // durable — and any fleet test that mints its ops with the receiving store's own `_me` is a
+    // false green.
     this._me = mintMemberId();
     this._device = mintDeviceId();
     this._short = crock32(crypto.getRandomValues(new Uint8Array(10)));
     this._clock = createClock(this._short, () => Date.now());
+    /** The injected durable identity, or null in solo mode. Read-only once set. */
+    this._identity = null;
+    /**
+     * ADR 001 §4.0's "the LOCAL device set" — my member's OTHER devices, as PAIRING established
+     * them, not as the log reports them. `ctx.myDevices` is this ∪ `_device` ∪ whatever the fold
+     * itself attests (see `_myDevices`). Empty in solo mode.
+     */
+    this._peerDevices = new Set();
+    /**
+     * `(memberId, blob) => DeviceAttestation|null`, injected with the identity. Without it
+     * `foldAuthorized` FAILS CLOSED on every `dev.*` register — which is right: a fold that
+     * admitted attestations it could not verify would be the key-injection hole ADR 002 §2.3
+     * exists to close, entered through the front door.
+     */
+    this._attestOpen = null;
     this._log = createOpLog({ now: () => Date.now() });
-    this._stacks = createUndoStacks({
-      act: this._me,
-      dev: this._device,
-      mint: () => this._clock.tick(),
-      newOpId,
-      newGid,
-      space: PERSONAL_PLACEHOLDER,
-      limitGroups: UNDO_LIMIT,
-      // `shadow` is deliberately NOT passed: `createUndoStacks` defaults to `DEV`, which the
-      // suites arm process-wide through `tests/helpers/dev-flag.mjs` (ATT-96). Pinning it here
-      // would disarm risk R5's mechanical guard for the whole app.
-    });
+    this._stacks = this._makeStacks();
     this._personalSpaceId = null;
     this._familySpaceId = null;
     this._opsPersisted = false;
+    /** finding E5-2: the stand-down warning is said once per session, not once per save. */
+    this._e52Warned = false;
     this.publisher = nullPublisher();
+    /**
+     * ── THE SYNC SEAM (LZP-502 · ADR 003 §8.1 · ADR 006 §9) ────────────────────────────────
+     * `true` from the moment `usePersonalSpace()` lands until this store is thrown away. It is
+     * NOT the same fact as `_opsPersisted`: a quarantined or read-only launch has a personal
+     * space and still may not write the log (§9.5), and the difference is exactly the case the
+     * flag exists to keep separate.
+     */
+    this._syncArmed = false;
+    /** `true` when THIS launch republishes its whole personal projection — ADR 006 §9.3's W2
+     *  re-join. Set by `init()` when a lineage-bearing board's log was quarantined, and reported
+     *  through `diagnostics().sync` so a re-join is a visible event and never a quiet one. */
+    this._rejoined = false;
 
     // ── the warnings channel (F-8) ──────────────────────────────────────────
     // Everything this layer knows it lost, refused or repaired ends up here. It is ONE array for
@@ -1234,6 +1294,418 @@ class Store {
     this.redoStack = stackView(() => this._stacks.size().redo, () => this._stacks.clear());
   }
 
+  /** The undo stacks carry `act`/`dev` into every inverse op, so they are rebuilt with the
+   *  identity rather than pinned to whichever one the constructor happened to mint. */
+  _makeStacks() {
+    return createUndoStacks({
+      act: this._me,
+      dev: this._device,
+      mint: () => this._clock.tick(),
+      newOpId,
+      newGid,
+      // LZP-502: the SPACE IN FORCE, not the placeholder. `undo()` emits NEW ops carrying the
+      // pre-values (rule U4) and they go on the wire like any other local op — so an inverse op
+      // stamped `space: 'personal'` while every other op carries `psp_…` is an op the outbox
+      // would offer and `sealOp` would refuse for ever (ADR 002 §5.2.2 check 2). That is a ⌘Z
+      // that syncs on one Mac and never reaches the other, which is the worst possible shape for
+      // a bug in undo. `usePersonalSpace()` rebuilds the stacks for the same reason
+      // `useIdentity()` does.
+      space: this._personalSpaceId ?? PERSONAL_PLACEHOLDER,
+      limitGroups: UNDO_LIMIT,
+      // `shadow` is deliberately NOT passed: `createUndoStacks` defaults to `DEV`, which the
+      // suites arm process-wide through `tests/helpers/dev-flag.mjs` (ATT-96). Pinning it here
+      // would disarm risk R5's mechanical guard for the whole app.
+    });
+  }
+
+  // ── DURABLE DEVICE IDENTITY — the A3-H4 seam ────────────────────────────────────────────────
+  //
+  // ADR 002 §2.2's identity, handed in rather than reached for. `src/js/platform/device-identity.js`
+  // is what produces it (`ensureDeviceIdentity` over the keystore); this file must not import it,
+  // because that would put `src/js/crypto/` in `boot.js`'s import graph and solo mode would then
+  // evaluate the key generator on first run — the exact thing story 15.1 and ADR 002 §2.4 forbid,
+  // and the thing `tests/tier1/crypto-identity.test.js`'s PRINCIPLE 7 gate fails on.
+  //
+  // WHAT IT CHANGES, AND WHAT IT DOES NOT.
+  //   · `_me` stops being per-process, so `foldAuthorized`'s `op.act === me` stops rejecting my
+  //     own other Mac. This is the A3-H4 blocker, and it is the whole reason the seam exists.
+  //   · `_short` stops being random and becomes `crock32(SHA-256(sigPubRaw)[0..10])`, so the
+  //     device short every future stamp carries is the one ADR 002 §5.2.2's check 4 compares
+  //     against `env.dv`. Any op minted before this call carries the old short and is not
+  //     re-stamped — see the ordering rule below.
+  //   · `board.json` is UNCHANGED by it. Identity is not board content (11.4), nothing is
+  //     written to disk here, and `state` is not touched.
+  //
+  // ORDERING — the one rule a caller has to keep. Call it BEFORE `init()`. The spine is minted
+  // from `board.json` at `init()` with whatever identity is current (`_buildSpine` passes
+  // `memberId`/`deviceId` to `migrateV1`), so an identity adopted afterwards leaves this
+  // session's spine authored by the ephemeral one. That is survivable rather than corrupting —
+  // ADR 006's whole point is that `board.json` is the truth and the log is history, so the next
+  // launch re-derives the spine under the durable identity — but it is not what anyone means,
+  // so a post-`init()` call re-derives immediately: it warns, and the caller is told to
+  // `await store.init()` again. `_lineageId` and `board.json` are untouched by that, so
+  // re-initialising costs nothing (ADR 006 §9.4's re-derivation, arrived at from the other side).
+  //
+  /**
+   * @param {{memberId:string, deviceId:string, deviceShort:string,
+   *          peerDeviceIds?:Iterable<string>,
+   *          attestOpen?:(m:string, blob:string) => (Object|null)}} identity
+   * @returns {{memberId:string, deviceId:string, deviceShort:string}} what the store now is
+   */
+  useIdentity(identity) {
+    const id = identity && typeof identity === 'object' ? identity : {};
+    // Loud, not lenient. A half-formed identity that was quietly ignored would leave the store
+    // ephemeral while the caller believed it durable, and the symptom would be "sync silently
+    // converges nothing" — the same class of failure A3-H4 already is.
+    if (!isMemberId(id.memberId)) {
+      throw new TypeError(`store.useIdentity: memberId must be a MemberId, got ${JSON.stringify(id.memberId)}`);
+    }
+    if (!isDeviceId(id.deviceId)) {
+      throw new TypeError(`store.useIdentity: deviceId must be a DeviceId, got ${JSON.stringify(id.deviceId)}`);
+    }
+    if (!isDeviceShort(id.deviceShort)) {
+      throw new TypeError(
+        'store.useIdentity: deviceShort must be the 16-character Crockford short of the signing key '
+        + `(ADR 002 §5.2.0), got ${JSON.stringify(id.deviceShort)}`
+      );
+    }
+    if (this._identity
+      && (this._identity.memberId !== id.memberId || this._identity.deviceId !== id.deviceId)) {
+      // The same discipline `ensureDeviceIdentity` applies to a half-written key store, for the
+      // same reason: a device that quietly re-points at a second identity has authored ops under
+      // two names and nobody can tell which of them is this Mac.
+      throw new Error(
+        `store.useIdentity: this store already runs as ${this._identity.memberId}/${this._identity.deviceId}. `
+        + 'An identity is never re-pointed; build a new store.'
+      );
+    }
+
+    const peers = new Set();
+    for (const d of id.peerDeviceIds || []) {
+      if (!isDeviceId(d)) throw new TypeError(`store.useIdentity: peerDeviceIds holds ${JSON.stringify(d)}`);
+      if (d !== id.deviceId) peers.add(d);
+    }
+    if (id.attestOpen !== undefined && id.attestOpen !== null && typeof id.attestOpen !== 'function') {
+      throw new TypeError('store.useIdentity: attestOpen must be (memberId, blob) => DeviceAttestation|null');
+    }
+
+    this._me = id.memberId;
+    this._device = id.deviceId;
+    this._short = id.deviceShort;
+    // The HLC state is carried across, never restarted: `save()`/`opts.state` exist precisely so
+    // a clock can be rebuilt without walking backwards. A clock that restarted at 0 would mint
+    // stamps below ops this very session already appended.
+    this._clock = createClock(this._short, () => Date.now(), { state: this._clock.save() });
+    this._peerDevices = peers;
+    this._attestOpen = id.attestOpen ?? null;
+    this._identity = Object.freeze({
+      memberId: id.memberId, deviceId: id.deviceId, deviceShort: id.deviceShort,
+    });
+    this._stacks = this._makeStacks();
+
+    if (this.ready) {
+      this._warn(
+        'the device identity was adopted after the board had already loaded, so this session\'s '
+        + 'history is still authored by the temporary one. Call store.init() again — board.json is '
+        + 'the truth and re-deriving from it costs nothing.'
+      );
+    }
+    return { ...this._identity };
+  }
+
+  /** Is this store running on a durable, keystore-backed identity? Diagnostics and tests. */
+  hasDurableIdentity() { return this._identity !== null; }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // THE SYNC SEAM — LZP-502.  `src/js/sync/personal.js` is the only caller.
+  //
+  // ADR 003 §8 puts the engine outside this file: the transport, the cadence, the backoff and
+  // the envelopes all live in `src/js/sync/`, and `store.js` neither imports them nor knows
+  // whether one is attached. What it owns is the six facts a sync engine cannot compute for
+  // itself, and every one of them is a projection of the LOG:
+  //
+  //   usePersonalSpace()  which `psp_…` id this board's ops are authored into
+  //   outbox()            the sealed-but-unacknowledged lines — §8.1, derived, never a queue
+  //   ackPushed()         the server has it (`accepted` OR `duplicate` — §3.1, identically)
+  //   cursor()/noteCursor()   the transport cursor, §3.3, riding BELOW the commit point (§9 W1)
+  //   applyRemote(ops, {seqs})  the inbox
+  //   setPublisher()      ADR 004 §3's retraction hand-off (the WP-3 obligation)
+  //
+  // WHY THE OUTBOX IS DERIVED AND NOT A SECOND FILE. ADR 003 §8.1 defines it as "`ops.jsonl`
+  // lines whose `seq` is unset", and that definition is worth more than it looks: it means every
+  // path that appends a local op — `_commit`, `undo`, `redo`, `_adopt`, `replaceAll`, and any
+  // path a later round adds — is in the outbox automatically, with no publish hook to forget at
+  // one of them. A separate queue would have to be written to at six call sites and would drift
+  // at the seventh. It also survives quit and crash for free, because the log does (19.1).
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Adopt the personal space this board's ops belong to (story 19.4).
+   *
+   * ORDERING — the same rule `useIdentity()` has, for the same reason and with more teeth.
+   * **Call it BEFORE `init()`.** `_ctx().space` is `_personalSpaceId ?? PERSONAL_PLACEHOLDER`, so
+   * the spine `init()` mints from `board.json` carries whichever of the two was current — and an
+   * op stamped `space: 'personal'` can NEVER be sealed for a `psp_…` space: ADR 002 §5.2.2 check
+   * 2 (`hdr.sp === op.space`) is mirrored inside `sealOp`, so it fails at authoring time on the
+   * one machine that can still do something about it. Adopting the space first means the whole
+   * board is minted into it, once, by the ordinary spine path, with GENESIS stamps when the board
+   * has never had a log (so two Macs migrating the same `board.json` still agree byte for byte —
+   * ADR 001 §8.1) and fresh ones when it has (ADR 006 §9.4).
+   *
+   * A post-`init()` call is REFUSED rather than warned about, which is the one place this seam is
+   * stricter than `useIdentity()`: `useIdentity` after `init()` leaves a survivable "this
+   * session's history is authored by the temporary identity", while a space adopted after `init()`
+   * leaves a whole log of placeholder-space ops that the outbox would offer and `sealOp` would
+   * then refuse one by one, for ever, with nothing on screen to say why.
+   *
+   * @param {string} spaceId a `psp_…` SpaceId
+   * @returns {string} the id now in force
+   */
+  usePersonalSpace(spaceId) {
+    if (!isSpaceId(spaceId) || spaceClassOf(spaceId) !== 'personal' || spaceId === PERSONAL_PLACEHOLDER) {
+      throw new TypeError(
+        `store.usePersonalSpace: expected a psp_… SpaceId, got ${JSON.stringify(spaceId)}`);
+    }
+    if (this._personalSpaceId !== null && this._personalSpaceId !== spaceId) {
+      throw new Error(
+        `store.usePersonalSpace: this store already writes into ${this._personalSpaceId}. A board `
+        + 'belongs to one personal space; build a new store.');
+    }
+    if (this.ready) {
+      throw new Error(
+        'store.usePersonalSpace: call it BEFORE init(). Adopting a space afterwards leaves this '
+        + "session's whole log authored into the 'personal' placeholder, and sealOp refuses every "
+        + 'one of those envelopes (ADR 002 §5.2.2 check 2). Re-run init().');
+    }
+    this._personalSpaceId = spaceId;
+    this._syncArmed = true;
+    // The undo stacks carry the space into every inverse op, so they are rebuilt rather than
+    // pinned to whatever the constructor happened to hold — the same discipline `useIdentity()`
+    // applies to `act`/`dev`, and for a sharper reason: see `_makeStacks`.
+    this._stacks = this._makeStacks();
+    return spaceId;
+  }
+
+  /** The `psp_…` id in force, or `null` in solo mode. */
+  personalSpaceId() { return this._personalSpaceId; }
+
+  /**
+   * MAY THE LOG BE WRITTEN THIS LAUNCH? ADR 006 §9.5, and it is the whole of that rule.
+   *
+   * "Whoever sets `_opsPersisted = true` when a space is created must consult `store.quarantine`
+   * first. Turning the flag on over a quarantined log overwrites the very bytes the quarantine
+   * exists to preserve." `_sequesterQuarantine()` renames those bytes out of the way, so once it
+   * reports `movedAside` there is nothing left to overwrite and the log may be written again.
+   * A refused move (or a DEFERRED_QUARANTINE reason, which is kept in place ON PURPOSE so the
+   * next launch can reconsider it) means the log stays read-only for this session.
+   */
+  _logMayBeWritten() {
+    if (!this._syncArmed || this._personalSpaceId === null) return false;
+    if (this.bootFailure) return false;                       // I-2: a read-only session writes nothing
+    if (this.quarantine && !this.quarantine.movedAside) return false;
+    return true;
+  }
+
+  /**
+   * THE OUTBOX (ADR 003 §8.1) — the lines this device authored that the server has not confirmed.
+   *
+   * Four filters, and every one of them is a defect if it is missing:
+   *
+   *  · `seq === null` — the definition. An op leaves the outbox when the server reports it in
+   *    `accepted` OR `duplicate` (§3.1: the client treats them identically), which is
+   *    `ackPushed()` below, which is `oplog.ack()`, which rides in `checkpoint().seqs` and so
+   *    survives a relaunch. This is why a crash between push and ack costs one duplicate push and
+   *    never a lost op, and why at-least-once delivery is sufficient.
+   *  · `park === null` — a parked line is a promise not to fold. Pushing one would publish an op
+   *    this build has already decided it cannot apply.
+   *  · `op.dev === this._device` — **A PEER'S OP CAN NEVER BE IN MY OUTBOX.** It is not a
+   *    politeness: `POST /ops` refuses `e.dv !== auth.deviceShort` with `403 device_mismatch`,
+   *    and `sealOp` cannot even build the envelope, because `devOf(op.ts)` is the peer's short
+   *    and check 4 compares it against mine. Without this filter, one peer op that arrived
+   *    without a seq wedges the outbox permanently.
+   *  · the space — `op.space === this._personalSpaceId`. This is F-7's outbound half. `pref.set`
+   *    is a `local`-space op and settings are NEVER synced (17.7, rule U6); a family op belongs
+   *    to a different key and a different stream (21.2 — the two scopes are disjoint and the
+   *    crypto layer enforces it, so this filter is the second of two locks, not the only one).
+   *  · **GENESIS stamps — the spine is shared PREHISTORY, not traffic.** A migration op's stamp
+   *    carries the all-zeros device short by construction (ADR 001 §8.1), so `sealOp` refuses it
+   *    on ADR 002 §5.2.2 check 4 and no honest peer could open it if it somehow got out. It does
+   *    not need to travel and must not: §8.1's determinism means the op is a pure function of
+   *    `board.json`, so every Mac holding that file has already minted the identical op, with the
+   *    identical opId — which is exactly why re-stamping the spine instead would collide on
+   *    `409 forked_op_id` (same id, different bytes) on the second Mac's very first push.
+   *    Without this filter the outbox offers the whole migrated board and the engine quarantines
+   *    it line by line, leaving story 19.3's `error` indicator lit on day one for every M1 user
+   *    with two healthy Macs.
+   *    **THE COROLLARY IS OWED AND IS REPORTED, NOT PAPERED OVER:** a Mac that does NOT hold that
+   *    `board.json` — a genuinely new device paired in, which ADR 002 §6.3 step 8 says "pulls from
+   *    seq 0" — receives nothing of the pre-space board through the op stream. Pairing (or the
+   *    backup file, ADR 002 §7.2) has to hand the board over. See E5's report.
+   *
+   * @param {{limit?:number}} [opts]
+   * @returns {Array<{op:Object, seq:null, park:null}>} in the log's own arrival order
+   */
+  outbox({ limit = Infinity } = {}) {
+    const sp = this._personalSpaceId;
+    if (sp === null) return [];
+    const out = [];
+    for (const line of this._log.lines()) {
+      if (out.length >= limit) break;
+      if (line.seq !== null && line.seq !== undefined) continue;
+      if (line.park !== null && line.park !== undefined) continue;
+      const op = line.op;
+      if (!op || op.dev !== this._device) continue;
+      if (op.space !== sp) continue;
+      if (isGenesisStamp(op.ts)) continue;
+      out.push(line);
+    }
+    return out;
+  }
+
+  /** How many lines the outbox holds. Cheap enough to call on every status tick. */
+  outboxSize() { return this.outbox().length; }
+
+  /**
+   * The server has these ops (ADR 003 §3.1 — `accepted` and `duplicate` mean the same thing).
+   *
+   * It does NOT persist by itself. The seq lands in `checkpoint().seqs`, which `persistNow`
+   * writes below the commit point, so an ack lost to a crash costs one idempotent re-push.
+   * @param {Array<{oid:string, seq:string|number|bigint}>} entries
+   * @returns {number} how many lines actually moved
+   */
+  ackPushed(entries) {
+    let n = 0;
+    for (const e of Array.isArray(entries) ? entries : []) {
+      if (!e || typeof e.oid !== 'string') continue;
+      try { if (this._log.ack(e.oid, e.seq)) n += 1; }
+      catch (err) { this._warn(`push ack refused for ${e.oid}: ${err.name}: ${err.message}`); }
+    }
+    if (n) this.schedulePersist();
+    return n;
+  }
+
+  /** The transport cursor for a space (ADR 003 §3.3), as a decimal string, or `'0'`. */
+  cursor(space) {
+    const c = this._log.cursor(space ?? this._personalSpaceId);
+    return c === null ? '0' : String(c);
+  }
+
+  /**
+   * Advance the transport cursor — **W1 (ADR 006 §9.1), and this method IS the assertion.**
+   *
+   *   > The persisted cursor may never be ahead of `board.json`. Cursors ride in
+   *   > `checkpoint().cursors`, which is written AFTER `board.json` in the same persist (R5), so
+   *   > this holds automatically — and it must be asserted, so that a future sync engine cannot
+   *   > break it by persisting a cursor through some other file.
+   *
+   * The assertion is structural rather than a runtime check: there is exactly one way to move a
+   * cursor and it writes into the LOG, whose only route to disk is `_persistOps`, which
+   * `persistNow` runs strictly after the `saveBoardText` commit point. A sync engine that wanted
+   * to persist a cursor "through some other file" would have to add a storage call, and
+   * `tests/tier1/sync-personal.test.js` asserts that a crash between the two leaves the cursor
+   * behind the board and never ahead of it.
+   *
+   * `oplog.setCursor` never moves backwards, which is the other half of §3.3: a crash mid-pull
+   * re-fetches rather than skips.
+   * @returns {boolean} whether it advanced
+   */
+  noteCursor(space, seq) {
+    const sp = space ?? this._personalSpaceId;
+    if (sp === null) throw new Error('store.noteCursor: no personal space — call usePersonalSpace() first');
+    let moved = false;
+    try { moved = this._log.setCursor(sp, seq); }
+    catch (e) { this._warn(`cursor refused for ${sp}: ${e.name}: ${e.message}`); return false; }
+    if (moved) this.schedulePersist();
+    return moved;
+  }
+
+  /**
+   * Install the real publication port (ADR 004 §3) — **the WP-3 obligation's landing site.**
+   *
+   * `replaceAll()` hands `plan.retractions` to `this.publisher` at the moment of the import, and
+   * that moment is usually BEFORE any sync engine exists: `nullPublisher()` therefore RECORDS
+   * rather than discards (see its docblock). Anything less than carrying that record across here
+   * would mean an import performed in solo mode leaves entries live on the family's boards for
+   * ever (story 16.5, RECHECK-40-4) — the list is computable only by `planReplaceAll`, and
+   * nothing in `core/` runs after the transaction lands, so if it is dropped here it cannot be
+   * recovered anywhere.
+   * @param {Object} pub
+   */
+  setPublisher(pub) {
+    if (!pub || typeof pub !== 'object'
+      || typeof pub.retract !== 'function' || typeof pub.askToReshare !== 'function') {
+      throw new TypeError('store.setPublisher: a publisher must implement retract() and askToReshare()');
+    }
+    const old = this.publisher;
+    this.publisher = pub;
+    const carried = { retractions: 0, reshares: 0 };
+    if (old && Array.isArray(old.pendingRetractions) && old.pendingRetractions.length) {
+      carried.retractions = old.pendingRetractions.length;
+      pub.retract(old.pendingRetractions.slice());
+      old.pendingRetractions.length = 0;
+    }
+    if (old && Array.isArray(old.pendingReshares) && old.pendingReshares.length) {
+      carried.reshares = old.pendingReshares.length;
+      pub.askToReshare(old.pendingReshares.slice());
+      old.pendingReshares.length = 0;
+    }
+    return carried;
+  }
+
+  /**
+   * `ctx.myDevices` — ADR 001 §4.0's "the LOCAL device set", SUPPLIED rather than defaulted.
+   *
+   * Finding A3-H4 item (3): "`ctx.myDevices` actually supplied — it is optional today and the
+   * check degrades to `act === me`. Once identity is durable, (3) is *derived*
+   * (`attestationOf` filtered by `memberId`), needs no new plumbing, and removes the
+   * degradation."
+   *
+   * **"ONCE IDENTITY IS DURABLE" IS THE WHOLE CONDITION, AND IT IS LOAD-BEARING — `null` HERE
+   * IS AN ANSWER, NOT AN OMISSION.** §4.0 sanctions the degradation *"where the caller does not
+   * supply it"*, and in solo mode this caller genuinely cannot: `_device` is minted per process
+   * (see the constructor), so `{_device}` is a set that is DIFFERENT ON EVERY LAUNCH. Supplying
+   * it would not be "the local device set", it would be an assertion — "I have exactly one
+   * device, and it is whichever uuid this process happened to draw" — that the store has no
+   * grounds for and that would refuse ops the same Mac wrote yesterday. Solo mode therefore
+   * keeps §4.0's degradation, deliberately and reportably (`diagnostics().identity.durable`),
+   * and the moment `useIdentity()` lands the degradation is gone for good.
+   *
+   * Three sources, unioned, in order of how much they cost to be wrong about:
+   *
+   *   1. `_device` — this Mac. Mine by construction; nothing else can be said about it.
+   *   2. `_peerDevices` — my member's other devices as PAIRING established them (ADR 002 §6).
+   *      This is the source §4.0 actually names, and it is the only one that exists for two Macs
+   *      of one person with no Familienkreis: `member.set` is a FAMILY-space op kind
+   *      (`core/ops.js` OP_KINDS), so a personal-only fleet has nowhere to write a `dev.*`
+   *      register and source 3 below is empty for it. Reported — see E5's notes.
+   *   3. every `deviceId` the fold itself attests to `me`, i.e. `attestationOf` filtered by
+   *      member. This is the family-space source, and it is why the fold below runs twice.
+   *
+   * @param {Object} [attested] an `AuthzResult`, when one has already been computed
+   * @returns {Set<string>|null} null in solo mode — see above
+   */
+  _myDevices(attested) {
+    if (!this._identity) return null;
+    const set = new Set([this._device, ...this._peerDevices]);
+    const fromLog = attested && attested.attestedDevices instanceof Map
+      ? attested.attestedDevices.get(this._me)
+      : null;
+    if (fromLog) for (const d of fromLog) set.add(d);
+    return set;
+  }
+
+  /**
+   * The ctx every authorization fold in this file is run with. One function, so the fold that
+   * LEARNS the device set and the fold that GATES on it cannot drift apart.
+   * @param {{myDevices?:Set<string>}} [extra]
+   */
+  _authzCtx(extra = {}) {
+    const ctx = { me: this._me };
+    if (this._attestOpen) ctx.attestOpen = this._attestOpen;
+    if (extra.myDevices) ctx.myDevices = extra.myDevices;
+    return ctx;
+  }
+
   /**
    * THE SPINE (ADR 006 R1). `board.json` is migrated into an op set on EVERY launch, whether a
    * log exists or not. There is no predicate here any more; the path that used to be rare is the
@@ -1252,9 +1724,33 @@ class Store {
    */
   _buildSpine(board, { restamp }) {
     const spine = createOpLog({ now: () => Date.now() });
-    const r = migrateV1(board, { memberId: this._me, deviceId: this._device, acceptLossy: true });
+    // `personalSpaceId` — LZP-502. `migrateV1` has taken it since WP-3 (ADR 001 §8.2: "omitted in
+    // solo mode … the ops carry the 'personal' placeholder and are rewritten the first time a
+    // personal space is created") and nothing passed it, so the whole spine — i.e. THE WHOLE
+    // BOARD — was authored into the placeholder even on a store that had adopted a space. Every
+    // one of those ops is unsealable (ADR 002 §5.2.2 check 2 is mirrored in `sealOp`), so the
+    // outbox would have offered the entire board and the engine would have refused it op by op.
+    // Passing it here is also what makes ADR 006 §9.3's re-join work at all.
+    const r = migrateV1(board, {
+      memberId: this._me,
+      deviceId: this._device,
+      acceptLossy: true,
+      ...(this._personalSpaceId ? { personalSpaceId: this._personalSpaceId } : {}),
+    });
     this._warnAll(r.warnings);
-    for (const op of r.ops) spine.append(restamp ? { ...op, ts: this._clock.tick() } : op);
+    // A RE-STAMP RE-MINTS THE opId TOO, AND THAT IS NOT TIDINESS (LZP-502).
+    //
+    // `migrateV1` is pure and deterministic: two Macs migrating the same `board.json` produce
+    // byte-identical ops INCLUDING their opIds, which is what makes a second Mac's push a clean
+    // `duplicate` instead of a conflict. A re-stamp changes the BODY (`ts`, and with it the
+    // device short) while leaving the id — and `@@unique([spaceId, opId])` plus the relay's
+    // byte comparison then answer `409 forked_op_id` (ADR 003 §3.1) to a push that is not a fork
+    // at all. Measured: two Macs over one copied board, and the second one's whole board is
+    // refused. Keeping the id was the bug; a re-derivation is a NEW authorship, so it gets new
+    // ids, and the two sets merge by entity key exactly as any two devices' ops do.
+    for (const op of r.ops) {
+      spine.append(restamp ? { ...op, id: newOpId(), ts: this._clock.tick() } : op);
+    }
     return spine;
   }
 
@@ -1297,6 +1793,27 @@ class Store {
 
     if (boardFile.kind === 'ok') {
       // ── R1. THE SPINE. Unconditional, every launch, no predicate. ──────────────
+      //
+      // `restamp: !!binding` IS UNCHANGED BY LZP-502, and the reason is worth writing down
+      // because the obvious "fix" for a sync engine is to widen it and it is wrong.
+      //
+      //   ADR 001 §8.1  migration stamps carry the ALL-ZEROS device short by construction, so two
+      //                 Macs migrating the same `board.json` agree byte for byte.
+      //   ADR 002 §5.2.2 check 4  `devOf(op.ts) === env.dv`, mirrored inside `sealOp`, and NOT
+      //                 weakenable: `core/authz.js` reads `devOf(op.ts)` as proof that the writer
+      //                 holds that short's signing key (FINDINGS §4.5 / I-3).
+      //
+      // Together they say **a migrated op can never be sealed** — and the first reading of that
+      // is "so re-stamp the spine once a space exists". Measured, that reading costs more than it
+      // buys: the two Macs' migrated register stamps then differ for every cell of the shared
+      // prehistory (ADR 004 §4.3 makes those decorations load-bearing the day a family space
+      // exists), and it re-derives the whole board on any launch that has not yet persisted.
+      //
+      // The correct reading is §8.1's own: **the spine is shared PREHISTORY, not traffic.** It is
+      // a pure function of `board.json`, so every Mac that holds that file reproduces it exactly,
+      // and it never has to travel. `store.outbox()` is where that is enforced — see the GENESIS
+      // filter there — and the corollary (a Mac that does NOT hold the file gets nothing of the
+      // pre-space board through the op stream) is reported, not papered over.
       const spine = this._buildSpine(board, { restamp: !!binding });
       // ── R2. ONE EQUALITY. ─────────────────────────────────────────────────────
       if (!hasLog) {
@@ -1325,10 +1842,18 @@ class Store {
       // The board file EXISTS and this app could not read it (R5-3a/b/c).
       this._log = this._bootUnreadableBoard(boardFile, checkpoint, tail, snaps.snapshots);
     }
-    // The log is durable only once a space exists (ADR 001 §9/§11, ADR 006 §9.5). WP-8 turns this
-    // on — and MUST consult `store.quarantine` first, or it overwrites the very bytes the
-    // quarantine exists to preserve.
+    // The log is durable only once a space exists (ADR 001 §9/§11, ADR 006 §9.5). LZP-502 turns
+    // this on — and MUST consult `store.quarantine` first, or it overwrites the very bytes the
+    // quarantine exists to preserve. So the decision is DEFERRED to the end of `init()`, after
+    // `_sequesterQuarantine()` has (or has not) renamed those bytes out of the way; until then
+    // this launch is treated as solo, which is the fail-safe direction.
     this._opsPersisted = false;
+    // ADR 006 §9.3 / W2 — A QUARANTINE AT FLEET SCALE IS A RE-JOIN, NOT A SILENT RESET.
+    // `this._log` is the spine here, so every op in it is unacknowledged and the outbox is the
+    // whole personal projection: the republication W2 asks for happens by construction, and the
+    // §9.4 `'now'` stamps it needs are the `restamp: !!binding` above. What was missing was the
+    // "visible, reported" half — this flag, and `diagnostics().sync.rejoin`.
+    this._rejoined = this._syncArmed && !!this.quarantine && !!binding;
 
     // The registers were replaced wholesale under stacks that survive `init()` by design (v1
     // fact, pinned at store-persistence.test.js:271). Retire their DEV shadow expectations,
@@ -1354,6 +1879,23 @@ class Store {
     // the user has just been told to send it in for a rescue (R5-3b's "the evidence is renamed
     // away one launch after the board is").
     if (this.quarantine && !this.bootFailure) await this._sequesterQuarantine();
+    // ADR 006 §9.5, decided HERE and nowhere else — see `_logMayBeWritten()`. It is deliberately
+    // the LAST thing before `ready`, because the quarantine verdict AND the move-aside outcome
+    // are both inputs and neither is known any earlier.
+    this._opsPersisted = this._logMayBeWritten();
+    if (this._syncArmed && !this._opsPersisted) {
+      this._warn(
+        'sync is configured but this launch will not write the op log: '
+        + (this.bootFailure ? 'the session is read-only.' : 'a quarantined log is still on disk.')
+        + ' Local edits are kept in board.json and will be published once the next launch can '
+        + 'write history.');
+    }
+    if (this._rejoined) {
+      this._warn(
+        'the history beside this board was refused, so this device RE-JOINS: its whole board is '
+        + 'republished at fresh stamps (ADR 006 §9.3). Nothing is lost and nothing on your peers '
+        + 'is deleted — the two boards merge.');
+    }
     this.ready = true;
     this.emit('init');
   }
@@ -2123,6 +2665,32 @@ class Store {
       // inside it. `'op-log'` is R7 (the file is genuinely gone); `'snapshot'` and `'none'` are
       // the read-only boot over a board.json that exists and could not be read.
       recoveredFrom: this._recoveredFrom ? { ...this._recoveredFrom } : null,
+      // WHICH identity this session runs as (A3-H4). `durable: false` is the solo-mode answer and
+      // is not a fault: it means no key was generated and none was needed (ADR 002 §2.4). It is
+      // also the answer that explains a sync engine converging nothing, which is exactly why it
+      // is reportable rather than private. No key material and no public key appears here.
+      identity: {
+        durable: this._identity !== null,
+        memberId: this._me,
+        deviceId: this._device,
+        deviceShort: this._short,
+        peerDevices: [...this._peerDevices].sort(),
+        canVerifyAttestations: this._attestOpen !== null,
+      },
+      // WHAT THE SYNC SEAM IS DOING (LZP-502). No key material, no space key, no envelope — a
+      // space id, two counters and three booleans, all of which the user's own settings pane may
+      // show. `logWritable: false` beside `armed: true` is the ADR 006 §9.5 refusal, and it is
+      // the answer to "why has nothing uploaded since this morning".
+      sync: {
+        armed: this._syncArmed,
+        personalSpaceId: this._personalSpaceId,
+        logWritable: this._opsPersisted,
+        outbox: this._personalSpaceId === null ? 0 : this.outboxSize(),
+        cursor: this._personalSpaceId === null ? null : this.cursor(),
+        rejoin: this._rejoined,
+        pendingRetractions: Array.isArray(this.publisher?.pendingRetractions)
+          ? this.publisher.pendingRetractions.length : 0,
+      },
       lineage: {
         id: this._lineageId,
         gen: this._gen,
@@ -2351,26 +2919,79 @@ class Store {
    *   · `_clock.observe(op.ts)` THROWS `TypeError` on anything that is not a 37-char stamp;
    *   · `_log.append(op)` throws `OpLogError` for an op below the checkpoint horizon or a body
    *     that splices an opId already seen.
+   *
+   * ── WHAT LZP-502 ADDED, AND WHY EACH HALF IS NOT OPTIONAL ────────────────────────────────
+   *
+   * **`meta.seqs` — the server's sequence numbers.** Without them a pulled op enters the log with
+   * `seq === null`, which is the DEFINITION of the outbox (§8.1) — so every op a peer sent would
+   * be pushed straight back at it, for ever, growing by one round trip per pull. The seq also
+   * rides in `checkpoint().seqs`, which is what makes the outbox survive a relaunch without
+   * re-publishing the world. A batch handed in without seqs still works (that is how every
+   * pre-existing test calls this door and how a `local` merge would); it simply cannot leave the
+   * outbox, which the outbox's own `op.dev === this._device` filter then catches.
+   *
+   * **The space filter — finding F-7, and it is the reason this door needed a filter at all.**
+   * ADR 001 §3.3 says the `local` space is "never synced" and 17.7 says settings never leave the
+   * machine, but `applyRemote` had no space filter, so a remote `pref.set` was ADMITTED: it moved
+   * the register map while `state.settings` — which `_project()` deliberately does not re-derive
+   * — did not move with it, and the two then disagreed about row height and about WHICH Feiertage
+   * layer is drawn. Three things are refused here, before the authorization fold, because none of
+   * them is an authorization question:
+   *   · `local`-space ops (F-7 / M-2). Never on a wire in either direction.
+   *   · a personal-space op addressed to a DIFFERENT `psp_…` than mine — the cross-space replay
+   *     that ADR 002 §5.2.2 check 2 refuses at the envelope, refused a second time at the op, so
+   *     the property does not depend on a caller having opened the envelope first.
+   *   · the `'personal'` PLACEHOLDER from a peer once I have a real space. A peer that is still
+   *     pre-space cannot have sealed anything, so such an op can only be a replay or a local
+   *     mistake, and admitting it would let an unspaced log write into a spaced one.
+   *
    * @param {Object[]} ops
+   * @param {{seqs?:Object<string,string>|Map<string,string>}} [meta]
+   * @returns {{applied:string[], refused:Array<{id:string, reason:string}>, batch:number}}
+   *          `refused` carries the fold's own reason code, which is what lets the puller tell a
+   *          refusal that a later op can cure (an attestation that has not arrived — F-6) from
+   *          one that nothing will ever cure. This door still never throws.
    */
-  applyRemote(ops) {
-    if (ops === null || ops === undefined) return;
+  applyRemote(ops, meta = {}) {
+    const result = { applied: [], refused: [], batch: 0 };
+    const seqOf = (id) => {
+      const s = meta && meta.seqs;
+      if (!s) return undefined;
+      const v = s instanceof Map ? s.get(id) : (Object.prototype.hasOwnProperty.call(s, id) ? s[id] : undefined);
+      return v === undefined || v === null ? undefined : v;
+    };
+    if (ops === null || ops === undefined) return result;
     if (!Array.isArray(ops)) {
       this._warn(`remote batch refused: expected an array of ops, got ${typeof ops}`);
-      return;
+      return result;
     }
     const list = [...ops];
-    if (!list.length) return;
+    if (!list.length) return result;
+    result.batch = list.length;
     this._adopt();
 
     // Shape first, so nothing downstream has to defend itself against `null`.
     const wellFormed = [];
     for (const op of list) {
-      if (op && typeof op === 'object' && !Array.isArray(op) && typeof op.id === 'string' && op.id !== '') {
-        wellFormed.push(op);
-      } else {
+      if (!(op && typeof op === 'object' && !Array.isArray(op) && typeof op.id === 'string' && op.id !== '')) {
         this._warn(`remote op refused: not a well-formed op (${op === null ? 'null' : typeof op})`);
+        continue;
       }
+      // ── F-7 · the space filter, ahead of the fold ──────────────────────────
+      const cls = spaceClassOf(op.space);
+      if (cls === 'local') {
+        this._warn(`remote op ${op.id} refused: the local space is never synced (ADR 001 §3.3, story 17.7)`);
+        result.refused.push({ id: op.id, reason: 'localSpace' });
+        continue;
+      }
+      if (cls === 'personal' && this._personalSpaceId !== null && op.space !== this._personalSpaceId) {
+        this._warn(
+          `remote op ${op.id} refused: it is addressed to personal space ${JSON.stringify(op.space)}, `
+          + `not to ${this._personalSpaceId}`);
+        result.refused.push({ id: op.id, reason: 'foreignSpace' });
+        continue;
+      }
+      wellFormed.push(op);
     }
 
     let verdict;
@@ -2414,15 +3035,37 @@ class Store {
       // exactly one thing: a future-stamped op is now judged by the same rules as the same op
       // stamped now. Restoring `nowMs: Date.now()` here is the mutant, and it reddens R6-4c,
       // D3-p5 and D2-s12/s14/s16/s18 × foreign.
-      verdict = foldAuthorized([...this._log.ops({ includeParked: true }), ...wellFormed], {
-        me: this._me,
-      });
+      //
+      // ── AND `ctx.myDevices` IS SUPPLIED, WHICH TAKES TWO FOLDS (A3-H4 item 3) ───────────────
+      //
+      // The device set is not a constant: a `dev.*` attestation register is itself an op, and it
+      // can arrive in the very batch being judged (ADR 002 §6.3 — a newly paired Mac's first
+      // pull carries its own attestation). So the same op set is folded twice over ONE ctx
+      // builder:
+      //
+      //   pass 1  no `myDevices`  → learns `attestedDevices`. Stage 0a's four ADR 002 §2.3
+      //                             conditions still run in full here, so a `dev.*` register
+      //                             that does not verify under the member's recovery key
+      //                             contributes nothing to pass 2. Without an injected
+      //                             `attestOpen` NOTHING verifies and the set stays whatever
+      //                             pairing supplied — fail closed, as §2.3 requires.
+      //   pass 2  `myDevices`     → THE GATE. `verdict` is this one, and nothing reads pass 1.
+      //
+      // Pass 1 cannot admit anything pass 2 refuses, because it is strictly the weaker ctx:
+      // `myDevices` only ever ADDS a rejection (`core/authz.js` stage 0b). The cost is one extra
+      // fold per remote batch, over a set that is already in memory — and it is paid ONLY when
+      // the identity is durable, because in solo mode `_myDevices()` is `null` by design and the
+      // second fold would be identical to the first.
+      const all = [...this._log.ops({ includeParked: true }), ...wellFormed];
+      const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
+      verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
     } catch (e) {
       // The gate itself could not reach a verdict. Admitting the batch ungated would break the
       // promise on the line above (`registers()` stays the authorized fold), so the batch is
       // refused — loudly, and without touching the board.
       this._warn(`remote batch refused: the authorization fold failed (${e.name}: ${e.message})`);
-      return;
+      for (const op of wellFormed) result.refused.push({ id: op.id, reason: 'foldFailed' });
+      return result;
     }
     const rejected = Array.isArray(verdict?.rejected) ? verdict.rejected : [];
     const refused = new Set(rejected.map((o) => o && o.id));
@@ -2431,7 +3074,48 @@ class Store {
       try { return verdict.rejectionOf(id)?.reason ?? 'inadmissible'; } catch { return 'inadmissible'; }
     };
     for (const op of wellFormed) {
-      if (refused.has(op.id)) { this._warn(`remote op ${op.id} refused: ${reasonOf(op.id)}`); continue; }
+      if (refused.has(op.id)) {
+        const why = reasonOf(op.id);
+        // ── F-6 · A CURABLE REFUSAL IS PARKED, NOT DROPPED ─────────────────────────────────
+        //
+        // The finding, in its own words: "`applyRemote` drops a refused op without appending it,
+        // so an unattested-device op that arrives before its attestation is lost rather than
+        // parked." Two of `authz.js` stage 0b's verdicts are not judgements about the op at all —
+        // they are judgements about what THIS DEVICE KNOWS. `notMyDevice` and `unattestedDevice`
+        // both mean "I have never been shown an attestation for the author", and an attestation
+        // is itself an op: it can arrive in a later page, or through pairing, minutes later.
+        // Dropping the line makes that unrecoverable, because the relay's `since` filter will
+        // never serve it again once the cursor has moved past it.
+        //
+        // So it is PARKED — ADR 001 §7.4's own vocabulary, under the reason ADR 002 §5.2.5
+        // requires (`PARK_REASONS.ATTESTATION`, landed by E5). A parked line is in no register,
+        // is never projected, is never offered by `outbox()`, and rides in `checkpoint().parked`
+        // with its reason, so the hold survives a quit as STATE rather than as a re-fetch.
+        // `oplog.load()` feeds the reason back through `classifyOp` as `haveAttestation: false`,
+        // which is what stops a relaunch from quietly promoting it to live — see that flag.
+        //
+        // EVERY OTHER refusal is still a refusal. `foreignSpace`, `localSpace`, a forged act, a
+        // malformed shape: those are verdicts about the op, no later op can change them, and
+        // parking them would be a way of keeping a stranger's write on disk for ever.
+        if (CURABLE_REFUSALS.has(why)) {
+          try {
+            this._log.park(op, PARK_REASONS.ATTESTATION);
+            this._warn(
+              `remote op ${op.id} parked: ${why} — this device has not been shown an attestation `
+              + 'for its author yet. It is held, not lost, and re-judged when one arrives.');
+            result.refused.push({ id: op.id, reason: why, parked: true });
+            continue;
+          } catch (e) {
+            // The one case `park()` refuses: the op is already folded into the checkpoint, so
+            // there is no line left to park and parking would be cosmetic. Fall through to the
+            // ordinary refusal, which is honest about having kept nothing.
+            this._warn(`remote op ${op.id}: ${why}, and it could not be parked (${e.message})`);
+          }
+        }
+        this._warn(`remote op ${op.id} refused: ${why}`);
+        result.refused.push({ id: op.id, reason: why });
+        continue;
+      }
       // BELT AND BRACES, and labelled as such after mutation testing: `observe` throws
       // `TypeError` on any non-stamp, but nothing hostile reaches it. `ops.js:validateOp` refuses
       // an `op.ts` that is not a 37-character stamp, so `foldAuthorized` has already put every
@@ -2444,13 +3128,90 @@ class Store {
         try { this._clock.observe(op.ts); }
         catch (e) { this._warn(`remote op ${op.id}: its stamp was not observable (${e.message}); the clock was left alone`); }
       }
-      try { this._log.append(op); }
-      catch (e) { this._warn(`remote op ${op.id} refused by the log: ${e.name}: ${e.message}`); }
+      const seq = seqOf(op.id);
+      try {
+        this._log.append(op, seq === undefined ? {} : { seq });
+        result.applied.push(op.id);
+      } catch (e) {
+        this._warn(`remote op ${op.id} refused by the log: ${e.name}: ${e.message}`);
+        result.refused.push({ id: op.id, reason: 'log' });
+      }
     }
+    // ── F-6, THE OTHER HALF · A HELD OP IS RE-JUDGED, NOT MERELY KEPT ─────────────────────
+    //
+    // Parking would be a slower way of losing the op if nothing ever looked at it again. This
+    // sweep is what closes the loop, and it costs one pass over the parked set because the
+    // verdict it consults has ALREADY judged those ops: `verdict` was folded over
+    // `[...this._log.ops({includeParked:true}), ...wellFormed]`, i.e. over the parked lines too.
+    // So an op parked because the batch that carried its author's attestation had not arrived is
+    // admitted by the very batch that carries it — same-batch and split-batch alike, with no
+    // second fold and no second gate to keep in step with the first.
+    //
+    // `unpark` re-runs `classifyOp`, which knows nothing about devices; the AUTHORIZATION answer
+    // is the one computed above, which is why the predicate is a set membership and not a
+    // re-derivation.
+    const stillRefused = refused;
+    const cured = [];
+    for (const e of this._log.parkedOps({ reason: PARK_REASONS.ATTESTATION })) {
+      if (!stillRefused.has(e.op.id)) cured.push(e.op.id);
+    }
+    if (cured.length) {
+      const ids = new Set(cured);
+      const promoted = this._log.unpark((op) => ids.has(op.id));
+      for (const op of promoted) {
+        if (!result.applied.includes(op.id)) result.applied.push(op.id);
+      }
+      if (promoted.length) {
+        this._warn(
+          `${promoted.length} op(s) held for a missing device attestation are now authorised and `
+          + 'have been applied.');
+      }
+    }
+
     this._stacks.remoteApplied();
     this._project();
     this.schedulePersist();
     this.emit('remote');
+    return result;
+  }
+
+  /**
+   * Re-judge every op parked for a missing device attestation, with no new batch to trigger it.
+   *
+   * `applyRemote`'s own sweep covers the case where the attestation arrives as an op. This covers
+   * the case that is the ONLY one M1 has: `member.set{dev.*}` is a family-space op kind, so a
+   * person with two Macs and no Familienkreis has nowhere in the log to record an attestation at
+   * all, and the device set is learnt from PAIRING instead (ADR 001 §4.0's "the LOCAL device
+   * set", which §2.3 says the pairing flow has to deliver). When `useIdentity()` or a pairing
+   * completion widens `_peerDevices`, nothing else would ever look at the held lines again.
+   *
+   * @returns {string[]} the opIds that became live
+   */
+  unparkAttested() {
+    const held = this._log.parkedOps({ reason: PARK_REASONS.ATTESTATION });
+    if (!held.length) return [];
+    const all = [...this._log.ops({ includeParked: true })];
+    let verdict;
+    try {
+      const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
+      verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
+    } catch (e) {
+      this._warn(`held ops could not be re-judged (${e.name}: ${e.message}); they stay parked`);
+      return [];
+    }
+    const refused = new Set((Array.isArray(verdict?.rejected) ? verdict.rejected : []).map((o) => o && o.id));
+    const ids = new Set(held.map((e) => e.op.id).filter((id) => !refused.has(id)));
+    if (!ids.size) return [];
+    const promoted = this._log.unpark((op) => ids.has(op.id));
+    if (promoted.length) {
+      this._project();
+      this.schedulePersist();
+      this.emit('remote');
+      this._warn(
+        `${promoted.length} op(s) held for a missing device attestation are now authorised and `
+        + 'have been applied.');
+    }
+    return promoted.map((op) => op.id);
   }
 
   /** The op group describing what `fn` just did to `state`. */
@@ -2727,8 +3488,14 @@ class Store {
    *      file is left alone. This is the half that makes a crash between ③ and ④ cost nothing.
    */
   async _persistOps(hash) {
+    // ⓪ THE OUTBOX CAP — finding E5-2. One value, computed once, then imposed on ①, ② and ③
+    //    alike, because the defect was precisely that ① predicted a horizon ③ then exceeded.
+    //    `undefined` means "nothing is unacknowledged" — the overwhelmingly common case and the
+    //    only case a solo install ever has — and every step below then behaves exactly as it did.
+    const cap = this._outboxHorizonCap();
+
     // ① the outbox (ADR 006 §9.2)
-    const pending = this._uncommittedTailLines();
+    const pending = this._uncommittedTailLines(cap === undefined ? this._comingHorizon() : cap);
     if (pending.length) {
       await storage.appendOps(pending);
       for (const line of pending) this._opsCommitted.add(tailLineKey(line.op));
@@ -2739,10 +3506,17 @@ class Store {
     //    `TAIL_COMPACT_AT` lines, or `TAIL_COMPACT_BYTES` measured once at launch. The byte
     //    trigger is one-shot: this compaction is what makes it false, so it is consumed here
     //    rather than re-measured on every debounced save.
+    //
+    //    Under a cap the horizon is passed EXPLICITLY, because `compact()`'s own default absorbs
+    //    everything currently held — including an op the relay has never seen. Compaction is
+    //    lossless for STATE (§7.2) and was never lossless for the OUTBOX, which is a claim about
+    //    LINES. A cap of `ZERO_STAMP` means there is nothing this persist may fold at all, so the
+    //    compaction is skipped rather than run for no gain.
     if (this._tailLines >= TAIL_COMPACT_AT || this._tailOverBytes) {
       this._tailOverBytes = false;
       try {
-        this._log.compact();
+        if (cap === undefined) this._log.compact();
+        else if (cap !== ZERO_STAMP) this._log.compact({ horizon: cap });
       } catch (e) {
         // A compaction that cannot run costs a bigger file and nothing else, so it is a warning
         // and never a refusal to persist — the checkpoint below is still written.
@@ -2750,8 +3524,8 @@ class Store {
       }
     }
 
-    // ③ the checkpoint
-    const cp = this._stampedCheckpoint(hash);
+    // ③ the checkpoint, under the SAME cap ① was selected against
+    const cp = this._stampedCheckpoint(hash, cap);
     await storage.saveCheckpoint(cp);
 
     // ④ drop only what ③ folds
@@ -2779,8 +3553,8 @@ class Store {
    *     — is appended rather than mistaken for the line already written; the fold is a function
    *     of the op SET, so both bodies in the file is the correct outcome, not a hazard.
    */
-  _uncommittedTailLines() {
-    const h = this._comingHorizon();
+  _uncommittedTailLines(horizon) {
+    const h = horizon === undefined ? this._comingHorizon() : horizon;
     const out = [];
     for (const line of this._log.lines()) {
       if (line.park !== null && line.park !== undefined) continue;
@@ -2796,6 +3570,10 @@ class Store {
    * out: `horizon ?? maxLiveStamp()` — `resolveHorizon(opts, 'read')`, which is the one thing
    * R5-4 proves must not be guessed at. Null means the log holds nothing live and the checkpoint
    * will fall back to `ZERO_STAMP`, which folds nothing and keeps every line in the tail.
+   *
+   * It is a PREDICTION and deliberately conservative: it is computed before `compact()` may raise
+   * the horizon, so it can only ever be lower than what ③ ends up folding, and a line kept in the
+   * tail that the checkpoint then folds costs one write and is dropped by ④.
    */
   _comingHorizon() {
     const h = this._log.horizon();
@@ -2803,6 +3581,70 @@ class Store {
     let max = null;
     for (const o of this._log.ops()) if (isStamp(o?.ts) && (max === null || cmp(o.ts, max) > 0)) max = o.ts;
     return max;
+  }
+
+  /**
+   * **THE OUTBOX CAP — finding E5-2, and the one line that closes it.**
+   *
+   * WHAT WAS WRONG. ADR 003 §8.1 defines the outbox as "`ops.jsonl` lines whose `seq` is unset"
+   * and promises it "survives quit and crash (19.1)". `outbox()` implements the first half
+   * exactly. The second half did not hold, because a checkpoint FOLDS every op at or below its
+   * horizon into `regs` and drops the LINE, and nothing capped that horizon. So an op the relay
+   * had never seen was written to disk as a register VALUE and never as a LINE; `load()` brings
+   * back registers rather than lines; and the next launch's outbox was empty.
+   *
+   * The fleet harness measured the consequence: five entries made on a laptop while it was
+   * offline never reach the desktop, ever, the two boards are permanently divergent, and
+   * `sync.status()` reports `healthy` throughout. Not only offline, either — the 700 ms autosave
+   * debounce beats the 2 s push debounce, so an edit and a quit within two seconds took the same
+   * path on a perfectly online Mac.
+   *
+   * THE RULE. **A persist may not fold past the oldest line the relay has not acknowledged.**
+   * Same shape as ADR 001 §7.3's tombstone GC, which is already gated on `Device.lastSeenSeq` for
+   * the same reason — you may not compact away what a peer has not seen. Here the peer is the
+   * relay, and `outbox()` is the definition of "not seen", CALLED rather than re-derived so the
+   * two cannot drift: a line the outbox stops offering (a genesis stamp, a peer's op, a
+   * `local`-space op) is also a line whose survival in `ops.jsonl` nothing depends on.
+   *
+   * WHY IT COSTS SOLO MODE NOTHING. `_persistOps` is the only caller and runs only while
+   * `_opsPersisted` is true, which `_logMayBeWritten()` gates on `_syncArmed && personalSpaceId`.
+   * A solo install has no outbox, so this returns `undefined` and every step of `_persistOps`
+   * takes the byte-identical path it took before — including `compact()`'s own `'advance'` mode,
+   * which R5-4e depends on to bound `ops.jsonl`.
+   *
+   * THE RECEDING GUARD. `oplog.resolveHorizon` throws if a horizon moves backwards, and a
+   * checkpoint written by a build without this cap can legitimately already fold an
+   * unacknowledged op. Nothing can put that line back, so the cap stands down and says so.
+   *
+   * @returns {string|undefined} `undefined` — no cap, use the log's own defaults. A stamp — fold
+   *          no further than this. `ZERO_STAMP` — fold nothing at all this time.
+   */
+  _outboxHorizonCap() {
+    let floor = null;
+    for (const line of this.outbox()) {
+      const ts = line.op?.ts;
+      if (isStamp(ts) && (floor === null || cmp(ts, floor) < 0)) floor = ts;
+    }
+    if (floor === null) return undefined;
+
+    // Fold up to the greatest live stamp STRICTLY below the floor, and no further.
+    let cap = null;
+    for (const o of this._log.ops()) {
+      if (!isStamp(o?.ts) || cmp(o.ts, floor) >= 0) continue;
+      if (cap === null || cmp(o.ts, cap) > 0) cap = o.ts;
+    }
+    const held = this._log.horizon();
+    if (held !== null && (cap === null || cmp(cap, held) < 0)) {
+      if (!this._e52Warned) {
+        this._e52Warned = true;
+        this._warn(
+          'op log: the persisted horizon already folds an op the server has not acknowledged, so '
+          + 'its line cannot be kept in ops.jsonl (finding E5-2, on a log written before the cap '
+          + 'landed). The board is intact; that edit may need a re-push from this device.');
+      }
+      return undefined;
+    }
+    return cap === null ? ZERO_STAMP : cap;
   }
 
   /**
@@ -2818,8 +3660,10 @@ class Store {
    * board file is — and `load()` ignores keys it does not recognise, so the envelope costs the
    * format nothing.
    */
-  _stampedCheckpoint(hash) {
-    const cp = this._log.checkpoint();
+  _stampedCheckpoint(hash, horizon) {
+    // `horizon` is `_outboxHorizonCap()` (finding E5-2). `undefined` — no cap — keeps the log's
+    // own `resolveHorizon(opts,'read')` default, which is what every solo persist uses.
+    const cp = this._log.checkpoint(horizon === undefined ? {} : { horizon });
     return {
       ...cp,
       lzp: {

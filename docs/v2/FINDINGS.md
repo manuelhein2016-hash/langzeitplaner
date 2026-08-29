@@ -55,6 +55,33 @@ Three things in this update are worth reading before the rows:
 - **§4.6's open decision is closed and no PO ruling is owed on it**, because the dilemma was
   misstated rather than unresolvable.
 
+**Updated 2026-08-29 by the E5 integration pass — the first pass with a SECOND DEVICE.** WP-8 is
+built and milestone M1 („Zwei Macs") is demonstrated in two real browser contexts against
+`node server/dev-server.mjs` over real HTTP; the run is in **`docs/v2/E5-VERIFICATION.md` §3**.
+This is the pass §3 of this file was written for, so §3 now carries a **disposition line on every
+row** rather than a plan.
+
+Four things in this update are worth reading before the rows:
+
+- **E5-2 is the most consequential defect since A3-M5, and it was inside A3-M5's own fix.** The
+  outbox did not survive a quit: `_persistOps` folded unacknowledged ops into `checkpoint().regs`
+  and dropped their LINES, so five entries made on an offline laptop never reached the desktop,
+  ever, while `sync.status()` said `healthy`. Found by the fleet harness, closed by one clamp,
+  and its accepted-defect row is **inverted**.
+- **F-6 is closed at the seam the finding names**, and closing it took four coordinated edits, not
+  one: the park reason had to exist (**E3-3**), it had to SURVIVE A RELAUNCH (`classifyOp` gained
+  `haveAttestation`, because `load()` re-classifies parked lines and would otherwise have
+  promoted an unattested device's op to live), `applyRemote` had to park instead of drop, and
+  something had to re-judge the held lines.
+- **Three findings were produced BY the demonstration** — E5-5 (the pairing poll cannot fit the
+  published `pairGet` budget, measured as a real 429), E5-6 (a paired Mac receives none of the
+  pre-space board, categories included — this is M1's last real gap), E5-7 (`device.attestation`
+  has two spellings on two endpoints).
+- **Four network gates were amended from "no import edge" to "no STATIC import edge".** The
+  stronger form forbade the design ADR 003 §7 gate 2 and ADR 002 §2.4 themselves describe, and the
+  way it gets worked around in practice is by hiding the specifier from the walker — which turns a
+  real gate into a vacuous one. The gate now counts the doors instead: exactly one, named.
+
 **Status vocabulary**
 
 | status | means |
@@ -1248,45 +1275,137 @@ a small change plus a re-derivation of the AAD.~~
   Pinned as a characterization row for **WP-8**.
 
 
-## 3. What must be fixed before WP-8, in order
+## 3. What must be fixed before WP-8 — **DISPOSED 2026-08-29 by the E5 integration pass**
 
-WP-8 is the first package with a second device, and it turns seven of these rows from latent into
-live. **Steps 1, 3-a and 5-a of the original list are done.** What is left, in order:
+WP-8 is the first package with a second device, and it turned seven of these rows from latent into
+live. **WP-8 is now built and M1 is demonstrated** (`docs/v2/E5-VERIFICATION.md` §3), so this list
+is no longer a plan: every row below carries what actually happened to it. **Three are still open
+and each one names an owner. Nothing here has been absorbed into a closure it did not earn.**
 
-1. ~~**F-10** — `attestationOf` on `AuthzResult`.~~ **DONE.** WP-6 is unblocked at this seam.
-2. **A3-H4** — durable device identity (ADR 002 §2.2). **Now the first item.** Until it lands, no
-   fleet test means anything, and the three things `authz.js` needs from it are listed on the row.
-3. **F-5** — the checkpoint must pass the same admissibility gate `applyRemote` uses.
-   ~~**A3-C1** — the checkpoint must carry the identity it was folded from.~~ **DONE**, and F-5 is
-   now the *only* input that becomes authoritative without being checked. **Read A3-C1's WP-8 note
-   before touching `_opsPersisted`.**
-4. **F-6** — the `ATTESTATION` park reason, or retain refused ops. First contact loses data without it.
-5. **F-7**, **F-2** — the `applyRemote` seam: drop `local`-space ops, and make the throw/accept
-   rule one rule. ~~**A3-H3** — guard `null`.~~ **DONE.**
-6. ~~**A3-M5** — `_persistOps` must append, and `truncateOps` must be given the tail length.~~
-   **DONE**, and it was not the small item this list made it look like — see its HIGH row. Two
-   things follow from it that WP-8 owns: the outbox in `ops.jsonl` now genuinely exists and has a
-   producer, and **ADR 001 §7.2's 30-day debuggability tail is still not implemented** (the
-   compaction is total). If WP-8 needs the tail for anything but bounding the file, say so before
-   building on it.
-7. ~~**I-3**~~ — **DECIDED AND BUILT 2026-08-28: §4.5 option (a).** WP-6's owed P2 check was the
-   planned fix and round 5 proved it does not close the hole, because `sigPubRaw` is a public key
-   travelling in the victim's own register. What closes it is a possession proof at fold time.
-   What is left of this item is the two obligations §4.5's ruling puts on WP-8: nothing may append
-   an op that has not passed `openOp`, and §5.2.2's check 4 may not be weakened.
-8. **R5-5b** — folding an adopted checkpoint through `applyRemote`'s gate. This is **F-5** seen
-   from the authority rule's side, and closing F-5 closes both. ADR 006 §8.1's corollary comes
-   with it: once a space exists, the persisted board is the FULL projection.
-9. **R5-2g** — a Time-Machine restore of a pre-lineage `board.json` still quarantines a current
-   log. Low frequency, high consequence, and the fix is not obvious: the restored board carries no
-   `_v2`, so there is nothing to compare, and the honest options are the same three the ADR
-   rejected for A3-C1. Decide it deliberately rather than at 3 a.m.
+| # | row | disposition |
+|---|---|---|
+| 1 | **F-10** `attestationOf` on `AuthzResult` | **CLOSED** before E5, and now load-bearing: it is `openOp`'s P1, and `createPersonalSync` refuses to be constructed without the port. |
+| 2 | **A3-H4** durable device identity | **CLOSED.** `platform/device-identity.js` + `store.useIdentity()`. Proved by two genuinely distinct identities converging — in `store-identity.test.js`, in the fleet harness, and in the M1 run with two separate browser storage partitions. All three things `authz.js` needed are supplied: `me`, `myDevices`, `attestOpen`. |
+| 3 | **F-5** the checkpoint must pass `applyRemote`'s gate | **STILL OPEN.** Untouched by E5. It remains the only input that becomes authoritative without being checked. Owner: `store.js`'s boot path. Closing it closes row 8 too. |
+| 4 | **F-6** the ATTESTATION park reason, or retain refused ops | **CLOSED**, by both halves rather than either — see the header note. `sync/personal.js` additionally holds the cursor, so the op is re-served even if the park were lost. |
+| 5 | **F-7** drop `local`-space ops · **F-2** one throw/accept rule | **F-7 CLOSED** at both ends of the wire by LZP-502; `round3-seam.test.js`'s two rows are inverted to `FAILED (held)`. **F-2 STILL OPEN** — `applyRemote` still mixes "throw" and "refuse and report". Nothing in M1 depends on it. Owner: `store.js`. |
+| 6 | **A3-M5** `_persistOps` must append | **CLOSED** before E5 — and E5 found the defect *inside* that fix: **E5-2**, below. ADR 001 §7.2's 30-day debuggability tail is still not implemented (compaction is total); E5 did not need it and did not build it. |
+| 7 | **I-3** the possession proof | **CLOSED** before E5. E5's two obligations are held and asserted: nothing appends an op that has not passed `openOp`, and §5.2.2 check 4 is not weakened (`store-identity.test.js` pins `devOf(op.ts) === deviceShort`). |
+| 8 | **R5-5b** fold an adopted checkpoint through the gate | **STILL OPEN.** F-5 seen from the authority rule's side; one fix closes both. |
+| 9 | **R5-2g** a Time-Machine restore of a pre-lineage board quarantines a current log | **STILL OPEN.** Unchanged. It needs a decision rather than an edit. |
 
 **Not on the WP-8 path but on the shipping one:** **I-1** and **I-2** are reachable today, by any
 user with a hand-edited or third-party `board.json`, with no second device anywhere. I-1 can lose
 a board; I-2 shows a white screen. Neither waits for WP-8. **R5-3's whole class is in the same
 category** and is closed, which is why it was worth the round: it needed no second device either,
 only a truncated byte.
+
+**Also latent-until-a-second-device, and now live:** **E3-1** — the row STATUS calls "the only row
+blocking a family-mode release" — is **untouched by E5 and still open**; E5 was told not to edit
+`src/js/crypto/`. **E3-3** is **CLOSED** (below). ADR 006 **§9.5**, **§9.3 / W2** and the **WP-3
+retraction obligation** were closed by LZP-502 and are asserted. **W1** holds structurally and is
+asserted as an *inequality* — a persisted cursor may be behind `board.json`, never ahead.
+
+---
+
+### 3b. Rows opened by the E5 integration pass and the M1 demonstration
+
+#### E5-2 — an op authored offline is LOST from the outbox by the next relaunch · CRITICAL · **fixed**
+
+*Found by:* `tests/fleet/long-offline.test.js`, on the first run of the fleet harness.
+*Owner was:* `src/js/store.js`. *Closed:* 2026-08-29.
+
+ADR 003 §8.1 defines the outbox as "`ops.jsonl` lines whose `seq` is unset" and promises it
+"survives quit and crash (19.1)". `store.outbox()` implemented the first half exactly. The second
+half did not hold: `_persistOps` ③ wrote a checkpoint whose horizon was above every op in the log,
+acknowledged or not; `checkpoint()` folds everything at or below the horizon into `regs` and drops
+the LINE; `load()` brings back registers, not lines. **So an op the relay had never seen was
+written to disk as a register VALUE and never as a LINE.**
+
+Measured consequence: five entries a user made on a laptop while it was offline never reach the
+desktop, ever; the two boards are permanently divergent; and the engine reports **`healthy`**
+throughout, so under F11's "silence is the design" the user is told nothing. Not only offline
+either — the 700 ms autosave debounce beats the 2 s push debounce, so an edit and a quit within
+two seconds took the same path on a perfectly online Mac.
+
+**Fix:** `store._outboxHorizonCap()` — a persist may not fold past the oldest line the relay has
+not acknowledged, with `outbox()` *called* as the definition of "not acknowledged" so the two
+cannot drift, and the one value imposed on the tail selection, `compact()` and `checkpoint()`
+alike. Same shape as ADR 001 §7.3's tombstone GC. `undefined` — no cap — on every solo persist, so
+R5-4e's compaction bound is untouched. **Mutant:** remove the cap → `long-offline.test.js` §3 goes
+red on `ops.jsonl` being empty after the quit.
+
+#### E5-5 — the published `pairGet` budget cannot accommodate a polling rendezvous · MEDIUM · **open**
+
+*Found by:* the M1 demonstration, as a live `429`. *Owner:* `server/`.
+
+`GET /api/v1/pair/:rid` is charged against `pairGetPerIpHour = 20` (ADR 002 §6.2), enforced
+`pre-auth`, so the offerer's *authenticated* read of its own rendezvous is charged too. The
+rendezvous lives 180 s and **two Macs of one household are one IP**. A 1 s poll spends the hour's
+budget in twenty seconds and the second Mac gets a 429 where it expected `box_A` — which surfaces
+as `answerAsNew: that did not open`, correctly indistinguishable from a wrong code, and therefore
+very hard to diagnose.
+
+Mitigated client-side by `pairflow.js`'s `PAIR_POLL_SCHEDULE` (2, 2, 3, 5, 8, 12, 18, 24, 32, 36,
+40 s — eleven reads cover the full TTL and leave nine for the joiner). **Still open:** a household
+that pairs a third device within the hour runs out. The right fix is not charging the
+authenticated offerer's own read, which `pair.js` §2 already argues for reads after `box_B` exists.
+
+#### E5-6 — a paired Mac receives NONE of the pre-space board, categories included · HIGH · **open**
+
+*Found by:* the M1 demonstration. *Owner:* WP-9 / the pairing flow.
+
+The corollary of E5-1: the migration spine is shared *prehistory*, not traffic, so `outbox()`
+excludes GENESIS stamps (re-stamping instead costs a permanent `409 forked_op_id` — LZP-502 built
+that, measured it and withdrew it). A Mac that does not already hold the `board.json` therefore
+receives nothing of the pre-space board, though ADR 002 §6.3 step 8 says it "pulls from seq 0".
+
+The demonstration shows the cost is more than a missing note. Both Macs minted their own default
+categories at first run — spine ops, so they never travelled — and every synced note carries its
+author's `categoryId`, unknown on the other Mac. `deserializeBoard`'s reference repair quietly
+remaps it to a local default:
+
+```
+MAC A  Arbeit c32ee91a-…   MAC B  Arbeit 596e6397-…
+```
+
+On that run every note landed on the right-looking local category. With a colour the user cares
+about it would be wrong, silently, on every entry. **Until this is closed, pairing a Mac that does
+not already hold the board is not delivered**, and story 19.4 reads as "my whole private board,
+from the moment the space exists". ADR 002 §7.2's backup file or a `board.json` hand-over during
+pairing is the fix.
+
+#### E5-7 — `device.attestation` has two spellings on two endpoints · LOW · **open**
+
+*Owner:* `server/`. `POST /spaces` reads it with `readBytes` (base64url of opaque bytes, never
+verified); `POST /devices` and `/devices/adopt` read the raw blob string and verify it. A client
+must encode the same value differently for the two calls. `family/engine.js` does, with a comment
+at each site.
+
+#### E5-3 — `pushNow()` threw where `syncNow()` returned a value · LOW · **fixed**
+
+`syncNow()` consulted `isOnline()` and returned `{skipped:'offline'}`; `pushNow()` did not, and
+let a `NetError('transport')` escape. The debounce timer, `flush()` on pagehide and any caller
+reaching for the lower verb got a rejected promise. Fixed: `pushNow()` returns
+`{pushed:0, batches:0, skipped:'offline'}`.
+
+#### E3-3 — the `attestation` park reason does not exist in `core/ops.js` · HIGH · **fixed**
+
+*Required by:* ADR 002 §5.2.5, "before WP-8 pulls from a real peer". *Closed:* 2026-08-29.
+
+`PARK_REASONS.ATTESTATION` now exists, and landing the constant alone would have been **worse than
+useless**: `oplog.load()` re-classifies every parked line on purpose, so a reason the classifier
+cannot re-derive comes back LIVE — for this one that means an op from an unattested device
+APPLIED, one relaunch later, with no gate. So `classifyOp` takes `haveAttestation` exactly as it
+takes `haveEpochKey`, `load()` feeds the reason back, and `unpark()` re-asserts both.
+`store.unparkAttested()` re-runs the AUTHORIZATION fold before selecting anything, because
+`classifyOp` knows nothing about devices and would admit it blindly. Two accepted-defect rows
+(`crypto-relay-tamper.test.js`, `crypto-envelope.dom.js`) are **inverted**.
+**Owed to `src/js/crypto/`:** `ENVELOPE_PARK.ATTESTATION` should now be `PARK_REASONS.ATTESTATION`
+and `PARK_REASONS_NEEDED` should be emptied. The two agree in VALUE — asserted — so nothing is
+broken; it is a duplicate constant.
+
+---
 
 ---
 
@@ -1872,8 +1991,8 @@ asserting `_persistOps()` never appends, which A3-M5's closure made false, and i
 | row | file | the defect it pins | register row |
 |---|---|---|---|
 | R3-2 | `round3-seam.test.js` | `reconcileList` preserves an entry object's **key order** | A3-L1 |
-| R3-3 | `round3-seam.test.js` | a remote `pref.set` moves the registers and never reaches `state.settings` | F-7 |
-| R3-4 | `round3-seam.test.js` | `applyRemote` has no space filter — it admits `local`-space ops | F-7 |
+| ~~R3-3~~ | `round3-seam.test.js` | a remote `pref.set` moves the registers and never reaches `state.settings` | **INVERTED by LZP-502 · F-7 closed** — refused by name |
+| ~~R3-4~~ | `round3-seam.test.js` | `applyRemote` has no space filter — it admits `local`-space ops | **INVERTED by LZP-502 · F-7 closed** |
 | R3-5 | `round3-seam.test.js` | `setSettings`' wholesale replace disagrees about a DRAWN layer | F-7 |
 | R3-6 | `round3-seam.test.js` | a `setSettings()` makes the next transaction emit a duplicate `pref.set` | A3-L2 |
 | R3-10 | `round3-seam.test.js` | a throwing `mutate()` callback's half-edit is adopted by the next action | A3-M4 |
@@ -1883,8 +2002,8 @@ asserting `_persistOps()` never appends, which A3-M5's closure made false, and i
 | R3-21 | `round3-doors.test.js` | the throw is not always an `OpError` — `EntityKeyError` too | F-2 |
 | R3-25 | `round3-doors.test.js` | a peer's over-length value is REFUSED where the diff door truncates | F-2 |
 | R3-27 | `round3-doors.test.js` | `store.warnings` is write-only — nothing in `src/` reads it | F-8 |
-| R3-40 | `round3-persistence.test.js` | two Macs agree on stamps, not on **authors** | A3-H4 |
-| R3-41 | `round3-persistence.test.js` | the other Mac's ops are refused `notMyAct` | A3-H4 |
+| R3-40 | `round3-persistence.test.js` | two Macs agree on stamps, not on **authors** | A3-H4 — **still true of a store with no `useIdentity()`; that is now the SOLO case and it is correct** |
+| R3-41 | `round3-persistence.test.js` | the other Mac's ops are refused `notMyAct` | A3-H4 — as above; `store-identity.test.js` §1–§2 is the paired case |
 | R4-11b | `round4-coercion-oracle.test.js` | `board.json` still not a fixed point after "clear a scratchpad" | F-1 residual |
 | R4-16a | `round4-attestation.test.js` | the fold has **no revocation**, and write-once means no amendment | **I-3 / §4.5** |
 | R4-19c | `round4-fixed-point.test.js` | a scratchpad held as `""` — v1 is a fixed point here, v2 is not | F-1 residual |
@@ -1902,6 +2021,17 @@ decision or a work package. That concentration is the useful reading of this tab
 **Rows inverted by the round-5 integration pass:** R3-39 (`_persistOps` appends; the file header's
 "`store.js` never writes `ops.jsonl`" corrected to the narrower claim R3-38 actually pins).
 **Rows added:** R5-3e, R5-3f (the two unproven fixes), R5-4f (the headline sequence).
+
+**Rows inverted by the E5 integration pass (2026-08-29):** R3-3 and R3-4 (F-7, at both ends of the
+wire); `crypto-relay-tamper.test.js` §(iii) and `crypto-envelope.dom.js`'s twin (E3-3 — the
+`attestation` park reason exists and the log records it); `tests/fleet/long-offline.test.js` §3
+(E5-2 — the outbox survives the quit and the peer receives every op); and
+`tests/tier1/crypto-envelope.test.js`'s "THE `attestation` PARK REASON DOES NOT EXIST" row, which
+now asserts that it does and keeps three lines asserting the ONE thing still owed to
+`crypto/envelope.js`. **Rows added:** none — E5 inverted rows and added positive controls inside
+them rather than opening new accepted defects, because every defect it found it also closed except
+E5-5, E5-6 and E5-7, which are owned by `server/` and by WP-9 and have no `tests/attack/` row to
+be green over.
 
 **Rows inverted by round 7:** R6-3a, R6-3b, R6-4a, R6-4b, R6-4c, R6-5a, R6-5c, R6-5d, R6-6a,
 R6-6b, R6-7a, R6-7d, R6-10a, R6-10b, R6-10c, R6-11a, R6-11b — and, in a file round 7 did not own

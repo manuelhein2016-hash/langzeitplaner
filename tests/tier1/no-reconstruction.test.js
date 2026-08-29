@@ -33,6 +33,8 @@ import assert from 'node:assert/strict';
 import {
   helperSelfDescriptions,
   reconstructionMarkerIn,
+  RECONSTRUCTION_MARKERS,
+  SELF,
 } from '../helpers/helper-hygiene.js';
 
 test('no helper under tests/helpers/ is a best-effort reconstruction', () => {
@@ -50,6 +52,18 @@ test('no helper under tests/helpers/ is a best-effort reconstruction', () => {
   );
 });
 
+// The scan skips exactly one file — the detector's own, whose head lists every phrase it looks
+// for and would otherwise report itself for ever. An exclusion is where a guard goes to die, so
+// it is asserted to be that ONE file and nothing else.
+test('the scan covers every helper but the detector itself', () => {
+  const names = helperSelfDescriptions().map((h) => h.name);
+  assert.ok(names.length > 5, `only ${names.length} helpers scanned — the walk stopped working`);
+  assert.equal(names.includes(SELF), false, 'the detector is the one file it may not scan');
+  for (const must of ['loopback.js', 'fleet.js', 'purity.js', 'mitm.js']) {
+    assert.ok(names.includes(must), `${must} was not scanned`);
+  }
+});
+
 // A guard that cannot fail is the same bug one level up, so prove this one can.
 test('the guard actually detects a reconstruction banner, and only that', () => {
   assert.ok(
@@ -63,4 +77,20 @@ test('the guard actually detects a reconstruction banner, and only that', () => 
     null,
     'and must not fire on an ordinary helper',
   );
+  assert.equal(RECONSTRUCTION_MARKERS.length, 5, 'a marker was removed from the table');
+  // Every marker fires on a banner somebody would actually write. A regex that can no longer
+  // match anything is how this class of gate goes quietly vacuous — the exact failure F-9 was,
+  // one directory over — and the table is small enough to keep one witness per row.
+  const witnesses = [
+    '// this file is a reconstruction of the original helper',
+    '// a best-effort rebuild, sorry',
+    '// rebuilt from the surviving call sites',
+    '// rebuild from call sites',
+    '// the original was better than this',
+  ];
+  witnesses.forEach((line, i) => {
+    assert.ok(RECONSTRUCTION_MARKERS[i].test(line),
+      `marker ${i} (${RECONSTRUCTION_MARKERS[i]}) no longer matches ${JSON.stringify(line)}`);
+    assert.ok(reconstructionMarkerIn(line), `and the detector misses it: ${line}`);
+  });
 });

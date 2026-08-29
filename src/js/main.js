@@ -22,7 +22,7 @@ import {
 } from './update-ui.js';
 import { closeTopSheet, anySheetOpen, el, toast } from './ui.js';
 import { todayISO, monthKeyOf, addMonths, parseISO, MONTH_DE, MONTH_EN } from './dates.js';
-import { isTauri } from './storage.js';
+import { isTauri, loadBoard } from './storage.js';
 import { maybeShowUnlock } from './firstrun.js';
 
 const $ = (id) => document.getElementById(id);
@@ -43,6 +43,18 @@ let pendingRollAnim = false;
 export async function boot() {
   boardEl = $('board');
   wrapEl = $('board-wrap');
+
+  // ── F19 · THE ONE DOOR (ADR 003 §7 gate 2 · ADR 002 §2.4) ────────────────
+  //
+  // This is the only place `net.js`, `src/js/sync/` and `src/js/crypto/` are reachable from the
+  // boot graph, and only through a dynamic `import()` that a SOLO install never reaches. The
+  // walker in `tests/helpers/importgraph.js` follows the specifier deliberately: a door it can
+  // see is a door a test can count, and the gate asserts there is exactly one.
+  //
+  // It is BEFORE `store.init()` because `usePersonalSpace()` refuses afterwards — a space
+  // adopted after init leaves a whole log of placeholder-space ops that `sealOp` refuses one by
+  // one, for ever, with nothing on screen to say why.
+  await armFamilyMode();
 
   await store.init();
   setLang(store.state.settings.language);
@@ -97,6 +109,85 @@ export async function boot() {
   // 21.5 gate on its own if the first-run screen has not disclosed the check.
   runLaunchCheck();
   startDailyTimer();
+
+  // The engine last, and not awaited: the board is drawn and usable before a byte of sync
+  // traffic is considered, exactly as 22.3 does it for the update check.
+  startFamilyMode();
+}
+
+// ── F19 · family mode — MAIN.JS'S WHOLE PART IN IT ───────────────────────────
+//
+// One module, one dynamic `import()`, three calls. `main.js` never learns what is inside
+// `family/mount.js`, and a solo launch never evaluates it. ADR 003 §7 gate 2 and ADR 002 §2.4
+// are the same claim about the module graph, and `tests/tier1/network-scope.test.js` §2 asserts
+// it over the real graph: no STATIC path from here into `crypto/`, `sync/` or `net.js`, and
+// exactly ONE dynamic door.
+
+/** The `family/mount.js` module, once loaded. Null on every launch nobody opts in on. */
+let familyMod = null;
+/** Its handle: `{cfg, armed, parts}` on an armed Mac, null on a solo one. */
+let family = null;
+
+/** The door. Idempotent, and the ONLY `import()` of `family/` in this file. */
+async function openFamilyDoor() {
+  if (!familyMod) familyMod = await import('./family/mount.js');
+  return familyMod;
+}
+
+/**
+ * BEFORE `store.init()` — see `family/engine.js`'s ordering note. Reads the RAW board file for a
+ * space id rather than `store.state`, because the store does not exist yet and
+ * `usePersonalSpace()` refuses to be called after `init()`.
+ */
+async function armFamilyMode() {
+  let settings = null;
+  try {
+    const raw = await loadBoard();
+    settings = raw && typeof raw === 'object' ? raw.settings : null;
+  } catch {
+    return;                                  // an unreadable board is store.init()'s problem
+  }
+  // THE GATE ITSELF, and it is two fields of the board file. Nothing below this line runs on a
+  // Mac that has never opted in.
+  if (!settings || !settings.syncEnabled || !settings.personalSpaceId) return;
+  try {
+    const mod = await openFamilyDoor();
+    family = await mod.arm(settings, { today: todayISO() });
+  } catch (e) {
+    // A Mac that cannot open its key store still has its board, and there is nothing a person
+    // can do about a locked Keychain from inside a settings sheet. Family mode is what stops.
+    console.warn('[family] this launch runs without sync:', e);
+    family = null;
+  }
+}
+
+/** AFTER `init()`, and never awaited: the board is usable before a byte of sync is considered. */
+function startFamilyMode() {
+  if (!family || !familyMod) return;
+  familyMod.start(family, { onChange }).catch((e) => {
+    console.warn('[family] the engine did not start:', e);
+  });
+}
+
+/**
+ * The ⚙ handler's half. A Mac with no Familienkreis has to be able to CREATE one or JOIN one,
+ * and both live in the settings sheet — so the door opens here too, on a human action, never at
+ * boot. Nothing is generated and nothing is requested by the load itself: `mountSolo` installs a
+ * section builder and a joiner-shaped pairing port, and both sit there until they are used.
+ */
+async function ensureFamilySettings() {
+  if (family) return;                        // already armed; `start()` installed the sections
+  try {
+    const mod = await openFamilyDoor();
+    mod.mountSolo({ onChange });
+  } catch (e) {
+    console.warn('[family] the family settings could not be mounted:', e);
+  }
+}
+
+/** The 6 px glyph (19.3), reconciled on every redraw — the way `refreshUpdateChrome()` is. */
+function refreshFamilyChrome() {
+  if (familyMod) familyMod.refreshSyncChrome();
 }
 
 // ── F22 · updates (LZP-103 wiring) ───────────────────────────────────────────
@@ -137,6 +228,11 @@ function wireUpdates() {
 
 // ── rendering ────────────────────────────────────────────────────────────────
 
+/** Open ⚙, with the family sections mounted first so the sheet is complete on its first draw. */
+function openSettingsWithFamily() {
+  ensureFamilySettings().finally(() => openSettings());
+}
+
 function redraw() {
   renderBoard(boardEl);
   applySelection();
@@ -147,6 +243,8 @@ function redraw() {
   // reconciled on every redraw. All three are derived from one predicate in
   // update-ui.js, so they cannot disagree with each other.
   refreshUpdateChrome();
+  // 19.3 — healthy draws NOTHING, so this is also the call that removes the glyph.
+  refreshFamilyChrome();
   if (pendingRollAnim) {
     pendingRollAnim = false;
     // 8.6 — one short slide so the leftmost column leaving reads as motion,
@@ -170,7 +268,7 @@ function onChange(reason) {
 function wireToolbar() {
   $('btn-today').addEventListener('click', jumpToToday);
   $('btn-print').addEventListener('click', printBoard);
-  $('btn-settings').addEventListener('click', () => openSettings());
+  $('btn-settings').addEventListener('click', () => openSettingsWithFamily());
 
   $('btn-feiertage').addEventListener('click', () => toggleLayer('feiertage'));
   $('btn-schulferien').addEventListener('click', () => toggleLayer('schulferien'));
@@ -319,7 +417,7 @@ function wireKeyboard() {
     if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); focusFind(); return; }
     if (mod && e.key.toLowerCase() === 't') { e.preventDefault(); jumpToToday(); return; }
     if (mod && e.key.toLowerCase() === 'p') { e.preventDefault(); printBoard(); return; }
-    if (mod && e.key === ',') { e.preventDefault(); openSettings(); return; }
+    if (mod && e.key === ',') { e.preventDefault(); openSettingsWithFamily(); return; }
     if (mod && e.key === '1') { e.preventDefault(); toggleLayer('feiertage'); return; }
     if (mod && e.key === '2') { e.preventDefault(); toggleLayer('schulferien'); return; }
     if (mod && e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); exportBoard(); return; }
@@ -357,7 +455,7 @@ function wireNativeMenu() {
     redo ? store.redo() : store.undo();
   };
   const actions = {
-    settings: () => openSettings(),
+    settings: () => openSettingsWithFamily(),
     export: () => exportBoard(),
     import: () => importBoard(() => onChange('restore')),
     print: () => printBoard(),

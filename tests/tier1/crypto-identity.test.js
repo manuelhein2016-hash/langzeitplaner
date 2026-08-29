@@ -39,7 +39,7 @@ import {
   hex, toHex, hkdf as pureHkdf, pbkdf2 as purePbkdf2, hmacSha256,
   SHA256_VECTORS, HKDF_RFC5869_CASE1, DEVICE_SHORT_VECTORS, CROCK32_VECTORS,
 } from '../helpers/kat.js';
-import { pathToPrefix, reachableFrom } from '../helpers/importgraph.js';
+import { pathToPrefix, staticPathToPrefix, reachableFrom } from '../helpers/importgraph.js';
 
 const TE = new TextEncoder();
 const S = globalThis.crypto.subtle;
@@ -307,18 +307,32 @@ test('the unavailable message says what the user can act on, and never names an 
   await assert.rejects(async () => unavailableMessage(await probeCrypto()), /nothing to say/);
 });
 
-test('PRINCIPLE 7: nothing under src/js/crypto/ is reachable from the boot or first-run graph', () => {
+test('PRINCIPLE 7: nothing under src/js/crypto/ is STATICALLY reachable from the boot graph', () => {
   // ADR 002 §2.4 — "First run mints only a memberId and a deviceShort. NO KEYGEN, NO PROBE, NO
   // NETWORK." An `import` is evaluated whether or not anyone calls the function, so the honest
   // form of that promise is a statement about the module graph. This is the enforcement.
+  //
+  // STATIC, and the word is the whole content of the amendment E5 made here. §2.4's own next
+  // sentence is "key generation happens at the family opt-in moment and nowhere else", which
+  // requires the opt-in to be able to REACH `crypto/` — through a dynamic `import()` that a solo
+  // launch never runs. A gate that forbade every kind of edge would have forbidden the design it
+  // was written to protect, and the way that gets worked around is by hiding the specifier from
+  // the walker, which is strictly worse than one door in plain sight.
+  //
+  // `tests/tier1/network-scope.test.js` §2 owns the other half: that there is exactly ONE such
+  // door and that it is `src/js/family/mount.js`.
   for (const entry of ['src/js/boot.js', 'src/js/firstrun.js', 'src/js/main.js']) {
-    const chain = pathToPrefix(entry, 'src/js/crypto/');
-    assert.equal(chain, null, chain ? `solo mode reaches crypto: ${chain.join(' -> ')}` : '');
+    const chain = staticPathToPrefix(entry, 'src/js/crypto/');
+    assert.equal(chain, null, chain ? `solo mode statically reaches crypto: ${chain.join(' -> ')}` : '');
   }
   // And the walker really can find one, so a green result above means something.
   const reached = reachableFrom('src/js/crypto/identity.js').reached;
   assert.ok(reached.includes('src/js/core/ids.js'), 'the import walker found nothing at all');
   assert.equal(pathToPrefix('src/js/crypto/identity.js', 'src/js/crypto/')[0], 'src/js/crypto/identity.js');
+  // The positive control for the STATIC walker specifically: the door itself reaches crypto/
+  // statically, so a null above is a fact about the boot graph and not about the walker.
+  const behind = staticPathToPrefix('src/js/family/mount.js', 'src/js/crypto/');
+  assert.notEqual(behind, null, 'the static walker cannot find a static edge that exists');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

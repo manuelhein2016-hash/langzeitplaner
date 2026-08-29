@@ -333,12 +333,15 @@ test('SUCCEEDED — T1 makes every client retain an arbitrary blob for ever, at 
   // the relay (or hold a device key) to deliver these bytes — this is a T1 capability, not an
   // anybody capability. And ADR 001 §7.4 owns the park store's own bounds, not this seam.
 
-  // (iii) A park reason this build cannot even record. `ENVELOPE_PARK.ATTESTATION` is F-6 / WP-8:
-  //       `ops.js` does not know 'attestation', so the outcome of (ii) is currently UNDEFINED at
-  //       the store — it is neither a rejection nor a recordable park.
+  // (iii) INVERTED — WP-8 landed, and the amplification above now has defined semantics. The
+  //       verdict `openOp` emits for an unattested device is a reason the op log will ACCEPT, so
+  //       the outcome of (ii) is a recordable park with a durable reason rather than a line the
+  //       store drops on the floor (finding F-6). `oplog.load()` feeds the reason back through
+  //       `classifyOp` as `haveAttestation: false`, so it survives a relaunch as a PARK and not
+  //       as an admission.
   assert.equal(ENVELOPE_PARK.ATTESTATION, 'attestation');
-  assert.equal(isParkReason(ENVELOPE_PARK.ATTESTATION), false,
-    'if this flips, WP-8 landed and the amplification above finally has defined semantics');
+  assert.equal(isParkReason(ENVELOPE_PARK.ATTESTATION), true,
+    'E3-3/F-6 closed: the reason exists in ops.js and the log records it');
   assert.equal(isParkReason(ENVELOPE_PARK.VERSION), true);
   assert.equal(isParkReason(ENVELOPE_PARK.EPOCH), true);
 });

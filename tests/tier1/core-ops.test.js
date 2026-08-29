@@ -603,7 +603,7 @@ test('classifyOp is the ONE triage: admit, park or reject', () => {
 
 test('every park reason is declared, and only declared reasons are parkable', () => {
   assert.deepEqual(Object.values(PARK_REASONS).sort(),
-    ['epoch', 'future', 'unknownField', 'unknownKind', 'unknownSpace', 'unshareShape', 'version']);
+    ['attestation', 'epoch', 'future', 'unknownField', 'unknownKind', 'unknownSpace', 'unshareShape', 'version']);
   for (const r of Object.values(PARK_REASONS)) assert.ok(isParkReason(r), r);
   assert.equal(isParkReason('typeViolation'), false);
   assert.equal(isParkReason(undefined), false);

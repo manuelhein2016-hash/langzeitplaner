@@ -177,40 +177,55 @@ describe('F-1 — confirming the scope, and the siblings of its class', () => {
     // is a supported door (store.js header note 1) and the WP-2 oracle uses it 60 times.
   });
 
-  test('R3-3 SUCCEEDED (defect, the WORSE sibling): a remote pref.set moves the registers and never reaches state.settings', async () => {
-    // THE ANSWER TO "is the same class reachable with a worse consequence than key order?" — yes,
-    // on `settings`, through `applyRemote()`. `_project()` deliberately does not re-derive
-    // settings (store.js note 4), and `applyPrefOps()` runs only inside `_commit()`. The remote
-    // path calls neither, so a `pref.set` that lands in the log is INVISIBLE to the board.
+  // ── R3-3 and R3-4 WERE INVERTED BY LZP-502 (E5), which closed finding F-7 ──────────────────
+  //
+  // They were the same defect at two resolutions: R3-4 said `applyRemote` had no space filter,
+  // and R3-3 said what that cost — a `local`-space `pref.set` folded into the registers while
+  // `state.settings` did not move, so the board and its own register map disagreed about row
+  // height and about WHICH Feiertage layer is drawn, and the disagreement became visible the day
+  // `checkpoint.json` was authoritative. WP-8 is that day.
+  //
+  // The fix is the filter R3-4 asked for, ahead of the authorization fold and not inside it —
+  // "never synced" (ADR 001 §3.3, story 17.7) is not an authorization question, and a rule that
+  // lived in `foldAuthorized` would also have had to be true of the LOCAL door, where it is not.
+  // `store.outbox()` applies the same three-class filter on the way OUT, so the property is held
+  // at both ends of the wire rather than only at the receiving one.
+  //
+  // Both rows are kept, driven by the same attacker, and now assert the refusal. Reverting the
+  // filter in `store.js:applyRemote` reddens exactly these two.
+
+  test('R3-3 FAILED (held): a remote pref.set can no longer move the registers, so it cannot disagree with the board', async () => {
     assert.equal(store.state.settings.rowHeight, 22);
     assert.equal(store.state.settings.layers.feiertage, true);
 
     const op = prefSet(remoteCtx({ space: 'local' }), { rowHeight: 44, 'layers.feiertage': false });
     store.applyRemote([op]); quiet();
 
-    assert.equal(store.registers().get('pref:app').get('rowHeight').value, 44, 'the register moved');
-    assert.equal(store.registers().get('pref:app').get('layers.feiertage').value, false);
-    assert.equal(store.state.settings.rowHeight, 22, 'DEFECT: the board did not');
-    assert.equal(store.state.settings.layers.feiertage, true, 'DEFECT: a drawn layer disagrees with its register');
-    assert.deepEqual(store.warnings, [], 'and nothing was warned about');
+    assert.notEqual(store.registers().get('pref:app').get('rowHeight')?.value, 44,
+      'the register did NOT move — the op never reached the fold');
+    assert.notEqual(store.registers().get('pref:app').get('layers.feiertage')?.value, false);
+    assert.equal(store.state.settings.rowHeight, 22, 'and neither did the board');
+    assert.equal(store.state.settings.layers.feiertage, true,
+      'so no drawn layer can disagree with its own register');
 
     await store.persistNow(); quiet();
     assert.equal(JSON.parse(LS.getItem(BOARD_KEY)).settings.rowHeight, 22,
-      'board.json is written from `state`, so in solo mode the remote change is silently DISCARDED …');
-    // … and the moment `checkpoint.json` exists (WP-8) the checkpoint wins at the next launch
-    // instead, so the row height and the Feiertage layer change under the user with no gesture
-    // behind them. Same class as F-1; the consequence is a VALUE, not a byte order.
+      'board.json is unchanged, and now so is the checkpoint that WP-8 makes authoritative');
   });
 
-  test('R3-4 SUCCEEDED (defect): applyRemote has no space filter, so it admits `local`-space ops that ADR 001 §3.3 says are NEVER SYNCED', () => {
-    // The op in R3-3 is in the `local` space. `pref` is documented "persisted, never undoable,
-    // NEVER SYNCED (17.7 / ADR 001 §3.3)" — so no legitimate remote batch can contain one, and
-    // the remote door should refuse the whole class rather than fold it.
+  test('R3-4 FAILED (held): applyRemote refuses `local`-space ops BY NAME — ADR 001 §3.3 says they are NEVER SYNCED', () => {
     const op = prefSet(remoteCtx({ space: 'local' }), { language: 'en' });
     assert.equal(op.space, 'local');
-    store.applyRemote([op]); quiet();
-    assert.equal(store.registers().get('pref:app').get('language').value, 'en', 'DEFECT: admitted and folded');
-    assert.deepEqual(store.warnings, [], 'DEFECT: not even reported');
+    const before = store.registers().get('pref:app').get('language')?.value;
+    const r = store.applyRemote([op]); quiet();
+    assert.equal(store.registers().get('pref:app').get('language')?.value, before, 'not folded');
+    assert.deepEqual(r.applied, [], 'and reported as applied to nobody');
+    assert.deepEqual(r.refused, [{ id: op.id, reason: 'localSpace' }]);
+    // REPORTED, not swallowed. "Nothing is ever lost" is a promise about the warnings channel as
+    // much as about the board: an op the app declines to apply must say so somewhere a support
+    // bundle can read (F-8).
+    assert.equal(store.warnings.length, 1);
+    assert.match(store.warnings[0], /local space is never synced/);
   });
 
   test('R3-5 SUCCEEDED (defect, known-quirk consequence): setSettings\' wholesale replace leaves state and the registers disagreeing about a DRAWN layer', () => {

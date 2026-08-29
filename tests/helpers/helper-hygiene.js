@@ -32,10 +32,24 @@ export function reconstructionMarkerIn(src) {
   return RECONSTRUCTION_MARKERS.find((re) => re.test(head)) ?? null;
 }
 
-/** Every `.js`/`.mjs` helper, as `{name, marker}`. `marker` is null for an honest file. */
+/**
+ * This file, excluded from its own scan — the one exception, named rather than clever.
+ *
+ * `RECONSTRUCTION_MARKERS` is a list of the phrases, so this file's own head CONTAINS every
+ * phrase the detector looks for and matches itself on the first pass. Three ways out were
+ * available and this is the least bad of them: hiding the table below line 60 makes the guard
+ * depend on where in the file it happens to sit; splicing the phrases out of string fragments
+ * (`'this file is a ' + 'reconstruction'`) defeats the match by making the source unreadable.
+ * A named self-exclusion is greppable, and the positive control in
+ * `tests/tier1/no-reconstruction.test.js` — a planted banner the detector MUST match — is what
+ * keeps it from quietly becoming an exclusion of everything.
+ */
+export const SELF = 'helper-hygiene.js';
+
+/** Every `.js`/`.mjs` helper except this one, as `{name, marker}`; `marker` is null when clean. */
 export function helperSelfDescriptions() {
   return readdirSync(HELPERS_DIR)
-    .filter((n) => n.endsWith('.js') || n.endsWith('.mjs'))
+    .filter((n) => (n.endsWith('.js') || n.endsWith('.mjs')) && n !== SELF)
     .map((name) => ({
       name,
       marker: reconstructionMarkerIn(readFileSync(path.join(HELPERS_DIR, name), 'utf8')),
