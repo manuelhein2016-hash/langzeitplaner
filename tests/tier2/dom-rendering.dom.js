@@ -1130,6 +1130,15 @@ test('12.2 · every piece of UI leaves the sheet; the +n badge stays, because it
 test('12.3/15.4 · the Today highlight is suppressed on paper, quiet tells included', async () => {
   reset();
   const today = $('.board .day.today');
+  // This row asks what print does to a PLAIN today. Today is a real date, so on a
+  // Saturday, a Sunday or a Ferien day the row also carries .we/.fer and print.css
+  // rightly keeps it at that shade — which is the NEXT test's subject, and made this
+  // one fail every weekend and every school holiday (E3-10). A suite that is red for
+  // calendar reasons teaches everyone to ignore red, so the row states its own
+  // premise instead of inheriting the wall clock.
+  const ambient = { we: today.classList.contains('we'), fer: today.classList.contains('fer') };
+  today.classList.remove('we', 'fer');
+  try {
   assert.equal(bg(today), SHADE.today, 'on screen it is unmistakable (8.1)');
   await withPrintCSS(() => {
     assert.equal(bg(today), SHADE.none, 'a pink band would date the sheet on the wall');
@@ -1141,6 +1150,10 @@ test('12.3/15.4 · the Today highlight is suppressed on paper, quiet tells inclu
       'the accent dot on the today-month header goes as well');
   });
   assert.equal(bg(today), SHADE.today, 'and comes straight back on screen');
+  } finally {
+    if (ambient.we) today.classList.add('we');
+    if (ambient.fer) today.classList.add('fer');
+  }
 });
 
 test('12.3/15.4 · a Today that falls on a weekend or in Ferien prints as that, not as blank', async () => {
