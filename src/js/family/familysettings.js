@@ -16,18 +16,31 @@
 // Mac that has actually opted in.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// WHAT THE THREE SECTIONS ARE
+// WHAT THE SECTIONS ARE, AND THE ONE NAME THAT MAY NOT BE SHARED
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-//   „Familienkreis"    the opt-in itself — the relay's address, and the button that creates the
-//                      personal space. Story 19.4. Present only while there is no space.
+//   „Familienkreis"    F15 — `createjoin.js`'s create/join, `membersui.js`'s people and
+//                      `adminpanel.js`'s F20 management. THE glossary term, and it belongs here.
+//   „Server & eigene Geräte"
+//                      the own-device opt-in — the relay's address, and the button that creates
+//                      MY PRIVATE `psp_` space. Story 19.4, F19. Present only while there is no
+//                      space.
 //   „Meine Geräte"     `pairingui.js`'s doorway (deliverable 21, story 19.5).
-//   „Synchronisation"  `syncstatus.js`'s three states (deliverable 20, story 19.2/19.3).
+//   „Abgleich"         `syncstatus.js`'s three states (deliverable 20, story 19.2/19.3).
 //   „Schlüssel sichern" ADR 002 §7's recovery file. Present only once there IS a space.
 //
-// The order is the order a person meets them: you opt in, then you pair, then you occasionally
-// wonder whether it is working, and then — the one that was missing — you make the copy that
-// survives the Mac.
+// ⚠ THE SECOND SECTION WAS ALSO CALLED „Familienkreis", AND TWO SECTIONS CANNOT SHARE ONE NAME.
+// It is not the Familienkreis: it is a relay address and a `psp_` space that is shared with
+// nobody but this person's own Macs, and a person who read „Familienkreis" over a server field
+// learned that the family feature IS an infrastructure setting — which is the belief F15 exists
+// to prevent. Renamed to „Server & eigene Geräte" / "Server & my own devices", which is what the
+// section actually contains, so the term the glossary defines is owned by the one section that
+// means it. `tests/tier2/family-settings.dom.js` pins that the two titles differ and that only
+// the F15 section carries the word.
+//
+// The order is the order a person meets them: you find the Familienkreis, you see who is in it
+// and manage it, then this Mac's own plumbing — you opt in, you pair, you occasionally wonder
+// whether it is working, and then you make the copy that survives the Mac.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // THE THREE THINGS THIS FILE ADDED IN WP-9, AND THE FINDINGS THEY CLOSE
@@ -62,6 +75,45 @@
 // The third defence, `sync/chain.js`, is NOT reachable from here and must not be made so: it
 // belongs in `sync/personal.js`'s pull path, and an import that only made the module reachable
 // would close the S5 row while leaving `S4-diverged` exactly as undetectable as it is today.
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// WHERE A FAMILY-MODE STRING LIVES.  DECIDED, AND IT IS `{de, en}` IN THE MODULE.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Three flow packages landed family copy in two different places — `i18n.js` for `createjoin.js`
+// and `pairingui.js`, module-local frozen `COPY` objects for `membersui.js` and `adminpanel.js`
+// — and this file uses BOTH, which is how the split became visible. It is settled here because
+// this is the family entry point and therefore the first file the next agent opens.
+//
+//   THE RULE: a string that only a family Mac can ever read lives in its own module, as a frozen
+//   `{de, en}` pair, rendered through `say()`. `i18n.js` keeps v1's vocabulary — the strings a
+//   solo board actually shows.
+//
+// PRINCIPLE 7 IS THE TIEBREAK, and it is not a stylistic preference: „nothing in solo mode gets
+// heavier because family mode exists". `i18n.js` is in the BOOT GRAPH — `main.js` imports it on
+// every launch, solo or not — and both language tables are evaluated in full at import. Every
+// family sentence added there is bytes and objects on a Mac that will never be in a circle. A
+// `{de, en}` pair in `family/…` is evaluated only behind the one dynamic door, which is the same
+// gate ADR 003 §7 already puts the modules themselves behind.
+//
+// THE PRECEDENT WAS ALREADY THE HOUSE STYLE and predates the disagreement: `crypto/backup.js`'s
+// `EXPORT_SHEET_COPY`, `crypto/probe.js`'s `unavailableMessage()` and `platform/net.js`'s
+// `insecureOriginMessage()` are all `{de, en}` pairs behind the door, rendered through the same
+// `say()` this file defines. `membersui.js` writes the argument out at length in its own header.
+//
+// THE OBJECTION, ANSWERED: "both languages in one file" is what „every string in both languages"
+// is actually about, and a frozen pair keeps them side by side rather than 400 lines apart in two
+// tables — which is where an untranslated leftover hides. The tier-2 suites walk the `COPY`
+// objects and assert both halves exist and differ, exactly as they walk `i18n.js`.
+//
+// ⚠ WHAT IS NOT DONE, AND WHY IT IS ONE ATOMIC CHANGE RATHER THAN A DRIFT. The `sync*`, `family*`,
+// `circle*` and `pair*` blocks still in `i18n.js` are NOT moved in this round, and no string is
+// duplicated to make a point — two spellings of one sentence would be worse than either
+// convention. Four of those keys are read by more than one module (`familyFailed` and
+// `familyNeedRelay` by `createjoin.js` and `adminpanel.js`; `syncErrAuth` and `syncErrProtocol`
+// by `createjoin.js`), so the move touches `i18n.js`, `createjoin.js`, `adminpanel.js`,
+// `pairingui.js`, `syncstatus.js` and this file at once, and one owner has to hold all six. It is
+// reported as a cross-file need rather than half-landed here.
 
 import { el, toast } from '../ui.js';
 import { t, getLang } from '../i18n.js';
@@ -104,7 +156,7 @@ export function buildFamilySections(body, api, hooks = {}) {
   buildAdminSection(body, api);          // F20 — rename, invites, and the three undoable things
 
   // ── F19 · this Mac's own plumbing ─────────────────────────────────────────────────────────
-  buildOptInSection(body, api, hooks);   // 19.4 — the relay address and MY private space
+  buildOptInSection(body, api, hooks);   // 19.4 — „Server & eigene Geräte": the relay and `psp_`
   buildPairingSection(body, api);        // 19.5
   buildSyncSection(body, api);           // 19.3
   buildRecoverySection(body, api, hooks);
@@ -146,7 +198,11 @@ async function assertSuiteAvailable() {
 }
 
 /**
- * „Familienkreis" — the one moment a solo install becomes a syncing one.
+ * „Server & eigene Geräte" — the one moment a solo install becomes a syncing one.
+ *
+ * DELIBERATELY NOT „Familienkreis", although this is what the section was called: it creates a
+ * `psp_` space that only this person's own Macs ever join (story 19.4), and F15's Familienkreis
+ * is three sections above it. See this file's header.
  *
  * It is a TEXT FIELD and a button rather than a switch, because there is no default relay: ADR
  * 003 §1 names `https://<vercel-app>.vercel.app` and no such app exists yet. A switch would

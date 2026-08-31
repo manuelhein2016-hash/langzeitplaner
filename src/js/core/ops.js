@@ -613,6 +613,28 @@ export function makeOp(ctx, k, e, f, opts = {}) {
   if (!OP_KINDS[k]) throw new OpError(`makeOp: unknown op kind ${JSON.stringify(k)}`);
   const ts = ctx.mint();
   const patch = opts.born ? { ...f, _born: ts } : { ...f };
+  // ⚠ ADR 004 §2.2 BARRIER 3 — THE BRAND MUST SURVIVE THIS COPY.
+  //
+  // `core/project.js:projectForFamily` returns a FROZEN patch carrying a non-enumerable
+  // `Symbol.for('lzp/v2/family-patch')`, and `crypto/envelope.js:sealOp` refuses any family-space
+  // `pub.set` whose patch is unbranded. `{ ...f }` copies string keys only, so before this loop
+  // existed EVERY op built through the shipped constructor arrived at `sealOp` unbranded and was
+  // refused — the publish path could not have worked at all, and the failure would have read as a
+  // bug in the projection. `PUBLISH_FAILURE_CONTRACT.byReference` states the obligation on the
+  // caller; this is the one copy on the path that the caller cannot avoid, so it discharges it
+  // here rather than asking every future call site to remember.
+  //
+  // ONLY WHEN THIS FUNCTION DID NOT WIDEN THE PATCH. A `born: true` op has a DIFFERENT field set
+  // from the one the projection asserted and branded, and carrying the brand onto a widened copy
+  // is exactly the "take the object the allowlist produced and add a key" attack the freeze in
+  // `brandAndFreeze` exists to stop. A family projection carries its own `_born` (ADR 004 §5), so
+  // no legitimate family patch reaches this function with `born: true`.
+  if (!opts.born && f !== null && typeof f === 'object') {
+    for (const s of Object.getOwnPropertySymbols(f)) {
+      const d = Object.getOwnPropertyDescriptor(f, s);
+      if (d) Object.defineProperty(patch, s, d);
+    }
+  }
   const op = {
     v: OP_VERSION,
     id: ctx.newOpId(),
@@ -721,6 +743,11 @@ export const layerSet = (ctx, patch) => prefSet(ctx, flattenPref(patch, 'layers'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. MUTATIONS — every v1 `store.mutate()` site, mapped (ADR 001 §3.2)
+//
+// Rows 1-22 are the retrofit and are ALL 22 v1 sites; rows 23-27 are the family vocabulary and
+// have no v1 site at all (see the block above row 23 — they carry `sites: []` and a `story`, and
+// the test asserts the two forms never mix). `V1_MUTATE_SITES` is the flatMap of `sites`, so it
+// stays exactly 22 entries however many v2 rows this table grows.
 //
 // All 22 sites. `[L]` in the ADR marks a site that ALSO writes `settings.lastCategoryId`, which
 // becomes a `pref.set` in the `local` space, outside the transaction and therefore NOT undone —
@@ -1061,7 +1088,325 @@ export const MUTATIONS = deepFreeze({
       ];
     },
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // 23-27 — THE FAMILY VOCABULARY. NO v1 SITE, AND THAT IS THE POINT (finding E6-1)
+  //
+  // Rows 1-22 above are a RETROFIT: each names the `store.mutate()` call site in the v1 tree it
+  // replaces, and `V1_MUTATE_SITES` is asserted against a list read out of that tree by hand. The
+  // five rows below have no v1 site, because the Familienkreis has no v1. They therefore carry
+  // `sites: []` and a `story` instead, and `core-ops.test.js` asserts the two are mutually
+  // exclusive — a v2 row that grew a `sites` entry would corrupt the 22-site proof, and a v1 row
+  // that lost one would be invisible without it.
+  //
+  // WHY THEY ARE IN *THIS* TABLE AND NOT A SECOND ONE. `store.apply(name, args)` is the shortest
+  // safe route from a gesture to the log: it builds through `makeOp` (validated and frozen before
+  // it can reach the log), commits through `_commit` (one group, one gid, one broadcast) and
+  // takes the decline protocol with it. A parallel table would be a second door with its own
+  // answer to "is this op legal", and the point of `MUTATIONS` is that there is one.
+  //
+  // NONE OF THE FIVE IS UNDOABLE, and that is not this table's decision: `core/undo.js`'s
+  // `UNDOABLE_KINDS` is note/bar/cat/pad, so `captureImages` filters `member.set` and `space.set`
+  // out of both images and `_commit` records no step for them (rule U6). ⌘Z after a rename does
+  // what it did before the rename — which is what 18.4 asks for, from the other side.
+  //
+  // ── WHAT EACH ROW REFUSES AT AUTHORING TIME, AND WHY IT REFUSES IT HERE ─────────────────────
+  //
+  // ADR 001 §4 is a fold every honest client applies to the SAME op set, so an inadmissible op is
+  // rejected by every peer *including its author's other Mac*. That is exactly right for a
+  // hostile client and exactly wrong as a user experience: the op lands in my log, my board
+  // updates, my outbox pushes it, the relay stores it, and every peer drops it in silence. The
+  // gesture worked everywhere except where it mattered.
+  //
+  // So each constructor mirrors the §4 predicate it can evaluate LOCALLY — never as a
+  // substitute for the fold (which stays the authority), but so the one machine that can still
+  // do something about it is told. Finding **E6-2** is precisely this failure with the seat of
+  // the admin in it: "the outgoing admin demotes himself, the successor is never promoted, the
+  // circle ends with no admin anywhere and no route back".
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+  // 23 ───────────────────────────────────────────────────────────────────────
+  /**
+   * **Story 15.6 — "I can change my display name and colour anytime and it propagates to
+   * everyone's boards, so identity stays current without admin involvement."**
+   *
+   * THE MEMBER ID IS `ctx.act` AND IS NOT AN ARGUMENT. ADR 001 §4.2: `member.set{displayName,
+   * colorRef}` is admissible **only** if `op.act === memberId`. Taking a memberId here would make
+   * "rename Mama from my Mac" a call somebody could write, an op every peer would reject, and a
+   * rename that appears to work on the one board where it must not. Structural beats checked.
+   *
+   * `null` CLEARS (ADR 001 §5 step 1 · ADR 004 §5.1): `colorRef: null` means "no colour of my
+   * own", which the legend renders from the palette, and is a different fact from never having
+   * set one. Both fields are optional so that changing only the colour does not restate the name
+   * at a fresh stamp and beat a concurrent rename from my other Mac for no reason (the same rule
+   * `toggleRepeat` keeps for `date`).
+   *
+   * IT NEVER TOUCHES `dev.*`. §4.0: a patch mixing `dev.*` with ordinary member fields "has two
+   * predicates and no single answer and is refused whole", so the two live in two constructors
+   * that cannot be talked into being one — see `attestMyDevice`.
+   * @param {OpCtx} ctx @param {{displayName?:string|null, colorRef?:string|null}} a
+   */
+  setMyProfile: {
+    sites: [], story: '15.6', label: 'profile', kinds: ['member.set'],
+    build: (ctx, { displayName, colorRef } = {}) => {
+      const f = {};
+      if (displayName !== undefined) f.displayName = displayName;
+      if (colorRef !== undefined) f.colorRef = colorRef;
+      if (!Object.keys(f).length) {
+        throw new OpError('setMyProfile: give displayName, colorRef or both (story 15.6)');
+      }
+      return [memberSet(ctx, ctx.act, f)];
+    },
+  },
+
+  // 24 ───────────────────────────────────────────────────────────────────────
+  /**
+   * **ADR 001 §4.0 — MY OWN DEVICE ATTESTATION, PUBLISHED INTO THE FAMILY LOG.**
+   *
+   * The self-authorizing bootstrap: "a `member.set` patch consisting **solely** of `dev.*`
+   * registers is self-authorizing on `op.act === memberId`", because requiring an already-attested
+   * device to author an attestation has no base case. This constructor is the only thing in the
+   * product that can author one, and without it `core/authz.js` stage 0b answers
+   * `unattestedDevice` for **every op every peer ever sends me** — correctly parked by the engine
+   * and by `applyRemote`, and curable by nothing, for ever. That is finding E6-1 read from the
+   * far side: not "my name is missing" but "the circle cannot admit a single op".
+   *
+   * THE IDEMPOTENCE GATE IS LOAD-BEARING AND IS NOT ATT-88's. §4.0's write-once is an
+   * ADMISSIBILITY rule: "only the minimal claim under ≺ is admitted and every later claim is
+   * rejected outright". So a second op for a short I have already published is not a harmless
+   * duplicate — it is an op every peer REJECTS, and re-minting one on every launch (which is
+   * exactly what an ungated call from an arming path does) grows the log by one permanently-dead
+   * line per launch. With a register view it therefore DECLINES when the register already carries
+   * this blob, and REFUSES LOUDLY when it carries a different one, because that second case is
+   * either a re-minted attestation (which write-once will never accept) or somebody else's, and
+   * silently emitting a doomed op is the thing this whole block exists to stop.
+   * @param {OpCtx} ctx @param {{deviceShort:string, blob:string}} a
+   */
+  attestMyDevice: {
+    sites: [], story: 'ADR 001 §4.0', label: 'attest-device', kinds: ['member.set'],
+    build: (ctx, { deviceShort, blob } = {}) => {
+      if (typeof blob !== 'string' || blob === '') {
+        throw new OpError('attestMyDevice: `blob` is the b64url DeviceAttestation and must be a non-empty string');
+      }
+      const name = `dev.${deviceShort}`;
+      if (!DEV_REGISTER_RE.test(name)) {
+        throw new OpError(`attestMyDevice: ${JSON.stringify(deviceShort)} is not a 16-character Crockford deviceShort (ADR 001 §1.2)`);
+      }
+      const held = registerValueIn(ctx, memberKey(ctx.act), name);
+      if (held !== undefined) {
+        if (held === blob) return DECLINED;                       // already published; write-once
+        throw new OpError(
+          `attestMyDevice: ${name} is already attested with a different blob. ADR 001 §4.0 makes `
+          + 'that register write-once, so a replacement is rejected by every peer rather than '
+          + 'applied — this device would go on authoring ops nobody can admit.');
+      }
+      return [memberSet(ctx, ctx.act, { [name]: blob })];
+    },
+  },
+
+  // 25 ───────────────────────────────────────────────────────────────────────
+  /**
+   * **Story 20.1 — the admin renames the space.** ADR 001 §4.1: `space.set{name}` is admissible
+   * only from `op.act === admin@op.ts`. The space id comes from `ctx.familySpaceId` — `spaceFor`
+   * has already refused a ctx without one — so a rename cannot be addressed at another circle.
+   *
+   * The ADMIN CHECK is `mustBeSittingAdmin`: without it, a member whose admin badge is one sync
+   * stale renames the circle on their own board and on nobody else's, permanently, with no error
+   * anywhere. See the block above row 23.
+   * @param {OpCtx} ctx @param {{name:string}} a
+   */
+  renameSpace: {
+    sites: [], story: '20.1', label: 'rename-space', kinds: ['space.set'],
+    build: (ctx, { name } = {}) => {
+      if (typeof name !== 'string' || name.trim() === '') {
+        throw new OpError('renameSpace: a Familienkreis name must be a non-empty string (story 20.1)');
+      }
+      mustBeSittingAdmin(ctx, 'renameSpace');
+      return [spaceSet(ctx, ctx.familySpaceId, { name })];
+    },
+  },
+
+  // 26 ───────────────────────────────────────────────────────────────────────
+  /**
+   * **ADR 001 §4.1 — THE GENESIS LINK.** "the space-create op has `adminPrev: null` and
+   * `admin: <creator>`; it is admissible only if `op.act === op.f.admin`."
+   *
+   * Story 15.2 ("I create a Familienkreis and automatically become its admin") is the gesture;
+   * this op is the *record*, and §4.1 is explicit that it is the only one: "the admin is resolved
+   * entirely from the op set — never from a server column", so that a compromised relay cannot
+   * rewrite a role table and thereby flip the validity of an admin unshare.
+   *
+   * Until this op exists, `adminAtIn` answers `null` for every stamp — so on a circle created by
+   * this build **20.1's rename and 20.2's member removal are inadmissible from everybody,
+   * including the creator**, and there is no link for a transfer to name. It is therefore the
+   * root of every other row in this block, and it is emitted at creation, once.
+   *
+   * `admin` IS `ctx.act`, for the same structural reason as row 23. It DECLINES when the space
+   * register already carries an admin: a second genesis link is not a correction, it is a rival
+   * root that `resolveChain` decides by longest-chain-then-stamp — the one shape in this design
+   * where two honest devices can disagree about who is in charge.
+   * @param {OpCtx} ctx
+   */
+  claimAdmin: {
+    sites: [], story: '15.2 · ADR 001 §4.1', label: 'claim-admin', kinds: ['space.set'],
+    build: (ctx) => {
+      const seated = registerValueIn(ctx, familySpaceKey(ctx, 'claimAdmin'), 'admin');
+      if (seated !== undefined && seated !== null) return DECLINED;
+      return [spaceSet(ctx, ctx.familySpaceId, { admin: ctx.act, adminPrev: null })];
+    },
+  },
+
+  // 27 ───────────────────────────────────────────────────────────────────────
+  /**
+   * **Story 20.1's transfer — ADR 001 §4.1's TRANSFER LINK, and finding E6-2's cure.**
+   *
+   * "admissible only if `op.act === admin(link named by adminPrev)` and `adminPrev` names an
+   * already-accepted link."
+   *
+   * THE MEASURED FAILURE THIS REFUSES. E6-2, on two Macs: `POST /members/transfer` answers
+   * `{authoritative:false, stored:'nothing'}` by design, so with no op in the log "the outgoing
+   * admin demotes himself, the successor is never promoted, the circle ends with no admin
+   * anywhere and no route back". Every one of the three checks below is a way that outcome was
+   * reachable:
+   *
+   *   · `adminPrev: null` would be a ROOTLESS ASSERTION. `resolveChain` roots only on
+   *     `prev === null ∧ act === admin`, so a transfer TO SOMEBODY ELSE with a null prev is not a
+   *     root and not a transfer — it is an orphan, dropped by every peer, seat lost.
+   *   · a non-MemberId `admin` passes `FIELDS.space.admin`'s `{t:'id'}` (any non-empty string)
+   *     and is then refused by `chainLink`'s `isMemberId`. The op is legal and the link is not:
+   *     the register would read the typo on my board alone.
+   *   · a transfer authored by anyone but the SITTING admin is refused at `op.act !== link.admin`.
+   *     This is the stale-badge case and it is the likeliest of the three in a real family.
+   *
+   * `adminPrev` names the head of the accepted chain. `store.familyAdmin()` is where a caller
+   * gets it; it is not derived here, because the chain is `core/authz.js`'s to resolve and a
+   * second resolver would be a second answer to who is in charge.
+   * @param {OpCtx} ctx @param {{admin:string, adminPrev:string}} a
+   */
+  transferAdmin: {
+    sites: [], story: '20.1 · ADR 001 §4.1', label: 'transfer-admin', kinds: ['space.set'],
+    build: (ctx, { admin, adminPrev } = {}) => {
+      if (!isMemberId(admin)) {
+        throw new OpError(`transferAdmin: \`admin\` must be a MemberId, got ${JSON.stringify(admin)} — a chain link naming anything else is dropped by every peer (ADR 001 §4.1)`);
+      }
+      if (!isOpId(adminPrev)) {
+        throw new OpError(
+          'transferAdmin: `adminPrev` must be the opId of the link this transfer supersedes '
+          + '(store.familyAdmin().headOpId). A transfer with no predecessor is a rootless admin '
+          + 'assertion, and ADR 001 §4.1 roots only on `adminPrev: null` AND `act === admin` — '
+          + 'so it would hand the seat to nobody.');
+      }
+      mustBeSittingAdmin(ctx, 'transferAdmin');
+      return [spaceSet(ctx, ctx.familySpaceId, { admin, adminPrev })];
+    },
+  },
+
+  // 28 ───────────────────────────────────────────────────────────────────────
+  /**
+   * **Story 20.2 / LZP-608 — THE ADMIN REMOVES A MEMBER.** ADR 001 §4.2's removal branch: the one
+   * op in this system by which one member touches another member's record.
+   *
+   * **THE PATCH IS EXACTLY `{_alive:false}` AND THAT IS A HARD SHAPE, NOT A CONVENTION.**
+   * `core/authz.js` stage 2 reads
+   *
+   *     const onlyAlive = names.length === 1 && names[0] === '_alive';
+   *
+   * and admits an admin's write to somebody else's member record ONLY through that branch. A patch
+   * carrying one extra field — a tidy `removedAt`, a helpful `reason` — falls through to
+   * `reject(op, STAGES[2], NOT_SELF)`: built here, sealed, accepted by the relay, pulled by every
+   * Mac in the family and dropped by all of them **in silence**. Nothing would report it except a
+   * member list that never changed. So the patch is written once, here, and the constructor takes
+   * no field arguments at all — there is no parameter through which a caller could add one.
+   *
+   * **REMOVING YOURSELF IS A DIFFERENT STORY AND A DIFFERENT ROUTE.** 20.3 is „Kreis verlassen":
+   * `POST /members/leave`, which the relay accepts from the member themselves and which clears the
+   * circle prefs on that Mac. Authoring `member.set{_alive:false}` against my own record would be
+   * admitted by stage 2's `self` branch a line ABOVE the admin branch — so it would work, and it
+   * would be the wrong thing: it marks the seat dead in the log while leaving the membership row,
+   * the device row and the key wraps alive on the relay. Refused by name so the caller is sent to
+   * the route that actually leaves.
+   *
+   * **THE ADMIN CHECK IS `mustBeSittingAdmin`**, the same one rows 25 and 27 use, and for the same
+   * measured reason: without it a member whose admin badge is one sync stale removes somebody on
+   * their own board and on nobody else's, permanently, with no error anywhere.
+   *
+   * `family/removal.js` is the caller. It owns the ORDER — rotate ▸ author ▸ publish ▸ syncNow —
+   * and the epoch rotation ADR 002 §4.1 requires; this row owns the op.
+   * @param {OpCtx} ctx @param {{memberId:string}} a
+   */
+  removeMember: {
+    sites: [], story: '20.2 · ADR 001 §4.2', label: 'remove-member', kinds: ['member.set'],
+    build: (ctx, { memberId } = {}) => {
+      if (!isMemberId(memberId)) {
+        throw new OpError(`removeMember: \`memberId\` must be a MemberId, got ${JSON.stringify(memberId)}`);
+      }
+      if (memberId === ctx.act) {
+        throw new OpError(
+          'removeMember: this is the admin\'s removal of ANOTHER member (20.2). Leaving a circle '
+          + 'yourself is story 20.3 — `POST /members/leave` — which also releases the membership '
+          + 'row, the device row and the key wraps on the relay; a `member.set{_alive:false}` '
+          + 'against your own record would be admitted by authz stage 2\'s SELF branch and would '
+          + 'leave every one of those behind.');
+      }
+      mustBeSittingAdmin(ctx, 'removeMember');
+      return [memberSet(ctx, memberId, { _alive: false })];
+    },
+  },
 });
+
+/**
+ * One register's value out of the OPTIONAL view in `ctx`, or `undefined` when there is no view
+ * and when the register was never written. Deliberately the same "I cannot tell" shape `knows()`
+ * has: a constructor called without a view (the op-vocabulary tests, a builder used outside a
+ * transaction) must still be able to build a legal op.
+ * @param {OpCtx} ctx @param {string} entityKey @param {string} field @returns {any}
+ */
+function registerValueIn(ctx, entityKey, field) {
+  const regs = ctx && ctx.regs;
+  if (!regs || typeof regs.get !== 'function') return undefined;
+  const cells = regs.get(entityKey);
+  if (!cells || typeof cells.get !== 'function') return undefined;
+  const cell = cells.get(field);
+  return cell === undefined ? undefined : cell.value;
+}
+
+/**
+ * `space:<fsp_…>` for the ctx's family space, refusing with `spaceFor`'s own sentence rather than
+ * with `spaceKey`'s `EntityKeyError`. The three `space.set` rows read the register BEFORE they
+ * build an op, so without this the first thing a solo caller would see is a message about a bad
+ * SpaceId rather than the one that says solo mode emits no family ops.
+ * @param {OpCtx} ctx @param {string} who @returns {string}
+ */
+function familySpaceKey(ctx, who) {
+  const sid = ctx && ctx.familySpaceId;
+  if (!isSpaceId(sid) || !String(sid).startsWith('fsp_')) {
+    throw new OpError(`${who} needs OpCtx.familySpaceId (an fsp_… id); solo mode emits no family ops`);
+  }
+  return spaceKey(sid);
+}
+
+/**
+ * ADR 001 §4.1's admin predicate, evaluated against the folded `space:` register.
+ *
+ * WHY THE REGISTER IS THE RIGHT SOURCE HERE and the chain walk is not: `applyRemote` gates on
+ * `foldAuthorized` BEFORE anything reaches the log, so a link that lost the longest-chain
+ * resolution never became a register write. `space:<id>` → `admin` is therefore the accepted
+ * chain's head value, read where a constructor can reach it, and `core/authz.js` stays the only
+ * thing that RESOLVES a chain.
+ *
+ * With no view it does not refuse. See `knows()`: "I cannot tell" must not be read as "no".
+ * @param {OpCtx} ctx @param {string} who the constructor name, for the message
+ */
+function mustBeSittingAdmin(ctx, who) {
+  const seated = registerValueIn(ctx, familySpaceKey(ctx, who), 'admin');
+  if (seated === undefined) return;                     // no view, or no chain yet — cannot judge
+  if (seated === ctx.act) return;
+  throw new OpError(
+    `${who}: this Mac is not the Familienkreis admin — the seat is held by ${JSON.stringify(seated)}. `
+    + 'ADR 001 §4.1 admits a `space.set` only from `op.act === admin@op.ts`, so this op would be '
+    + 'applied here and rejected by every other member: the change would appear to work on the '
+    + 'one board where it must not.');
+}
 
 /** Sites 9 and 10 share their op shape. @param {OpCtx} ctx @param {{month:string,text:string,born?:boolean}} a */
 function padOps(ctx, { month, text, born = false }) {

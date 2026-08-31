@@ -120,10 +120,15 @@ let settingsWrites = [];
 let reloaded = 0;
 
 /** Mount the panel in a real settings sheet over a fake relay. Returns the relay. */
+/** The opId of the accepted admin link a transfer must name as `adminPrev` (ADR 001 §4.1). */
+const HEAD_LINK = 'AAAAAAAAAAAAAAAAAAAAAA';
+let applied = [];
+
 function mount({ circle = circleOf(), members = membersOf(), relay = fakeRelay(), lang = 'de' } = {}) {
   i18n.setLang(lang);
   clipped = [];
   settingsWrites = [];
+  applied = [];
   reloaded = 0;
   admin.initAdminPanel({
     circle: () => circle,
@@ -134,6 +139,10 @@ function mount({ circle = circleOf(), members = membersOf(), relay = fakeRelay()
     persist: () => Promise.resolve(),
     reload: () => { reloaded += 1; },
     now: () => Date.now(),
+    // 20.1's authoritative half. The relay holds neither the name nor the role, so what the
+    // panel AUTHORS is the whole of the feature and this is where the test can see it.
+    apply: (name, args) => { applied.push({ name, args }); return true; },
+    adminSeat: () => ({ admin: circle.memberId, headOpId: HEAD_LINK, isMe: true }),
   });
   sheet = ui.openSheet({
     title: 'Einstellungen',
@@ -502,34 +511,60 @@ test('20.3 — leaving clears the circle from THIS Mac and touches nothing else'
   unmount();
 });
 
-test('the transfer is OFF while it cannot reach the successor — and says why, not nothing', async () => {
-  // ⚠ THIS TEST WAS INVERTED AT THE E6 INTEGRATION, and the reason is in `adminpanel.js`'s
-  // `TRANSFER_PROPAGATES`. Driving the handover across two real Macs against the real relay
-  // showed it is a ONE-WAY DEMOTION: `POST /members/transfer` answers `{authoritative:false,
-  // stored:'nothing'}` by design, the authoritative record is a `space.set{admin}` op, and that
-  // op has no client mutation. Observed end state: the outgoing admin demotes himself, the
-  // successor is never told, and the circle is left with NO ADMIN and no route back.
+test('20.1 — the transfer is ON, and it AUTHORS the link before it pings the relay', async () => {
+  // ⚠ **INVERTED AT THE E6 INTEGRATION. THIS ROW USED TO ASSERT THE DISABLED CONTROL** and the
+  // sentence „…ohne beim anderen anzukommen", because driving the handover across two real Macs
+  // showed it was a ONE-WAY DEMOTION: `POST /members/transfer` answers
+  // `{authoritative:false, stored:'nothing'}` by design, the authoritative record is a
+  // `space.set{admin, adminPrev}` op, and that op had no client mutation. Observed end state —
+  // the outgoing admin demoted himself, the successor was never told, and the circle was left
+  // with NO ADMIN and no route back (finding E6-2).
   //
-  // So the control is disabled with its reason. What is asserted here is the honest surface;
-  // the CONSEQUENCE SENTENCE is still guarded below at the pure-function level, so the copy
-  // cannot rot while the button is off and re-enabling is one constant plus this test.
+  // `core/ops.js` row 27 is that mutation now, and this asserts the three things that make the
+  // handover real rather than merely enabled: the op is authored, it names the head of the
+  // accepted chain as `adminPrev` (a null prev is a rootless assertion that hands the seat to
+  // nobody), and it goes FIRST — before the advisory relay call, so a relay hiccup cannot demote
+  // this Mac while the promotion never entered the log.
   const relay = mount();
   const pick = $('.sheet select.admin-transfer');
   const go = $$('.sheet button').find((b) => b.textContent === 'Rolle übergeben');
-  assert.ok(pick && go, 'the transfer control vanished instead of being disabled');
-  assert.equal(admin.TRANSFER_PROPAGATES, false, 'this test describes the un-propagating state');
-  assert.equal(go.disabled, true, 'the handover is offered while it cannot arrive');
-  assert.equal(pick.disabled, true);
-  assert.includes(sheetText(), 'ohne beim anderen anzukommen');
+  assert.ok(pick && go, 'the transfer control vanished');
+  assert.equal(admin.TRANSFER_PROPAGATES, true, 'this test describes the PROPAGATING state');
+  assert.equal(go.disabled, false, 'the handover is refused while it can arrive');
+  assert.equal(pick.disabled, false);
+  assert.equal(sheetText().includes('ohne beim anderen anzukommen'), false,
+    'the blocked-transfer sentence is still shown for a transfer that works');
 
-  // Pressing it anyway opens nothing and tells the relay nothing. The baseline is not zero:
-  // the settings sheet this section is drawn into carries a scrim of its own.
-  const scrimsBefore = $$('.scrim').length;
+  const successor = pick.value;
+  assert.ok(/^mem_/.test(successor), 'the picker offers a MemberId');
   go.click();
   await sleep(60);
-  assert.equal($$('.scrim').length, scrimsBefore, 'a disabled handover still opened a confirmation');
-  assert.equal(relay.calls.filter((c) => c.path === '/api/v1/members/transfer').length, 0,
-    'a disabled handover still called the relay');
+  const confirm = topButtons().find((b) => /bergeben|Hand over/.test(b.textContent));
+  assert.ok(confirm, 'the handover opened no confirmation');
+  confirm.click();
+  await waitFor(() => applied.length > 0, { what: 'the transfer op' });
+
+  assert.equal(applied[0].name, 'transferAdmin');
+  assert.equal(applied[0].args.admin, successor);
+  assert.equal(applied[0].args.adminPrev, HEAD_LINK,
+    'a transfer must name the link it supersedes — `store.familyAdmin().headOpId`');
+  await waitFor(() => relay.calls.some((c) => /transfer/.test(c.path)), { what: 'the relay ping' });
+  unmount();
+});
+
+test('20.1 — the transfer op is authored BEFORE the relay is told, not after', async () => {
+  // The ordering is the whole of E6-2's cure and it is invisible in the end state, so it is
+  // asserted directly. The relay stores nothing here; the op is the fact. Authoring second would
+  // mean an unreachable relay demoted this Mac's own prefs while nobody was ever promoted.
+  const relay = mount();
+  const order = [];
+  const seenApply = () => { if (applied.length && !order.includes('op')) order.push('op'); };
+  $$('.sheet button').find((b) => b.textContent === 'Rolle übergeben').click();
+  await sleep(60);
+  topButtons().find((b) => /bergeben|Hand over/.test(b.textContent)).click();
+  await waitFor(() => relay.calls.some((c) => /transfer/.test(c.path)), { what: 'the relay ping' });
+  seenApply();
+  assert.deepEqual(order, ['op'], 'the relay was told before the log was written');
   unmount();
 });
 
@@ -561,12 +596,20 @@ test('a relay that refuses leaves the sheet open and the circle untouched', asyn
 // §6 · 20.1 — the rename, and what the relay is told about it
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-test('renaming writes the name locally and pings a relay that stores nothing', async () => {
+test('20.1 — renaming AUTHORS space.set{name}, writes it locally, and pings a relay that stores nothing', async () => {
+  // ⚠ WIDENED AT THE E6 INTEGRATION. The local write and the relay ping were the whole of the
+  // rename, and E6-VERIFICATION §3.4 measured what that meant: Papa's circle read „Familie
+  // Weber-Schmidt" and Mama's read „—". The name is a fact the whole circle reads, so the
+  // authoritative record is `space.set{name}` (ADR 001 §4.1, admissible only from the sitting
+  // admin) and the pref is what RENDERS — before the op has folded, and on a Mac whose keys have
+  // not arrived (D9).
   const relay = mount();
   const input = $('.sheet input[type="text"]');
   input.value = 'Familie Hein';
   input.dispatchEvent(new Event('change'));
   await waitFor(() => settingsWrites.length > 0, { what: 'the local write' });
+  assert.deepEqual(applied, [{ name: 'renameSpace', args: { name: 'Familie Hein' } }],
+    'the rename must reach the log, or it is a per-Mac fact (finding E6-1)');
   assert.equal(Object.assign({}, ...settingsWrites)[createjoin.CIRCLE_PREFS.name], 'Familie Hein');
   await waitFor(() => relay.calls.some((c) => /rename/.test(c.path)), { what: 'the rename ping' });
   // `handlers/lifecycle.js` answers 400 on any readable field. The body must be empty.

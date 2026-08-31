@@ -266,6 +266,69 @@ export function familyWaitingState() {
 }
 
 /** Write the circle to `board.json`, then flush — this is a fact a relaunch must not lose. */
+/**
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ * THE CIRCLE, ADOPTED INTO THE LOG — and this is the step whose absence made E6 a membership
+ * feature with no content in it.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * Everything above this point is the RELAY's half: a space row, a member row, a device row, a
+ * wrap, an invite. None of it is board content and none of it makes a single op admissible. Four
+ * calls do, and until this function existed not one of them had a caller anywhere in `src/js/`.
+ *
+ *   1. **`store.useIdentity()`** — the identity `armForRelay` just minted is the one the relay
+ *      now holds a device row for. Without adopting it the store keeps its EPHEMERAL per-process
+ *      identity, so `op.act` is not this member, `store._short` is not the short the relay
+ *      registered, and `sealOp` §5.2.2 checks 4 and 5 refuse every op this Mac authors. It is
+ *      skipped when the store already runs on a durable identity (a Mac that had opted into
+ *      19.4 first, or a second circle screen in one session): the store refuses to be re-pointed
+ *      and it is right to.
+ *   2. **`store.useFamilySpace()`** — `core/ops.js:spaceFor` refuses to build a `member.set` or a
+ *      `space.set` without it, and `core/materialize.js:791` (`if (!familySpaceId) break;`) means
+ *      a peer's entry could not RENDER even once its op had folded.
+ *   3. **`claimAdmin` — THE CREATOR ONLY, AND IT IS THE ROOT OF EVERYTHING ELSE.** ADR 001 §4.1's
+ *      genesis link. Until it exists `adminAtIn` answers `null` for every stamp, so on a circle
+ *      created by this build **20.1's rename and 20.2's removal were inadmissible from everybody,
+ *      the creator included** — and `family/removal.js` reported it as `NO_ADMIN_CHAIN` on every
+ *      removal. The joiner must NOT emit it: a second genesis link is not a correction, it is a
+ *      rival root, and `resolveChain` would settle the seat by longest-chain-then-stamp.
+ *   4. **`attestMyDevice`** — ADR 001 §4.0. Without it `core/authz.js` stage 0b answers
+ *      `unattestedDevice` for every op this Mac sends and every op it receives.
+ *   5. **`setMyProfile`** — 15.6. The name and colour the human typed on THIS screen, published
+ *      into the log where every other member can read them. Before this, every member row on
+ *      every Mac read „Name noch nicht angekommen" — including my own, because writing my own
+ *      name was the same missing op (finding E6-1).
+ *
+ * **NOTHING HERE THROWS OUT OF THE FLOW.** The relay has already accepted the membership when
+ * this runs; a Mac that is a member but could not author its first ops still has its board, its
+ * member list and the calm D9 sentence, and `startFamilyEngine` re-publishes the attestation on
+ * every launch. So each call is reported and none of them unwinds a join that has happened.
+ *
+ * @param {Object} id what `armForRelay` returned
+ * @param {{spaceId:string, admin:boolean, displayName:string, colorRef:string}} circle
+ */
+async function adoptCircleIntoLog(id, circle) {
+  const step = (what, fn) => {
+    try { fn(); } catch (e) {
+      console.warn(`[circle] ${what} could not be authored into the family log:`, e.message);
+    }
+  };
+  if (typeof store.hasDurableIdentity === 'function' && !store.hasDurableIdentity()) {
+    step('this Mac\'s identity', () => store.useIdentity({ ...id.forStore }));
+  }
+  step('the Familienkreis', () => store.useFamilySpace(circle.spaceId));
+  if (circle.admin) step('the admin seat (ADR 001 §4.1 genesis link)', () => store.apply('claimAdmin', {}));
+  step('this device\'s attestation (ADR 001 §4.0)', () => store.apply('attestMyDevice', {
+    deviceShort: id.forStore.deviceShort,
+    blob: id.blob,
+  }));
+  step('your name and colour (15.6)', () => store.apply('setMyProfile', {
+    displayName: circle.displayName,
+    colorRef: circle.colorRef,
+  }));
+  if (typeof store.persistNow === 'function') await store.persistNow().catch(() => {});
+}
+
 async function rememberCircle(patch) {
   store.setSettings(patch);
   if (typeof store.persistNow === 'function') await store.persistNow();
@@ -671,7 +734,7 @@ async function createCircleOnRelay(origin, colorRef) {
   // failure here is reported and does NOT unwind the space, which cannot be undone anyway.
   if (minted.status !== 200) console.warn('[circle] the space exists but the first invite failed', minted.json);
 
-  return { spaceId, code: minted.status === 200 ? code : '', memberId: id.forStore.memberId };
+  return { spaceId, code: minted.status === 200 ? code : '', memberId: id.forStore.memberId, id };
 }
 
 /**
@@ -703,6 +766,7 @@ async function redeemOnRelay(origin, anyCodeForm, colorRef) {
     // D9's designed waiting state, driven by the relay's own key-ring state rather than by an
     // assumption this client makes about it.
     keysPending: body.pendingKeys !== false,
+    id,
   };
 }
 
@@ -909,10 +973,14 @@ export function closeCircleScreen(opts = {}) {
   view = null;
   try { lastFocus?.focus?.(); } catch { /* the node may be gone */ }
   lastFocus = null;
-  // A completed create or join needs the store re-derived into the space it now belongs to —
-  // `usePersonalSpace()` and its family twin may not be called after `init()` (ADR 006 §9.4),
-  // and `board.json` is the truth, so re-deriving costs nothing. It is the one place in this
-  // flow that asks for a reload, and it never happens on a screen somebody merely closed.
+  // A completed create or join needs the store re-derived into the space it now belongs to.
+  // `useFamilySpace()` MAY be called after `init()` and `adoptCircleIntoLog` already did — there
+  // is no family placeholder, so nothing can have been stamped wrongly. What may NOT is
+  // `useIdentity()`: the spine is minted from `board.json` at `init()` under whatever identity is
+  // current, so this session's history is still authored by the temporary one and the store says
+  // so in a warning. `board.json` is the truth (ADR 006 §9.4), so re-deriving costs nothing. It
+  // is the one place in this flow that asks for a reload, and it never happens on a screen
+  // somebody merely closed.
   if (finished && !opts.silent) ports.reload();
   return true;
 }
@@ -1190,6 +1258,12 @@ async function submitCreate() {
       [CIRCLE_PREFS.pending]: false,
       [CIRCLE_PREFS.joinedAt]: ports.today(),
     });
+    // AFTER the prefs and never before: `useFamilySpace` re-projects the board, and a board
+    // re-projected into a circle whose id has not reached `board.json` would be re-projected
+    // back out of it on the next launch. See `adoptCircleIntoLog`.
+    await adoptCircleIntoLog(out.id, {
+      spaceId: out.spaceId, admin: true, displayName: display, colorRef: view.colorRef,
+    });
     view.busy = false;
     view.circleName = name;
     view.displayName = display;
@@ -1373,6 +1447,13 @@ async function submitJoin() {
       [CIRCLE_PREFS.color]: view.colorRef,
       [CIRCLE_PREFS.pending]: out.keysPending,
       [CIRCLE_PREFS.joinedAt]: ports.today(),
+    });
+    // `admin: false` — ADR 001 §4.1's genesis link belongs to the creator alone. A joiner that
+    // emitted one would be a RIVAL ROOT, and `resolveChain` settles rival roots by
+    // longest-chain-then-stamp: the later root wins, so every joiner would take the seat from
+    // the founder in turn. See `adoptCircleIntoLog`.
+    await adoptCircleIntoLog(out.id, {
+      spaceId: out.spaceId, admin: false, displayName: display, colorRef: view.colorRef,
     });
     view.busy = false;
     view.displayName = display;

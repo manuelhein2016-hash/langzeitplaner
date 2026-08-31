@@ -659,23 +659,30 @@ describe('§3 · E6 · four devices, three members, and membership changing unde
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §4 · THE GATE — WHY THIS IS A NO-GO, ASSERTED RATHER THAN ARGUED
+// §4 · THE GATE — **INVERTED (LZP-608).**  The family engine exists; the gate is now its guard.
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// Everything above is green, and none of it is E6.
+// THE ROW THIS SECTION USED TO BE, kept verbatim so the inversion is legible rather than a diff
+// nobody reads:
 //
-// §3 drove three members and four devices, and every one of those rows had to measure the CURSOR
-// and the VERDICT rather than the BOARD, because no content ever crossed between members. That is
-// not an accident of the harness and it is not a defect to fix in the engine: the space the
-// product can sync is a PERSONAL space, and a personal space holding one person's acts is story
-// 21.2 — the promise the whole crypto design exists to keep.
+//   > The consequence is the gate: **E6's convergence question cannot be asked of this build**,
+//   > and a suite full of green rows must not be read as evidence that it can. The three
+//   > assertions below are what stop that misreading. Each is a statement about the SHIPPED
+//   > source, so it inverts on the day a family engine exists rather than on the day somebody
+//   > remembers to come back.
 //
-// The consequence is the gate: **E6's convergence question cannot be asked of this build**, and a
-// suite full of green rows must not be read as evidence that it can. The three assertions below
-// are what stop that misreading. Each is a statement about the SHIPPED source, so it inverts on
-// the day a family engine exists rather than on the day somebody remembers to come back.
+// That day is here. `src/js/sync/family.js` is the family engine and `src/js/sync/keys.js` is
+// ADR 002 §7.1 steps 4-6, so §4b's list is stale by exactly two entries — and the inversion is
+// NOT "delete the row". §4a's half is unchanged and must never change: the personal engine still
+// refuses an `fsp_` space at construction, because that refusal IS story 21.2. What §4b now
+// asserts is the SECOND half of the same property, which did not exist to be asserted before:
+// **the family engine refuses a `psp_` space by the same mechanism, in the other direction.**
+// Two constructors, two refusals, no override on either — and a row that fails the day somebody
+// adds a third engine, or softens either refusal into a parameter.
+//
+// §4c is untouched: R10-10 is the RELAY's half and no client change closes it.
 
-describe('§4 · the gate — E6 needs a family space, and nothing can sync one', () => {
+describe('§4 · the gate — two engines, two scopes, and neither can be handed the other\'s space', () => {
   test('§4a · the shipped engine REFUSES a family space, by construction and on purpose', async () => {
     const { createPersonalSync } = await import('../../src/js/sync/personal.js');
     assert.throws(
@@ -690,22 +697,45 @@ describe('§4 · the gate — E6 needs a family space, and nothing can sync one'
       + 'that has been hardened for three rounds is not the engine E6 needs.');
   });
 
-  test('§4b · and no OTHER engine exists — `family/engine.js` builds the personal one', () => {
+  test('§4b · INVERTED · the FAMILY engine refuses a personal space, by the same construction', async () => {
     // Measured over the source, in `round9-e6.test.js` §3c's discipline, so an engine added in a
-    // file nobody thought of inverts this row instead of hiding behind it.
+    // file nobody thought of is still caught by this row rather than hiding behind it.
     const dir = path.join(REPO, 'src/js/sync');
     const modules = fs.readdirSync(dir).filter((n) => n.endsWith('.js'));
     assert.deepEqual(modules.sort(),
-      ['chain.js', 'cursor.js', 'outbox.js', 'personal.js', 'protocol.js', 'status.js'],
-      'THE GATE, HALF TWO: there are six modules under `src/js/sync/` and exactly one of them is '
-      + 'an engine. There is no `family.js`, and this row inverts the day there is.');
+      ['chain.js', 'cursor.js', 'family.js', 'keys.js', 'outbox.js', 'personal.js', 'protocol.js', 'status.js'],
+      'THE INVERSION, HALF ONE: there are now EIGHT modules under `src/js/sync/` and exactly TWO '
+      + 'of them are engines — `personal.js` for `psp_` and `family.js` for `fsp_`. `keys.js` is '
+      + 'ADR 002 §7.1 steps 4-6, which is the half D9 rests on and which had no implementation '
+      + 'anywhere in the client until LZP-608. A THIRD engine inverts this row again.');
+
+    const { createFamilySync } = await import('../../src/js/sync/family.js');
+    assert.throws(
+      () => createFamilySync({
+        spaceId: 'psp_AAAAAAAAAAAAAAAAAAAAAA',
+        store: {}, transport: {}, keyring: {}, attestationOf: () => null, now: () => 0,
+        me: { memberId: 'mem_x', deviceId: 'dev_x', deviceShort: 'S'.repeat(16) },
+      }),
+      /must be an fsp_/,
+      'THE INVERSION, HALF TWO, and it is the point of the whole row: the family engine refuses a '
+      + '`psp_` id at CONSTRUCTION, exactly as §4a\'s personal engine refuses an `fsp_` one. The '
+      + 'two scopes are disjoint on both sides of the seam, neither refusal has an option, an '
+      + 'override or a default, and a family engine pointed at the personal space would drive '
+      + '`keys.js` `deliver()` over familyRecipients() — every OTHER member\'s devices — and hand '
+      + 'them the personal space key. Same catastrophe as §4a, other end.');
 
     const engine = fs.readFileSync(path.join(REPO, 'src/js/family/engine.js'), 'utf8');
     assert.match(engine, /createPersonalSync/,
-      'and `family/engine.js` — the file whose NAME says family — builds the PERSONAL engine');
+      '`family/engine.js` still builds the PERSONAL engine for story 19.4 — my own two Macs');
+    assert.match(engine, /createFamilySync/,
+      'AND the FAMILY engine, which is what „Familie" in this product now actually means');
     assert.match(engine, /startsWith\('psp_'\)/,
-      'and gates itself on a `psp_` id, so „Familie" in this product means "my own Macs, over a '
-      + 'relay", which is M1 and is exactly what E5 shipped and demonstrated');
+      'and `readFamilyConfig` still gates the personal arming on a `psp_` id …');
+    assert.match(engine, /startsWith\('fsp_'\)/,
+      '… while `readCircleConfig` gates the circle arming on an `fsp_` one. Two gates, two '
+      + 'prefixes, and a Mac that is in a Familienkreis WITHOUT having opted into own-device sync '
+      + 'now arms an engine — which is precisely the Mac `E6-VERIFICATION.md` §5.2 measured making '
+      + 'zero /ops requests for ever.');
   });
 
   test('§4c · the relay, meanwhile, ADMITS a second member to a personal space (R10-10)', async () => {

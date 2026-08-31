@@ -40,6 +40,12 @@
 //    diverge, that test goes red before anything renders.
 
 import { cmp } from './stamp.js';
+// THE VISIBILITY SEAM (ADR 004 §2.1, §4.2). `projectable` and `renderableNote` below used to
+// spell `'privat'` and `'belegt'` as inline string comparisons — a viewer-side PRIVACY decision
+// written as a literal inside a renderability predicate, in a file whose header is about entity
+// keys and day selection. `core/visibility.js` owns the levels and what each one discloses;
+// this file asks it. See the note on `projectedToPeers` at `projectable`.
+import { projectedToPeers, isRedacted, VISIBILITY_LEVELS as LEVELS } from './visibility.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 0. Entity kinds
@@ -68,8 +74,17 @@ export const FAMILY_OF = Object.freeze({ note: 'fnote', bar: 'fbar' });
 /** family publication kind → the truth kind it publishes. */
 export const TRUTH_OF = Object.freeze({ fnote: 'note', fbar: 'bar' });
 
-/** The three visibility levels, in increasing order of disclosure (16.1–16.7). */
-export const VISIBILITY_LEVELS = Object.freeze(['privat', 'belegt', 'geteilt']);
+/**
+ * The three visibility levels, in increasing order of disclosure (16.1–16.7).
+ *
+ * DEFINED IN `core/visibility.js` AND RE-EXPORTED HERE, unchanged in name and value, so that
+ * `ops.js`, `crypto/envelope.js` and `core/project.js` keep importing it from where they always
+ * did. The definition moved because the ORDER of this array is what every rank, comparison and
+ * upgrade/downgrade classification in the product is computed from, and it belongs beside the
+ * predicates that would have to answer for a fourth level rather than one line under the
+ * entity-kind tables, where nothing reads it.
+ */
+export const VISIBILITY_LEVELS = LEVELS;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Entity keys
@@ -662,7 +677,10 @@ const has = (v) => v !== undefined && v !== null;
  */
 export function renderableNote(note) {
   if (!note) return false;
-  if (note.isForeign) return has(note.date) && (note.level === 'belegt' || has(note.text));
+  // `isRedacted(level)` is `showsExistence && !showsContent` — exactly `'belegt'` today, and the
+  // predicate rather than the literal so that "a Belegt entry needs no text to be drawn" is a
+  // consequence of what Belegt DISCLOSES (ADR 004 §2.1) rather than of what it is spelled.
+  if (note.isForeign) return has(note.date) && (isRedacted(note.level) || has(note.text));
   if (note.repeatsYearly && typeof note.date !== 'string') return false;
   return has(note.text);
 }
@@ -728,7 +746,16 @@ export function projectable(kind, entry, ctx = {}) {
   if (!entry) return false;
   if (entry.alive === false) return false;
   if (entry.isForeign) {
-    if (!entry.level || entry.level === 'privat') return false;
+    // ADR 004 §4.2: `pub.level` `'privat'` or absent ⇒ NOT PROJECTED AT ALL.
+    //
+    // `projectedToPeers` is `!level || level === 'privat'`, BYTE FOR BYTE — the same predicate
+    // this line always applied, now named once instead of spelled here. It is deliberately NOT
+    // `showsExistence`, which additionally refuses a level outside the enum: that would drop a
+    // foreign entry at an unknown future level rather than render it un-redacted, which is the
+    // forward-compatibility trade `core-materialize.test.js:757` characterizes on purpose. The
+    // two predicates, the one input they disagree on and the reason the choice is somebody
+    // else's are all documented at `visibility.js:projectedToPeers`.
+    if (!projectedToPeers(entry.level)) return false;
     if (ctx.currentMembers && !ctx.currentMembers.has(entry.ownerId)) return false;
     if (ctx.hiddenMembers && ctx.hiddenMembers.has(entry.ownerId)) return false;
   }

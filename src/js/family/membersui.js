@@ -9,8 +9,8 @@
 //                           member: colour, initial, name. Exactly one row has controls on it.
 //   the legend's second half A3 / 17.3 — the members as colour + initial, each one a visibility
 //                           toggle, sitting next to „Meine Kategorien" in the same 40 px row.
-//   the member popover      what the legend's „Familie" label opens: the same list, read-only,
-//                           for the moment you need the name behind a chip.
+//   the member popover      what the legend's `· n` opener opens: the same list, read-only, for
+//                           the moment you need the name behind a chip.
 //
 // They are one module because they are one QUESTION — "who is in this circle and what colour are
 // they?" — answered from one reader (`readMembers`) over one source of truth (the op log). Two
@@ -73,7 +73,7 @@
 // principle 1 and it is the thing being defended.
 //
 // WHAT IT COSTS, SAID RATHER THAN HIDDEN: the legend no longer NAMES the members. The name is in
-// the tooltip, in ⚙ → „Familie", and one click away in the popover the „Familie" label opens.
+// the tooltip, in ⚙ → „Familie", and one click away in the popover the `· n` opener opens.
 //
 // WHY THAT IS THE RIGHT THING TO GIVE UP, AND NOT MERELY THE CHEAPEST: story 17.2 renders
 // another member's entry as their colour plus an INITIAL CHIP — never their name. The legend's
@@ -83,9 +83,14 @@
 //
 // THE OVERFLOW, because 223 px is a promise about a window width and not a law: after every
 // render `applyOverflow()` measures the real row, and if it still overflows the whole family
-// section becomes one `Familie · 8` button that opens the popover. That is R14's disclosure
+// section becomes just the `· 8` opener that is on the row either way. That is R14's disclosure
 // option, reached by measurement rather than by a guessed breakpoint, and it is v1's own „+n"
 // idiom (2.4) rather than a new one.
+//
+// THE SECTION HAS NO LABEL, and that is a decision rather than an omission: v1 ships a default
+// category called „Familie", so a „Familie" heading here put the same word twice in one 40 px row
+// meaning two different things. The alternative was renaming a category that is already in every
+// existing user's board. See `renderFamilyLegend`.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // WHAT THIS FILE MAY NOT DO
@@ -120,6 +125,8 @@ import { el, toast, openSheet } from '../ui.js';
 import { getLang } from '../i18n.js';
 import { store } from '../store.js';
 import { PALETTE, colorOf, paletteName } from '../palette.js';
+// `legend.js` is v1's and is in the boot graph. The edge goes THIS way — see `setFamilyLegend`.
+import { setFamilyLegend } from '../legend.js';
 
 /** Whichever of a `{de, en}` pair the UI is currently speaking. German is the default (13.7). */
 const say = (pair) => (getLang() === 'en' ? pair.en : pair.de);
@@ -210,7 +217,10 @@ export const MEMBERS_COPY = Object.freeze({
   waitingNoName: { de: '—', en: '—' },
 
   // ── the legend half (A3 / 17.3) ────────────────────────────────────────────────────────────
-  legendLabel: { de: 'Familie', en: 'Family' },
+  //
+  // NO `legendLabel`, and no key that could become one. The section is a divider, the chips and a
+  // `· n` opener — see `renderFamilyLegend` for why „Familie" may not be a heading in a legend that
+  // already has a category by that name, and why the CATEGORY is not the half that moves.
   legendHint: {
     de: 'Farbe und Anfangsbuchstabe — genau so stehen die Einträge der anderen auf dem Board.',
     en: 'Colour and initial — exactly how the others’ entries appear on the board.',
@@ -274,24 +284,23 @@ export const MEMBERS_COPY = Object.freeze({
 let port = null;
 /** The legend host. `.legend` in the shipped page; overridable so a test can mount its own. */
 let legendSelector = '.legend';
-let legendObserver = null;
 let notifyChange = () => {};
 
 /**
  * Mount the member surfaces over a flow. No arguments unmounts, which is what a teardown wants.
  *
- * @param {{port?:MembersPort|null, legendHost?:string, onChange?:Function, observe?:boolean}} deps
- *        `observe` installs the MutationObserver described on `initFamilyLegend`. Off by default
+ * @param {{port?:MembersPort|null, legendHost?:string, onChange?:Function, legend?:boolean}} deps
+ *        `legend` installs the `legend.js` seam described on `initFamilyLegend`. Off by default
  *        so a test renders exactly once per call and nothing races it.
  */
 export function initMembersUI({
-  port: p = null, legendHost = '.legend', onChange = null, observe = false,
+  port: p = null, legendHost = '.legend', onChange = null, legend = false,
 } = {}) {
-  teardownLegendObserver();
+  teardownFamilyLegend();
   port = p;
   legendSelector = typeof legendHost === 'string' && legendHost ? legendHost : '.legend';
   notifyChange = typeof onChange === 'function' ? onChange : () => {};
-  if (p && observe) initFamilyLegend();
+  if (p && legend) initFamilyLegend();
 }
 
 /** Present only where a flow has been mounted. In solo mode the whole feature is absent. */
@@ -460,7 +469,17 @@ export function hiddenMemberIds() {
  * @param {string} memberId @returns {boolean} the new hidden state
  */
 export function setMemberHidden(memberId, hide) {
-  store.setSettings({ hiddenMembers: { [memberId]: !!hide } });
+  // ⚠ **THE SPREAD IS THE FIX FOR FINDING E6-6, AND IT IS NOT DEFENSIVE STYLE.** `setSettings` is
+  // v1's WHOLESALE OBJECT REPLACEMENT — `store-persistence.test.js:757` pins that — so the
+  // one-key literal this used to pass REPLACED the whole map. Reproduced: `{A:true}` then
+  // `{B:true}` leaves `{"B":true}`. **Hiding a second member un-hid the first**, silently, on the
+  // one gesture 17.3 exists for, and the legend and the board agreed with each other about the
+  // wrong answer so nothing looked broken.
+  //
+  // Read fresh on every call rather than held: the sheet is rebuilt between clicks and another
+  // surface (the popover's member filter) writes the same map.
+  const current = (store.state && store.state.settings && store.state.settings.hiddenMembers) || {};
+  store.setSettings({ hiddenMembers: { ...current, [memberId]: !!hide } });
   notifyChange('members');
   return !!hide;
 }
@@ -729,39 +748,35 @@ export const FAMILY_LEGEND_ID = 'legend-family';
 /**
  * Install the legend half and keep it installed.
  *
- * ── WHY A MutationObserver AND NOT A CALL FROM `legend.js` ────────────────────────────────────
+ * ── THE SEAM LANDED, AND THE MutationObserver IS GONE ─────────────────────────────────────────
  *
  * `legend.js:renderLegend()` opens with `legendEl.textContent = ''` and rebuilds, so anything
  * this module appends is erased on the next category toggle, the next „bearbeiten", and every
- * `flashCategory`. The right shape is one line in `legend.js` — a `setFamilyLegend(fn)` seam,
- * exactly the shape `settings.js` already has for `setFamilySections` — and `legend.js` is
- * LZP-802's file, not this one's.
+ * `flashCategory`. This module used to answer that with a `MutationObserver` that re-appended
+ * when its own node had gone — which worked, and which was a BRIDGE, in its own words: it made
+ * the family half arrive one frame late and only ever as a repair.
  *
- * The observer is what lets this half work TODAY without a second dynamic door: it is installed
- * only from behind `family/mount.js` (so a solo Mac never evaluates this module at all,
- * `tests/tier1/network-scope.test.js` §2), it re-appends only when its own node has gone, and it
- * cannot loop, because after the re-append the node is present and the next callback returns
- * immediately. It costs one observer per family Mac and nothing per solo Mac.
+ * `legend.js` now has `setFamilyLegend(fn)`, the same seam `settings.js` has as
+ * `setFamilySections` and with the same inverted direction: `legend.js` is in the boot graph and
+ * may not import this module, so this module — which is evaluated only behind `family/mount.js`,
+ * the one dynamic door — hands it a callback. `renderLegend()` calls it INSIDE the rebuild, so
+ * there is no frame in which the second section is missing.
  *
- * It is a BRIDGE and it should be deleted the day the seam lands; see this file's report.
+ * The observer is DELETED rather than kept as a fallback. Two mechanisms that both re-append one
+ * node is how it gets appended twice.
  *
  * @param {{host?:string}} [opts]
  */
 export function initFamilyLegend({ host } = {}) {
   if (typeof host === 'string' && host) legendSelector = host;
-  renderFamilyLegend();
-  const node = document.querySelector(legendSelector);
-  if (!node || typeof MutationObserver !== 'function') return;
-  teardownLegendObserver();
-  legendObserver = new MutationObserver(() => {
-    if (!document.getElementById(FAMILY_LEGEND_ID)) renderFamilyLegend();
-  });
-  legendObserver.observe(node, { childList: true });
+  setFamilyLegend(renderFamilyLegend);
 }
 
-function teardownLegendObserver() {
-  if (legendObserver) { try { legendObserver.disconnect(); } catch { /* already gone */ } }
-  legendObserver = null;
+/** Take the family half back out of `legend.js`, and off the screen with it. */
+function teardownFamilyLegend() {
+  setFamilyLegend(null);
+  const n = document.getElementById(FAMILY_LEGEND_ID);
+  if (n) n.remove();
 }
 
 /**
@@ -792,20 +807,60 @@ export function renderFamilyLegend() {
   // plus a named second section already says which half is which.
   sec.appendChild(el('span', 'tb-sep legend-fam-rule'));
 
-  const label = el('button', 'legend-fam-label', say(MEMBERS_COPY.legendLabel));
-  label.type = 'button';
-  label.title = say(MEMBERS_COPY.openFamily);
-  label.addEventListener('click', () => openFamilyPopover());
-  sec.appendChild(label);
-
+  // ── THE „Familie" COLLISION, AND WHY THE LABEL IS THE HALF THAT GOES ────────────────────────
+  //
+  // v1 SHIPS A DEFAULT CATEGORY CALLED „Familie". With a section label the German legend read
+  //
+  //     Arbeit · Familie · Reisen · bearbeiten │ Familie ⬤⬤⬤
+  //
+  // — the same word twice in one 40 px row, meaning two different things (a category of MY
+  // entries; the people in the circle), and the second one immediately after a divider that a
+  // reader has no reason to trust as a change of subject. It is the worst kind of ambiguity,
+  // because both readings are correct somewhere on the row.
+  //
+  // TWO WAYS OUT WERE ON THE TABLE. Rename the default category, or drop the section label and
+  // let the divider carry A3's two sections. **THE LABEL GOES**, and the reason is not
+  // aesthetics:
+  //
+  //   · A CATEGORY IS USER DATA. „Familie" is in every v1 board that has ever been created, in
+  //     `cat:*` registers with stamps, and a person has spent a year putting entries in it. An
+  //     upgrade that renames it is an upgrade that edits the user's board — a v1 regression, and
+  //     one that would arrive silently on somebody who has never heard of a Familienkreis.
+  //     Renaming only the DEFAULT for new boards would be worse still: two products, and the
+  //     collision still shipped to everyone who upgraded.
+  //   · THE DIVIDER ALREADY CARRIES THE SPLIT, and this file already argued that for the FIRST
+  //     section eight lines up: no „Meine Kategorien" heading, because the rule says which half
+  //     is which for ~85 px less. Spending the argument on one section and not the other was the
+  //     inconsistency; A3's "two sections" is one rule, applied twice.
+  //   · IT BUYS ~48 px of the exact row finding R14 is about, which pushes the eight-member
+  //     measurement further inside its budget rather than nearer to it.
+  //
+  // WHAT REPLACES IT AS THE POPOVER'S DOOR. The `· n` disclosure `applyOverflow` already builds
+  // is promoted from "only when the row overflows" to ALWAYS — a count, not a word, so it can
+  // collide with no category anybody has ever named. „whose chip is that?" keeps its one-click
+  // answer, the tooltip still says „Familie im Kreis anzeigen" in full (a tooltip is not a legend
+  // label and cannot be read as one), and the collapsed case is unchanged: the chips go, the
+  // opener stays.
   const chips = el('span', 'legend-fam-chips');
   for (const r of rows) chips.appendChild(chipNode(r, { interactive: true }));
   sec.appendChild(chips);
+  sec.appendChild(familyOpener(rows.length));
 
   if (!existing) host.appendChild(sec);
   else if (sec.parentElement !== host) host.appendChild(sec);
   applyOverflow(host, sec, chips, rows.length);
   return sec;
+}
+
+/** The section's one word-free affordance: `· n`, opening the read-only popover. */
+function familyOpener(count) {
+  const more = el('button', 'legend-fam-more', `· ${count}`);
+  more.id = `${FAMILY_LEGEND_ID}-more`;
+  more.type = 'button';
+  more.title = say(MEMBERS_COPY.openFamily);
+  more.setAttribute('aria-label', more.title);
+  more.addEventListener('click', () => openFamilyPopover());
+  return more;
 }
 
 /**
@@ -852,8 +907,8 @@ function chipNode(r, { interactive }) {
  *
  * `.legend` is `overflow:hidden`, so an overflowing row does not report itself anywhere a user
  * can see — it silently loses whatever was last. This asks the layout the one question that
- * matters (`scrollWidth > clientWidth`) and, if the answer is yes, replaces the chips with one
- * `Familie · n` button that opens the popover.
+ * matters (`scrollWidth > clientWidth`) and, if the answer is yes, HIDES the chips, leaving the
+ * `· n` opener that is on the row either way.
  *
  * A guessed breakpoint would have been wrong for the case that actually produces the overflow:
  * it is not the member count, it is the member count TIMES the length of the category names in
@@ -863,21 +918,17 @@ function chipNode(r, { interactive }) {
  * legend render, on family Macs only.
  */
 function applyOverflow(host, sec, chips, count) {
+  void count;                                     // the opener carries it now; see `familyOpener`
   sec.classList.remove('legend-fam-collapsed');
   chips.hidden = false;
-  const collapsed = document.getElementById(`${FAMILY_LEGEND_ID}-more`);
-  if (collapsed) collapsed.remove();
   if (!host || typeof host.scrollWidth !== 'number') return;
   if (host.scrollWidth <= host.clientWidth) return;
 
+  // The chips go and the `· n` opener stays — which is what it was before, except that the
+  // opener no longer has to be BUILT here, so the collapsed and expanded rows can no longer
+  // disagree about what it says or what it opens.
   chips.hidden = true;
   sec.classList.add('legend-fam-collapsed');
-  const more = el('button', 'legend-fam-more', `· ${count}`);
-  more.id = `${FAMILY_LEGEND_ID}-more`;
-  more.type = 'button';
-  more.title = say(MEMBERS_COPY.openFamily);
-  more.addEventListener('click', () => openFamilyPopover());
-  sec.appendChild(more);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -895,11 +946,6 @@ export const MEMBERS_CSS = `
 /* ── the legend's second section (A3, 17.3, finding R14) ───────────────────── */
 .legend-fam { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 .legend-fam-rule { margin: 0 2px 0 0; }
-.legend-fam-label {
-  font: 400 11px var(--font); color: var(--ink-3); white-space: nowrap; cursor: pointer;
-  background: none; border: 0; padding: 0;
-}
-.legend-fam-label:hover { color: var(--ink-1); }
 .legend-fam-chips { display: inline-flex; align-items: center; gap: 4px; }
 /* A class rule that sets display BEATS the UA stylesheet's [hidden] rule, so the collapsed chips
    kept their box and the disclosure sat next to a 140 px hole. Found in the browser and not in

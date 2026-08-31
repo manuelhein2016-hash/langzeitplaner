@@ -142,7 +142,7 @@ test('the shipped page exposes no member hook, and solo mode draws nothing at al
   // „Familie", and a test that looked for the string would pass on a broken build the day
   // somebody renamed that category.
   assert.equal($$('.legend .member-chip').length, 0);
-  assert.equal($$('.legend .legend-fam-label').length, 0);
+  assert.equal($$('.legend .legend-fam-more').length, 0);
   unmount();
 });
 
@@ -372,14 +372,42 @@ test('D9 — the waiting line is calm, has no spinner, and never sends anyone to
 // 5 · THE LEGEND — A3 / 17.3, and finding R14 measured in the real toolbar
 // ═════════════════════════════════════════════════════════════════════════════
 
-test('the legend gains a second section: a rule, a „Familie" label, and one chip per member', () => {
+test('the legend gains a second section: a rule, one chip per member, and NO „Familie" label', () => {
   mount(TWO);
   members.renderFamilyLegend();
   const sec = famSection();
   assert.ok(sec, 'no family section in the legend');
   assert.equal(sec.parentElement.className, 'legend', 'the section is not in the legend');
   assert.ok($('.legend-fam-rule', sec), 'A3’s two sections need a visible divider');
-  assert.equal($('.legend-fam-label', sec).textContent, 'Familie');
+
+  // ── THE „Familie" COLLISION, PINNED FROM THE ONE SIDE THAT MAY MOVE ───────────────────────
+  //
+  // v1 ships a DEFAULT CATEGORY called „Familie", so a section label of the same word put it
+  // twice in one 40 px row meaning two different things. The decision was to drop the LABEL and
+  // not to rename the category: a category is user data, it is in every board that already
+  // exists, and an upgrade that renames it is a v1 regression on somebody who has never heard of
+  // a Familienkreis.
+  //
+  // THE ASSERTION IS DIRECTIONAL ON PURPOSE. It does not say "the word „Familie" is absent from
+  // the legend" — the category is legitimately there and its name is the user's to choose. It
+  // says the FAMILY SECTION contains no label element and no text of its own beyond the count,
+  // so the row can never again show one word for two meanings whatever anybody's category is
+  // called.
+  assert.equal($$('.legend-fam-label', sec).length, 0, 'the section label came back');
+  assert.equal(sec.textContent.replace(/[·\s]/g, '').replace(/\d/g, ''),
+    chips().map((c) => c.textContent).join(''),
+    `the family section says something other than its chips and its count: „${sec.textContent}"`);
+  // The divider is the section break A3 asks for, and it is the toolbar's own — not a new one.
+  assert.includes($('.legend-fam-rule', sec).className, 'tb-sep');
+
+  // The popover keeps its one-click door, and the door is a COUNT rather than a word, so it can
+  // collide with no category anybody will ever name. The full sentence is in the tooltip, where
+  // it is read on purpose rather than scanned by accident.
+  const opener = $('.legend-fam-more', sec);
+  assert.ok(opener, 'nothing in the expanded legend opens the member popover any more');
+  assert.equal(opener.textContent, `· ${chips().length}`);
+  assert.equal(/[A-Za-zÄÖÜäöü]/.test(opener.textContent), false, 'the opener grew a word');
+  assert.includes(opener.title.toLowerCase(), 'familie');
 
   // ME IS NOT IN THE LEGEND. 17.2: my entries render in MY CATEGORY COLOURS, so a chip for
   // myself would be a toggle for something the board never draws that way.
@@ -506,18 +534,61 @@ test('17.3 — a member chip hides that member the way a category swatch hides a
   unmount();
 });
 
-test('the legend survives legend.js rebuilding itself, which is what the observer is for', async () => {
+test('the legend survives legend.js rebuilding itself — through the SEAM, with no observer', async () => {
   const legend = await importApp('legend.js');
   mount(EIGHT);
   members.initFamilyLegend({ host: '.legend' });
   assert.ok(famSection());
 
-  // `renderLegend()` opens with `legendEl.textContent = ''`. Without the bridge the family half
-  // disappears on the next category toggle and never comes back.
+  // ── THE SEAM, AND WHY IT IS ASSERTED SYNCHRONOUSLY ────────────────────────────────────────
+  //
+  // `renderLegend()` opens with `legendEl.textContent = ''`, so the family half was erased on
+  // every category toggle, every „bearbeiten" and every `flashCategory`. This module used to
+  // answer that with a `MutationObserver` that re-appended after the fact — which is why this
+  // test used to `waitFor` the section to come BACK: there was a window, one microtask wide, in
+  // which the toolbar was a legend with one section.
+  //
+  // `legend.js#setFamilyLegend(fn)` calls the family half INSIDE the rebuild, so there is no
+  // such window. The assertion is therefore immediate and not a `waitFor`: an implementation
+  // that repaired the legend a frame late would now fail here, and a `waitFor` would hide
+  // exactly the regression the seam was landed to prevent.
   legend.renderLegend();
-  await waitFor(() => famSection(), { what: 'the family section to be restored', timeout: 2000 });
+  assert.ok(famSection(), 'the family half did not survive the rebuild');
   assert.equal(chips().length, 7);
+
+  // …and it is drawn LAST, after „bearbeiten": A3's two sections in the order A3 names them.
+  const kids = [...legendHost().children];
+  assert.equal(kids[kids.length - 1].id, members.FAMILY_LEGEND_ID);
+  assert.ok(kids.some((n) => n.className === 'legend-edit'), 'the category half lost its editor');
+
+  // ONE SECTION, NOT TWO. The observer and the seam together would append twice; the observer is
+  // deleted, so a second rebuild still yields exactly one node.
+  legend.renderLegend();
+  legend.renderLegend();
+  assert.equal($$(`#${members.FAMILY_LEGEND_ID}`).length, 1);
+  assert.equal($$('.legend .legend-fam').length, 1);
+
+  // UNMOUNTING TAKES IT OUT OF `legend.js` TOO — not just off the screen. A callback left behind
+  // would redraw a family section on a Mac that has just left the circle (20.3), which is the
+  // exact bug `syncCircleMounts`'s unmount exists to prevent, one layer down.
   unmount();
+  legend.renderLegend();
+  assert.equal(famSection(), null, 'the seam kept a stale callback after unmount');
+});
+
+test('the MutationObserver is gone, and nothing re-appends the section behind the seam', async () => {
+  // THE BRIDGE IS DELETED, NOT KEPT AS A FALLBACK. Two mechanisms that both re-append one node is
+  // how it gets appended twice, and a bridge nobody removes is a bridge that outlives its reason.
+  // Asserted over the SOURCE because the observer's absence is not otherwise observable: a live
+  // observer that happens never to fire looks exactly like no observer at all.
+  const src = await fetch(new URL('./src/js/family/membersui.js', location.href)).then((r) => r.text());
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.equal(/MutationObserver/.test(code), false, 'the observer is back in membersui.js');
+  assert.equal(/\.observe\s*\(/.test(code), false, 'something is observing the legend again');
+  // …and the seam it was replaced by is the one `settings.js` already had, by name.
+  assert.includes(code, 'setFamilyLegend(renderFamilyLegend)');
+  const legendSrc = await fetch(new URL('./src/js/legend.js', location.href)).then((r) => r.text());
+  assert.includes(legendSrc, 'export function setFamilyLegend');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -596,10 +667,11 @@ test('the English UI is English — no German leaks into the panels or the legen
   members.buildMembersSection(body, { rebuild: () => {}, close: () => {} });
   const text = `${body.textContent} ${famSection().textContent} ${words(body)}`;
 
-  assert.includes(text, 'Family');
+  assert.includes(text.toLowerCase(), 'family');
   assert.includes(text, 'the encryption prevents that, not a rule');
   assert.includes(text, 'My name and my colour');
-  assert.equal($('.legend-fam-label').textContent, 'Family');
+  assert.equal($$('.legend-fam-label').length, 0);
+  assert.includes($('.legend-fam-more').title, 'Show the family circle');
   for (const german of ['Familienkreis', 'Verwaltung', 'Schlüssel', 'Verschlüsselung',
     'ausblenden', 'Farbe', 'du bist im kreis']) {
     assert.equal(text.includes(german), false, `German leaked into the English UI: „${german}"`);

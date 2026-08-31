@@ -147,12 +147,29 @@ async function armFamilyMode() {
   } catch {
     return;                                  // an unreadable board is store.init()'s problem
   }
-  // THE GATE ITSELF, and it is two fields of the board file. Nothing below this line runs on a
-  // Mac that has never opted in.
-  if (!settings || !settings.syncEnabled || !settings.personalSpaceId) return;
+  // THE GATE ITSELF, and it is now THREE fields of the board file rather than two. Nothing below
+  // this line runs on a Mac that has never opted in — `syncEnabled`/`personalSpaceId` is story
+  // 19.4's own-device sync, and `familySpaceId` is F15's Familienkreis, and a Mac can have either
+  // without the other.
+  //
+  // ⚠ **THE THIRD FIELD IS A FIX, NOT A WIDENING FOR ITS OWN SAKE.** `useIdentity()` may only be
+  // called BEFORE `store.init()` (the spine is minted from `board.json` with whatever identity is
+  // current), and it was called from `armStore` alone — which this gate never reached for a Mac
+  // that had joined a circle and opted into nothing else. That Mac ran the whole session under
+  // the EPHEMERAL identity, so `store._short` was random, `store._me` was not her MemberId, and
+  // the family engine refused to construct at all (`me.deviceShort !== store._short`). It is the
+  // same Mac E6-VERIFICATION §5.2 measured making zero `/ops` requests, one layer further down.
+  if (!settings) return;
+  const hasPersonal = !!(settings.syncEnabled && settings.personalSpaceId);
+  const hasCircle = typeof settings.familySpaceId === 'string' && settings.familySpaceId.startsWith('fsp_');
+  if (!hasPersonal && !hasCircle) return;
   try {
     const mod = await openFamilyDoor();
-    family = await mod.arm(settings, { today: todayISO() });
+    // A Mac with BOTH goes through `arm()`, which adopts the personal space as well; `armCircle()`
+    // would then be a second `useIdentity()` for the same identity, which the store refuses by
+    // design. So it is one or the other, and `start()`/`mountCircleSurfaces()` pick up from there.
+    family = hasPersonal ? await mod.arm(settings, { today: todayISO() }) : null;
+    if (!hasPersonal) await mod.armCircle(settings, { today: todayISO() });
   } catch (e) {
     // A Mac that cannot open its key store still has its board, and there is nothing a person
     // can do about a locked Keychain from inside a settings sheet. Family mode is what stops.

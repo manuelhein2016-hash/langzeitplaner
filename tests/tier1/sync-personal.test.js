@@ -37,13 +37,13 @@ import assert from 'node:assert/strict';
 import { localStorage as LS, resetStorage, seedBoard } from '../helpers/env.js';
 
 import { memKeyStore } from '../../src/js/platform/keystore.js';
-import { openDeviceIdentity, selfAttest } from '../../src/js/platform/device-identity.js';
+import { openDeviceIdentity, selfAttest, buildAttestOpen } from '../../src/js/platform/device-identity.js';
 import { exportRawPublic } from '../../src/js/crypto/identity.js';
 import { createKeyRing, createSpaceKey } from '../../src/js/crypto/spacekeys.js';
-import { sealOp } from '../../src/js/crypto/envelope.js';
+import { sealOp, openOp } from '../../src/js/crypto/envelope.js';
 import { buildRequest } from '../../src/js/platform/net.js';
 import { spaceId as mkSpaceId, opId as newOpId, groupId as newGid } from '../../src/js/core/ids.js';
-import { prefSet, noteSet } from '../../src/js/core/ops.js';
+import { prefSet, noteSet, pubSet, spaceSet, OpError } from '../../src/js/core/ops.js';
 
 // THE RELAY COMES THROUGH THE HELPER, NOT THROUGH `server/` DIRECTLY.
 // `tests/tier1/suite-integrity.test.js` allows a tier-1 test file to import only `node:`,
@@ -1624,5 +1624,766 @@ describe('§9 the protocol numbers are the contract\'s', () => {
   test('the park reasons this engine holds for are the ones the envelope layer emits', async () => {
     const { ENVELOPE_PARK } = await import('../../src/js/crypto/envelope.js');
     assert.deepEqual([...CURABLE_PARKS].sort(), [ENVELOPE_PARK.ATTESTATION, ENVELOPE_PARK.EPOCH].sort());
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §10  THE FAMILY PUBLISH SEAM — E6-1, and it is the WRITE half of E6
+//
+// Both E6 flow agents reported the same wall independently, and it is one sentence:
+//
+//   > `MUTATIONS` is exactly v1's 22 sites, so `store.apply('setMyProfile', …)` throws
+//   > `unknown mutation`. **15.6's write half does not exist**, and `space.set{name}` /
+//   > `space.set{admin, adminPrev}` have no client mutation either — so a rename and an admin
+//   > transfer are today per-Mac facts written to local prefs, not ops that reach the circle.
+//
+// The consequences were measured rather than reasoned: every member row on every Mac reads
+// „Name noch nicht angekommen", INCLUDING MY OWN (E6-1); handing over the admin role "left the
+// circle with no admin anywhere and no route back" (E6-2), so the control ships disabled.
+//
+// WHY THE DRIVING IS HERE. This file's rule is A3-H4's: **nothing is hand-built to be
+// acceptable.** So §10 has TWO MEMBERS with two recovery identities, two key stores, two
+// independently generated device pairs and two store instances; every op one store applies is an
+// op the OTHER store's own `apply()` minted; admission on the far side goes through the real
+// `foldAuthorized` with a real `attestOpen` built by `buildAttestOpen` over real signatures; and
+// §10i puts the bytes through the real relay. What is NOT here is `sync/family.js`: that engine
+// takes the outbox as a port and its owner drives it: this section drives the PORT — the thing
+// that was missing — and the last row proves the lines it produces are ones the shipping relay
+// accepts and the shipping opener can open.
+//
+// THE THREE FALSE GREENS THIS SECTION REFUSES, each with the row that prevents it:
+//   1. **the store admits its own author unconditionally** → §10f asserts the SAME op is parked
+//      `unattestedDevice` before the attestation lands and applied after it, on the same store;
+//   2. **the admin chain is a register somebody wrote** → §10g asserts Mama's fold REJECTS the
+//      old admin's later rename, by name, through `applyRemote`;
+//   3. **the board "renders" because the test read the register** → §10h asserts on
+//      `store.state.notes`, the v1 array `layout.js` draws.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+const CIRCLE_DAY = '2026-08-29';
+
+/**
+ * PAPA AND MAMA — two people, one Familienkreis, one shared `FSK` (ADR 002 §4).
+ *
+ * Mama gets NO personal space on purpose. Story 19.4 is a SEPARATE opt-in from 15.3's join, and
+ * the Mac E6's verification measured making zero `/ops` requests for ever is exactly this one: in
+ * a Familienkreis, not opted into own-device sync. If `useFamilySpace()` did not arm the log, her
+ * family ops would be authored into a log that is never written and lost at quit.
+ */
+async function buildCircle() {
+  const ks = { papa: memKeyStore(), mama: memKeyStore() };
+  const papaId = await openDeviceIdentity(ks.papa, { today: CIRCLE_DAY, ...MEM });
+  const mamaId = await openDeviceIdentity(ks.mama, { today: CIRCLE_DAY, ...MEM });
+  const papaAtt = await selfAttest(ks.papa, papaId.forStore, papaId.recovery.recSig.privateKey, { createdAt: CIRCLE_DAY });
+  const mamaAtt = await selfAttest(ks.mama, mamaId.forStore, mamaId.recovery.recSig.privateKey, { createdAt: CIRCLE_DAY });
+
+  const fsp = mkSpaceId('family');
+  const fsk = await createSpaceKey();
+  const rings = { papa: createKeyRing(), mama: createKeyRing() };
+  rings.papa.put(fsp, 1, fsk);
+  rings.mama.put(fsp, 1, fsk);
+
+  // The P1 table and the fold's opener, both built from REAL signatures over REAL recovery keys.
+  // `buildAttestOpen` verifies every blob ahead of time and drops anything that does not verify —
+  // fail-closed, so a green here cannot come from a stub that says yes.
+  const rec = async (id) => exportRawPublic(id.recovery.recSig.publicKey);
+  const attestOpen = await buildAttestOpen([
+    { memberId: papaId.forStore.memberId, recoveryPubSigRaw: await rec(papaId), blobs: [papaAtt.blob] },
+    { memberId: mamaId.forStore.memberId, recoveryPubSigRaw: await rec(mamaId), blobs: [mamaAtt.blob] },
+  ]);
+  const byShort = new Map([
+    [papaAtt.attestation.deviceShort, papaAtt.attestation],
+    [mamaAtt.attestation.deviceShort, mamaAtt.attestation],
+  ]);
+
+  const storeP = (await import('../../src/js/store.js?fam-papa')).store;
+  const storeM = (await import('../../src/js/store.js?fam-mama')).store;
+
+  return {
+    fsp, fsk, attestOpen, byShort,
+    attestationOf: (dv) => byShort.get(dv) ?? null,
+    recSigPubRaw: { [papaId.forStore.memberId]: await rec(papaId), [mamaId.forStore.memberId]: await rec(mamaId) },
+    papa: { id: papaId, ks: ks.papa, att: papaAtt, ring: rings.papa, store: storeP, disk: {}, psp: mkSpaceId('personal') },
+    mama: { id: mamaId, ks: ks.mama, att: mamaAtt, ring: rings.mama, store: storeM, disk: {}, psp: null },
+  };
+}
+
+/**
+ * Boot one member's Mac. `whenFamily` decides whether the circle is adopted BEFORE or AFTER
+ * `init()` — both orders are real: 15.2 creates the circle from a Mac that is already running,
+ * and a relaunch afterwards adopts it before the board is read.
+ */
+async function bootCircleMac(mac, C, { whenFamily = 'before', board = BOARD() } = {}) {
+  mac.disk = {};
+  await on(mac, async () => {
+    resetStorage();
+    if (board) seedBoard(board);
+    const s = mac.store;
+    s.listeners.clear();
+    s.undoStack.length = 0;
+    s.redoStack.length = 0;
+    s.snapshots.length = 0;
+    s._lastSnapshotDay = null;
+    s.ready = false;
+    s.warnings.length = 0;
+    if (!s.hasDurableIdentity()) {
+      s.useIdentity({ ...mac.id.forStore, peerDeviceIds: [], attestOpen: C.attestOpen });
+    }
+    if (mac.psp && s.personalSpaceId() === null) s.usePersonalSpace(mac.psp);
+    if (whenFamily === 'before') s.useFamilySpace(C.fsp);
+    await s.init();
+    if (whenFamily === 'after') s.useFamilySpace(C.fsp);
+    s.warnings.length = 0;
+  });
+}
+
+/** Publish MY device attestation into the family log — ADR 001 §4.0's self-authorizing op. */
+const attestInto = (mac) => mac.store.apply('attestMyDevice', {
+  deviceShort: mac.id.forStore.deviceShort, blob: mac.att.blob,
+});
+
+/** Every family op `mac` has authored and the relay has not acknowledged, as ops. */
+const famOps = (mac) => mac.store.familyOutbox().map((l) => l.op);
+
+let CIRCLE = null;
+before(async () => { CIRCLE = await buildCircle(); });
+
+describe('§10a the door — one circle, and a family op needs one', () => {
+  test('useFamilySpace refuses a psp_, refuses a second circle, and is idempotent', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await on(C.papa, () => {
+      assert.throws(() => C.papa.store.useFamilySpace(C.papa.psp), /expected an fsp_/);
+      assert.throws(() => C.papa.store.useFamilySpace('nonsense'), /expected an fsp_/);
+      assert.throws(() => C.papa.store.useFamilySpace(mkSpaceId('family')), /already writes into/);
+      // 20.6 — at most one Familienkreis. Re-adopting the SAME one is a no-op, not a refusal:
+      // `family/mount.js` arms from two paths and neither knows whether the other ran.
+      assert.equal(C.papa.store.useFamilySpace(C.fsp), C.fsp);
+      assert.equal(C.papa.store.familySpaceId(), C.fsp);
+    });
+  });
+
+  test('a family mutation on a Mac with no circle is refused by NAME, and it is an OpError', async () => {
+    // R3-21 measured that `apply()` already hands its caller two error classes and called that a
+    // defect; this refusal is `spaceFor`'s own, raised where the sentence can name the cure, so
+    // it is `spaceFor`'s class too. A third class here would make R3-21 worse.
+    const solo = (await import('../../src/js/store.js?fam-solo')).store;
+    for (const name of ['setMyProfile', 'renameSpace', 'claimAdmin', 'transferAdmin', 'attestMyDevice']) {
+      assert.throws(() => solo.apply(name, {}), (e) => e instanceof OpError && /useFamilySpace/.test(e.message),
+        `${name} must name the method that fixes it`);
+    }
+    assert.equal(solo.familySpaceId(), null, 'and nothing adopted a circle on the way past');
+  });
+});
+
+describe('§10b story 15.6 — my name and my colour, without admin involvement', () => {
+  test('one member.set, in the family space, on MY OWN record — and the memberId is not an argument', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      const me = s._me;
+      assert.equal(s.apply('setMyProfile', { displayName: 'Papa', colorRef: 'blau' }), true);
+
+      const ops = famOps(C.papa);
+      assert.equal(ops.length, 1, 'one gesture, one op');
+      const op = ops[0];
+      assert.equal(op.k, 'member.set');
+      assert.equal(op.e, `member:${me}`);
+      assert.equal(op.space, C.fsp, 'a family op is authored into the FAMILY space, never the personal one');
+      assert.equal(op.act, me);
+      assert.deepEqual(op.f, { displayName: 'Papa', colorRef: 'blau' });
+
+      // ADR 001 §4.2 — "admissible ONLY if op.act === memberId". The constructor takes the id
+      // from `ctx.act`, so there is no argument through which a caller could rename Mama: an op
+      // every peer would reject, and a rename that appears to work on the one board where it
+      // must not.
+      s.apply('setMyProfile', { memberId: C.mama.id.forStore.memberId, displayName: 'Nicht Mama' });
+      for (const o of famOps(C.papa)) assert.equal(o.e, `member:${me}`);
+      assert.equal(s.registers().get(`member:${C.mama.id.forStore.memberId}`), undefined);
+    });
+  });
+
+  test('a colour change alone does not restate the name at a fresh stamp', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      s.apply('setMyProfile', { displayName: 'Papa', colorRef: 'blau' });
+      s.apply('setMyProfile', { colorRef: 'gruen' });
+      const last = famOps(C.papa).at(-1);
+      assert.deepEqual(Object.keys(last.f), ['colorRef'],
+        'restating an unchanged name would beat a concurrent rename from another Mac for no reason');
+      const cells = s.registers().get(`member:${s._me}`);
+      assert.equal(cells.get('displayName').value, 'Papa');
+      assert.equal(cells.get('colorRef').value, 'gruen');
+    });
+  });
+
+  test('rule U6 — a profile write is not undoable, and ⌘Z still undoes the board action before it', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await on(C.papa, async () => {
+      const s = C.papa.store;
+      s.apply('createNoteInline', { id: 'nU', date: '2026-05-05', text: 'Zahnarzt', categoryId: 'c1' });
+      const depth = s.undoStack.length;
+      s.apply('setMyProfile', { displayName: 'Papa' });
+      assert.equal(s.undoStack.length, depth, 'member.set records no undo step (rule U6)');
+      s.undo();
+      assert.equal(s.state.notes.some((n) => n.id === 'nU'), false, '⌘Z undid the NOTE');
+      assert.equal(s.registers().get(`member:${s._me}`).get('displayName').value, 'Papa',
+        'and the name is still there — a rename is not a board action');
+    });
+  });
+});
+
+describe('§10c the outbox — two spaces, two streams, one definition', () => {
+  test('a family op is in familyOutbox() and NOT in outbox(); a personal op is the reverse', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      s.apply('setMyProfile', { displayName: 'Papa', colorRef: 'blau' });
+      s.apply('createNoteInline', { id: 'nX', date: '2026-06-06', text: 'privat', categoryId: 'c1' });
+
+      const fam = s.familyOutbox().map((l) => l.op);
+      const per = s.outbox().map((l) => l.op);
+      assert.deepEqual(fam.map((o) => o.k), ['member.set']);
+      assert.ok(per.some((o) => o.e === 'note:nX'));
+      assert.equal(per.some((o) => o.space === C.fsp), false,
+        '21.2 — the two scopes are disjoint; a family op in the personal push would be sealed under the wrong key');
+      assert.equal(fam.some((o) => o.space === s.personalSpaceId()), false);
+      // and `pref.set` is in neither, in either direction (ADR 001 §3.3, story 17.7)
+      s.setSettings({ rowHeight: 26 });
+      assert.equal([...s.familyOutbox(), ...s.outbox()].some((l) => l.op.k === 'pref.set'), false);
+    });
+  });
+
+  test('familyOutbound() is the {lines, ack} port sync/family.js declares, and ack empties it', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      s.apply('setMyProfile', { displayName: 'Papa' });
+      s.apply('claimAdmin', {});
+      const port = s.familyOutbound();
+      assert.equal(typeof port.lines, 'function');
+      assert.equal(typeof port.ack, 'function');
+      assert.deepEqual(port.lines({}).map((l) => l.op.id), s.familyOutbox().map((l) => l.op.id));
+      assert.equal(port.lines({ limit: 1 }).length, 1, 'the limit is honoured — LIMITS.opsPerPush drains in batches');
+
+      const acks = port.lines({}).map((l, i) => ({ oid: l.op.id, seq: String(i + 1) }));
+      assert.equal(port.ack(acks), acks.length);
+      assert.deepEqual(s.familyOutbox(), [], 'ADR 003 §3.1 — accepted and duplicate both mean "the server has it"');
+    });
+  });
+
+  test('E5-2, one space to the right — a persist may not fold past an unacknowledged FAMILY op', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await on(C.papa, async () => {
+      const s = C.papa.store;
+      // Everything personal is acknowledged, so the personal outbox is empty and the ONLY floor
+      // is the family op. Before `_outboxHorizonCap()` read both outboxes this returned
+      // `undefined` — no cap — and the very next compaction folded the family op into `regs`,
+      // dropping its LINE: on my board, absent from `familyOutbox()`, `healthy` in every
+      // diagnostic, and never on Mama's Mac.
+      s.ackPushed(s.outbox().map((l, i) => ({ oid: l.op.id, seq: String(i + 1) })));
+      assert.deepEqual(s.outbox(), []);
+      s.apply('setMyProfile', { displayName: 'Papa' });
+      const famStamp = famOps(C.papa)[0].ts;
+
+      const cap = s._outboxHorizonCap();
+      assert.notEqual(cap, undefined, 'a cap, not "fold as far as you like"');
+      assert.ok(cap < famStamp, `the cap ${cap} must sit strictly below the family op ${famStamp}`);
+    });
+  });
+});
+
+describe('§10c-2 the Mac §5.2 measured — in a Familienkreis, never opted into 19.4', () => {
+  test('useFamilySpace ARMS THE LOG on a Mac with no personal space, and the ops survive the quit', async () => {
+    const C = CIRCLE;
+    // Mama has `psp: null`. Story 19.4 (my own two Macs) is a SEPARATE opt-in from 15.3 (join a
+    // circle), and `family/mount.js` mounts the circle from `board.json` alone — so this Mac is
+    // ordinary, not exotic. `_logMayBeWritten()` used to require a PERSONAL space, so every
+    // family op she authored went into a log that was never written and was gone at quit.
+    await bootCircleMac(C.mama, C, { whenFamily: 'after' });
+    await on(C.mama, async () => {
+      const s = C.mama.store;
+      assert.equal(s.personalSpaceId(), null, 'no 19.4 opt-in on this Mac');
+      assert.equal(s.diagnostics().sync.logWritable, true, 'and the log is writable all the same');
+      assert.equal(s.diagnostics().sync.familySpaceId, C.fsp);
+
+      // The other half of adopting a circle AFTER `init()`: the projection branches on
+      // `_familySpaceId`, so without a re-project the board keeps the v1-stripped shape and no
+      // foreign entry could ever render on it.
+      assert.notEqual(s.state.notes[0].entityKey, undefined,
+        'the board was re-projected on adoption — `stripV2Fields` no longer applies');
+
+      s.apply('setMyProfile', { displayName: 'Mama', colorRef: 'gruen' });
+      assert.equal(s.familyOutbox().length, 1);
+      await s.persistNow();
+    });
+    await relaunch(C.mama);
+    await on(C.mama, () => {
+      const s = C.mama.store;
+      assert.equal(s.registers().get(`member:${s._me}`).get('displayName').value, 'Mama',
+        '19.1 — the log survives quit and crash');
+      assert.equal(s.familyOutbox().length, 1,
+        'and it is still UNACKNOWLEDGED, so the next launch publishes it (ADR 003 §8.1)');
+    });
+  });
+});
+
+describe('§10d ADR 001 §4.0 — the attestation, and what the circle cannot do without it', () => {
+  test('attestMyDevice writes dev.<short> alone, declines the second time, and refuses a rewrite', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      const short = C.papa.id.forStore.deviceShort;
+      assert.equal(attestInto(C.papa), true);
+      const op = famOps(C.papa).at(-1);
+      assert.deepEqual(Object.keys(op.f), [`dev.${short}`],
+        '§4.0 — a patch mixing dev.* with ordinary member fields "has two predicates and no single answer and is refused whole"');
+      assert.equal(op.f[`dev.${short}`], C.papa.att.blob);
+
+      // Idempotent: the register is write-once as an ADMISSIBILITY rule, so a second op is not a
+      // harmless duplicate — it is one every peer rejects, minted once per launch for ever.
+      const before = famOps(C.papa).length;
+      assert.equal(attestInto(C.papa), false, 'the constructor declined');
+      assert.equal(famOps(C.papa).length, before);
+
+      assert.throws(() => s.apply('attestMyDevice', { deviceShort: short, blob: 'aGVhZGVy.c2ln' }),
+        (e) => e instanceof OpError && /write-once/.test(e.message));
+      assert.throws(() => s.apply('attestMyDevice', { deviceShort: 'not-crockford', blob: 'x' }),
+        (e) => e instanceof OpError && /deviceShort/.test(e.message));
+    });
+  });
+
+  test('THE PAYOFF — the same peer op is PARKED before the attestation and APPLIED after it', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await bootCircleMac(C.mama, C, { whenFamily: 'after' });
+
+    // Papa authors a profile op and an entry, with his own store, his own identity, his own ctx.
+    let profile;
+    let entry;
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      s.apply('setMyProfile', { displayName: 'Papa', colorRef: 'blau' });
+      profile = famOps(C.papa).at(-1);
+      entry = pubSet(s._ctx(), 'fnote', s._me, 'e1', {
+        'pub.level': 'geteilt', 'pub.coEdit': false, 'pub.alive': true,
+        'pub.date': '2026-07-07', 'pub.text': 'Grillen bei Oma', 'pub.repeatsYearly': false,
+      }, { born: true });
+    });
+
+    // Mama has never been shown an attestation for Papa's device. `authz.js` stage 0b answers
+    // `unattestedDevice`, which is a statement about what SHE KNOWS, so `applyRemote` parks it.
+    await on(C.mama, async () => {
+      const r = C.mama.store.applyRemote([profile, entry]);
+      assert.deepEqual(r.applied, []);
+      assert.deepEqual(r.refused.map((x) => x.reason).sort(), ['unattestedDevice', 'unattestedDevice']);
+      assert.ok(r.refused.every((x) => x.parked === true), 'F-6 — held, not lost');
+      assert.equal(C.mama.store.state.notes.length, 1, 'nothing of Papa reached the board yet');
+    });
+
+    // Papa publishes his attestation. It is the SAME op set, judged again.
+    let att;
+    await on(C.papa, () => { attestInto(C.papa); att = famOps(C.papa).at(-1); });
+    await on(C.mama, async () => {
+      const r = C.mama.store.applyRemote([att]);
+      // The attestation is admitted on its own (§4.0's self-authorizing bootstrap), and
+      // `applyRemote`'s same-batch sweep then re-judges the two held lines against the very
+      // verdict that admitted it — so all three ids come back applied from ONE call. Without
+      // `attestMyDevice` there is no op in the product that can produce `att`, and neither the
+      // sweep nor `unparkAttested()` nor a re-pull could ever cure those two lines.
+      assert.equal(r.applied[0], att.id, 'a dev.*-only patch is self-authorizing (§4.0)');
+      assert.deepEqual([...r.applied].sort(), [att.id, profile.id, entry.id].sort());
+      assert.deepEqual(C.mama.store._log.parkedOps(), [], 'nothing is left held');
+      assert.equal(C.mama.store.unparkAttested().length, 0, 'and the reaper has nothing left to do');
+      assert.equal(
+        C.mama.store.registers().get(`member:${C.papa.store._me}`).get('displayName').value, 'Papa',
+        'E6-1 — the member row stops reading „Name noch nicht angekommen"');
+    });
+  });
+});
+
+describe('§10e ADR 001 §4.1 — the admin chain lives in the op log, not on the server', () => {
+  test('claimAdmin seats the creator, is idempotent, and 20.1 rename is admin-only', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await bootCircleMac(C.mama, C, { whenFamily: 'after' });
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      assert.equal(s.familyAdmin().admin, null, 'before the genesis link there is no admin at all');
+      assert.equal(s.apply('claimAdmin', {}), true);
+      const g = famOps(C.papa).at(-1);
+      assert.deepEqual(g.f, { admin: s._me, adminPrev: null });
+      assert.equal(s.familyAdmin().admin, s._me);
+      assert.equal(s.familyAdmin().headOpId, g.id);
+      assert.equal(s.familyAdmin().isMe, true);
+      assert.equal(s.apply('claimAdmin', {}), false, 'a second genesis link is a RIVAL ROOT, not a correction');
+
+      assert.equal(s.apply('renameSpace', { name: 'Familie Weber' }), true);
+      assert.equal(famOps(C.papa).at(-1).f.name, 'Familie Weber');
+      assert.throws(() => s.apply('renameSpace', { name: '   ' }), OpError);
+    });
+    // Without the genesis link nothing in §4.1 is admissible from ANYBODY, including the creator:
+    // `adminAtIn` answers null for every stamp. Mama, who has no chain at all yet, may not rename.
+    await on(C.mama, () => {
+      assert.equal(C.mama.store.familyAdmin().admin, null);
+      assert.equal(C.mama.store.apply('renameSpace', { name: 'Familie Mama' }), true,
+        'with no chain folded she cannot be told she is not the admin — her peers decide that');
+    });
+  });
+
+  test('E6-2 CLOSED — the transfer reaches the successor, and the old admin stops being one', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await bootCircleMac(C.mama, C, { whenFamily: 'after' });
+    const papa = C.papa.store._me;
+    const mama = C.mama.store._me;
+
+    // Papa: attestation, genesis link, and one rename while he still holds the seat.
+    let fromPapa = [];
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      attestInto(C.papa);
+      s.apply('claimAdmin', {});
+      s.apply('renameSpace', { name: 'Familie Weber' });
+      fromPapa = famOps(C.papa);
+    });
+    // Mama needs her own attestation in the log too, or her transfer link is parked, not judged.
+    let mamaAtt;
+    await on(C.mama, () => { attestInto(C.mama); mamaAtt = famOps(C.mama).at(-1); });
+    await on(C.papa, () => { C.papa.store.applyRemote([mamaAtt]); });
+
+    await on(C.mama, () => {
+      const r = C.mama.store.applyRemote(fromPapa);
+      assert.equal(r.refused.length, 0, JSON.stringify(r.refused));
+      assert.equal(C.mama.store.familyAdmin().admin, papa, 'the chain folded on HER Mac, out of the ops');
+      // A member who is not the admin is refused at authoring time rather than left to discover
+      // it by nothing happening on anybody else's board (E6-2's shape).
+      assert.throws(() => C.mama.store.apply('renameSpace', { name: 'Familie Mama' }),
+        (e) => e instanceof OpError && /not the Familienkreis admin/.test(e.message));
+      assert.throws(() => C.mama.store.apply('transferAdmin', { admin: mama, adminPrev: C.mama.store.familyAdmin().headOpId }),
+        (e) => e instanceof OpError && /not the Familienkreis admin/.test(e.message));
+    });
+
+    // Papa hands the seat over. `adminPrev` is the head of the accepted chain, read from the store.
+    let transfer;
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      assert.throws(() => s.apply('transferAdmin', { admin: mama, adminPrev: null }),
+        (e) => e instanceof OpError && /rootless admin assertion/.test(e.message));
+      assert.throws(() => s.apply('transferAdmin', { admin: 'mama', adminPrev: s.familyAdmin().headOpId }),
+        (e) => e instanceof OpError && /MemberId/.test(e.message));
+      assert.equal(s.apply('transferAdmin', { admin: mama, adminPrev: s.familyAdmin().headOpId }), true);
+      transfer = famOps(C.papa).at(-1);
+      assert.equal(s.familyAdmin().admin, mama, 'the outgoing admin sees the successor seated');
+    });
+
+    // And the successor IS promoted on her own Mac — which is the half E6-2 measured as missing.
+    let mamaRename;
+    await on(C.mama, () => {
+      const s = C.mama.store;
+      assert.deepEqual(s.applyRemote([transfer]).applied, [transfer.id]);
+      assert.equal(s.familyAdmin().admin, mama);
+      assert.equal(s.familyAdmin().isMe, true);
+      assert.equal(s.apply('renameSpace', { name: 'Familie Weber-Neu' }), true, 'the seat is hers, and it works');
+      mamaRename = famOps(C.mama).at(-1);
+    });
+
+    // The old admin's LATER rename is rejected by her fold, by name. The chain is the authority,
+    // not a role column a compromised relay could rewrite (§4.1's opening sentence).
+    let lateRename;
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      s._familySpaceId = C.fsp;
+      // authored by hand at the op layer: the constructor now refuses him, which is the point of
+      // the constructor — this is what a MODIFIED CLIENT would put on the wire.
+      lateRename = spaceSet(s._ctx(), C.fsp, { name: 'Familie Papa' });
+    });
+    await on(C.mama, () => {
+      const r = C.mama.store.applyRemote([lateRename]);
+      assert.deepEqual(r.applied, []);
+      assert.equal(r.refused[0].reason, 'notAdmin');
+      assert.equal(C.mama.store.registers().get(`space:${C.fsp}`).get('name').value, 'Familie Weber-Neu');
+      assert.ok(mamaRename);
+    });
+  });
+});
+
+describe('§10f the render half — a family entry reaches the BOARD, and 17.3 hides it', () => {
+  /** Papa: attested, named, one Geteilt entry. Mama: everything of his, admitted through the fold. */
+  async function papaOnMamasBoard(C) {
+    await bootCircleMac(C.papa, C);
+    await bootCircleMac(C.mama, C, { whenFamily: 'after' });
+    let batch = [];
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      attestInto(C.papa);
+      s.apply('setMyProfile', { displayName: 'Papa', colorRef: 'blau' });
+      batch = famOps(C.papa);
+      batch.push(pubSet(s._ctx(), 'fnote', s._me, 'e1', {
+        'pub.level': 'geteilt', 'pub.coEdit': false, 'pub.alive': true,
+        'pub.date': '2026-07-07', 'pub.text': 'Grillen bei Oma', 'pub.repeatsYearly': false,
+      }, { born: true }));
+    });
+    await on(C.mama, () => {
+      const r = C.mama.store.applyRemote(batch);
+      assert.equal(r.refused.length, 0, JSON.stringify(r.refused));
+    });
+    return batch;
+  }
+
+  test('the entry is on the v1 array layout.js draws, in Papa\'s colour and under his initial', async () => {
+    const C = CIRCLE;
+    await papaOnMamasBoard(C);
+    await on(C.mama, () => {
+      const s = C.mama.store;
+      const his = s.state.notes.find((n) => n.ownerId === C.papa.store._me);
+      // BEFORE this seam: `_project()` passed `currentMembers: new Set([me])`, so
+      // `entities.js:projectable` dropped every foreign entry — the op converged perfectly and
+      // was never drawn; and `familySpaceId` was never set, so `materialize.js:791` broke out of
+      // the family branch before that could even be asked.
+      assert.ok(his, 'ADR 001 §4.2 currentMembers is the DEFINITION, not `{me}`');
+      assert.equal(his.text, 'Grillen bei Oma');
+      assert.equal(his.date, '2026-07-07');
+      assert.equal(his.isForeign, true);
+      assert.equal(his.memberColorRef, 'blau', '17.2 — others render in the MEMBER colour');
+      assert.equal(his.initial, 'P', '17.2 — and under their initial chip');
+      assert.ok(s.state.notes.some((n) => n.id === 'n0'), 'and my own board is untouched');
+    });
+  });
+
+  test('17.3 — hiding Papa removes his entry from the BOARD, not only from the legend, and un-hiding brings it back', async () => {
+    const C = CIRCLE;
+    await papaOnMamasBoard(C);
+    const papa = C.papa.store._me;
+    await on(C.mama, () => {
+      const s = C.mama.store;
+      const mine = () => s.state.notes.filter((n) => n.ownerId === papa).length;
+      assert.equal(mine(), 1);
+
+      // `membersui.js:setMemberHidden` writes exactly this. Every layer of 17.3 existed —
+      // `store.setSettings` wrote the pref, `materialize` accepted `ctx.hiddenMembers`,
+      // `projectable` applied it — except the line that connects them.
+      s.setSettings({ hiddenMembers: { [papa]: true } });
+      assert.equal(mine(), 0, 'the toggle changed the board');
+      assert.equal(s.state.settings.hiddenMembers[papa], true);
+
+      s.setSettings({ hiddenMembers: { [papa]: false } });
+      assert.equal(mine(), 1, 'and it is a HIDE, not a delete — 20.2 is the only thing that removes content');
+
+      // Only `true` hides. `false` is written to UN-hide (an absolute value, never a toggle), so
+      // reading any truthy value would make „Papa ist sichtbar" mean hidden.
+      s.setSettings({ hiddenMembers: { [papa]: 0 } });
+      assert.equal(mine(), 1);
+    });
+  });
+
+  test('a local write STILL WORKS with a foreign entry on the board — _diff describes my rows only', async () => {
+    const C = CIRCLE;
+    await papaOnMamasBoard(C);
+    await on(C.mama, () => {
+      const s = C.mama.store;
+      // Before `ownRows`, this threw `EntityKeyError: localKey: bad note id "fnote:mem_…/e1"` out
+      // of `_adopt()` — which every local door calls FIRST, so ONE family entry on the board made
+      // the app unwritable. And had it not thrown it would have minted `note:<the family key>`:
+      // a private copy of Papa's entry in Mama's own personal space, pushed to her other Mac.
+      assert.equal(s.apply('createNoteInline', { id: 'nM', date: '2026-07-08', text: 'Meins', categoryId: 'c1' }), true);
+      assert.ok(s.state.notes.some((n) => n.id === 'nM'));
+      s.undo();
+      assert.equal(s.state.notes.some((n) => n.id === 'nM'), false);
+      const foreign = s.state.notes.find((n) => n.isForeign);
+      assert.ok(foreign, 'and Papa\'s entry is still on the board through all of it');
+      assert.equal(s.outbox().some((l) => String(l.op.e).includes('fnote:')), false,
+        'no op anywhere names a family key in the personal space');
+    });
+  });
+
+  test('OPEN (E6-6, reported): hiding a SECOND member un-hides the first — the caller must merge', async () => {
+    const C = CIRCLE;
+    await papaOnMamasBoard(C);
+    await on(C.mama, () => {
+      const s = C.mama.store;
+      // `store.setSettings` is `Object.assign(state.settings, patch)` — v1's WHOLESALE object
+      // replacement, pinned as a v1 quirk by `store-persistence.test.js:757`, so it is not this
+      // seam's to change. `family/membersui.js:472` passes `{ hiddenMembers: { [memberId]: hide } }`,
+      // a patch containing ONE member, so the second toggle replaces the whole subtree.
+      //
+      // Measured here rather than described, so the fix — merge in `setMemberHidden`, which is
+      // `membersui.js`'s to make — has a row to invert. The projection side is already correct:
+      // `_memberCtx` reads whatever the subtree holds, so a merged patch needs nothing here.
+      s.setSettings({ hiddenMembers: { A: true } });
+      s.setSettings({ hiddenMembers: { B: true } });
+      assert.deepEqual(s.state.settings.hiddenMembers, { B: true },
+        'DEFECT: the first member came back on the board when the second was hidden');
+      // …and a caller that merges gets exactly what 17.3 asks for, through this same seam.
+      s.setSettings({ hiddenMembers: { ...s.state.settings.hiddenMembers, A: true } });
+      assert.deepEqual(s.state.settings.hiddenMembers, { B: true, A: true });
+      assert.deepEqual([...s._hiddenMembers()].sort(), ['A', 'B']);
+    });
+  });
+
+  test('the pref never leaves the machine, in either direction (17.7 · rule U6)', async () => {
+    const C = CIRCLE;
+    await papaOnMamasBoard(C);
+    await on(C.mama, () => {
+      const s = C.mama.store;
+      s.setSettings({ hiddenMembers: { [C.papa.store._me]: true } });
+      assert.equal([...s.outbox(), ...s.familyOutbox()].some((l) => l.op.k === 'pref.set'), false);
+      const hidden = s._log.ops().filter((o) => o.k === 'pref.set');
+      assert.ok(hidden.length > 0 && hidden.every((o) => o.space === 'local'));
+    });
+  });
+});
+
+describe('§10g the wire — the seam produces lines the SHIPPING relay accepts', () => {
+  /** The family space and both members, as `POST /spaces` + join would leave the relay. */
+  async function seedCircleRelay(relay, C) {
+    const raw = async (kp) => exportRawPublic(kp.publicKey);
+    await relay.store.tx(async (tx) => {
+      await tx.createSpace({
+        id: C.fsp, kind: 'FAMILY', currentEpoch: 1, nextSeq: 0n, headChain: null,
+        createdAt: new Date(relay.ctx.now()),
+      });
+      await tx.claimEpoch(C.fsp, 1);
+      for (const m of [C.papa, C.mama]) {
+        await tx.addMember({
+          id: m.id.forStore.memberId, spaceId: C.fsp, colorRef: m === C.papa ? 'blau' : 'gruen',
+          recoveryPubSig: C.recSigPubRaw[m.id.forStore.memberId],
+          recoveryPubKex: await raw(m.id.recovery.recKex),
+          joinedAt: new Date(relay.ctx.now()), removedAt: null,
+        });
+        await tx.addDevice({
+          id: m.id.forStore.deviceId, spaceId: C.fsp, memberId: m.id.forStore.memberId,
+          deviceShort: m.id.forStore.deviceShort,
+          sigPubRaw: await raw(m.id.identity.devSig),
+          kexPubRaw: await raw(m.id.identity.devKex),
+          attestation: new TextEncoder().encode(m.att.blob),
+          lastSeenSeq: 0n, lastPushedSeq: 0n,
+          addedAt: new Date(relay.ctx.now()), revokedAt: null,
+        });
+      }
+    });
+  }
+
+  const transportFor = (mac, relay) => loopbackTransport(relay, {
+    origin: ORIGIN,
+    deviceShort: mac.id.forStore.deviceShort,
+    sign: mac.id.sign,
+    clientVersion: '2.0.0',
+    now: () => relay.ctx.now(),
+    random: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+    subtle: S,
+  });
+
+  test('familyOutbound() → sealOp → the real POST /ops → the real GET /ops → openOp → applyRemote', async () => {
+    const C = CIRCLE;
+    const relay = makeRelay();
+    await seedCircleRelay(relay, C);
+    await bootCircleMac(C.papa, C);
+    await bootCircleMac(C.mama, C, { whenFamily: 'after' });
+
+    // ── Papa: author, then drain the PORT and seal every line it offers ──────────────────────
+    let sent = [];
+    await on(C.papa, async () => {
+      const s = C.papa.store;
+      attestInto(C.papa);
+      s.apply('setMyProfile', { displayName: 'Papa', colorRef: 'blau' });
+      s.apply('claimAdmin', {});
+      s.apply('renameSpace', { name: 'Familie Weber' });
+
+      const port = s.familyOutbound();
+      const lines = port.lines({});
+      assert.equal(lines.length, 4, 'four gestures, four family ops, all offered by the port');
+      const envelopes = [];
+      for (const line of lines) {
+        // eslint-disable-next-line no-await-in-loop
+        envelopes.push(await sealOp(line.op, C.papa.ring, C.papa.id.identity.devSig.privateKey, {
+          v: 1, sp: C.fsp, ep: 1, dv: C.papa.id.forStore.deviceShort, oid: line.op.id, wit: '',
+        }, { attestation: C.papa.att.attestation }));
+      }
+      const res = await transportFor(C.papa, relay).request('POST', '/api/v1/ops', {}, {
+        space: C.fsp, ackSeq: s.cursor(C.fsp), ops: envelopes, drained: true,
+      }, {});
+      assert.equal(res.status, 200, JSON.stringify(res.json));
+      const acks = [...(res.json.accepted || []), ...(res.json.duplicate || [])];
+      assert.equal(acks.length, 4, 'the shipping relay accepted every line the seam produced');
+      port.ack(acks.map((a) => ({ oid: a.oid, seq: a.seq })));
+      assert.deepEqual(s.familyOutbox(), [], 'ADR 003 §8.1 — an acknowledged line leaves the outbox');
+      sent = lines.map((l) => l.op.id);
+    });
+
+    // ── Mama: pull, open with the shipping opener, and admit through the real fold ───────────
+    await on(C.mama, async () => {
+      const s = C.mama.store;
+      const res = await transportFor(C.mama, relay).request('GET', '/api/v1/ops', {
+        space: C.fsp, since: s.cursor(C.fsp), limit: '100',
+      }, null, {});
+      assert.equal(res.status, 200);
+      const page = res.json.ops || [];
+      assert.equal(page.length, 4);
+
+      const ops = [];
+      const seqs = {};
+      for (const row of page) {
+        // eslint-disable-next-line no-await-in-loop
+        const out = await openOp(row, C.mama.ring, C.attestationOf);
+        assert.equal(out.status, 'opened', `openOp said ${out.status}: ${out.reason || ''}`);
+        ops.push(out.op);
+        seqs[out.op.id] = String(row.seq);
+      }
+      assert.deepEqual(ops.map((o) => o.id).sort(), [...sent].sort(),
+        'the ops that came back are the ops the outbox offered — same ids, same bodies');
+      assert.ok(ops.every((o) => o.dev === C.papa.id.forStore.deviceId),
+        'A3-H4 — these are the SENDER\'s ops, not ops this store minted for itself');
+
+      const r = s.applyRemote(ops, { seqs });
+      assert.equal(r.refused.length, 0, JSON.stringify(r.refused));
+      assert.equal(s.registers().get(`member:${C.papa.store._me}`).get('displayName').value, 'Papa');
+      assert.equal(s.registers().get(`space:${C.fsp}`).get('name').value, 'Familie Weber');
+      assert.equal(s.familyAdmin().admin, C.papa.store._me);
+      assert.deepEqual(s.familyOutbox(), [],
+        'a pulled op carries its seq into the log, so it is never pushed back (the ping-pong)');
+    });
+
+    // 21.1 — the relay stored bytes it cannot read, read back out of the adapter itself (the
+    // same check §1 makes for the personal space). „Familie Weber" is a name a human typed and
+    // 20.5 says even the admin's own relay may not see it.
+    const stored = await relay.store.listOps(C.fsp, 0n, 500);
+    assert.equal(stored.ops.length, 4, 'the relay stored something');
+    const bytes = stored.ops.map((o) => Buffer.from(o.envelope).toString('latin1')).join('');
+    assert.equal(bytes.includes('Familie Weber'), false, 'the circle name is not in the stored envelope');
+    assert.equal(bytes.includes('Papa'), false, 'nor is the display name');
+    assert.equal(bytes.includes(C.papa.store._me), false, 'nor the member id inside the patch');
+  });
+
+  test('a family op addressed to ANOTHER circle is refused — 20.6 says there is only one', async () => {
+    const C = CIRCLE;
+    await bootCircleMac(C.papa, C);
+    await bootCircleMac(C.mama, C, { whenFamily: 'after' });
+    let stranger;
+    await on(C.papa, () => {
+      const s = C.papa.store;
+      // A real op, really authored, addressed at a DIFFERENT family space. The personal space has
+      // had this filter since F-7; the family space had none, and unlike the personal case the op
+      // would have FOLDED AND RENDERED, because `materialize` gates a foreign entry on its owner
+      // being a current member and never on the op's space.
+      const ctx = { ...s._ctx(), familySpaceId: mkSpaceId('family') };
+      stranger = pubSet(ctx, 'fnote', s._me, 'e9', {
+        'pub.level': 'geteilt', 'pub.alive': true, 'pub.date': '2026-09-09', 'pub.text': 'fremd',
+      }, { born: true });
+    });
+    await on(C.mama, () => {
+      const r = C.mama.store.applyRemote([stranger]);
+      assert.deepEqual(r.applied, []);
+      assert.equal(r.refused[0].reason, 'foreignSpace');
+      assert.equal(C.mama.store.state.notes.some((n) => n.text === 'fremd'), false);
+    });
   });
 });

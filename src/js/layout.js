@@ -4,15 +4,177 @@
 
 import {
   addMonths, daysInMonth, dow, iso, monthKey, monthOrdinal, monthOrdinalOf,
-  parseISO, projectYearly, p2, todayISO, WD_DE, WD_EN, MONTH_DE, MONTH_EN,
+  parseISO, p2, todayISO, WD_DE, WD_EN, MONTH_DE, MONTH_EN,
 } from './dates.js';
 import { holidayIndex } from './holidays.js';
 import { ferienIndex } from './ferien.js';
-import { colorOf } from './palette.js';
+import { colorOf, PALETTE } from './palette.js';
+import { noteOccurrencesInRange, visibleBars as selectBars } from './core/entities.js';
+import { showsContent, allowsCoEdit } from './core/visibility.js';
 
 export const MAX_LANES = 3;        // spec 3.8
 export const MONTHS_VISIBLE = 12;  // spec 1.1
 const LINE_H = 10.5;               // one line of 9px entry text incl. leading
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The family decorations (ADR 004 §4.2, §4.3, §6 — LZP-705, LZP-706)
+//
+// EVERY ONE OF THEM IS A HORIZONTAL COST AND NONE OF THEM IS A VERTICAL ONE.
+// `rowCapacity` is untouched below and the line box of a `.note` is unchanged, so
+// a family board hosts exactly the same number of lines per day as a solo one —
+// twelve months on one screen survives intact. What the badges spend is the
+// ~60 px of TEXT width a day row has at the default 118 px column
+// (118 − 17 day number − 13 weekday − 27 lane gutter − 1 for the note's own
+// padding), and the brief's "measure what your additions cost a row" is answered
+// in `PREFIX_COST_PX`, which `tests/tier2/belegt-render.dom.js` §5 measures the
+// real rendered boxes against in WebKit at 22 px AND at 18 px.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * What each prefix element costs a `.note`'s text width, in px.
+ *
+ * MEASURED, not estimated: these are the rendered box widths of the `app.css`
+ * rules including their margins, taken in WebKit. The family is a fixed pixel
+ * cost and does not scale with row height, which is exactly why it has to be
+ * priced once and then held.
+ *
+ * Nothing here is read by the renderer. It is a published measurement, so a
+ * reviewer can price the next marker somebody proposes without opening a
+ * browser, and so a CSS edit that quietly widens one of them goes red.
+ *
+ * `rep` is the one font-dependent entry — the ↻ glyph at 8 px in Ubuntu plus
+ * 1 px — so the test compares it within a pixel rather than exactly.
+ */
+export const PREFIX_COST_PX = Object.freeze({
+  neu: 5,        // 17.5 — 3 px dot + 1 px bearing + 1 px margin
+  chip: 10,      // 17.2 — 8 px initial chip + 2 px margin
+  exposure: 9,   // 16.6 — 7 px badge + 2 px margin
+  rep: 8,        // 9.2  — the existing ↻, unchanged by this epic
+  // The two EXCLUSIVE worlds, and the reason the badge family fits at all.
+  // `exposure` is MY disclosure of MY entry; `chip` and `neu` only ever appear
+  // on SOMEONE ELSE'S. No note can carry both. ADR 004 §6 treats all five
+  // markers as one contested slot — measured, the contest never has more than
+  // three entrants, and the Belegt block costs ZERO extra width because it is a
+  // fill on a note that was already there.
+  ownWorst: 17,      // exposure + rep    — 28 % of the 60 px text budget
+  foreignWorst: 23,  // neu + chip + rep  — 38 %
+});
+
+/**
+ * A foreign entry whose member record has not arrived yet.
+ *
+ * ADR 004 §4.3: a foreign entry must NEVER fall through to `colorOf(undefined)`,
+ * which silently answers `PALETTE[0]` (blue) and would paint someone else's
+ * entry as one of mine. `colorOf` answers `PALETTE[0]` for an UNKNOWN ref too,
+ * so guarding only against `null` would leave the same hole one typo wide.
+ * This tone is deliberately not in `PALETTE`, so it can never collide with a
+ * member's real colour and "I do not know whose this is" stays distinguishable
+ * from "this is Papa's".
+ */
+export const UNKNOWN_MEMBER_COLOR = '#8A7CB8';   // --ink-3
+
+/** The chip glyph for a foreign entry whose member record has not arrived. */
+export const UNKNOWN_MEMBER_INITIAL = '·';
+
+const PALETTE_REFS = new Set(PALETTE.map((p) => p.ref));
+
+/**
+ * The one colour decision, for notes and bars alike (ADR 004 §17.2 / §4.3).
+ * Mine → my category colour, so my board stays mine. Someone else's → their
+ * member colour, and never a category colour anywhere, because A3 means a
+ * foreign entry HAS no category to read.
+ */
+export function entryColor(entry, catOf) {
+  if (entry && entry.isForeign) {
+    const ref = entry.memberColorRef;
+    return typeof ref === 'string' && PALETTE_REFS.has(ref) ? colorOf(ref) : UNKNOWN_MEMBER_COLOR;
+  }
+  return colorOf((catOf.get(entry.categoryId) || {}).paletteRef);
+}
+
+/**
+ * 18.1 / 18.2 — only the owner edits, unless the owner opted this one entry in.
+ * Read by `board.js` to withhold the resize grips and by `interact.js` to
+ * withhold the gestures; both must ask the same question, so it is asked here.
+ *
+ * `allowsCoEdit(level)` IS PART OF THE QUESTION, not decoration. ADR 004 §8:
+ * `pub.coEdit` exists only at Geteilt. A Geteilt → Belegt downgrade nulls it
+ * (§5's table), but `pub.coEdit` is a GOVERNING field and `authz.js` stage 3c
+ * never drops governing fields — so between the arrival of the new `pub.level`
+ * and the arrival of the `pub.coEdit: null` beside it, a register map can hold
+ * `level: 'belegt'` next to `coEdit: true`. Reading the flag alone would put
+ * live resize grips on someone else's Belegt block for exactly that window.
+ */
+export const canEditEntry = (entry) =>
+  !entry.isForeign || (entry.coEdit === true && allowsCoEdit(entry.level));
+
+/**
+ * The exposure badge's input (16.6, ADR 004 §6), narrowed at the model seam.
+ *
+ * `exposure` is MY disclosure state and is meaningless for someone else's entry
+ * — `materialize.js` already answers `null` there, and this re-states it so a
+ * future materializer change cannot put a peer's level on my board. `privat`
+ * yields no badge at all: the ABSENCE of a badge means private, which is the
+ * default and the quiet state (Principle 8).
+ */
+export function exposureOf(entry) {
+  if (!entry || entry.isForeign) return null;
+  const e = entry.exposure;
+  if (!e || typeof e !== 'object') return null;
+  if (e.level !== 'belegt' && e.level !== 'geteilt') return null;
+  return { level: e.level, pending: !!e.pending };
+}
+
+/**
+ * The per-member toggle (17.3), from the device-local `hiddenMembers` pref.
+ *
+ * `Object.hasOwn`, not `in` and not a bare index: `hidden['toString']` is a
+ * truthy inherited function and would hide a member. That is the same
+ * prototype-chain hole WP-10 found in ADR 004 §2.2's own printed barrier, one
+ * layer up, and it costs one call to close.
+ *
+ * The same rule is spelled in `family/membersui.js:hiddenMemberIds()`, which
+ * builds a Set for the legend. Both read one register shape; if a third reader
+ * appears the predicate belongs in `core/entities.js`.
+ */
+export function memberVisibilityOf(settings) {
+  const hidden = settings && settings.hiddenMembers;
+  if (!hidden || typeof hidden !== 'object') return () => true;
+  return (memberId) => !(Object.hasOwn(hidden, memberId) && hidden[memberId]);
+}
+
+/** The family decorations one model row carries, for a note or a bar segment. */
+function decorate(entry, catOf) {
+  const foreign = !!entry.isForeign;
+  return {
+    color: entryColor(entry, catOf),
+    foreign,
+    // ═══ 16.7 — WHAT THE BOARD MAY PAINT ═════════════════════════════════════
+    // Keyed on the LEVEL, never on the absence of a text. A text that reaches a
+    // Belegt entry is a defect upstream; deciding "redacted" by asking whether
+    // one is present would turn that defect into the leak.
+    //
+    // `!showsContent(level)`, NOT `isRedacted(level)`, and the difference is the
+    // one input class `visibility.js:projectedToPeers` flags and declines to
+    // decide: a level OUTSIDE the enum. `entities.js:projectable` admits such an
+    // entry (dropping a family member's entry is data loss on the viewer's
+    // board) and `materialize.js` leaves `entry.redacted` false, so an old
+    // client that folded a stale `pub.text` beside a level added between Belegt
+    // and Geteilt by a future protocol version WOULD PRINT THE TEXT. That leak
+    // happens here, in the renderer, so it is closed here — and it is closed
+    // without paying the data-loss price the other half of the trade would:
+    // the entry still appears, with its date, its owner and its duration. Only
+    // the content is withheld, which is what an unknown level is entitled to.
+    //
+    // On every level THIS build can produce the two agree exactly; the row is
+    // `X4` in `core/visibility.js`'s terms and `belegt-render.dom.js` §4 here.
+    redacted: foreign && !showsContent(entry.level),
+    initial: foreign ? (entry.initial || UNKNOWN_MEMBER_INITIAL) : null,
+    isNew: foreign && !!entry.isNew,            // 17.5 dots a PEER's change, never my own
+    exposure: exposureOf(entry),                // 16.6, own entries only
+    canEdit: canEditEntry(entry),               // 18.1 / 18.2
+  };
+}
 
 /** How many text lines a day row can host at the current density. */
 export function rowCapacity(rowH) {
@@ -57,27 +219,6 @@ export function assignLanes(bars) {
   return out;
 }
 
-/** Expand yearly repeats into concrete dates inside the visible window (F9). */
-function noteOccurrences(notes, firstISO, lastISO) {
-  const map = new Map(); // date → occurrences[]
-  const push = (date, note) => {
-    if (date < firstISO || date > lastISO) return;
-    if (!map.has(date)) map.set(date, []);
-    map.get(date).push({ note, date });
-  };
-  const y0 = Number(firstISO.slice(0, 4));
-  const y1 = Number(lastISO.slice(0, 4));
-  for (const n of notes) {
-    if (!n.repeatsYearly) { push(n.date, n); continue; }
-    const anchorYear = Number(n.date.slice(0, 4));
-    for (let y = Math.max(y0, anchorYear); y <= y1; y++) {
-      // 9.5 — a series exists from its first year onward, never before.
-      push(projectYearly(n.date, y), n);
-    }
-  }
-  return map;
-}
-
 /**
  * Build the full render model.
  * @param {object} state store.state
@@ -108,15 +249,20 @@ export function buildBoard(state, opts = {}) {
     ? ferienIndex(s.bundesland, lang)
     : new Map();
 
-  const visibleCat = new Map(state.categories.map((c) => [c.id, c.visible !== false]));
   const catOf = new Map(state.categories.map((c) => [c.id, c]));
 
-  const occ = noteOccurrences(
-    state.notes.filter((n) => visibleCat.get(n.categoryId) !== false),
-    firstISO, lastISO
-  );
+  // ADR 004 §4.3 / ADR 005 §3 — ONE selector, shared with the popover. The two
+  // used to be separate filters that had to be kept in lockstep by hand, and a
+  // foreign entry would have been silently omitted from whichever one was
+  // updated second. `entities.js` routes MINE through the category gate (4.3)
+  // and SOMEONE ELSE'S through the member gate (17.3), because a foreign entry
+  // has no `categoryId` at all (A3) and `categoryVisible(undefined)` answers
+  // "visible" by v1's dangling-reference rule — correct by accident is not good
+  // enough for a privacy control.
+  const sel = { memberVisible: opts.memberVisible || memberVisibilityOf(s) };
+  const occ = noteOccurrencesInRange(state, firstISO, lastISO, sel);
 
-  const visibleBars = state.bars.filter((b) => visibleCat.get(b.categoryId) !== false);
+  const visibleBars = selectBars(state, sel);
   const laneOf = assignLanes(visibleBars);
 
   // ── columns ────────────────────────────────────────────────────────────────
@@ -139,7 +285,7 @@ export function buildBoard(state, opts = {}) {
       const seg = {
         bar: b,
         lane,
-        color: colorOf((catOf.get(b.categoryId) || {}).paletteRef),
+        ...decorate(b, catOf),
         startDay: sd,
         endDay: ed,
         topRow: sd - 1,
@@ -190,10 +336,14 @@ export function buildBoard(state, opts = {}) {
       const h = hol.get(date) || null;
       const showHol = h && (h.own || s.layers.otherStates);
 
+      // 17.4 — foreign notes arrive through THIS map, so they hit the capacity
+      // slice below and are counted into `overflow` exactly like mine. A family
+      // entry can never break the board's density rules, because there is no
+      // second path on which it could bypass them.
       const notesHere = (occ.get(date) || []).map((o) => ({
         note: o.note,
         date,
-        color: colorOf((catOf.get(o.note.categoryId) || {}).paletteRef),
+        ...decorate(o.note, catOf),
       }));
 
       // Challenge 2 resolved: a holiday keeps the row only while the user has

@@ -72,19 +72,19 @@ import {
   chooseTransport, NetError, PROTOCOL,
 } from '../platform/net.js';
 import { chooseKeyStore } from '../platform/keystore.js';
-import { openDeviceIdentity, selfAttest, IdentityUnavailableError } from '../platform/device-identity.js';
+import { openDeviceIdentity, selfAttest, buildAttestOpen, IdentityUnavailableError } from '../platform/device-identity.js';
 import {
   signBytes, exportRawPublic, importSigPublic, importKexPublic,
   buildDeviceAttestation, attestDevice, verifyAttestation, ensureRecoveryIdentity,
 } from '../crypto/identity.js';
 import {
-  createKeyRing, createSpaceKey, wrapSpaceKey,
+  createKeyRing, createSpaceKey, wrapSpaceKey, createSpaceWraps, recoveryRecipientId,
 } from '../crypto/spacekeys.js';
 import { createPersonalSync, createPersonalPublisher, CADENCE } from '../sync/personal.js';
+import { createFamilySync } from '../sync/family.js';
 import { spaceId as mintSpaceId } from '../core/ids.js';
 import { b64u, ub64 } from '../core/b64.js';
 
-const TE = new TextEncoder();
 
 /** The settings keys the opt-in writes. `pref.set` takes any key and is LOCAL-space, never synced. */
 export const FAMILY_PREFS = Object.freeze({
@@ -299,10 +299,32 @@ function driveCadence(sync, p) {
  * `GET /spaces/:id/keys` returns nothing for a space that has never rotated, so a member
  * restoring from the backup file would recover a member id and no space key.
  *
- * NOTE, and it is a real wart reported to the server's owner: `device.attestation` has two
- * spellings on two endpoints. `POST /spaces` reads it with `readBytes` (base64url of opaque
- * bytes, never verified); `POST /devices` reads the raw blob string and VERIFIES it. So the same
- * value is encoded differently for the two calls, below and in `adoptOnRelay`.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ * ⚠ TWO BUGS FIXED HERE, BOTH OF THEM SILENT AND BOTH OF THEM MEASURED AGAINST THE LIVE RELAY.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * **1 · `device.attestation` — finding E2E3-7.** The note that stood here said the field "has two
+ * spellings on two endpoints … `POST /spaces` reads it with `readBytes` (base64url of opaque
+ * bytes, never verified)". That was true of the relay this line was written against and has not
+ * been true since E2E3-7 closed: `server/core/handlers/spaces.js` now reads the RAW BLOB on every
+ * route that writes one (`readAttestationBlob`, ASCII, `b64u '.' b64u`) and VERIFIES it under
+ * `member.recoveryPubSig`. So `b64u(TE.encode(blob))` — base64url of the blob's UTF-8 — no longer
+ * matches `/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/`, because the encoding swallows the dot.
+ *
+ * The consequence was not a degraded path, it was a dead one: **`POST /spaces` answered
+ * `400 bad_shape` and the personal opt-in could not complete against the shipping server.**
+ * `adoptOnRelay`, ten lines down, sent `armed.myBlob` raw and was right all along; the two call
+ * sites in one file disagreed, and the one nobody had driven end to end was the broken one.
+ *
+ * **2 · the hand-rolled wrap packer — finding E2E3-2.** `wrapTo` built the `KeyWrap.wrapped`
+ * column as `b64u(TE.encode(JSON.stringify(blob)))`. ADR 002 §4.2's amendment is explicit that
+ * `encodeWrap`/`decodeWrap` in `crypto/spacekeys.js` "are the only two functions that perform it",
+ * and it names the exact program that got this wrong before — `server/dev/two-client.js`, which
+ * "hand-rolled its own packer and carried the sender key by courier, and so stepped over every gap
+ * instead of hitting one". This was that second translator. `JSON.stringify` is not
+ * `canonicalBytes`, so the same blob could reach the column in two spellings, and `putKeyWraps`
+ * upserts on `(spaceId, epoch, recipientId)`: two spellings of one value are two rows waiting to
+ * happen. `createSpaceWraps` is the sanctioned door and it is what is used now.
  */
 export async function createSpaceOnRelay(engineParts, armed, spaceKey) {
   const { transport } = engineParts;
@@ -312,10 +334,10 @@ export async function createSpaceOnRelay(engineParts, armed, spaceKey) {
   const recSigPub = b64u(await exportRawPublic(armed.recovery.recSig.publicKey));
   const recKexPub = b64u(await exportRawPublic(armed.recovery.recKex.publicKey));
 
-  const wrapTo = async (pubB64u) => b64u(TE.encode(JSON.stringify(await wrapSpaceKey(
+  const wrapTo = async (pubB64u) => wrapSpaceKey(
     spaceKey, armed.identity.devKex.privateKey, await importKexPublic(ub64(pubB64u)),
     { spaceId: armed.cfg.spaceId, epoch: 1 },
-  ))));
+  );
 
   const res = await transport.request('POST', '/api/v1/spaces', undefined, {
     spaceId: armed.cfg.spaceId,
@@ -327,12 +349,13 @@ export async function createSpaceOnRelay(engineParts, armed, spaceKey) {
       deviceShort: id.deviceShort,
       sigPubRaw: devSigPub,
       kexPubRaw: devKexPub,
-      attestation: b64u(TE.encode(armed.myBlob)),      // ← base64url here …
+      // THE RAW BLOB, exactly as `adoptOnRelay` has always sent it. See bug 1 above.
+      attestation: armed.myBlob,
     },
-    wraps: [
-      { recipientId: id.deviceId, epoch: 1, wrapped: await wrapTo(devKexPub) },
-      { recipientId: `rec_${id.memberId}`, epoch: 1, wrapped: await wrapTo(recKexPub) },
-    ],
+    wraps: createSpaceWraps([
+      { deviceId: id.deviceId, epoch: 1, wrapped: await wrapTo(devKexPub) },
+      { deviceId: recoveryRecipientId(id.memberId), epoch: 1, wrapped: await wrapTo(recKexPub) },
+    ]),
   });
   if (res.status !== 200) {
     throw new NetError('bad_response', `POST /spaces → ${res.status} ${JSON.stringify(res.json)}`);
@@ -356,6 +379,359 @@ export async function adoptOnRelay(engineParts, armed) {
     throw new NetError('bad_response', `POST /devices/adopt → ${res.status} ${JSON.stringify(res.json)}`);
   }
   return res.json;
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// THE FAMILIENKREIS — ADR 002 §7.1 steps 4–6, D9, and the second engine
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// `docs/v2/E6-VERIFICATION.md` §5.2 measured this as an absence: "a Familienkreis arms no engine
+// at all … Mama's Mac, a full member, made **zero** `/ops` requests in 8 s of idling after
+// joining, and makes none on any subsequent launch." Everything below is the wiring that ends
+// that sentence, and it is deliberately a SECOND arming path rather than a branch inside the
+// first one, because the two gates are genuinely different gates:
+//
+//     armFamilyMode()  opens on  syncEnabled && personalSpaceId   ← story 19.4, MY two Macs
+//     armCircleMode()  opens on  familySpaceId                    ← story 15.3, MY family
+//
+// `mount.js#mountCircleSurfaces` already says why in its own docblock: "a Mac can be in a
+// Familienkreis without ever having opted into own-device sync." Such a Mac has a `familySpaceId`
+// and no `personalSpaceId`, `readFamilyConfig()` answers `null` for it, and before this it
+// therefore armed nothing at all — which is exactly Mama's Mac in §5.2's measurement.
+
+/**
+ * The one settings key this file needs from the create/join flow.
+ *
+ * **RESTATED rather than imported, and the reason is a cycle, not laziness.**
+ * `family/createjoin.js` owns `CIRCLE_PREFS` and imports `store.js`, `settings.js`, `palette.js`
+ * and `i18n.js`; `mount.js` imports both files; and this module is imported BY `createjoin.js`'s
+ * neighbours. An import edge from here into `createjoin.js` would put a UI module inside the door
+ * that is supposed to open onto it. `tests/tier1/sync-family.test.js` §5 asserts this string
+ * equals `CIRCLE_PREFS.space`, so the copy cannot drift without a red test — the same discipline
+ * `sync/personal.js` applies to the protocol constants it restates from the contract file.
+ */
+export const CIRCLE_SPACE_PREF = 'familySpaceId';
+/** Mirrors `CIRCLE_PREFS.member`, pinned by the same test. */
+export const CIRCLE_MEMBER_PREF = 'familyMemberId';
+/** Mirrors `CIRCLE_PREFS.pending` — D9's waiting state, as a durable fact. */
+export const CIRCLE_PENDING_PREF = 'familyKeysPending';
+
+/**
+ * What a circle config has to carry before a family engine is worth starting.
+ *
+ * The origin is SHARED with `FAMILY_PREFS.origin` because there is one relay, and the space id is
+ * checked for its prefix here rather than trusted: a `psp_` id in this slot would be handed to
+ * `createFamilySync`, which refuses it — but a refusal at boot with a message about a settings key
+ * is a better diagnostic than a refusal three frames deeper about a space kind.
+ *
+ * @param {Object} settings the store's settings, or the raw `board.json` settings
+ * @returns {{origin:string, spaceId:string, memberId:string}|null}
+ */
+export function readCircleConfig(settings) {
+  const s = settings || {};
+  const origin = typeof s[FAMILY_PREFS.origin] === 'string' ? s[FAMILY_PREFS.origin].trim() : '';
+  const spaceId = typeof s[CIRCLE_SPACE_PREF] === 'string' ? s[CIRCLE_SPACE_PREF] : '';
+  const memberId = typeof s[CIRCLE_MEMBER_PREF] === 'string' ? s[CIRCLE_MEMBER_PREF] : '';
+  if (!origin || !spaceId.startsWith('fsp_') || !memberId) return null;
+  return Object.freeze({ origin, spaceId, memberId });
+}
+
+/**
+ * The durable identity, WITHOUT a space and WITHOUT touching the store.
+ *
+ * `armStore()` above does the same work and then calls `usePersonalSpace()` + `useIdentity()`,
+ * which a circle-only Mac must not do — it has no personal space to adopt, and adopting one it
+ * has not created would arm an engine into a space the relay has never heard of.
+ *
+ * @param {{today:string, invoke?:Function}} ports
+ */
+export async function armCircleIdentity(ports) {
+  const { today, invoke } = ports || {};
+  const { store: ks, kind: custody } = chooseKeyStore({ invoke });
+  const opened = await openDeviceIdentity(ks, { today, custody, allowMemoryCustody: false });
+  const recovery = opened.recovery
+    ? opened.recovery
+    : await ensureRecoveryIdentity(ks, opened.forStore.memberId, {});
+  const mine = await selfAttest(ks, opened.forStore, recovery.recSig.privateKey, { createdAt: today });
+  return Object.freeze({
+    ks, today, custody,
+    identity: opened.identity,
+    recovery,
+    forStore: opened.forStore,
+    myAttestation: mine.attestation,
+    myBlob: mine.blob,
+  });
+}
+
+/**
+ * ADR 001 §4.0 — publish this device's own attestation into the family log, ONCE, ever.
+ *
+ * **THE REGISTER IS CHECKED FIRST AND THAT IS NOT AN OPTIMISATION.** `selfAttest` re-signs on
+ * every launch and ECDSA is randomised, so the blob this launch minted is a DIFFERENT STRING
+ * from the one already in the log even though both attest the same six fields and both verify
+ * under the same recovery key. §4.0's write-once is an *admissibility* rule, so `attestMyDevice`
+ * refuses a second blob loudly — correctly, because it cannot tell a harmless re-mint from
+ * somebody else's blob being written into my record.
+ *
+ * Measured before this guard: every relaunch of a Mac already in a circle logged
+ * „dev.<short> is already attested with a different blob … peers will park its ops as
+ * unattestedDevice", which was **alarming and false** — the register already held a good
+ * attestation and no peer was parking anything. A warning that cries wolf on every ordinary
+ * launch is worse than no warning, because the launch on which it means something looks the same.
+ *
+ * So: a register that already holds ANY blob for my short is the write-once rule being satisfied,
+ * and there is nothing to do. Only a genuinely absent claim is published, and only that path can
+ * still fail loudly.
+ */
+function publishMyAttestation(store, armed) {
+  const short = armed.forStore.deviceShort;
+  try {
+    const held = store.registers().get(`member:${armed.forStore.memberId}`)?.get(`dev.${short}`);
+    if (held !== undefined && typeof held.value === 'string' && held.value !== '') return;
+  } catch { /* no register view yet — fall through and let the constructor decide */ }
+  try {
+    store.apply('attestMyDevice', { deviceShort: short, blob: armed.myBlob });
+  } catch (e) {
+    console.warn('[family] this Mac could not publish its own device attestation (ADR 001 §4.0). '
+      + 'Peers will park its ops as `unattestedDevice` until this is resolved:', e.message);
+  }
+}
+
+/**
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ * `openOp`'s P1 FOR A FAMILY SPACE — where the verification key comes from, and what it costs.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `attestationOf(deviceShort)` is the one input `openOp` cannot do without, and this file's own
+ * header enumerates the three possible sources and rules two of them out for M1. In a FAMILY
+ * space the arithmetic changes, and ADR 002 §4.2 step 6 changed with it (finding E2E3-6, which
+ * "reverses a decision, deliberately"):
+ *
+ *   · THE LOG is the authority and stays the authority — but a joiner between §7.1 steps 2 and 6
+ *     holds no epoch key, so it cannot fold a single family op, so the log can tell it nothing.
+ *     That is not a temporary inconvenience; it is the exact window D9 creates on purpose.
+ *   · PAIRING cannot reach here at all: Mama and Papa never share a SAS. They share an invite
+ *     code, which by D9 carries no key material of any kind.
+ *   · So it is THE ROSTER, and `GET /spaces/:id/members` now publishes `Device.attestation`
+ *     precisely so this is possible.
+ *
+ * **AND EVERY BLOB IS VERIFIED HERE, UNDER THE HOUSING MEMBER'S OWN `recoveryPubSig`**, which is
+ * what keeps the relay out: a relay that wants this device to accept a forged attestation has to
+ * forge a signature under a recovery key it does not hold, or invent a whole MEMBER — recovery
+ * key, attestation, the lot — and that member appears in the member list (15.4) as somebody
+ * nobody invited. ADR 002 §8.5 accepts that residual by name and calls it a UI-surfaceable
+ * phantom member. It is not zero and it is not hidden.
+ *
+ * `unproven` is the honest half of the return value: a blob whose signature did not verify is
+ * DROPPED, so the ops of that device park on P1 rather than being admitted, and the count says so.
+ *
+ * @param {Array<Object>} members the `GET /spaces/:id/members` projection
+ * @returns {Promise<{table:Map<string,Object>, unproven:number}>} deviceShort → DeviceAttestation
+ */
+export async function attestationsFromRoster(members) {
+  const table = new Map();
+  let unproven = 0;
+  for (const m of Array.isArray(members) ? members : []) {
+    if (!m || typeof m.memberId !== 'string' || typeof m.recoveryPubSig !== 'string') continue;
+    let recSigPub;
+    try {
+      recSigPub = await importSigPublic(ub64(m.recoveryPubSig));
+    } catch {
+      // An unusable recovery key verifies nothing. Every device of that member stays unproven,
+      // which is a park and never an admission.
+      unproven += Array.isArray(m.devices) ? m.devices.length : 0;
+      continue;
+    }
+    for (const dev of Array.isArray(m.devices) ? m.devices : []) {
+      if (!dev || typeof dev.attestation !== 'string' || dev.attestation === '') { unproven++; continue; }
+      if (dev.revokedAt !== undefined && dev.revokedAt !== null) continue;
+      let att = null;
+      try { att = await verifyAttestation(dev.attestation, recSigPub); }
+      catch { att = null; }
+      // §2.3's conditions (2) and (3), re-checked at the point of USE rather than trusted from
+      // the row: the blob must name the member whose key just verified it, and the short it
+      // claims must be the short the relay filed it under. Either mismatch is a relay lying
+      // about which device a genuine attestation belongs to.
+      if (!att || att.memberId !== m.memberId || att.deviceShort !== dev.deviceShort) { unproven++; continue; }
+      table.set(att.deviceShort, att);
+    }
+  }
+  return { table, unproven };
+}
+
+/**
+ * STEP 4 FOR THE CIRCLE — the transport, the FAMILY key ring, and `createFamilySync`.
+ *
+ * The ring is a SECOND `createKeyRing()` and not the personal engine's, and that separation is
+ * structural rather than tidy: `KeyRing` is keyed by the FULL space id, so `get('fsp_…', 3)`
+ * could not reach a `psp_` key whatever a caller intended — but two engines sharing one ring
+ * would mean one `admitWraps` call away from a family sender set being asked to authorize a
+ * personal admission. `admissibleSenders` refuses that by brand (§3 barrier 2); giving each
+ * engine its own ring means the question is never asked.
+ *
+ * @param {Object} store
+ * @param {Object} armed what `armCircleIdentity()` (or `armStore()`) returned
+ * @param {{origin:string, spaceId:string, memberId:string}} circle
+ * @param {{now:Function, schedule?:Function, unschedule?:Function, invoke?:Function,
+ *          isOnline?:Function, onStatus?:Function, onKeys?:Function, fetchImpl?:Function}} ports
+ */
+export async function startFamilyEngine(store, armed, circle, ports) {
+  const p = ports || {};
+  // ONE MEMBER ID, TWO PLACES IT IS WRITTEN DOWN — and they must agree before a single wrap is
+  // addressed. `circle.memberId` is `familyMemberId`, written by the create/join flow into
+  // `board.json`; `armed.forStore.memberId` is the durable identity's, read out of the key store.
+  // They are the same value on every honest path (both flows open the SAME identity), and if they
+  // ever diverge the consequences are silent and expensive: `sealOp` check 5 refuses every op this
+  // device authors (`att.memberId !== op.act`), and `keys.js` addresses the recovery wraps to
+  // `rec_<the wrong member>`, which nothing would ever open. Refused here, where the message can
+  // name both values, rather than three layers deeper where it can only name one.
+  if (armed.forStore.memberId !== circle.memberId) {
+    throw new Error(
+      `family engine: this Mac's durable identity is member ${armed.forStore.memberId}, but `
+      + `board.json says the Familienkreis member is ${circle.memberId}. Refusing to sync: every `
+      + 'envelope sealed under the first would be refused by every peer, and every key wrapped to '
+      + 'the second would be unopenable here (ADR 002 §5.2.2 checks 3 and 5).');
+  }
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // THE STORE SEAM — three calls, and without them the engine runs and shares nothing.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // `store.useFamilySpace()`, `store.familyOutbound()` and `store.apply('attestMyDevice')` all
+  // shipped before this line existed, and NONE OF THEM HAD A CALLER anywhere in `src/js/`. What
+  // that cost, measured, one item per call:
+  //
+  //   1. **`useFamilySpace`** — `core/materialize.js:791` is `if (!familySpaceId) break;`, so a
+  //      peer's entry folded into the register map and could not RENDER. The op landed, the board
+  //      stayed empty, and nothing anywhere was in an error state. It also arms `_logMayBeWritten`
+  //      for a Mac that never opted into 19.4 — the Mac E6-VERIFICATION §5.2 measured — whose
+  //      family ops would otherwise never have reached disk.
+  //   2. **`familyOutbound`** — `createFamilySync` falls back to `NO_OUTBOUND`, whose `lines()`
+  //      returns `[]`. The push path was real and drained an empty list for ever: this build
+  //      shared nothing outbound and reported it honestly as `diagnostics().outbound.wired`.
+  //   3. **`attestMyDevice`** — ADR 001 §4.0. Until this device publishes `dev.<short>` into the
+  //      family log, `core/authz.js` stage 0b answers `unattestedDevice` for every op every peer
+  //      ever sends me, AND for every op I send them. The engine parks those correctly and
+  //      nothing could ever cure them. It is E6-1 from the far side: not "my name is missing" but
+  //      **the circle cannot admit a single op**.
+  //
+  // **THE ATTESTATION BELONGS ON AN ARMING PATH AND NOWHERE ELSE.** It must be re-published by a
+  // Mac that joined before the op existed, by a second Mac of an existing member (19.4 pairing),
+  // and by a Mac whose log was rebuilt from a backup — none of which is a moment the human does
+  // anything. So it runs every launch, and `core/ops.js`'s row is IDEMPOTENCE-GATED for exactly
+  // that reason: §4.0's write-once is an *admissibility* rule, so an ungated call here would mint
+  // one permanently-dead op per launch. Same blob -> `DECLINED`; different blob -> it throws, and
+  // the throw is caught below because a Mac whose attestation cannot be published still has a
+  // board, a member list and a working personal sync.
+  store.useFamilySpace(circle.spaceId);
+  publishMyAttestation(store, armed);
+
+  const { transport, kind } = chooseTransport({
+    origin: circle.origin,
+    deviceShort: armed.forStore.deviceShort,
+    sign: (bytes) => signBytes(armed.identity.devSig.privateKey, bytes),
+    clientVersion: CLIENT_VERSION,
+    now: p.now,
+    schedule: p.schedule,
+    unschedule: p.unschedule,
+    invoke: p.invoke,
+    fetchImpl: p.fetchImpl,
+  });
+
+  const keyring = createKeyRing();
+  for (const [epoch, raw] of loadRing(circle.spaceId)) {
+    // eslint-disable-next-line no-await-in-loop
+    keyring.put(circle.spaceId, epoch, await importSpaceKey(raw));
+  }
+
+  // The P1 table, refreshed from the roster on every key pass. It starts with MY OWN attestation
+  // because `sealOp` mirrors the far-side gate (ADR 002 §5.2.2): a device that cannot attest
+  // itself cannot seal its own ops.
+  const attestations = new Map([[armed.forStore.deviceShort, armed.myAttestation]]);
+
+  // ── THE SECOND TABLE, AND IT IS NOT THE SAME TABLE ──────────────────────────────────────────
+  //
+  // `attestations` above is `openOp`'s P1: deviceShort → attestation, "whose signing key do I
+  // check this ENVELOPE against". `attestOpen` is `foldAuthorized` stage 0a: (memberId, blob) →
+  // attestation, "does this `dev.*` REGISTER WRITE verify under its housing member's recovery
+  // key". Two questions, two keys, two lookups — and until this line the second had no answer at
+  // all, so every peer's attestation op was rejected `badAttestation` and every op behind it
+  // parked `unattestedDevice` for ever. See `store.setAttestOpen`.
+  //
+  // It is installed as a STABLE closure over a mutable slot rather than re-installed per refresh,
+  // so a roster read that fails leaves the previous answer standing instead of blanking it — an
+  // unreachable relay must never look like "nobody in this family can be verified".
+  let attestOpenFn = () => null;
+  store.setAttestOpen((memberId, blob) => attestOpenFn(memberId, blob));
+
+  const refreshAttestations = async (members) => {
+    const { table } = await attestationsFromRoster(members);
+    for (const [short, att] of table) if (!attestations.has(short)) attestations.set(short, att);
+    // `buildAttestOpen` verifies every blob against its own member's `recoveryPubSig` and DROPS
+    // whatever does not verify, so the map it returns is exactly the set stage 0a may admit. My
+    // own row is included: this Mac folds its OWN attestation op back through `applyRemote` on
+    // the sync after it is published, and a device that cannot verify itself would reject it.
+    const rows = (Array.isArray(members) ? members : [])
+      .filter((m) => m && typeof m.memberId === 'string' && typeof m.recoveryPubSig === 'string')
+      .map((m) => ({
+        memberId: m.memberId,
+        recoveryPubSigRaw: m.recoveryPubSig,
+        blobs: (Array.isArray(m.devices) ? m.devices : [])
+          .map((dv) => dv && dv.attestation)
+          .filter((b) => typeof b === 'string' && b !== ''),
+      }));
+    if (rows.length) attestOpenFn = await buildAttestOpen(rows);
+    return attestations.size;
+  };
+
+  const sync = createFamilySync({
+    store,
+    transport,
+    keyring,
+    sigPriv: armed.identity.devSig.privateKey,
+    kexPriv: armed.identity.devKex.privateKey,
+    recoveryKexPriv: armed.recovery.recKex.privateKey,
+    spaceId: circle.spaceId,
+    me: {
+      memberId: circle.memberId,
+      deviceId: armed.forStore.deviceId,
+      deviceShort: armed.forStore.deviceShort,
+    },
+    attestationOf: (dv) => attestations.get(dv) || null,
+    attestation: armed.myAttestation,
+    now: p.now,
+    schedule: p.schedule,
+    unschedule: p.unschedule,
+    isOnline: p.isOnline,
+    onStatus: p.onStatus,
+    onKeys: p.onKeys,
+    // Every roster read refreshes BOTH attestation tables — see `refreshAttestations` above and
+    // `sync/keys.js#roster`. Without it a member who joins after this launch is unattested here
+    // until the app is restarted, and every op they author parks on P1.
+    onRoster: (members) => refreshAttestations(members),
+    saveKey: async (epoch, key) => {
+      const raw = new Uint8Array(await globalThis.crypto.subtle.exportKey('raw', key));
+      saveRingEpoch(circle.spaceId, epoch, b64u(raw));
+    },
+    envelopeStore: sealedEnvelopeStore(),
+    parkStore: parkedEnvelopeStore(),
+    chainStore: chainHeadStore(),
+    coverStore: coverageStore(),
+    // The outbound half. One property, and it is the whole of it — see the block above.
+    outbound: store.familyOutbound(),
+  });
+
+  // The roster is read once at start so the FIRST pull already has a P1 table — without it every
+  // envelope on a launch would park on `attestation`, be re-served on the next poll, and the
+  // board would fill in one cadence tick late for no reason.
+  try {
+    const seed = await sync.keys.roster();
+    if (seed.ok) await refreshAttestations(seed.members);
+  } catch { /* an unreachable relay at launch is not a sentence (19.3); the next pass asks again */ }
+
+  sync.attach();
+  const cadence = driveCadence(sync, p);
+  return Object.freeze({ transport, transportKind: kind, keyring, sync, armed, circle, cadence, refreshAttestations });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -411,6 +787,7 @@ const LS_PEERS = (spaceId) => `langzeitplaner.peers.${spaceId}`;
 const LS_SEALED = 'langzeitplaner.sealed';
 const LS_PARKED = 'langzeitplaner.parked';
 const LS_CHAIN = 'langzeitplaner.chainheads';
+const LS_COVER = 'langzeitplaner.keycoverage';
 
 function readJSON(key, fallback) {
   try {
@@ -496,6 +873,25 @@ function parkedEnvelopeStore() {
     durable: true,
     async loadRecords() { return readJSON(LS_PARKED, []); },
     async saveRecords(rows) { writeJSON(LS_PARKED, rows); },
+  };
+}
+
+/**
+ * The `coverStore` port — `sync/keys.js` §4's COVERAGE PROOF, across launches.
+ *
+ * It holds two tiny records per space: the recipient ids this device can PROVE hold the ring, at
+ * which epoch, and the last roster it read together with the epoch that reading carried. Losing
+ * it is survivable and bounded — this Mac then delivers the ring once more than it had to, which
+ * is one extra epoch and no lost key — and that is why it is a `localStorage` slot rather than a
+ * new obligation on `board.json`.
+ *
+ * It is NOT key material and it is NOT a secret: every id in it is published by
+ * `GET /spaces/:id/members` to every member of the circle already.
+ */
+function coverageStore() {
+  return {
+    async load(spaceId) { return readJSON(`${LS_COVER}.${spaceId}`, null); },
+    async save(spaceId, record) { writeJSON(`${LS_COVER}.${spaceId}`, record); },
   };
 }
 

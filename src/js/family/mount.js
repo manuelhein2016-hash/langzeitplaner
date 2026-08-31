@@ -33,6 +33,7 @@ import { setFamilySections } from '../settings.js';
 import {
   readFamilyConfig, armStore, startEngine, createSpaceOnRelay, adoptOnRelay,
   attestPeer, savePeer, saveRingEpoch, mintSpaceId, createSpaceKey, FAMILY_PREFS,
+  readCircleConfig, armCircleIdentity, startFamilyEngine, CIRCLE_PENDING_PREF,
 } from './engine.js';
 import { createPairingFlow } from './pairflow.js';
 import { initPairingUI } from './pairingui.js';
@@ -41,6 +42,15 @@ import { buildFamilySections } from './familysettings.js';
 import { initCreateJoin, familyCircle, circleTransport, CIRCLE_ROLE } from './createjoin.js';
 import { initMembersUI, renderFamilyLegend } from './membersui.js';
 import { initAdminPanel } from './adminpanel.js';
+// A7 / LZP-702 — the popover's sharing cluster. It arrives as a PORT, not as an import from
+// `popover.js`, and that is ADR 003 §7 gate 2: `boot.js -> main.js -> popover.js` is the SOLO
+// graph, so a static `import './family/sharing.js'` inside `popover.js` makes solo mode statically
+// reach `src/js/family/`, which `tests/tier1/network-scope.test.js` §2 refuses. Installed HERE,
+// behind the one dynamic door, solo mode cannot render the cluster for two independent structural
+// reasons: `stripV2Fields` leaves no `visibility` field on any entry for it to change, AND not one
+// byte of the module is evaluated.
+import { useSharing } from '../popover.js';
+import * as sharing from './sharing.js';
 import { createFetchTransport } from '../platform/net.js';
 import { exportRawPublic, signBytes } from '../crypto/identity.js';
 import { b64u } from '../core/b64.js';
@@ -67,6 +77,59 @@ export async function arm(settings, opts) {
 }
 
 /**
+ * STEP 2, THE OTHER CASE — **a Mac that is in a Familienkreis and has opted into nothing else.**
+ *
+ * `arm()` above gates on `syncEnabled && personalSpaceId`, which is story 19.4's OWN-DEVICE sync.
+ * Mama joined a circle from a Mac with one Mac; she has `familySpaceId` and none of those three.
+ * So `armStore` never ran for her, `store.useIdentity()` was never called, and her store went on
+ * running under the EPHEMERAL per-process identity that `store.js` mints when nothing durable is
+ * handed in. Three consequences, each of which stops the circle dead:
+ *
+ *   · `_me` is not her MemberId, so `attestMyDevice` would attest a member who does not exist and
+ *     `sealOp` §5.2.2 check 5 (`att.memberId !== op.act`) refuses every op she authors;
+ *   · `_short` is random rather than `crock32(SHA-256(sigPubRaw))`, so `createFamilySync`'s own
+ *     construction check (`me.deviceShort !== store._short`) throws before the engine exists;
+ *   · `foldAuthorized` compares `op.act === me`, so her own ops would not be hers.
+ *
+ * **IT IS A SEPARATE FUNCTION AND NOT A WIDER `arm()` BECAUSE IT MUST NOT ADOPT A PERSONAL
+ * SPACE.** `armStore` calls `usePersonalSpace(cfg.spaceId)`; a circle-only Mac has no `psp_` and
+ * adopting one it never created would arm an engine into a space the relay has never heard of —
+ * which is exactly what `armCircleIdentity`'s own docblock says it exists to avoid. So this
+ * adopts the IDENTITY and nothing else, and `useFamilySpace()` (which may legitimately be called
+ * after `init()`, because there is no family placeholder to have stamped anything wrongly) is
+ * left to `startFamilyEngine`.
+ *
+ * **BEFORE `store.init()`, like `arm()` and for `useIdentity()`'s own ordering rule**: the spine
+ * is minted from `board.json` at `init()` with whatever identity is current, so an identity
+ * adopted afterwards leaves this session's history authored by the temporary one.
+ *
+ * Principle 7 is untouched: the caller's gate is `familySpaceId`, and a Mac that has opted into
+ * nothing has none. Nothing here reaches the network.
+ *
+ * @param {Object} settings the RAW `board.json` settings, read before the store exists
+ * @param {{today:string}} opts
+ */
+export async function armCircle(settings, opts) {
+  const circle = readCircleConfig(settings);
+  if (!circle) return null;
+  const armed = await armCircleIdentity({ today: opts.today, invoke: ports().invoke });
+  if (armed.forStore.memberId !== circle.memberId) {
+    // The same refusal `startFamilyEngine` makes, one step earlier, where the store has not yet
+    // been pointed at anything. See its docblock: two member ids in one process is silent and
+    // permanent.
+    throw new Error(
+      `family: this Mac's durable identity is member ${armed.forStore.memberId}, but board.json `
+      + `says the Familienkreis member is ${circle.memberId}. Refusing to adopt either.`);
+  }
+  store.useIdentity({ ...armed.forStore });
+  circleArmed = armed;
+  return armed;
+}
+
+/** What `armCircle()` opened, so `startCircleEngine` does not open the key store a second time. */
+let circleArmed = null;
+
+/**
  * STEP 4 — after `store.init()`. The transport, the engine, the two screens and the settings
  * sections, in that order, because each one needs the one before it.
  *
@@ -90,6 +153,10 @@ export async function start(handle, hooks) {
   });
   installSections(handle, hooks);
   refreshSyncChrome();
+  // The circle's own engine, on a Mac that has BOTH. `armed` is reused rather than re-opened:
+  // opening the key store twice on a real Mac is two IndexedDB handles and two chances to mint a
+  // second identity, which is `armStore`'s own reason for existing.
+  startCircleEngine(hooks, handle.armed);
   return handle;
 }
 
@@ -123,13 +190,14 @@ function installSections(handle, hooks) {
 // `initMembersUI` is the one that needs a real port, because the member list is a join of two
 // sources that live in two different modules — see `MembersPort` in `membersui.js`.
 //
-// ⚠ `setProfile` IS DELIBERATELY ABSENT, and that is a report rather than an oversight. Writing
-// my own name and colour (15.6) needs a `member.set` entry in `core/ops.js`'s `MUTATIONS` table,
-// and that table is documented as "every v1 `store.mutate()` site, mapped — all 22 sites" with
-// `tests/tier1/core-ops.test.js` enumerating them independently. The op CONSTRUCTOR exists
-// (`memberSet`, `ops.js:651`); the mutation and the publish path do not. `membersui.js` reacts to
-// the absent port by disabling the two fields and saying so, which is the honest rendering. The
-// day the mutation lands, `setProfile` is one property here.
+// `setProfile` IS story 15.6's write half, and it is one property because `core/ops.js` now has
+// the mutation (`setMyProfile`, row 23) and `store.useFamilySpace()` has a caller. It was absent
+// for one round and `membersui.js` reacted by DISABLING the two fields and saying so — the honest
+// rendering, and the reason its `selfEditSupported()` asks about the port rather than assuming.
+//
+// **The memberId is not an argument here and cannot be.** `core/ops.js`'s row takes it from
+// `ctx.act`, because ADR 001 §4.2 admits a `member.set` only on `op.act === memberId`: "rename
+// Mama from my Mac" is not a call anybody can write.
 
 /** The pseudonymous roster the relay publishes, cached because `membersUIState()` is sync. */
 let rosterCache = [];
@@ -161,15 +229,28 @@ function syncCircleMounts(hooks) {
   const key = circle ? circle.spaceId : null;
   if (key === mountedFor) return;
   mountedFor = key;
+  // 16.3 / A7 — the cluster mounts and UNMOUNTS with the circle, in the same breath as the member
+  // surfaces and for the same reason (20.3): a Mac that has left may not keep a control that
+  // writes a `visibility` register nothing will ever publish.
+  useSharing(circle ? sharing : null);
   if (!circle) { initMembersUI(); rosterCache = []; rosterFor = null; return; }
   initMembersUI({
-    observe: true,
+    legend: true,
     onChange: () => { try { hooks?.onChange?.(); } catch { /* a redraw that throws is not ours */ } },
     port: {
       me: () => familyCircle()?.memberId ?? null,
       adminId: () => currentAdminId(),
       keysPending: () => familyCircle()?.keysPending === true,
       roster: () => rosterCache,
+      /** 15.6 — see the block above. `displayName`/`colorRef` are both optional in the op. */
+      setProfile: async ({ displayName, colorRef }) => {
+        store.apply('setMyProfile', { displayName, colorRef });
+        // The local prefs as well: they are what the circle section and the join screen render
+        // before the op has folded, and on a Mac whose keys have not arrived (D9) they are all
+        // there is.
+        store.setSettings({ familyDisplayName: displayName, familyColorRef: colorRef });
+        if (typeof store.persistNow === 'function') await store.persistNow();
+      },
     },
   });
 }
@@ -250,15 +331,94 @@ export function mountSolo(hooks) {
  * sync. Before this, such a Mac showed no member chips in its legend until somebody happened to
  * open the settings sheet — the members were known, and simply not drawn.
  *
- * It arms no engine and sends nothing: the roster refresh is the one request, it is a GET, and
- * it fails silently. The board is already on screen by the time this runs.
+ * ⚠ **THIS DOCBLOCK USED TO SAY "it arms no engine and sends nothing", AND THAT SENTENCE WAS THE
+ * BUG.** `docs/v2/E6-VERIFICATION.md` §5.2 measured its consequence: Mama's Mac, a full member of
+ * a Familienkreis, made **zero** `/ops` requests in 8 s of idling after joining, and none on any
+ * subsequent launch — so D9's waiting state could be entered and never left. It now arms the
+ * FAMILY engine (`startCircleEngine`), which is what makes the calm sentence on her screen come
+ * true. The board is still on screen before any of it runs, and a solo Mac still reaches none of
+ * it: the gate is `familySpaceId`, and a Mac that has opted into nothing has none.
  */
 export function mountCircleSurfaces(hooks) {
   installSections(null, hooks);
   syncCircleMounts(hooks);
   renderFamilyLegend();
   refreshRoster().then(() => renderFamilyLegend());
+  startCircleEngine(hooks, null);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// THE CIRCLE'S ENGINE — ADR 002 §7.1 steps 4-6, PO decision D9 part 4
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/** The family engine, once started. One per launch, because one circle per install (20.6). */
+let circleParts = null;
+let circleStarting = null;
+
+/**
+ * Arm the family sync engine for this Mac's Familienkreis.
+ *
+ * **IDEMPOTENT AND FIRE-AND-FORGET.** It is called from two places that can both happen in one
+ * launch — `start()` on a Mac that also syncs its own two Macs, and `mountCircleSurfaces()` on a
+ * Mac that only ever joined a circle — and from the join flow, which turns a Mac into a member in
+ * the middle of a session. None of the three may block a redraw, and none of them may arm a
+ * second engine: two engines on one space would be two cursors, two parking lots and two devices'
+ * worth of pulls from one Mac.
+ *
+ * `onKeys` is D9 part 4, and it is the only place the waiting state is cleared:
+ *
+ *   > "The next member device to sync wraps the keys — no action required from anyone, and no
+ *   >  notification demanded of them. It must not need any particular person to *notice* anything."
+ *
+ * The ring grew, so the sentence Mama was shown has come true, so the flag that renders it is
+ * written to `board.json` and the board is redrawn. Nobody clicked anything.
+ *
+ * @param {{onChange?:Function}} hooks
+ * @param {Object|null} armed reuse `armStore()`'s identity when this launch already opened one
+ */
+export function startCircleEngine(hooks, armed) {
+  if (circleParts || circleStarting) return circleStarting;
+  const circle = readCircleConfig(store.state && store.state.settings);
+  if (!circle) return null;
+  const p = ports();
+  circleStarting = (async () => {
+    // `armCircle()` (step 2) already opened the key store on a circle-only Mac and adopted the
+    // identity; `start()` (step 4) already did on a Mac that has both. Opening it a third time
+    // is two IndexedDB handles and a second chance to mint an identity — `armStore`'s own reason
+    // for existing. The fallback is the JOIN FLOW, which turns a Mac into a member in the middle
+    // of a session, after both of those have already run and found nothing.
+    const id = armed || circleArmed || await armCircleIdentity({ today: todayISO(), invoke: p.invoke });
+    if (!circleArmed) circleArmed = id;
+    circleParts = await startFamilyEngine(store, id, circle, {
+      ...p,
+      isOnline: () => globalThis.navigator?.onLine !== false,
+      onStatus: () => refreshSyncChrome(),
+      onKeys: () => {
+        // D9's waiting state, cleared BY THE ARRIVAL OF THE KEYS and by nothing else.
+        if (store.state.settings[CIRCLE_PENDING_PREF] !== false) {
+          store.setSettings({ [CIRCLE_PENDING_PREF]: false });
+          if (typeof store.persistNow === 'function') store.persistNow().catch(() => {});
+        }
+        refreshRoster().then(() => renderFamilyLegend()).catch(() => {});
+        try { hooks?.onChange?.('settings'); } catch { /* a redraw that throws is not ours */ }
+      },
+    });
+    return circleParts;
+  })()
+    .catch((e) => {
+      // A circle whose engine will not start still has its board and its member list. The one
+      // thing that must not happen is a thrown promise on the boot path.
+      console.warn('[family] the circle engine did not start:', e);
+      return null;
+    })
+    .finally(() => { circleStarting = null; });
+  return circleStarting;
+}
+
+/** The family engine, for the admin panel's removal + rotation (20.2) and for tests. */
+export function circleEngine() { return circleParts; }
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
 
 const timerPorts = () => {
   const p = ports();

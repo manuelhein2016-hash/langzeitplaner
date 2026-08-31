@@ -1,299 +1,525 @@
-# E6 — Familienkreis. Verification of the client flows.
+# E6 — Familienkreis. Verification of the client flows, and of a circle that actually shares.
 
-**Date:** 2026-08-29 · **Tickets:** LZP-601…607 (**608 out of scope**) · **Stories:** F15 15.1–15.6,
-F20 20.1–20.6 · **PO decision:** D9
+**Date:** 2026-08-29, **re-run and extended 2026-08-31 by the integration pass** ·
+**Tickets:** LZP-601…**608** · **Stories:** F15 15.1–15.6, F17 17.1–17.3, F20 20.1–20.6 ·
+**PO decision:** D9
 
-**Read `FINDINGS.md` §9 first.** That section already established that the shipped sync engine is a
-*personal* engine that refuses an `fsp_` space. This document is what happened when E6's flows were
-built on top of that fact and then driven, and its §5 is the part a reader should not skip.
+**Read `FINDINGS.md` §9 and §10 first, then §11.** §9 and §10 established that E6 had built the
+*membership* half of the feature and that the *content* half did not exist: the shipped engine was a
+personal engine that refused an `fsp_` space, and ADR 002 §7.1 steps 4–6 had no client
+implementation at all. §11 is what happened when that gap was closed and three real Macs were put in
+one circle.
 
 ---
 
 ## 0. The one-paragraph verdict
 
-**The membership lifecycle is real and was driven end to end against `node server/dev-server.mjs`
-with two independent Macs: create → invite → join → both members listed → rename → leave → delete,
-every step a real signed HTTP round trip, pasted in §3.** The relay holds no display name and no
-circle name, and the invite row carries no key material — D9 is structural, not conventional.
-**D9's waiting state is demonstrated in full for its first three required behaviours and its fourth
-cannot be demonstrated at all**, because ADR 002 §7.1 steps 4–6 have no implementation anywhere in
-the client: nothing fetches a key wrap, nothing produces one for a peer, and the relay has no route
-to push one. Mom joins, is immediately a member, and is told calmly that the entries arrive by
-themselves — and in this build they never do. That is stated plainly in §5 rather than described as
-working. **Solo mode is untouched and measured**: 36 modules, zero family/crypto/sync modules, zero
-network requests, DOMContentLoaded 127 ms.
+**A Familienkreis now shares.** Three browser contexts against `node server/dev-server.mjs` —
+Papa, Mama and Oma, three origins, three storage partitions, three durable identities — were driven
+through create → invite → join → **D9's waiting state clearing by itself** → a shared entry arriving
+on two other boards → a joiner receiving three years of history → a name change propagating →
+**LZP-608's removal with its epoch rotation** → and the removed member's board left byte-for-byte
+intact. Every step is pasted in §3. **The relay's stored bytes contain no display name, no circle
+name, no entry text and no date**, proved by an *armed* search that decodes all 553 base64url tokens
+in the file and is shown to find a planted needle in the same bytes (§4).
 
-**What integration cost:** three defects found by driving rather than by reading — one of them mine,
-introduced during this pass and caught in the browser — plus one control switched **off** because
-end-to-end driving showed it destroys the thing it manages.
+**D9 part 4 — the acceptance test for this whole epic, and the one thing the flow pass could not
+show — is demonstrated.** `familyKeysPending: true → false`, all epochs admitted, six parked
+envelopes re-judged and applied in the same pass, and the only thing called on either Mac was
+`cadence.wake()`, the scheduler's own entry point. No button, no notification, nothing in anybody's
+UI (§3.4).
+
+**Four defects were found by driving that a green suite could not see**, every one of which silenced
+the entire circle while looking like normal operation — because each fails by *parking* or
+*declining*, which is the shape this product is designed to have. They are §5, and each now has a
+row that dies without its fix (`tests/tier1/sync-family.test.js` §7).
+
+**Solo mode is untouched and measured, after the change**: 38 modules, **zero** from
+`family/`/`crypto/`/`sync/`/`net.js`, **zero** network requests, no IndexedDB, DOMContentLoaded
+170 ms, first run unchanged (§6).
 
 ---
 
-## 1. Suites — measured at the close of the pass
+## 1. Suites — measured at the close of the integration pass
 
 ```bash
-npm test              # tier 1                    → 1932 pass / 0 fail  (155 suites)
-npm run test:attack   # adversarial corpus        →  720 pass / 0 fail  (121 suites)
-npm run test:property # property + domains        →   88 pass / 0 fail  ( 18 suites)
+npm test              # tier 1                    → 2008 pass / 0 fail
+npm run test:attack   # adversarial corpus        →  769 pass / 0 fail
+npm run test:property # property + domains        →  101 pass / 0 fail
 npm run test:server   # relay                     →  868 pass / 0 fail
-npm run test:fleet    # multi-device scenarios    →  169 pass / 0 fail  ( 60 suites)
-npm run test:dom      # tier 2, real WebKit       →   29 files, all pass
+npm run test:fleet    # multi-device scenarios    →  193 pass / 0 fail
+npm run test:dom      # tier 2, real WebKit       →   32 files, all pass
 ```
 
-Zero dependencies, no `node_modules`, no stray root files.
+Zero dependencies, no `node_modules`, no stray root files. `no-reconstruction.test.js` and
+`headless-shell.test.js` untouched.
 
-The property suite moved 87 → 88 and the module domain 58 → 62: `createjoin.js`, `membersui.js`,
-`adminpanel.js` and `leavedelete.js` became **reachable** the moment `familysettings.js` called
-their sections. They sat on disk for a round before that and the walk could not see them — the
-import graph is the measurement, and an unmounted module is correctly invisible to it.
+Two rows that had been red at the head of this branch are **closed, not silenced**:
 
-The fleet suite moved 155 → 169 during this pass. That is the parallel workflow's, not this one's;
-a `sync/status.js` durability row was red mid-session and is green again.
-
----
+- `tests/property/sync-domains.test.js` **S5** reported `src/js/core/project.js` as an unreachable
+  `defence` (`openFinding: P-4`). It is now reachable, and the door it came through is
+  `sync/family.js#sealLine`, which passes `assertFamilyPatch` as `ctx.assertFamilyPatch` (ADR 004
+  §2.2 barrier 2) alongside `store.familyLevelOf` as `ctx.levelOf` (barrier 4). The row keeps
+  `role: 'defence'` and loses its `openFinding`: the two fields answer different questions, and
+  "would deleting this file make the product worse while turning the row green?" is permanently yes
+  for a choke point.
+- `tests/attack/privacy-e5-silence.test.js` **§5** reported the same file as a new orphan, and its
+  §3 row pinned `main.js`'s arming gate as one literal line. The gate grew a third field
+  (`familySpaceId`) and the row is now asserted by **shape** — see §5.2.
 
 ## 2. Status by ticket
 
 | ticket | story | verdict | where the evidence is |
 |---|---|---|---|
-| **LZP-601** create a circle | 15.2, 20.6 | **VERIFIED-HERE** | §3.1 — real `POST /spaces`, epoch-1 wrap to own device only |
-| **LZP-602** join a circle | 15.3, D9 | **VERIFIED-HERE** | §3.2, §4 — real redemption; whole-invitation paste; colour collision |
-| **LZP-603** member list | 15.4, 15.6, 17.3 | **PARTLY VERIFIED** | §3.3, §6 — the list, the legend and the toggle are real; **names are not**, see E6-1 |
-| **LZP-604** invite management | 15.5, 20.1 | **VERIFIED-HERE** | §3.1, §3.6 — mint, open-invite list with expiry, revoke |
-| **LZP-605** admin panel | 20.1, 20.5 | **VERIFIED-HERE** | §3.4, §7 — rename real; **transfer switched OFF**, see E6-2 |
-| **LZP-606** leave | 20.3 | **VERIFIED-HERE** | §3.5 — real `POST /members/leave`, relay marks `removedAt`, device revoked |
-| **LZP-607** delete space | 20.4 | **VERIFIED-HERE** | §3.6 — real delete, space purged from the relay, board intact |
-| **LZP-608** removal + rotation | 20.2 | **OUT OF SCOPE** | §8 — the seam is live and named |
+| **LZP-601** create a circle | 15.2, 20.6 | **VERIFIED-HERE** | §3.1 — real `POST /spaces`, and the three ops the create path now authors into the log |
+| **LZP-602** join a circle | 15.3, D9 | **VERIFIED-HERE** | §3.3, §3.5 — two real redemptions, colour collision, whole-invitation paste |
+| **LZP-603** member list | 15.4, 15.6, 17.2, 17.3 | **VERIFIED-HERE** | §3.4, §3.6 — names, colours, initial chips, and hiding a member removes his entries from the **board** |
+| **LZP-604** invite management | 15.5, 20.1 | **VERIFIED-HERE** | §3.1, §3.5 — mint, open-invite list with expiry, revoke; plus finding E6-8 |
+| **LZP-605** admin panel | 20.1, 20.5 | **VERIFIED-HERE** | §3.6 — rename **propagates**; transfer is **ON** (E6-2 closed) |
+| **LZP-606** leave | 20.3 | **VERIFIED-HERE (2026-08-29)** | §3.5 of the previous pass — unchanged by this one |
+| **LZP-607** delete space | 20.4 | **VERIFIED-HERE (2026-08-29)** | §3.6 of the previous pass — unchanged by this one |
+| **LZP-608** removal + rotation | 20.2 | **VERIFIED-HERE** | §3.7 — three Macs; epoch 5 → 6; her entries leave every board; **her own board is byte-identical** |
 
-"VERIFIED-HERE" means: driven in a real browser against the real relay in this pass, with the
-request and the relay's stored bytes both inspected. It does **not** mean the feature is complete
-in the product — §5 governs all of it.
+"VERIFIED-HERE" means: driven in a real browser against the real relay, with the request and the
+relay's stored bytes both inspected. Two rows carry the earlier pass's date because this pass did
+not re-drive them and nothing it changed touches them.
+
+**What is NOT claimed.** The board *renderer* for a foreign entry is E7's (`board.js`, `layout.js`,
+`popover.js`); it works and is shown in §3.6, but it is not this pass's to verify. And the
+`geteilt` gesture itself is driven through `family/sharing.js#planVisibilityChange` + `store.txn`,
+which is the exact pair `popover.js#applyLevel` calls — not through a synthetic write.
+
+## 3. THE DEMONSTRATION — a real circle, three members, three browser contexts
+
+**The rig.** `node server/dev-server.mjs --port 8787` (file adapter, 23 of 23 routes wired) and one
+`dev-server.mjs --relay http://127.0.0.1:8787` per Mac, on ports 4201/4202/4203. The `--relay` proxy
+is the repository's own M1 lane: it puts the API on the app's own origin so `connect-src 'self'` is
+satisfied and the page under test is byte-for-byte the page that ships. **Three ports are three
+origins are three `localStorage` partitions**, so these are three genuinely separate Macs with
+separate durable identities and separate key stores. Every origin was virgin.
+
+Everything below is pasted from the live pages.
+
+### 3.1 Papa creates the circle — and the create path now writes to the LOG, not only the relay
+
+Papa first gives his board history, including the entry risk R11 is about: **a yearly repeat
+anchored 2023-11-14**, entered three years before the circle exists.
+
+```
+notes: [ {date: 2023-11-14, text: "Omas Geburtstag",     rep: true},
+         {date: 2026-10-03, text: "Papas Zahnarzt",      rep: false},
+         {date: 2026-10-09, text: "Bewerbungsgespraech", rep: false} ]   ← stays PRIVAT throughout
+```
+
+Then „Familienkreis erstellen", through the real screen:
+
+```
+spaceId : fsp_9rlVQSl2o_-qz1-c7WK8Sg
+code    : GKDA-GVNV-WE08
+role    : admin
+```
+
+**And this is the part that did not exist before.** `createjoin.js#adoptCircleIntoLog` now runs
+after the relay accepts, and the family outbox reads:
+
+```
+space.set   space:fsp_9rlVQSl2o_-qz1-c7WK8Sg   admin, adminPrev   ← ADR 001 §4.1 GENESIS LINK
+member.set  member:mem_AxY0fulJRg51xLFbJjSgTA  dev.X7STW1QNHTCB62B7  ← ADR 001 §4.0 attestation
+member.set  member:mem_AxY0fulJRg51xLFbJjSgTA  displayName, colorRef ← story 15.6
+```
+
+```
+store.familyAdmin() → { admin: mem_AxY0fulJRg51xLFbJjSgTA,
+                        headOpId: ue3HWk_nmAuoVz6707WvuQ, isMe: true }
+```
+
+Without the genesis link `adminAtIn` answers `null` for every stamp, so on a circle created by the
+previous build **20.1's rename and 20.2's removal were inadmissible from everybody, the creator
+included.** That is now a real chain root with a real head opId, which is what `transferAdmin`'s
+`adminPrev` names and what `removal.js` stopped reporting as `NO_ADMIN_CHAIN`.
+
+### 3.2 Papa shares two entries, renames the circle, and pushes
+
+`family/sharing.js#planVisibilityChange` through `store.txn` — the same pair `popover.js#applyLevel`
+calls. The projection `core/project.js#projectForFamily` produces:
+
+```
+pub.set  fnote:mem_AxY0fulJRg51xLFbJjSgTA/71ec9213-…
+         pub.level=geteilt  pub.alive=true  pub.date=2026-10-03
+         pub.repeatsYearly=false  pub.coEdit=false  pub.text=Papas Zahnarzt  _born=…
+```
+
+**`categoryId` is absent** — A3, and it is absent because the projection is an allowlist, not
+because anyone remembered to strip it. Then:
+
+```
+syncNow() → { pushed: 3, applied: 3 }   opsPushed 6   quarantined 0   outbox 0
+space register `name` → "Familie Weber-Schmidt"
+levels → Omas Geburtstag: geteilt · Papas Zahnarzt: geteilt · Bewerbungsgespraech: PRIVAT
+```
+
+`applied: 3` is Papa's own ops coming **back** from the relay and being admitted through
+`applyRemote → foldAuthorized` — including his own attestation op. Nothing is quarantined, nothing
+deferred: the fold can verify him, which is finding E6-7 (§5.1) closed.
+
+### 3.3 Mama joins — the colour collision, then D9's waiting state
+
+She picks `blau`, which Papa holds. The relay refuses **inside the transaction** and rolls the whole
+redemption back, so the code still works:
+
+```
+.circle-notice (never .circle-problem):
+  „Diese Farbe hat schon jemand im Kreis. Grün ist frei — nimmst du die?"
+```
+
+One more click, and she is in:
+
+> „Du bist dabei." / „Du gehörst jetzt zum Familienkreis." / „2 Mitglieder. Die Namen erscheinen
+> zusammen mit den Einträgen." / **„Die gemeinsamen Einträge erscheinen von selbst, sobald ein
+> anderer Mac im Kreis das nächste Mal abgleicht."** / „Bis dahin bleibt dein Board genau so, wie es
+> ist. Du musst nichts tun und niemanden fragen."
+
+```
+familyKeysPending : TRUE            ← the waiting state, entered
+D9 machine-checks on the live panel:
+  animated nodes 0 · progress/.spinner/[aria-busy] 0 · .circle-problem 0 · [role=alert] 0
+  buttons: exactly one — „Fertig"
+```
+
+### 3.4 **D9 PART 4 — the waiting state clears BY ITSELF.** The acceptance test for the epic.
+
+Mama's Mac, after her own first sync and **before** Papa has delivered anything:
+
+```
+keysPending      : true
+epochs held      : []          ← she can open nothing
+heldEnvelopes    : 6           ← Papa's six ops are ON HER DISK, parked on `epoch`
+quarantined      : []          ← and NOT destroyed (finding E6-9, §5.3)
+opsHeldForKey    : 2           ← her own two ops wait in the outbox rather than being lost
+familyOutbox     : member.set dev.5B6R1N5QA732HZFE · member.set displayName,colorRef
+```
+
+Papa's Mac. **The only thing called is `cadence.wake()` — the scheduler's own entry point, the one
+the `pullVisibleMs` timer and the `visibilitychange` listener call. Nothing in any UI, nothing a
+person can press:**
+
+```
+PAPA — cadence.wake()
+  before : epochs [1,2]     rotations 1  deliveries 1
+  after  : epochs [1,2,3]   rotations 2  deliveries 2  lastDelivery "delivered"
+  coverage proof @ epoch 3 : [ dev_QYN_G4I1_gnZIs4PKF9wkQ, dev_l7PngJfc0RHBZYZdJ0G4vA ]
+                             ↑ Papa's own device        ↑ Mama's, which did not exist at his launch
+```
+
+Mama's Mac. **Again only `cadence.wake()`, and she was told nothing by anyone:**
+
+```
+MAMA — cadence.wake(), nothing else
+  keysPending      true  →  FALSE          ← D9 part 4
+  epochs held      []    →  [1, 2, 3]      ← ALL epochs, so history from genesis is readable
+  heldEnvelopes    6     →  0              ← re-judged and applied IN THE SAME PASS
+  opsApplied       6 · quarantined 0 · deferred 0
+  board            Omas Geburtstag (2023-11-14, yearly, foreign)
+                   Papas Zahnarzt  (2026-10-03, foreign)
+                   Mamas Yoga      (2026-09-21, her own)
+  circle name from the LOG : "Familie Weber-Schmidt"      ← 20.1 propagated
+  names she knows          : Mama, Papa                   ← 15.6, E6-1 closed
+  admin seat               : mem_AxY0fulJ… , isMe: false  ← E6-2's precondition
+```
+
+**„Bewerbungsgespraech" is not on her board and never was.** Papa's Privat entry produced no family
+op at all — not a redacted one, none (16.1, §7).
+
+That is the whole of D9: she was immediately a member, her board stayed calm, the sentence she was
+shown was true, and it came true without her, without Papa, and without anybody being told to do
+anything.
+
+### 3.5 Oma joins a circle that ALREADY has history — risk R11 / A4 / 17.1
+
+Papa's app stays **open** while she joins, which is the case the previous build got wrong (§5.2).
+
+```
+OMA — joined third; cadence.wake() and nothing else
+  keysPending   true  →  FALSE
+  epochs held   []    →  [1, 2, 3, 4]        ← every epoch, including three she was not alive for
+  held 0 · quarantined 0 · deferred 0 · opsApplied 8
+  board:
+     Omas Geburtstag   2023-11-14  yearly  foreign   ← ENTERED THREE YEARS AGO. It renders.
+     Papas Zahnarzt    2026-10-03          foreign
+     Omas Chor         2026-12-06          her own
+  circle name   : "Familie Weber-Schmidt"
+  names she knows: Oma, Papa, Mama
+  admin         : mem_AxY0fulJ…
+```
+
+On her board, pinned to Oktober 2026, the renderer draws „Papas Za…" on 03 Okt and **„● Omas G…" on
+14 November 2026** — the 2023 anchor, projected forward as a yearly repeat, in Papa's member colour.
+The legend reads `M P · 2`, with `title="Mama ausblenden"` and `title="Papa ausblenden"`.
+
+### 3.6 15.6 propagates both ways, and 17.3 hides on the BOARD
+
+Papa's Mac, after one `syncNow()`:
+
+```
+names Papa knows : [ {name: Papa, colour: blau}, {name: Mama, colour: gruen} ]
+deferred         : []                    ← nothing parked on P1 (§5.2 closed)
+admin panel      : „P Papa · Verwalter · du" / „M Mama · Mitglied · Entfernen"
+                                             / „O Oma · Mitglied · Entfernen"
+```
+
+17.3, on Mama's Mac, through `membersui.js#setMemberHidden`:
+
+```
+board before hiding Papa : [ Papas Zahnarzt, Mamas Yoga ]
+board while Papa hidden  : [ Mamas Yoga ]              ← the BOARD, not just the legend
+hidden map after hiding a SECOND member:
+   { mem_d8Som4yB…: true, mem_ZZZZ…: true }            ← BOTH survive — finding E6-6 closed
+board after un-hiding    : [ Papas Zahnarzt, Mamas Yoga ]
+```
+
+The second line is the whole of E6-6: `setSettings` is v1's wholesale object replacement, so the
+one-key literal this used to pass **un-hid the first member every time a second was hidden**.
+
+### 3.7 LZP-608 — removal, end to end, on three Macs
+
+Papa presses „Entfernen" on Oma's row. The confirmation, verbatim:
+
+> „Die geteilten und die Belegt-Einträge von Oma verschwinden von allen Familien-Boards und der
+> Zugang zum Kreis endet sofort — die privaten Einträge auf dem eigenen Mac bleiben unberührt, denn
+> sie waren nie bei uns."
+> „Was ihr Mac schon geladen hat, bleibt auf ihrem Mac. **Geteiltes lässt sich zurücknehmen,
+> Gesehenes nicht.**"
+
+**Papa's Mac:**
+
+```
+epochs   [1,2,3,4,5]  →  [1,2,3,4,5,6]        ← ADR 002 §4.1's rotation, performed BEFORE the op
+board    Omas Chor  →  GONE
+member:mem_xePEnVMI…  _alive: false, displayName still "Oma"
+         ↑ nothing was deleted. It stopped being PROJECTED.
+quarantined 0 · deferred 0
+```
+
+**Mama's Mac — `cadence.wake()` only; she was told nothing:**
+
+```
+epochs   [1,2,3,4,5]  →  [1,2,3,4,5,6]        ← she admitted e+1 before the pull
+board    Omas Chor  →  GONE ;  Papas Zahnarzt and Mamas Yoga untouched
+legend   chips: [ "Papa ausblenden" ]          ← Oma's chip is gone
+member:mem_xePEnVMI…  still present, _alive false, name still "Oma"
+```
+
+**Oma's Mac — the promise that matters most, after her own tick against a relay that now refuses
+her:**
+
+```
+board before : [ Omas Chor, Omas Geburtstag, Papas Zahnarzt ]
+board after  : [ Omas Chor, Omas Geburtstag, Papas Zahnarzt ]
+boardIdentical         : true
+WHOLE store.state deep-equal to the pre-removal snapshot : TRUE
+  (and the snapshot was non-empty: 3 notes, 4 categories, 22 settings keys)
+epochs before [1,2,3,4] · after [1,2,3,4] · keptEveryEpochKey TRUE
+   ↑ she keeps every key she HELD and gains neither 5 nor 6 — she can read what she was given
+     and nothing sealed after she left
+relay now answers : 403 device_revoked
+nothing deleted   : 3 notes, 4 categories
+```
+
+The copy is literally true in both directions, which is the point of the sentence.
+
+## 4. The relay's stored bytes — 21.1 / 20.5, grepped, with the search ARMED
+
+The whole file after the run above: `/tmp/lzp-e6-relay/sync-store.json`, **31 554 bytes**, one
+space, three members, three devices, twelve ops, six epochs.
+
+```
+                     raw file      after decoding ALL 553 base64url tokens
+"Papa"                    0                        0
+"Mama"                    0                        0
+"Oma"                     0                        0
+"Familie Weber"           0                        0
+"Weber-Schmidt"           0                        0
+"Zahnarzt"                0                        0
+"Geburtstag"              0                        0
+"Chor"  "Yoga"  "Bewerbung"   0  0  0              0  0  0
+"2023-11-14"  "2026-10-03"  "2026-12-06"  "2026-09-21"   0 0 0 0
+```
+
+**The search is armed**: the same method, run over the same bytes with one needle planted, finds it
+(`SEARCH_IS_ARMED: true`). 16 199 bytes of decoded payload were searched as well as the 31 554 raw
+ones, so nothing is hiding inside the base64url device-attestation blob either.
+
+What the relay **does** hold is exactly what ADR 003 §5.1 permits and nothing more:
+
+```
+space   : id, kind FAMILY, currentEpoch 6, nextSeq, headChain, createdAt          ← NO NAME
+member  : id, spaceId, colorRef ("blau"/"gruen"/"orange"), recoveryPubSig,
+          recoveryPubKex, joinedAt, removedAt                                     ← NO DISPLAY NAME
+device  : id, deviceShort, sigPubRaw, kexPubRaw, attestation blob, seqs,
+          addedAt, revokedAt
+op      : spaceId, seq, opId, epoch, deviceShort, witness, chain, envelope,
+          receivedAt                                                              ← NINE FIELDS
+```
+
+The only member fact in the clear is a **palette reference**. Oma's row carries `removedAt` and her
+device row carries `revokedAt`; neither says who she is.
 
 ---
 
-## 3. The lifecycle, driven
+## 5. The four defects this pass found — every one of them silenced the whole circle
 
-**The rig.** `server/dev-server.mjs --port 8787` (file adapter, 23 of 23 routes wired) and one
-`dev-server.mjs --relay http://127.0.0.1:8787` per Mac. The `--relay` proxy is the repository's own
-M1 lane: it puts the API on the app's own origin so `connect-src 'self'` is satisfied and the page
-under test is byte-for-byte the page that ships. **Two ports are two origins are two
-`localStorage` partitions**, so :4181 and :4182 are two genuinely separate Macs with separate
-durable identities. Every origin used below was virgin.
+None was visible to a green suite, and the reason is structural: **each fails by parking or by
+declining, which is the shape this product is designed to have.** The ops arrive, they are held, the
+board is empty, and nothing anywhere is in an error state. That is the correct failure mode and
+exactly why it needs a test that names the cure. All four now have one —
+`tests/tier1/sync-family.test.js` §7 — and each row was killed by a mutant (§5.5).
 
-### 3.1 Create — Papa, :4181
+### 5.1 E6-7 — **nothing in the product could verify anybody's attestation.** (HIGH)
 
-```
-POST /api/v1/spaces   50 ms      POST /api/v1/invites   14 ms
-```
+`core/authz.js` stage 0a checks a peer's `member.set{dev.<short>}` with
+`ctx.attestOpen(memberId, blob)`. Without one, `attestationVerifies` returns **`false` for every
+blob** — fail-closed, correctly. `store.useIdentity({attestOpen})` accepts one and **no caller
+anywhere in `src/js/` ever passed one.**
 
-Relay state afterwards:
+So every peer's attestation op was rejected `badAttestation`, and — because that op is the only
+thing that could ever attest that device — every *subsequent* op from that peer parked
+`unattestedDevice`, permanently, curable by nothing. **A circle could not admit a single op from
+anybody.** It is finding E6-1 read from its far side, and it survived a whole round because both
+halves are silent.
 
-```
-spaces  : fsp_nhfN9dwRvOireWklQbKERw   kind=FAMILY   currentEpoch=1
-members : mem_qhYHqy0OcfbhLKGI77cn0A   colorRef=blau   removedAt=None
-devices : dev_Mzm2OmbyfFRakIVTT2c-3Q   deviceShort=3FXX0D85VCMCN35V
-keyWraps: [fsp_…,"1",dev_Mzm2OmbyfFRakIVTT2c-3Q]     ← the creator's OWN device, and only it
-invites : {id:47ssOFFOhJjOjEZnJ7vPeQ, verifier:…, wrapSalt:…, epoch:1, expiresAt:…, usedAt:null}
-```
+**Fix, in two parts.** `store.setAttestOpen(fn)` (`store.js`) is a **separate seam from
+`useIdentity`**, deliberately: an identity is adopted once, before `init()`, and re-pointing it is
+refused; *who I can verify* changes every time the roster does. `family/engine.js#refreshAttestations`
+builds it with `platform/device-identity.js#buildAttestOpen` over the roster's own rows, and
+installs a stable closure over a mutable slot so a failed roster read leaves the previous answer
+standing rather than blanking it.
 
-Invite code shown: `J17Z-XSXN-7CSQ`.
+### 5.2 E6-7b — the attestation tables were seeded **once**, at launch. (HIGH)
 
-**Two things the relay does not have.** Grepping the whole store for the human strings:
+Papa's engine started when he was alone. Mama joined afterwards, and her ops parked on `openOp`'s P1
+(`attestation`) on his Mac **for the rest of the launch** — he had no attestation for a device that
+did not exist when he last looked. A member who joins while somebody's app is open is the *normal*
+case.
 
-```
-"Papa"          : absent
-"Familie Weber" : absent
-```
+**Fix:** `sync/keys.js#roster()` takes an `onRoster(members)` port and calls it on every read. It
+hangs off `roster()` and not off `admit()` so `deliver()` and `rotate()` refresh it too, and so
+there is no second GET. `sync/family.js` forwards it; `family/engine.js` wires it to
+`refreshAttestations`, which rebuilds **both** tables — P1's and stage 0a's.
 
-Display names and the circle's name never leave the Mac. And the invite row carries `verifier`,
-`wrapSalt`, `epoch` and two timestamps — **no wrapped key of any kind**. That is D9 as a property
-of the stored bytes rather than a claim in a comment.
+The same class of bug, one layer down: **a Mac in a Familienkreis and nothing else never adopted a
+durable identity at all.** `main.js#armFamilyMode` gated on `syncEnabled && personalSpaceId` —
+story 19.4's *own-device* sync — and `useIdentity()` may only be called before `store.init()`. Mama's
+Mac ran the whole session on the ephemeral per-process identity, so `store._short` was random,
+`store._me` was not her MemberId, and `createFamilySync` **refused to construct**. That is the Mac
+§5.2 of the previous pass measured making zero `/ops` requests, one layer further down. The gate now
+has a third field and `mount.js#armCircle` adopts the identity *without* a personal space —
+`armStore` would have adopted one this Mac never created.
 
-### 3.2 Join — Mama, :4182, with Papa's Mac closed
+### 5.3 E6-9 — **D9's own window destroyed the ops a joiner authors inside it.** (HIGH)
 
-This is the D9 scenario on purpose: no other member device was running.
+`createjoin.js#adoptCircleIntoLog` authors Mama's attestation and her name the moment she is
+admitted — and at that moment she holds no epoch key, which *is* the state D9 designs for.
+`sealLine` threw, and `pushNow`'s catch **quarantined** both ops. A quarantine has no cure.
 
-```
-POST /api/v1/invites/redeem       ← attempt 1, colour collision, rolled back (§4)
-POST /api/v1/invites/redeem       ← attempt 2, accepted
-```
+So the two ops that say who a new member *is* were destroyed by the very window the product exists
+to make survivable, and every op she ever authored afterwards would have parked on every peer as
+`unattestedDevice`. Permanently. On the honest path.
 
-Mama's `board.json` afterwards:
+**Fix:** the distinction is whether the failure can be cured by something that has not happened yet.
+A `FamilySyncError` of kind `'key'` leaves the line **in the outbox, untouched**, breaks the batch to
+keep log order, and counts it as `opsHeldForKey` — "waiting for a key" is a state, not an absence.
+An op this build would refuse on its *shape* is still quarantined, which is what the catch was
+written for.
 
-```
-familySpaceId    fsp_nhfN9dwRvOireWklQbKERw
-familyRole       member
-familyMemberId   mem_7TS5xrb0KDsWouMHWjzHRw
-familyDisplayName Mama          familyColorRef gruen
-familyKeysPending TRUE                                  ← the waiting state
-```
+### 5.4 E6-8 — a clipboard refusal destroyed the invite it was copying. (MEDIUM)
 
-### 3.3 Both members listed
+Measured: `navigator.clipboard.writeText` threw `NotAllowedError: Document is not focused`, the
+rejection escaped `createInvite`'s try, the panel reported „…fehlgeschlagen" and then drew „Keine
+offene Einladung" — **while the invite had been minted on the relay.** `POST /invites` stores a
+verifier, never the code (ADR 002 §7.1), so a code not read out of that response is gone for ever and
+the row must be revoked and re-minted. Two orphaned invites in the relay's list are what showed it.
 
-Mama's ⚙ → „Familie" shows **two rows** and the D9 line. Papa's shows the same two, his own marked
-`· du · Verwaltung`, the other carrying „Entfernen" — and never his own row, which is „Kreis
-verlassen" and which the relay agrees with (`use_leave`).
+**Fix:** the mint is committed and the list drawn first; the copy is wrapped on its own; and the
+toast shows the code either way, so the one place it appears is never conditional on a permissioned
+API succeeding.
 
-The rows read `· · —`, not names. See **E6-1**.
+### 5.5 The mutants — each named row dies
 
-### 3.4 Rename — 20.1
+Measured in an isolated copy of the tree, one run each.
 
-```
-POST /api/v1/spaces/fsp_…/rename   → 200
-board.json familyName: "Familie Weber" → "Familie Weber-Schmidt"
-relay store grep "Weber" → 0 matches
-```
-
-The panel says „Der Name gehört dem Kreis. Auf dem Server steht er nirgends." The handler stores
-nothing, by design. The sentence is literally true. The rename does **not** reach Mama — see E6-1.
-
-### 3.5 Leave — 20.3
-
-```
-POST /api/v1/members/leave → 200
-```
-
-Relay:
-
-```
-mem_qhYHqy0OcfbhLKGI77cn0A  removedAt=None                 ← Papa stays
-mem_7TS5xrb0KDsWouMHWjzHRw  removedAt=1788021091053        ← Mama gone
-dev_DsZ4OfdDPmuoJoKfLVhl2g  revokedAt=1788021091053        ← her device revoked
-```
-
-On her Mac the circle prefs cleared, the legend's family section disappeared, her own entries stayed.
-**`syncOrigin` / `syncEnabled` / `personalSpaceId` were deliberately NOT cleared** — that triple is
-the *personal* space's (19.4), and clearing it would unpair somebody's second Mac as a side effect
-of leaving a family circle. Finding P-1 stays open on purpose and a test asserts it.
-
-### 3.6 Delete — 20.4, on a fresh circle
-
-Created `Testkreis` / `fsp_0YdRa2IsohRGy866cZimvA` on a third virgin Mac (:4183), then deleted it.
-The confirmation is gated on typing the circle's **name** and the wire carries the **id**; pressing
-„Endgültig löschen" with the gate empty made **no** request and left the sheet open.
-
-After confirming, the relay's space list contains only the Weber circle — the space, its member,
-its device and its wrap are gone. The Mac reverted to a fully intact solo board (4 categories, board
-renders, family prefs cleared).
-
----
-
-## 4. The join flow's two designed details, both exercised
-
-**The whole-invitation paste.** A multi-line invitation — prose, a code, a `Server:` line — pasted
-into the field yields `J17Z-XSXN-7CSQ` and lifts the origin out, saying so: „Server aus der
-Einladung übernommen: http://localhost:4182". **This did not work when the pass began**; see E6-4.
-
-**The colour collision.** Mama kept the preselected `blau`, which Papa holds. A joiner cannot read
-the roster before redeeming — `GET /members` requires membership, correctly — so the knowledge comes
-from the redemption itself:
-
-```
-attempt 1 → the relay refuses on colorRef and ROLLS THE WHOLE REDEMPTION BACK
-            invites[0].usedAt = None      ← the code still works
-            members on relay = 1          ← nothing half-created
-UI          .circle-notice (never .circle-problem):
-            „Diese Farbe hat schon jemand im Kreis. Grün ist frei — nimmst du die?"
-            blau is now disabled, aria-label „Blau — schon vergeben"
-attempt 2 → accepted
-```
-
-One round trip, a calm notice naming a free colour, one click to retry.
-
----
-
-## 5. D9 — the acceptance test for this epic
-
-### 5.1 What is demonstrated
-
-Joined while **no other member device was online**. Machine-checked on the live panel:
-
-| D9 requires | measured |
+| mutant | row that dies |
 |---|---|
-| **1.** she is immediately a member | `familyMemberId = mem_7TS5xrb0KDsWouMHWjzHRw`, roster shows 2 |
-| **2.** one calm line, no spinner on the board | every node's computed `animationName` walked → **none**; `progress`/`.spinner`/`[aria-busy]` → **0**, on the panel and on the board |
-| **3.** never an error, never "go wake someone" | `.circle-problem` → 0, `[role=alert]` → 0, no `Fehler\|failed\|erneut versuchen`; no `aufklappen\|frag \|bitte jemand\|ask \|open their\|warte`; the line names **another Mac**, and a person-name regex over it returns false; exactly one button, „Fertig" |
-| **4.** it resolves itself | **NOT DEMONSTRABLE — see 5.2** |
-
-The copy, verbatim:
-
-> „Du bist dabei." / „Du gehörst jetzt zum Familienkreis." / **„Die gemeinsamen Einträge erscheinen
-> von selbst, sobald ein anderer Mac im Kreis das nächste Mal abgleicht."** / „Bis dahin bleibt dein
-> Board genau so, wie es ist. Du musst nichts tun und niemanden fragen."
-
-### 5.2 What is not, and why — **the headline of this document**
-
-**ADR 002 §7.1 steps 4, 5 and 6 have no implementation in the client.** Not "incomplete": absent.
-
-```
-client callers of GET  /api/v1/spaces/:id/keys    → NONE
-client callers of POST /api/v1/spaces/:id/epoch   → NONE
-client code that wraps the ring for a PEER device → NONE
-a relay route that pushes a wrap outside space
-  creation or epoch rotation                      → DOES NOT EXIST (router.js, 23 routes)
-sync/personal.js imports from crypto/spacekeys.js → { spaceKindOf, isSpaceId }   ← no wraps at all
-```
-
-And underneath that, the engine is not a family engine:
-
-```js
-// src/js/family/engine.js — readFamilyConfig
-if (!s[enabled] || !origin || !space.startsWith('psp_')) return null;
-```
-
-```js
-// src/js/sync/personal.js:435 — assertPersonalSpace
-// "A psp_… id is required and an fsp_… id is a THROW, not a fallback: a personal sync engine
-//  pointed at a family space would push the user's private board into the family stream, which
-//  is the single worst thing this product could do."
-```
-
-That refusal is correct and must stay. Its consequence is that **a Familienkreis arms no engine at
-all**. Measured: Mama's Mac, a full member, made **zero** `/ops` requests in 8 s of idling after
-joining, and makes none on any subsequent launch.
-
-**So the waiting state can be entered and cannot be left.** Mom is a member, her board is calm, the
-sentence she is shown is true about what is *supposed* to happen, and in this build no member Mac
-will ever wrap the keys because nothing anywhere is written to do it. This is not a bug in the E6
-flows — every one of them does what it was asked to do — and it is not the D9 copy's fault. It is
-that E6 built the membership half of the feature and the content half does not exist yet.
-
-`FINDINGS.md` §9 reached the same wall from the other side ("E6's convergence question cannot be
-asked of this build"). This is the client-side statement of it.
-
-**What has to land before D9 part 4 can be shown:** a family sync path (or a family-aware
-`readFamilyConfig`), a `GET /spaces/:id/keys` caller feeding `admitWraps`, a producer that wraps
-epochs `1..e` for a new member's device, and a route to push it. None is a small change and none is
-this ticket's.
+| M-A `keys.js#roster` stops calling `onRoster` | `§7c` |
+| M-B a key-less seal is quarantined again | `§7d` |
+| M-C `store.setAttestOpen` becomes a no-op | `§7b` |
+| M-D the fold ignores `ctx.attestOpen` | `§7a` |
 
 ---
 
-## 6. Principle 7 and 15.1 — solo mode, measured
+## 6. Principle 7 and 15.1 — solo mode, re-measured AFTER the change
 
-A **virgin origin**, `dev-server.mjs` with no `--relay` at all:
+A **virgin origin**, `dev-server.mjs` with no `--relay` at all, on the tree as committed:
 
 | | first run | after clicking ⚙ |
 |---|---|---|
-| DOMContentLoaded | **127 ms** | — |
-| JS modules | **36** | 62 (+26) |
-| modules from `family/`, `crypto/`, `sync/`, `platform/net.js` | **0** | 24 |
-| network requests | **0** | **0** |
-| family UI on the board | none — no `#legend-family`, no chips | — |
-| family sections in ⚙ | — | „Familienkreis" (the entry point) + 19.4's own |
+| DOMContentLoaded | **170 ms** | — |
+| JS modules | **38** | 68 (+30) |
+| modules from `family/`, `crypto/`, `sync/`, `platform/net.js` | **0** | 28 |
+| network requests (`fetch`/XHR) | **0** | **0** |
+| off-origin requests | **0** | **0** |
+| `localStorage` | `langzeitplaner.unlock` | *unchanged* |
+| IndexedDB databases | **none** | **none** — no identity minted |
+| family UI on the board | none — no `#legend-family`, no chips, no „Familienkreis" text | — |
+| ⚙ section titles | — | Ebenen · Darstellung · Fenster · Updates · **Familienkreis** · **Server & eigene Geräte** · Meine Geräte · Abgleich · Daten · Sicherungen |
 
-Opening the door loads the modules and **still makes no request and mints no identity**. The member
-section, the admin section and the legend section draw nothing at all without a circle.
+First run is unchanged: the „Willkommen" card, and the four v1 categories „Arbeit · Familie · Reisen
+· Deadlines".
+
+**This is the measurement that had to be re-taken**, because `main.js#armFamilyMode`'s gate grew a
+third field this pass (§5.2). It grew in the direction that arms *more* Macs, so the question "does a
+Mac that has opted into nothing still reach nothing?" had to be asked again rather than assumed. It
+does: the gate is `syncEnabled && personalSpaceId` **or** `familySpaceId`, and a solo Mac has none of
+the three. Opening the door loads the modules and **still makes no request and mints no key** — the
+empty IndexedDB list is the sharper half of that, because a minted identity would be visible there
+whether or not anything went on the wire.
+
+Two section titles, not one: „Familienkreis" is F15's entry point and „Server & eigene Geräte" is
+19.4's own-device sync. The collision the previous pass closed has stayed closed.
 
 Guards, run by name: `tests/attack/privacy-e5-silence.test.js` 13/13,
-`tests/property/sync-domains.test.js` + `tests/tier1/network-scope.test.js` 33/33.
+`tests/property/sync-domains.test.js` + `tests/tier1/network-scope.test.js` all green.
 
-**A bug this pass introduced and caught here.** Mounting the members port unconditionally made
-„Familie" — a heading and a member row — render in the settings sheet of a Mac that had never heard
-of a Familienkreis. `buildMembersSection`'s own guard could not catch it: it asks whether a *port*
-exists, not whether a *circle* does. Fixed in `mount.js#syncCircleMounts`, which now mounts and
-**unmounts** on every sheet open, because a Mac becomes a member mid-session (the join flow) and
-stops being one mid-session (20.3). Verified in the browser after the fix: solo ⚙ shows the entry
-point and nothing else.
+---
+
+## 6b. Story 21.2 — two engines now exist, so the separation was re-proved rather than assumed
+
+Run live in Papa's page, with a real family ring holding six epochs:
+
+```
+personal engine handed the family space :
+   PersonalSyncError: spaceId must be a psp_… id; got "fsp_9rlVQSl2o_-qz1-c7WK8Sg"
+family engine handed a personal space   :
+   FamilySyncError:   spaceId must be an fsp_… id; got "psp_AAAAAAAAAAAAAAAAAAAAAA"
+
+ring.epochs(fsp_9rlVQSl2o…)  →  [1,2,3,4,5,6]
+ring.epochs(psp_AAAA…)       →  []
+ring.get(psp_AAAA…, 6)       →  false      ← no family key is REACHABLE under a personal id
+```
+
+Both refusals are at construction and neither has an option, a flag or a default — a parameter has a
+default, and a default is how the worst thing this product could do becomes reachable by forgetting
+an argument.
+
+And the second half, on the same page:
+
+```
+Papa's PRIVAT entry „Bewerbungsgespraech"
+   pub.set ops addressed at it, anywhere in the family outbox : 0
+   store.familyLevelOf('fnote:<papa>/<its uuid>')             : "privat"
+```
+
+**Zero, not a redacted one** — 16.1 is structural. And it never appeared on Mama's or Oma's board at
+any point in §3, which is the same fact observed from the other two Macs.
 
 ---
 
@@ -320,7 +546,21 @@ clear is a palette reference.
 
 ---
 
-## 8. Findings this pass produced
+## 8. The earlier pass's findings — where each one stands now
+
+| id | 2026-08-29 | 2026-08-31 |
+|---|---|---|
+| **E6-1** `member.set`/`space.set` have no mutation, so a circle has no shared vocabulary | OPEN | **CLOSED.** Six rows on `MUTATIONS` (23–28) and a publish path; names, colours, the rename and the admin chain all propagate — §3.4, §3.6. The far side of it (E6-7, §5.1) had to be closed too, or the ops would have arrived and been rejected. |
+| **E6-2** handing over the admin role is a one-way demotion; control switched OFF | OPEN | **CLOSED.** `transferAdmin` (ADR 001 §4.1's transfer link) is authored **before** the advisory relay call, `adminPrev` comes from `store.familyAdmin().headOpId`, and `TRANSFER_PROPAGATES` is `true`. `tests/tier2/family-admin.dom.js` §7 is inverted and now asserts the op, its `adminPrev`, and the ordering. |
+| **E6-3** leaving a circle bricks that Mac's family mode on that relay | OPEN | **STILL OPEN — `server/`.** Device uniqueness is global; it must be scoped to `(spaceId, deviceId)`. Not touched by this pass and not reachable from it. |
+| **E6-4** the huge paste field defeated its own parser | CLOSED | still closed; re-exercised in §3.3. |
+| **E6-5** „Familie" collides with itself in the legend | OPEN (PO call) | **CLOSED** by the seams pass: the section label is gone, the divider carries A3's two halves, and the `· n` count opens the popover. Verified in §3.5's legend (`M P · 2`). |
+| **E6-6** hiding a second member un-hides the first | *(found later)* | **CLOSED.** `setMemberHidden` merges instead of replacing; both keys survive — §3.6. |
+
+Three new findings are **E6-7**, **E6-7b**, **E6-8** and **E6-9**, all in §5.
+
+The original text of the six rows follows, unedited, because the *argument* in each is still the
+record of why the fix has the shape it has.
 
 ### E6-1 — `member.set` and `space.set` have no client mutation, so a circle has no shared vocabulary
 
@@ -456,63 +696,87 @@ names in whichever language is on.
 **What it costs:** the legend no longer names the members; the name is in the tooltip, in ⚙ →
 „Familie", and one click away in the popover. That is defensible because 17.2 renders a foreign
 entry as colour + **initial chip** and never as a name, so the legend teaches exactly the mapping
-the board uses. In this build the chips render `·` rather than initials — E6-1, not R14.
+the board uses. **In the 2026-08-29 build the chips rendered `·` rather than initials — E6-1, not
+R14. They render initials now** (`M`, `P`, `O`, each with its member's colour and a
+„<Name> ausblenden" tooltip), which is what §3.5's legend shows.
 
 ---
 
-## 10. What LZP-608 still needs
+## 10. LZP-608 — landed and driven (§3.7)
 
-608 is removal end to end, i.e. the epoch rotation ADR 002 §4.1 requires once a member is gone. Its
-seam is live and named and nothing in E6 changes when it lands:
+The four items this section listed on 2026-08-29 are settled:
 
-1. **The caller exists.** `adminpanel.js#removeMember()` passes the relay's whole body —
-   `rotateRequired: true` included — to `ports.afterRemove`, and warns to the console when nothing is
-   wired. 608 implements `afterRemove`.
-2. **The producer does not.** Rotation needs `crypto/spacekeys.js`'s rotation body builder to have a
-   caller and `POST /spaces/:id/epoch` to have a client. Today neither exists (§5.2) — so 608 is
-   blocked by the *same* missing wrap machinery D9 part 4 is blocked by, and whoever builds one
-   should build both.
-3. **The copy is already written to be true without it.** The removal consequence claims exactly
-   what the server does — access ends, ops purged, wraps deleted, the member's invites revoked — and
-   says nothing about future ciphertext, because without the rotation that claim would be false. It
-   carries the addendum §6 line in both languages: „Geteiltes lässt sich zurücknehmen, Gesehenes
-   nicht."
-4. **E6-3 will bite it.** A removed member who is later re-invited hits the same
-   `device.deviceId/registered` wall. 608 should not land before the uniqueness scope is fixed.
+1. **The caller existed** — `adminpanel.js#removeMember` → `ports.afterRemove`. It is now wired to
+   `family/removal.js#afterRemove` and driven in a browser (§3.7).
+2. **The producer now exists.** `sync/keys.js` has `GET`/`POST /spaces/:id/keys` and
+   `POST /spaces/:id/epoch` clients; the rotation runs **before** the removal op, so the roster it
+   reads no longer names the removed member — she is excluded by reading the truth, not by
+   filtering a list, and the server's own `assertCoverage` refuses a rotation that leaves a
+   *remaining* member out. Measured: 5 → 6, with the removal op sealed under 6.
+3. **The copy was already written to be true**, and now the thing it describes happens. Both
+   sentences are pasted in §3.7.
+4. **E6-3 will still bite a re-invite.** A removed member who is later re-invited hits
+   `device.deviceId/registered`. That is `server/`'s and it is unchanged.
 
----
+The removal op is `member.set{_alive:false}` and **exactly** that: `authz.js` stage 2's `onlyAlive`
+is `names.length === 1`, so one extra field turns it into "an admin writing to another member's
+record", which every peer drops permanently and in silence. `core/ops.js`'s `removeMember` (row 28)
+is the constructor, it refuses `memberId === ctx.act` by name (that is 20.3's `POST /members/leave`,
+a different route that also releases the membership row, the device row and the wraps), and it goes
+through `mustBeSittingAdmin`.
+
+**What `removal.js` still refuses to do, and should:** it will not mint the admin chain. `resolveChain`
+breaks rival roots by longest-chain-then-**stamp**, so a root minted at removal time would *beat* one
+minted at creation and hand the seat to whoever reached the code path. Now that `createjoin.js`
+emits `claimAdmin`, the blocker it reports (`NO_ADMIN_CHAIN`) no longer fires on a circle this build
+created — but the refusal stays, because a circle created by an *older* build still has no root and
+minting one there is the wrong cure.
 
 ## 11. Still owed, by owner
 
-**`core/ops.js` + a family publish path** (blocks 15.4's names, 15.6's write, 20.1's rename and
-transfer): a `member.set` mutation and a `space.set` mutation. See E6-1 and E6-2.
+**`server/`** — scope device uniqueness to `(spaceId, deviceId)` (**E6-3**). Until then leaving a
+circle is one-way on that relay, and a removed member cannot be re-invited. This is the only row
+from the 2026-08-29 list that is untouched, and it is the one this pass could not reach.
 
-**`sync/` + `family/engine.js`**: a family space arms no engine (§5.2). Until then no family content
-moves and D9 cannot resolve.
+**`family/removal.js` + `sync/family.js`** — the removal op is still sealed and posted by
+`removal.js` itself rather than riding `pushNow`, so it does not get the sealed-envelope cache or
+the quarantine. It **does** now get the chain witness (`sync.witness(space)` is exposed and is
+`removal.js`'s default `witnessOf`), which closes the "commits to no chain value" half. The
+remaining move is `publishOne(op)` on the engine, or the ORDER — rotate ▸ author ▸ publish —
+migrating into the engine so `store.apply('removeMember')` + `syncNow()` is the whole call.
 
-**`server/`**: scope device uniqueness to the space (E6-3). Until then leaving is one-way and a Mac
-with a personal space cannot join a circle.
+**`crypto/spacekeys.js`** — `rotateSpace()` puts the new key in the ring *before* the POST, so a
+caller that loses a race holds a private `FSK_{e+1}` that `KeyRing.put`'s first-write-wins will never
+replace: that device could never open an op sealed under the winner's real `e+1`, permanently and
+silently. Every family caller can lose that race (D9 makes both devices deliver). `sync/keys.js`
+therefore does **mint → build → POST → put** and does not call it. Either `rotateSpace` grows a
+rollback, or it is documented as the solo-rotator helper it is.
 
-**`syncstatus.js`**: render `familyWaitingState()` as the board's one calm line while `pending` — as
-the **pending** state, never `error` (19.3). The function is exported and unused.
+**`platform/device-identity.js`** — `selfAttest` re-signs on every launch and ECDSA is randomised, so
+the blob differs each time even though all six attested fields agree. `family/engine.js` now checks
+the register first and publishes only a genuinely absent claim (otherwise `attestMyDevice` refuses,
+loudly and correctly, on every ordinary relaunch). A deterministic or persisted blob would remove the
+need for that guard.
 
-**`legend.js`**: a `setFamilyLegend(fn)` seam, the shape `settings.js` already has for
-`setFamilySections`. `membersui.js` currently bridges `renderLegend()`'s `textContent = ''` with a
-MutationObserver; the observer should be deleted the day the seam lands.
+**`i18n.js` + five modules** — the copy convention is decided (module-local frozen `{de, en}`,
+Principle 7 as the tiebreak) and **not banked**. The migration of `sync*`/`family*`/`circle*`/`pair*`
+out of `i18n.js` touches `i18n.js` + `createjoin.js` + `adminpanel.js` + `pairingui.js` +
+`syncstatus.js` + `familysettings.js` at once, because four keys are read by more than one module.
+One owner, one commit. Until then solo mode still pays for family copy.
 
-**`store.js`**: `hiddenMembers` is written and not read — `materialize()` accepts `ctx.hiddenMembers`
-and `store._project()` does not pass one, so 17.3's toggle changes the legend and not yet the board.
-`hiddenMemberIds()` is exported for whoever wires it.
+**`syncstatus.js`** — two sentences are still owed to D9's neighbours: it speaks `syncErrGeneric` for
+a held op and for a line that will not reach the other Mac, because `i18n.js` has no words of their
+own for them. `opsHeldForKey` (§5.3) is now a real, counted state and is the natural thing for the
+first of those to render.
 
-**`storage.js`**: `langzeitplaner.ring.<spaceId>` wants a named slot so a Tauri build writes it
-beside `board.json` rather than into the WebView's storage.
+**`membersui.js`** — `MEMBERS_COPY.legendHint` is dead (no call site) and passes the both-languages
+walk, which is how it survived.
 
-**PO / design**: E6-5 (the „Familie" collision), and open question 4 (invite transport — no
-`langzeitplaner://` scheme was invented; the field reads plain text carrying an address and a code,
-which is what deliverable 28's mail can carry today).
+**`storage.js`** — `langzeitplaner.ring.<spaceId>` and `langzeitplaner.sealed.<spaceId>` want named
+slots so a Tauri build writes them beside `board.json` rather than into the WebView's storage.
 
-**Convention, unresolved deliberately**: LZP-601/602 put its strings in `i18n.js`; LZP-603/605 used
-frozen `{de,en}` COPY objects in the module, citing `crypto/backup.js`'s precedent and Principle 7.
-Both ship and both are complete in both languages. Churning 338 strings across three green test
-files during an integration pass buys nothing a reader can see, so it is reported rather than done.
-`i18n.js` is already `live` in the module domain and adding keys to it adds no module.
+**Round 10's honest ceiling, unchanged and not overclaimed:** `fromGenesis` is still withheld on any
+page that does not start at genesis, and the witness window is still unpersisted, so a relay that
+forks across a relaunch is still undetectable. E6's population pulls from genesis — it is the page
+every new member makes first — so the genesis-page defence (R10-2b) carries into the family engine
+unchanged, and §3.5 is that page being made.

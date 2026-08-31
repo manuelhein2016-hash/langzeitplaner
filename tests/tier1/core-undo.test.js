@@ -1020,7 +1020,13 @@ describe('makeTx', () => {
     // (The sentence above is worded to avoid the two words f-r-o-m and a quote on one line:
     //  suite-integrity.test.js greps tier-1 test files for import specifiers with a plain regex
     //  and a quoted phrase after that word reads as an illegal import. Do not "tidy" this back.)
-    const names = Object.keys(MUTATIONS);
+    // THE V1 ROWS, SELECTED BY THE THING THAT MAKES THEM V1 ROWS. `MUTATIONS` also carries the
+    // family vocabulary now (E6-1: `setMyProfile`, `attestMyDevice`, `renameSpace`, `claimAdmin`,
+    // `transferAdmin`), and those have no v1 site — `sites: []` — because the Familienkreis has
+    // no v1. Counting the table would therefore have counted them, and INVERTING them is not
+    // something to fix: rule U6 says `member.set` / `space.set` are never undone, and the row
+    // below asserts exactly that rather than leaving it to a number.
+    const names = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length > 0);
     assert.equal(names.length, 22, `expected 22 v1 mutate sites, found ${names.length}`);
     const mint = (() => { let i = 0; return () => fmt(T0, i++, DS_A); })();
     const ctx = { act: MEM_ME, dev: DEV_A, gid: b22(), mint, newOpId: () => b22(), space: PERSONAL_PLACEHOLDER };
@@ -1059,6 +1065,39 @@ describe('makeTx', () => {
         assert.deepEqual(validateOp(op), { ok: true }, `${name} → invalid inverse op ${JSON.stringify(op)}`);
         assert.ok(!('_born' in op.f), `${name} → an inverse op wrote _born`);
       }
+    }
+  });
+
+  test('rule U6 — the family mutations produce NO undo image at all', () => {
+    // The other half of the filter above, asserted rather than assumed. `UNDOABLE_KINDS` is
+    // note/bar/cat/pad, so `captureImages` drops every `member.set` and `space.set` and `_commit`
+    // records no step for them. That is what makes ⌘Z after a rename undo the last BOARD action
+    // instead of the rename (story 18.4, and v1's four content keys one for one).
+    //
+    // It is asserted on the ops the shipped constructors actually build, so a future family row
+    // that started writing a note register would redden this rather than silently join the undo
+    // stack.
+    const mint = (() => { let i = 0; return () => fmt(T0, i++, DS_A); })();
+    const fctx = {
+      act: MEM_ME, dev: DEV_A, gid: b22(), mint, newOpId: () => b22(),
+      space: PERSONAL_PLACEHOLDER, familySpaceId: `fsp_${'F'.repeat(22)}`,
+    };
+    const famArgs = {
+      setMyProfile: { displayName: 'Papa', colorRef: 'blau' },
+      attestMyDevice: { deviceShort: DS_A, blob: 'aGVhZGVy.c2ln' },
+      renameSpace: { name: 'Familie Weber' },
+      claimAdmin: {},
+      transferAdmin: { admin: MEM_MAMA, adminPrev: b22() },
+      removeMember: { memberId: MEM_MAMA },
+    };
+    const family = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length === 0);
+    assert.deepEqual(family.sort(), Object.keys(famArgs).sort(), 'every v2 row is driven here');
+    for (const name of family) {
+      const ops = MUTATIONS[name].build(fctx, famArgs[name]);
+      assert.ok(ops.length > 0, `${name} built nothing`);
+      const { pre, post } = captureImages(new Map(), ops, { me: MEM_ME });
+      assert.equal(pre.length, 0, `${name} must not be undoable (rule U6)`);
+      assert.equal(post.length, 0, `${name} must not be undoable (rule U6)`);
     }
   });
 });

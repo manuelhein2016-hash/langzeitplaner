@@ -28,6 +28,7 @@ import { addDays, diffDays, parseISO, p2 } from './dates.js';
 // verbatim so the import door and this gesture can never drift apart (including the deliberate
 // "<nonLeapYear>-02-29" quirk documented there).
 import { reanchorRepeat } from './core/entities.js';
+import { visibilityForNewEntry } from './core/visibility.js';
 import { renderBoard, currentModel } from './board.js';
 import { openDayPopover, closePopover, popoverOpen } from './popover.js';
 import { flashCategory } from './legend.js';
@@ -133,10 +134,20 @@ export const canEdit = (entry) => !entry || entry.isForeign !== true || entry.co
 const canEditNote = (id) => canEdit(noteById(id));
 const canEditBar = (id) => canEdit(barById(id));
 
-/** 16.4 / ADR 004 §3 — an entry's `visibility` is its category's default, read ONCE at creation
- *  and never again. Stripped out of the solo projection, so this is `undefined` there and the op
- *  constructor's own default ('privat', 16.1) applies; it starts carrying a value in WP-10. */
-const defaultVisibilityOf = (catId) => store.category(catId)?.defaultVisibility;
+/**
+ * 16.4 / ADR 004 §3 — an entry's `visibility` is its category's default, read ONCE at creation
+ * and never again.
+ *
+ * It goes through `core/visibility.js:visibilityForNewEntry`, which is the one function that owns
+ * that rule, rather than reading the field here. The old form — `store.category(catId)?.
+ * defaultVisibility` — was CORRECT and correct only by coincidence: it answers `undefined` for a
+ * dangling category and for a category whose `defaultVisibility` is a value outside the enum, and
+ * three other files (`ops.js`'s enum validation, `replace.js`'s floor, `materialize.js`) all had
+ * to hold for that `undefined` to become `'privat'` rather than a level nobody chose. Routed
+ * through the policy it holds on its own, and it FAILS CLOSED twice: never the last level used,
+ * never `undefined` handed on for somebody else to default.
+ */
+const defaultVisibilityOf = (catId) => visibilityForNewEntry(store.category(catId) ?? null);
 
 /**
  * `[L]` — v1's `s.settings.lastCategoryId = catId` (story 4.2: "every entry has a category, and it

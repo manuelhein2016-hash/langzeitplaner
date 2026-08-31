@@ -1,8 +1,54 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-29 · **Stopped at:** **E6 — Familienkreis, integrated and driven** (the
-client half) and **round 10 — the E6 gate** (the engine half). The two passes ran in parallel and
-**reached the same wall from opposite sides**; read both, in that order.
+**Last session:** 2026-08-31 · **Stopped at:** **E7 — visibility and sharing, integrated and
+proven on the bytes.** The wall §9 and §10 both closed on — a family with a membership lifecycle and
+no content — is down.
+
+---
+
+## E7 — the redaction boundary. LZP-701…706 wired, and the invariant proven on the sealed bytes.
+
+All six suites green: **2004 · 769 · 101 · 868 · 193 · 32 files.** Full record:
+`docs/v2/E7-VERIFICATION.md`; findings in `FINDINGS.md` §11.
+
+**The invariant ADR 004 exists to enforce is enforced where ADR 004 says it must be: on the emitted
+ops and on the sealed bytes, never on the rendering.** `src/js/core/project.js` is no longer an
+orphan — it is the only path by which a family patch comes into existence, and there is no second
+one. Papa's Mac creates an entry through the real store, the store **derives** the publication, the
+real `sealOp` seals it under a real family key with barriers 2, 3 and 4 injected, Mama's Mac opens
+it with the real `openOp`, folds it with the real `foldAuthorized` and draws it with the real
+`materialize`. The word „Scheidungsanwalt" appears in **no** pre-seal plaintext, **no** envelope
+field, **no** ciphertext byte, and in **no** object recovered by decrypting the whole family log
+under **every epoch key the family has ever held**. Papa downgrades to Privat; the entry leaves
+Mama's board at the next sync and every withdrawable register on her disk holds an explicit `null`.
+A Privat entry — created, edited, moved, made repeating, recategorised, deleted — emits **zero**
+family ops, counted rather than shaped.
+
+`tests/attack/redaction-invariants.test.js` is ADR 004 §10's row set: **49 rows in 10 groups**,
+INV-R1…R4 · P7a–P7g, P7i · A3 · 16.1 · 16.6 · 16.7 · Principle 9. **22 mutants, 22 dead**, plus one
+null control that correctly survives. `assertNeverTransmitted` (ADR 004 §10.1) ships as
+`tests/helpers/never-transmitted.js` and runs in every Belegt scenario.
+
+**The one thing to read first: `FINDINGS.md` §11, row E7-1.** `core/ops.js:makeOp` spread the field
+patch — `{ ...f }` copies string keys only — and `projectForFamily`'s barrier-3 brand is a
+non-enumerable **symbol**. So every op built through the shipped constructor reached `sealOp`
+unbranded and was refused: **the epic could not have worked at all**, and the failure read as a bug
+in the projection. Two more defects came out of writing the row that asks what the exposure badge
+says while the op is still in the outbox (**E7-2**: a pending downgrade rendered as *already
+withdrawn* — the badge under-reporting what the family can still see, the one direction ADR 004 §6
+forbids; **E7-3**: acknowledging a push never redrew it).
+
+**One measured weakness is stated rather than hidden. E7-4:** ADR 004 §10's **P7i** ("a Belegt op
+and a Geteilt op are the same ciphertext length") is true *inside* a 256-byte padding bucket and
+stops being true **below the product's own `str80` note cap** — so a relay operator can distinguish
+a long shared note from a booking **without a key**. No content escapes; one bit about a level does.
+Closing it means a second padding tier, which is a storage cost and a PO decision. The boundary is
+measured and pinned so that the day it moves, the row must be inverted rather than relaxed.
+
+**Three modules shipped dark and are now wired:** `family/sharing.js` (installed through
+`popover.js#useSharing` as a **port**, because a static import would put solo mode's graph inside
+`src/js/family/` and ADR 003 §7 gate 2 refuses that), `popover.js`'s create path (which hardcoded
+`'privat'`, so **16.4 did not fire from the popover at all**), and `i18n.js`'s six ADR 004 §4.3 keys.
 
 ---
 

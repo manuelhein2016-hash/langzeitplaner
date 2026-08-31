@@ -87,7 +87,7 @@ import { nextFreeRef } from './palette.js';
 import * as storage from './storage.js';
 
 import {
-  PERSONAL_PLACEHOLDER, FIELDS, flattenPref, spaceClassOf, PARK_REASONS,
+  PERSONAL_PLACEHOLDER, FIELDS, flattenPref, spaceClassOf, PARK_REASONS, OP_KINDS, OpError,
   noteSet, barSet, catSet, padSet, prefSet, buildMutation, mutation,
 } from './core/ops.js';
 import { isMonthKey, noteKey, barKey, catKey, isMemberId, isDeviceId, isSpaceId } from './core/entities.js';
@@ -106,6 +106,11 @@ import { createUndoStacks, makeTx, captureImages, shadowContent } from './core/u
 import { migrateV1, migrateSnapshots, toV1Snapshot } from './core/migrate1to2.js';
 import { planReplaceAll } from './core/replace.js';
 import { foldAuthorized, REJECT_REASONS } from './core/authz.js';
+// ADR 004 §2 — the ONE function permitted to turn a local entry into something that leaves the
+// device, and `ops.contract.js` §6's derivation that calls it. The store owns §2.3's LOUD failure
+// path; `PUBLISH_FAILURE_CONTRACT` in that module is the specification `_publishAndEnqueue` below
+// satisfies, clause by clause.
+import { derivePublication, PUBLISH_FAILURE_CONTRACT } from './core/project.js';
 
 /**
  * THE TWO REFUSALS A LATER OP CAN CURE — finding F-6, and the reason `applyRemote` parks.
@@ -122,6 +127,25 @@ import { foldAuthorized, REJECT_REASONS } from './core/authz.js';
  * ADR 003 §7 gate 2 requires `sync/` to be unreachable from the boot graph.
  */
 const CURABLE_REFUSALS = new Set([REJECT_REASONS.NOT_MY_DEVICE, REJECT_REASONS.UNATTESTED_DEVICE]);
+
+/**
+ * Does this named mutation build ops that live in the FAMILY space? DERIVED from `OP_KINDS`, not
+ * from a list here: the table already declares each row's `kinds` and `OP_KINDS` already declares
+ * each kind's space, so a sixth family mutation is covered the moment it is added and a list
+ * would be the thing that silently stopped matching.
+ *
+ * `every` and not `some`: a row that mixed a family op with a personal one would not be a family
+ * mutation, it would be a bug in `core/ops.js` (the two spaces are sealed under different keys —
+ * 21.2), and answering `true` for it here would hide that behind a friendly error message.
+ * @param {string} name @returns {boolean}
+ */
+function isFamilyMutation(name) {
+  let kinds;
+  try { kinds = mutation(name).kinds; }
+  catch { return false; }                   // unknown name — `buildMutation` owns that refusal
+  return Array.isArray(kinds) && kinds.length > 0
+    && kinds.every((k) => OP_KINDS[k] && OP_KINDS[k].space === 'family');
+}
 
 export const SCHEMA_VERSION = 1;
 const UNDO_LIMIT = 50;
@@ -253,6 +277,16 @@ export function migrate(raw) {
 // never inferred from a v1 entry object, which cannot carry them.
 
 const CONTENT_KEYS = ['notes', 'bars', 'categories', 'scratchpads'];
+/**
+ * The truth fields a MATERIALIZED entry may carry a newer value for than the raw registers do —
+ * ADR 004 §4.1's promotion. `_publishAndEnqueue` overlays exactly these and nothing else, so a
+ * field materialization derives (`redacted`, `isForeign`, `exposure`, `ownerId`) can never reach
+ * a projection, and `categoryId` is absent on purpose (A3): it has no `pub.` counterpart at any
+ * level and therefore nothing to overlay onto.
+ */
+const PROMOTED_TRUTH_FIELDS = [
+  'date', 'text', 'repeatsYearly', 'startDate', 'endDate', 'label', 'coEdit', 'visibility',
+];
 const SETTER = { note: noteSet, bar: barSet, cat: catSet };
 const COLLECTION = [
   { kind: 'note', key: 'notes', fields: ['date', 'text', 'categoryId', 'repeatsYearly'],
@@ -416,6 +450,38 @@ function bornBetween(lo, hi, n) {
     out.unshift(cur);
   }
   return out;
+}
+
+/**
+ * MY OWN ROWS. A FOREIGN ENTRY IS NOT BOARD CONTENT THIS DEVICE MAY DESCRIBE — and this was a
+ * latent blocker rather than a tidiness filter.
+ *
+ * `_diff` is v1's "say what changed about my board in ops", and every op it can mint is a
+ * `note.set` / `bar.set` / `cat.set` / `pad.set` in MY PERSONAL SPACE. A foreign entry has no
+ * truth registers by construction (ADR 004 §4.2 — the viewer holds `pub.*` and nothing else) and
+ * its `id` is the FAMILY ENTITY KEY (`fnote:<member>/<uuid>`), not a uuid. So handing one to
+ * `diffCollection` does one of two things, both wrong:
+ *
+ *   · `cellsInLog` calls `noteKey('fnote:mem_…/e1')` and THROWS `EntityKeyError` out of whatever
+ *     door ran the diff — `_adopt()`, which every local write calls first. That is the failure
+ *     this filter was found by: one family entry on the board and the next `setSettings` threw;
+ *   · and if it did not throw, it would MINT `note:<the family key>` — a private copy of Mama's
+ *     entry in MY personal space, pushed to MY other Mac, for ever.
+ *
+ * It could not happen before a family space existed: `stripV2Fields` (`materialize.js:947`)
+ * filters `!isForeign` while `familySpaceId === null`, so solo mode never had one of these in
+ * `state.notes`. `store.useFamilySpace()` is what makes the branch reachable, so the filter lands
+ * with it.
+ *
+ * The test is `isForeign`, which `materialize` writes on EVERY candidate (`false` on my own,
+ * `true` on a viewer's), plus the key shape as a second lock — a row hand-written into `state` by
+ * a caller that predates the retrofit carries no flag at all, and `id` containing `:` is the one
+ * thing that cannot be true of a v1 uuid.
+ * @param {any} rows @returns {any[]}
+ */
+function ownRows(rows) {
+  if (!Array.isArray(rows)) return rows;
+  return rows.filter((e) => !(e && (e.isForeign === true || (typeof e.id === 'string' && e.id.includes(':')))));
 }
 
 /** One collection, before vs after, into `ops`. Entries are matched by `id`, never by index. */
@@ -1253,6 +1319,19 @@ class Store {
      *  re-join. Set by `init()` when a lineage-bearing board's log was quarantined, and reported
      *  through `diagnostics().sync` so a re-join is a visible event and never a quiet one. */
     this._rejoined = false;
+    /**
+     * ── ADR 004 §2.3 — THE LOUD FAILURE PATH'S OWN STATE ──────────────────────────────────
+     *
+     * `null` in health; otherwise `{ at, entityKey, barrier, message }`, the `RedactionError`
+     * that stopped the family sync loop. It is a HALT, not a warning: `familyOutbox()` answers
+     * `[]` while it is set, so not one further family envelope is offered to the relay.
+     *
+     * IT IS DELIBERATELY NOT `_syncArmed = false`. That flag gates `_logMayBeWritten()`, so
+     * clearing it would stop the LOG being written and lose the very ops the halt exists to
+     * protect — the failure mode §5.1 describes, arrived at from the other side. What must stop
+     * is publication, and only publication.
+     */
+    this.redactionHalt = null;
 
     // ── the warnings channel (F-8) ──────────────────────────────────────────
     // Everything this layer knows it lost, refused or repaired ends up here. It is ONE array for
@@ -1463,6 +1542,45 @@ class Store {
   /** Is this store running on a durable, keystore-backed identity? Diagnostics and tests. */
   hasDurableIdentity() { return this._identity !== null; }
 
+  /**
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   * WHO THIS DEVICE CAN VERIFY AN ATTESTATION FOR — ADR 002 §2.3, and it is a MOVING SET.
+   * ═══════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * `foldAuthorized` stage 0a takes `ctx.attestOpen(memberId, blob)` and, without one,
+   * `attestationVerifies` returns **`false` for every blob** — fail-closed, correctly, because a
+   * fold that admitted an unverifiable attestation would be the key-injection hole §2.3 exists to
+   * close. `useIdentity()` accepts one, and that was the ONLY way to supply it.
+   *
+   * **MEASURED, THREE MACS, A REAL CIRCLE.** Nothing in `src/js/` ever passed one. So every peer's
+   * `member.set{dev.<short>}` op was rejected `badAttestation` at stage 0a, and — because that op
+   * is the one thing that could ever attest that device — every *subsequent* op from that peer was
+   * parked `unattestedDevice`, permanently, curable by nothing. A circle could not admit a single
+   * op from anybody. That is finding E6-1 read from its far side, and it survived a whole round
+   * because both halves fail silently: the ops arrive, they park, and the board is simply empty.
+   *
+   * **WHY IT IS ITS OWN METHOD AND NOT AN ARGUMENT TO `useIdentity()`.** The two answer different
+   * questions and change on different clocks. An identity is adopted ONCE, before `init()`, and
+   * re-pointing it is refused. Who I can verify changes every time the roster does — a member
+   * joins, a member pairs a second Mac — and each of those must refresh this WITHOUT re-adopting
+   * an identity, which would warn about a spine minted under the temporary one and rebuild the
+   * undo stacks for no reason. `family/engine.js#startFamilyEngine` refreshes it on every key
+   * pass, from `platform/device-identity.js#buildAttestOpen` over the roster's own rows.
+   *
+   * It is a SYNCHRONOUS lookup because the fold is synchronous and WebCrypto is not; the async
+   * verification happens once, in the builder, and a blob that failed it is simply absent — which
+   * `authz.js` reads as `BAD_ATTESTATION`. Fail-closed is preserved end to end.
+   *
+   * @param {((memberId:string, blob:string) => (Object|null))|null} fn
+   */
+  setAttestOpen(fn) {
+    if (fn !== null && typeof fn !== 'function') {
+      throw new TypeError('store.setAttestOpen: expected (memberId, blob) => DeviceAttestation|null, or null');
+    }
+    this._attestOpen = fn;
+    return this;
+  }
+
   // ══════════════════════════════════════════════════════════════════════════════════════════
   // THE SYNC SEAM — LZP-502.  `src/js/sync/personal.js` is the only caller.
   //
@@ -1536,6 +1654,292 @@ class Store {
   /** The `psp_…` id in force, or `null` in solo mode. */
   personalSpaceId() { return this._personalSpaceId; }
 
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // THE FAMILY PUBLISH SEAM — finding E6-1, and the write half of E6
+  //
+  // `_familySpaceId` has existed since WP-3. It is read by `_project()` (which strips the v2
+  // decorations while it is null), by `_projectionOf`, by the checkpoint envelope and by
+  // `_ctx()`, where `core/ops.js:spaceFor` refuses to build a `pub.set` / `member.set` /
+  // `space.set` without it. Nothing ever SET it. The consequences, all measured:
+  //
+  //   · `store.apply('setMyProfile', …)` threw `unknown mutation` — 15.6's write half did not
+  //     exist, so every member row on every Mac read „Name noch nicht angekommen", MY OWN
+  //     INCLUDED (E6-1);
+  //   · a family op that arrives from a peer folds into the register map and CANNOT RENDER,
+  //     because `core/materialize.js:791` is `if (!familySpaceId) break;`. The op lands, the
+  //     board stays empty, and nothing anywhere is in an error state;
+  //   · `outbox()` is hard-filtered to `_personalSpaceId`, so a family op this device authored
+  //     would never be offered to the relay: this build shared nothing outbound.
+  //
+  // FOUR METHODS, and they are the whole seam. `sync/family.js` takes the outbox as a PORT
+  // (`{lines, ack}`) with an empty default and reports `outbound.wired === false` until one is
+  // handed in — `familyOutbound()` is that port, so wiring it is one property and not a new
+  // protocol.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Adopt the Familienkreis this device's family ops are authored into (F15, ADR 001 §3).
+   *
+   * **UNLIKE `usePersonalSpace()`, THIS MAY BE CALLED AFTER `init()`, AND THAT IS NOT A
+   * RELAXATION.** The personal rule exists because `_ctx().space` defaults to the `'personal'`
+   * PLACEHOLDER, so a spine minted before the space is adopted carries the wrong space in every
+   * op and `sealOp` refuses each one for ever (ADR 002 §5.2.2 check 2). There is no family
+   * placeholder: `spaceFor` THROWS without an `fsp_…`, so before this call the log holds no family
+   * op at all and there is nothing to have stamped wrongly. Being callable mid-session is also
+   * required rather than convenient — joining a circle happens in the middle of a session, which
+   * is the whole of story 15.3.
+   *
+   * Three things follow the assignment, each of which is a defect if it is missing:
+   *   · the log becomes writable (`_logMayBeWritten`), because a Mac can be in a Familienkreis
+   *     without ever having opted into own-device sync (19.4) — that is precisely the Mac E6's
+   *     verification measured making zero `/ops` requests — and until now `_opsPersisted` was
+   *     gated on a PERSONAL space alone, so that Mac's family ops would never have reached disk;
+   *   · the board is re-projected, because `_project()` branches on `_familySpaceId` to decide
+   *     whether the v2 decorations are stripped and whether a foreign entry may render at all;
+   *   · `emit()` runs, so a board mounted before the join redraws without anybody polling.
+   *
+   * @param {string} spaceId an `fsp_…` SpaceId
+   * @returns {string} the id now in force
+   */
+  useFamilySpace(spaceId) {
+    if (!isSpaceId(spaceId) || spaceClassOf(spaceId) !== 'family') {
+      throw new TypeError(
+        `store.useFamilySpace: expected an fsp_… SpaceId, got ${JSON.stringify(spaceId)}`);
+    }
+    if (this._familySpaceId !== null && this._familySpaceId !== spaceId) {
+      throw new Error(
+        `store.useFamilySpace: this store already writes into ${this._familySpaceId}. Addendum `
+        + '20.6 — a user belongs to at most ONE Familienkreis; leave the first (20.3) and build a '
+        + 'new store.');
+    }
+    if (this._familySpaceId === spaceId) return spaceId;
+    this._familySpaceId = spaceId;
+    this._syncArmed = true;
+    // ADR 006 §9.5 — `_logMayBeWritten()` is what consults `store.quarantine`, so this may turn
+    // the flag ON and can never turn it on over bytes the quarantine is preserving.
+    if (this.ready) {
+      this._opsPersisted = this._logMayBeWritten();
+      this._project();
+      this.emit('family-space');
+    }
+    return spaceId;
+  }
+
+  /** The `fsp_…` id in force, or `null` when this Mac is in no Familienkreis. */
+  familySpaceId() { return this._familySpaceId; }
+
+  /**
+   * THE FAMILY OUTBOX — `outbox()`'s definition, over the family space (ADR 003 §8.1).
+   *
+   * It is the SAME METHOD with a different space rather than a second reader, because the four
+   * filters `outbox()` documents are not personal-space facts: `seq === null` is the definition,
+   * a parked line is a promise not to fold, a peer's op can never be in my outbox (`POST /ops`
+   * answers `403 device_mismatch`), and a genesis stamp is shared prehistory. A copy would drift
+   * at the first of them somebody remembered to change in one place.
+   * @param {{limit?:number}} [opts]
+   */
+  familyOutbox(opts = {}) {
+    // ADR 004 §2.3 — a RedactionError STOPS THE SYNC LOOP. Here is where it stops: the engine
+    // asks for lines and is told there are none, for as long as the halt stands. It is never
+    // logged-and-skipped, because a silently omitted downgrade op is exactly the §5.1 failure —
+    // the entry looks downgraded on my board and stays fully readable on Mama's.
+    if (this.redactionHalt) return [];
+    return this.outbox({ ...opts, space: this._familySpaceId });
+  }
+
+  /**
+   * ── ADR 004 §2.3 — THE PUBLICATION SEAM, AND THE LOUD FAILURE PATH ────────────────────────
+   *
+   * `core/project.js:PUBLISH_FAILURE_CONTRACT` is the specification this satisfies; its six
+   * clauses are checked executably by `tests/tier1/redaction-failpath.test.js`.
+   *
+   * **IT IS CALLED SYNCHRONOUSLY, FROM INSIDE THE APPEND, AND THAT IS A DEPARTURE FROM §2.3's
+   * WORDING WITH §2.3's OWN REASON.** The ADR places the publish path "inside the
+   * `queueMicrotask` after `emit()`" because ADR 001 §0.9 forbids an `await` above `emit()` — the
+   * hazard is ASYNCHRONY, and `derivePublication` is pure and synchronous. Deferring it to a
+   * microtask would buy nothing and cost two things that matter:
+   *
+   *   1. **The gid.** ADR 004 §5 requires the truth write and the publication to be ONE
+   *      transaction — one ⌘Z (18.4). An op appended after `_stacks.push` carries the gid and is
+   *      outside the undo entry, so ⌘Z would restore `visibility: 'privat'` in the truth and
+   *      leave `pub.level: 'geteilt'` published. A leak that survives undo.
+   *   2. **The ordering.** A microtask runs after `emit()`, so every listener redraws against a
+   *      board whose publication has not been derived yet, and the exposure badge (§6) reads a
+   *      state that is one tick stale in the UNSAFE direction.
+   *
+   * What genuinely belongs in the microtask is the SEALING, and it is already there: the outbox
+   * is derived from the log (`ops.jsonl` lines with no `seq`), so there is no enqueue step at
+   * all and `sync/family.js` seals on its own cadence.
+   *
+   * @param {Object[]} localOps the ops just appended @param {string} gid their group
+   * @returns {Object[]} the `pub.set` ops appended, `[]` when solo or when nothing changed
+   */
+  _publishAndEnqueue(localOps, gid) {
+    if (this._familySpaceId === null) return [];        // 16.1 — solo mode costs zero bytes
+    if (this.redactionHalt) return [];                  // already halted; do not compound it
+    let pubs = [];
+    try {
+      pubs = derivePublication(localOps, this._log.registers(), {
+        ...this._ctx(gid),
+        me: this._me,
+        truthOf: (truthKind, uuid) => this._truthOf(truthKind, uuid),
+      });
+    } catch (err) {
+      // CATCH BY NAME, never by identity: `core/project.js` and `crypto/envelope.js` each export
+      // a `RedactionError` and neither may import the other (ADR 005 §2).
+      if (err && err.name === 'RedactionError') {
+        this.redactionHalt = {
+          at: new Date().toISOString(),
+          barrier: err.barrier ?? null,
+          message: String(err.message),
+          gid: gid ?? null,
+        };
+        this._warn(
+          `PUBLICATION HALTED (${err.barrier ?? 'redaction'}): ${err.message} — family sync is `
+          + 'stopped and nothing further will be published from this Mac until the cause is '
+          + `fixed. ${PUBLISH_FAILURE_CONTRACT.adr}. Your own board is unchanged and your local `
+          + 'ops are safe; what has stopped is publication, and only publication.',
+        );
+        return [];
+      }
+      throw err;
+    }
+    if (!pubs.length) return [];
+    for (const op of pubs) this._log.append(op);
+    return pubs;
+  }
+
+  /**
+   * The MATERIALIZED truth fields of one of my entities — ADR 004 §4.1's `truth` argument.
+   *
+   * Two layers, and the order is the whole point. The registers carry the structural rows
+   * (`_alive`, `_born`, `visibility`) that materialization renames or strips; the materialized
+   * entry carries PROMOTION — a co-editor's newer `pub.date` already folded over my older one
+   * (§4.1). Publishing raw registers would re-publish my stale value at a fresh stamp on every
+   * visibility change and silently win, which is the co-edit half of the §5.1 failure.
+   *
+   * @param {'note'|'bar'} truthKind @param {string} uuid @returns {Object|null}
+   */
+  _truthOf(truthKind, uuid) {
+    let cells;
+    try { cells = this._log.registers().get(`${truthKind}:${uuid}`); } catch { cells = null; }
+    if (!cells) return null;
+    const truth = {};
+    for (const [name, cell] of cells) truth[name] = cell === null ? null : cell.value;
+    const list = truthKind === 'note' ? this.state.notes : this.state.bars;
+    const mat = Array.isArray(list) ? list.find((e) => e && e.id === uuid) : undefined;
+    if (mat) {
+      for (const f of PROMOTED_TRUTH_FIELDS) {
+        if (Object.hasOwn(mat, f)) truth[f] = mat[f];
+      }
+    }
+    return truth;
+  }
+
+  /**
+   * The `{lines, ack}` port `sync/family.js` declares as `FamilySyncDeps.outbound`.
+   *
+   * `ack` is `ackPushed`, unchanged and unwrapped: `oplog.ack(oid, seq)` addresses a line by opId
+   * and knows nothing about spaces, so one acknowledger serves both engines and there is no way
+   * for the two to disagree about what "the server has it" means (ADR 003 §3.1).
+   */
+  familyOutbound() {
+    return {
+      lines: (o) => this.familyOutbox(o || {}),
+      ack: (entries) => this.ackPushed(entries),
+    };
+  }
+
+  /**
+   * **ADR 004 §2.2 BARRIER 4 — `sealOp`'s `ctx.levelOf`, answered from the AUTHENTICATED REGISTER
+   * MAP and from nothing else.**
+   *
+   * `crypto/envelope.js` refuses to seal a family `pub.set` without this function, and the refusal
+   * is deliberate: the level a payload may carry must be re-derived at seal time rather than taken
+   * from the patch. Finding S5 is what happens when it is not — the caller's declared level wins,
+   * a legitimate projection declares one on every transition, and a `pub.text` gets sealed for an
+   * entry the register map calls **belegt**.
+   *
+   * **THE ONE CHOICE IN HERE IS WHICH REGISTER IT READS, AND `visibility` IS THE ONLY RIGHT
+   * ANSWER.** `pub.level` — the level last PUBLISHED to the family — is the level a transition is
+   * moving AWAY from, so wiring this to it makes every first share a barrier-4 refusal and every
+   * downgrade a barrier-4 refusal in the other direction. `visibility` is the entity's own `gov`
+   * truth register in MY PERSONAL space (ADR 001 §3.1), it already carries the NEW level when the
+   * publish microtask runs (ADR 001 §0.9), and it is the same value `core/visibility.js#plan()`
+   * hands to `projectForFamily` as `truth.visibility`. One value, two consumers — which is exactly
+   * what `PUBLISH_FAILURE_CONTRACT` clause 5 requires and what `brand.level === level` checks.
+   *
+   * **A FOREIGN ENTRY ANSWERS `null`, AND THAT IS A REFUSAL RATHER THAN A GUESS.** The key names
+   * its owner (`fnote:<memberId>/<uuid>`, ADR 001 §4.4), and a viewer holds `pub.*` for a peer's
+   * entry and no `visibility` register at all — there is no truth here to re-derive from. Barrier 4
+   * turns the `null` into a `RedactionError`, which is the correct outcome: **this device may not
+   * publish somebody else's entry**, and answering with the peer's last-published `pub.level`
+   * instead would let a co-edit re-publish a text at a level its owner had since withdrawn.
+   *
+   * @param {string} entityKey an `fnote:`/`fbar:` family key
+   * @returns {'privat'|'belegt'|'geteilt'|null}
+   */
+  familyLevelOf(entityKey) {
+    if (typeof entityKey !== 'string') return null;
+    const slash = entityKey.indexOf('/');
+    const colon = entityKey.indexOf(':');
+    if (colon < 0 || slash < 0) return null;
+    const kind = entityKey.slice(0, colon);
+    const owner = entityKey.slice(colon + 1, slash);
+    const uuid = entityKey.slice(slash + 1);
+    const truthKind = kind === 'fnote' ? 'note' : (kind === 'fbar' ? 'bar' : null);
+    if (truthKind === null) return null;
+    // Ownership is READ OFF THE KEY, not off a flag: `_me` is this device's MemberId and the key
+    // carries the author's. A key naming anybody else has no truth register on this Mac and the
+    // honest answer is that there is nothing to derive.
+    if (owner !== this._me) return null;
+    let cells;
+    try { cells = this._log.registers().get(`${truthKind}:${uuid}`); } catch { return null; }
+    const cell = cells && typeof cells.get === 'function' ? cells.get('visibility') : undefined;
+    const v = cell === undefined ? undefined : cell.value;
+    return v === 'privat' || v === 'belegt' || v === 'geteilt' ? v : null;
+  }
+
+  /**
+   * Who holds the admin seat, and the opId a transfer must name as `adminPrev` (ADR 001 §4.1).
+   *
+   * The chain is `core/authz.js`'s to resolve and this does not re-resolve it: `applyRemote`
+   * gates every remote op on `foldAuthorized` before it reaches the log, so a link that lost the
+   * longest-chain resolution never became a register write and `space:<id>` → `admin` is the
+   * accepted head's value. `headOpId` is that register's `op` — the very link the next transfer
+   * supersedes — which is why this is one register read and not a second chain walk.
+   *
+   * @returns {{spaceId:string|null, admin:string|null, headOpId:string|null, isMe:boolean}}
+   */
+  familyAdmin() {
+    const sid = this._familySpaceId;
+    const blank = { spaceId: sid, admin: null, headOpId: null, isMe: false };
+    if (sid === null) return blank;
+    const cells = this._log.registers().get(`space:${sid}`);
+    const cell = cells && cells.get('admin');
+    if (!cell || typeof cell.value !== 'string') return blank;
+    return {
+      spaceId: sid,
+      admin: cell.value,
+      headOpId: typeof cell.op === 'string' ? cell.op : null,
+      isMe: cell.value === this._me,
+    };
+  }
+
+  /**
+   * Every space this device authors SYNCED ops into. `local` is never one of them (ADR 001 §3.3).
+   * The order is personal-then-family and nothing depends on it; what depends on the LIST is
+   * `_outboxHorizonCap()`, which must see BOTH outboxes or a compaction folds away a family op
+   * the relay has never seen — finding E5-2, one space to the right.
+   * @returns {string[]}
+   */
+  _syncedSpaces() {
+    const out = [];
+    if (this._personalSpaceId !== null) out.push(this._personalSpaceId);
+    if (this._familySpaceId !== null) out.push(this._familySpaceId);
+    return out;
+  }
+
   /**
    * MAY THE LOG BE WRITTEN THIS LAUNCH? ADR 006 §9.5, and it is the whole of that rule.
    *
@@ -1547,7 +1951,11 @@ class Store {
    * next launch can reconsider it) means the log stays read-only for this session.
    */
   _logMayBeWritten() {
-    if (!this._syncArmed || this._personalSpaceId === null) return false;
+    // EITHER space arms the log. A Mac can be in a Familienkreis without ever having opted into
+    // own-device sync (19.4 is a separate opt-in, and `family/mount.js` mounts the circle from
+    // `board.json` alone) — gating this on the PERSONAL space alone meant that Mac authored
+    // family ops into a log it would never write, so every one of them was lost at quit.
+    if (!this._syncArmed || this._syncedSpaces().length === 0) return false;
     if (this.bootFailure) return false;                       // I-2: a read-only session writes nothing
     if (this.quarantine && !this.quarantine.movedAside) return false;
     return true;
@@ -1589,12 +1997,14 @@ class Store {
    *    seq 0" — receives nothing of the pre-space board through the op stream. Pairing (or the
    *    backup file, ADR 002 §7.2) has to hand the board over. See E5's report.
    *
-   * @param {{limit?:number}} [opts]
+   * @param {{limit?:number, space?:string|null}} [opts] `space` defaults to the PERSONAL space,
+   *        which is what every pre-existing caller means. `familyOutbox()` passes the `fsp_…`;
+   *        the filters below are identical for both and are not personal-space facts.
    * @returns {Array<{op:Object, seq:null, park:null}>} in the log's own arrival order
    */
-  outbox({ limit = Infinity } = {}) {
-    const sp = this._personalSpaceId;
-    if (sp === null) return [];
+  outbox({ limit = Infinity, space } = {}) {
+    const sp = space === undefined ? this._personalSpaceId : space;
+    if (sp === null || sp === undefined) return [];
     const out = [];
     for (const line of this._log.lines()) {
       if (out.length >= limit) break;
@@ -1627,7 +2037,23 @@ class Store {
       try { if (this._log.ack(e.oid, e.seq)) n += 1; }
       catch (err) { this._warn(`push ack refused for ${e.oid}: ${err.name}: ${err.message}`); }
     }
-    if (n) this.schedulePersist();
+    if (n) {
+      this.schedulePersist();
+      // 16.6 / ADR 004 §6 — THE ACK IS WHAT MAKES THE BADGE TRUE, so it has to redraw.
+      //
+      // `exposure` is derived from what carries a server `seq`, and this method is the only place
+      // a `seq` ever appears for a local op. Without the re-projection the badge stayed HOLLOW
+      // until the next unrelated edit — the entry was published, the family could see it, and my
+      // own board went on saying "not synced yet" for as long as I did not touch anything. That
+      // is the badge lagging in the SAFE direction, which is why it was invisible, and it is
+      // still wrong: 19.3 says a sync state that has resolved must stop being shown.
+      //
+      // Only when a family space exists, because only then is there an exposure to be wrong about.
+      if (this._familySpaceId !== null) {
+        this._project();
+        this.emit('sync');
+      }
+    }
     return n;
   }
 
@@ -2796,6 +3222,15 @@ class Store {
         refused: Array.isArray(this.syncRefusals) ? this.syncRefusals.length : 0,
         lost: this._syncLostOps().length,
         chain: this.syncChain ?? null,
+        // ── THE FAMILY HALF (E6-1) ───────────────────────────────────────────────────────────
+        // Reported beside the personal counters and never merged into them: two spaces, two
+        // engines, two key rings (21.2), and „nichts geht raus" has a different cause and a
+        // different cure on each side. `familyOutbox` reads 0 on every Mac in no circle, which is
+        // the same answer it gave before this seam existed.
+        familySpaceId: this._familySpaceId,
+        familyOutbox: this._familySpaceId === null ? 0 : this.familyOutbox().length,
+        familyCursor: this._familySpaceId === null ? null : this.cursor(this._familySpaceId),
+        admin: this.familyAdmin().admin,
       },
       lineage: {
         id: this._lineageId,
@@ -2926,6 +3361,150 @@ class Store {
   registers() { return this._log.registers(); }
 
   /**
+   * THE THREE MEMBER INPUTS `materialize()` NEEDS, out of the log and out of the local prefs.
+   *
+   * This used to be three constants — `members: new Map()`, `currentMembers: new Set([me])`,
+   * `hiddenMembers: new Set()` — and each of them silently disabled a shipped story:
+   *
+   *   · `currentMembers: {me}` is the strictest possible reading of ADR 001 §4.2 and it drops
+   *     EVERY foreign entry: `entities.js:projectable` refuses a foreign entry whose owner is not
+   *     in the set (20.2). So Mama's shared entry folded into the register map, converged
+   *     perfectly, and was never drawn. Now it is §4.2's own definition, verbatim —
+   *     `{ m : member:m exists ∧ _alive !== false }` — read off the same registers `authz.js`
+   *     reads it off, which is legitimate here BECAUSE `applyRemote` gates on `foldAuthorized`
+   *     before anything reaches the log: `registers()` IS the authorized fold (see `applyRemote`).
+   *     `me` is unioned in unconditionally, so a Mac whose own `member:` record has not folded yet
+   *     still renders its own board — fail-open for me, fail-closed for everybody else.
+   *   · `members: new Map()` left 17.2's member colour and 17.6's attribution with nothing to
+   *     resolve, so a foreign entry rendered under its initial and „einem Mitglied".
+   *   · `hiddenMembers: new Set()` made 17.3's per-member toggle change the LEGEND AND NOT THE
+   *     BOARD. `store.setSettings({hiddenMembers: {…}})` wrote the pref, `materialize` accepted
+   *     the ctx field, `projectable` applied it — and `_project()` never passed it. Every layer
+   *     of that feature existed except the one line that connects them.
+   *
+   * IT IS DELIBERATELY NOT USED BY `_projectionOf()`. That builds a projection of an ARBITRARY
+   * log to compare against another one (`_reconcileOntoBoard`, `_projectSafe`'s trial). Feeding a
+   * device-local PRESENTATION filter into a comparison would make hiding Papa look like content
+   * that had gone missing, and reconciliation would try to put it back.
+   *
+   * @param {Map} regs @returns {{members:Map, currentMembers:Set<string>, hiddenMembers:Set<string>}}
+   */
+  _memberCtx(regs) {
+    const members = new Map();
+    const currentMembers = new Set([this._me]);
+    for (const key of regs.keys()) {
+      if (!key.startsWith('member:')) continue;
+      const id = key.slice('member:'.length);
+      if (!isMemberId(id)) continue;
+      const cells = regs.get(key);
+      const val = (f) => {
+        const c = cells.get(f);
+        return c === undefined ? undefined : c.value;
+      };
+      // §4.2: a member record EXISTS ⇒ they are current, unless `_alive` is explicitly false. An
+      // absent `_alive` is not a "no" (ADR 001 §5 step 3: meaning is never inferred from absence),
+      // which is why a record carrying nothing but a `dev.*` attestation already counts.
+      if (val('_alive') !== false) currentMembers.add(id);
+      const displayName = val('displayName');
+      const colorRef = val('colorRef');
+      const name = typeof displayName === 'string' ? displayName.trim() : '';
+      members.set(id, {
+        displayName: name === '' ? null : name,
+        colorRef: typeof colorRef === 'string' ? colorRef : null,
+        // 17.2's chip. `[...name][0]` and never `name[0]`: a name beginning with an emoji or an
+        // astral character would otherwise put half a surrogate pair in a 16 px circle.
+        //
+        // `family/membersui.js:initialOf` carries the same rule for the LEGEND, with
+        // `toLocaleUpperCase(de|en)` and a `·` placeholder, and the two are deliberately not one
+        // function: `membersui.js` imports THIS module, so importing it back would be a cycle,
+        // and it is a `family/` module, which ADR 005 §2 keeps out of `boot.js`'s import graph.
+        // The rule they share is the grapheme; de and en upper-case identically, and `null` here
+        // means "no name yet", which `materialize` renders as an absent chip rather than a dot.
+        initial: name === '' ? null : [...name][0].toUpperCase(),
+      });
+    }
+    return { members, currentMembers, hiddenMembers: this._hiddenMembers() };
+  }
+
+  /**
+   * 16.6 / ADR 004 §6 — THE EXPOSURE BADGE'S TWO INPUTS. *"The badge must never promise a privacy
+   * state that has not yet reached the server."*
+   *
+   * The badge on MY OWN entry is derived from what actually reached the log, never from my local
+   * intent. Both hooks are optional in `materialize.js` and without them the badge simply reports
+   * the current level and never pends — which was the honest answer while there was no outbox to
+   * ask, and is the wrong one now that there is: a pending downgrade would render as ALREADY
+   * WITHDRAWN, and that is the badge promising a privacy state the family has not been told about.
+   *
+   * `lastAckedPubLevel` restricts `pub.level` to ops that carry a server `seq` (ADR 003 §3.1's
+   * `accepted` ≡ `duplicate`), so a level whose op is still in the outbox does not count. Both
+   * errors then point the same way — a pending upgrade shows the old LOWER exposure, a pending
+   * downgrade the old HIGHER one — and the badge never UNDER-reports what others can see.
+   *
+   * Solo mode reaches none of it: with no family space there are no `fnote:`/`fbar:` registers, so
+   * the closures are never called.
+   *
+   * @param {Map} regs @returns {Object} the two `MaterializeCtx` hooks
+   */
+  _exposureCtx() {
+    if (this._familySpaceId === null) return {};
+    // ONE PASS over the log, not one per entity. Two answers come out of it:
+    //   `pending`  entity keys with a `pub.set` still in the outbox (no seq, not parked)
+    //   `acked`    the NEWEST `pub.level` among ops that DO carry a seq
+    //
+    // The second cannot be read off the register map, and that is the whole subtlety: the map
+    // keeps only the winner, and the winner of a pending downgrade is the op that has not reached
+    // the server. Asking the map and treating an unacked winner as "no answer" makes a pending
+    // Geteilt→Belegt render as PRIVAT — the badge under-reporting what the family can still see,
+    // which is the one direction ADR 004 §6 forbids.
+    const pending = new Set();
+    const acked = new Map();
+    const ackedAt = new Map();
+    for (const line of this._log.lines()) {
+      const op = line.op;
+      if (!op || op.k !== 'pub.set' || op.space !== this._familySpaceId) continue;
+      if (line.seq === null || line.seq === undefined) {
+        if (!line.park) pending.add(op.e);
+        continue;
+      }
+      if (!Object.hasOwn(op.f ?? {}, 'pub.level')) continue;
+      // Stamps are 37 fixed-width characters and order lexicographically (ADR 001 §6), so the
+      // newest acked level is a string comparison and needs no clock.
+      const prev = ackedAt.get(op.e);
+      if (prev !== undefined && prev >= op.ts) continue;
+      ackedAt.set(op.e, op.ts);
+      acked.set(op.e, op.f['pub.level']);
+    }
+    return {
+      pendingPub: (fkey) => pending.has(fkey),
+      lastAckedPubLevel: (fkey) => {
+        const v = acked.get(fkey);
+        return v === 'privat' || v === 'belegt' || v === 'geteilt' ? v : null;
+      },
+    };
+  }
+
+  /**
+   * Story 17.3 — the per-member toggle, from `settings.hiddenMembers.<memberId>`.
+   *
+   * A DEVICE-LOCAL pref (`pref.set`, the `local` space, never synced — rule U6, story 17.7), and
+   * `core/replace.js:PRESERVED_PREF_PREFIXES` keeps it across an import for exactly this reason:
+   * "restoring a snapshot would otherwise un-hide every foreign entry in the family".
+   *
+   * Only a `true` hides. The register is set to `false` to UN-hide (`membersui.js:463` writes the
+   * absolute value, never a toggle, so two Macs converge instead of cancelling), and reading any
+   * truthy value would make `false` mean hidden.
+   * @returns {Set<string>}
+   */
+  _hiddenMembers() {
+    const out = new Set();
+    const raw = this.state && this.state.settings && this.state.settings.hiddenMembers;
+    if (!raw || typeof raw !== 'object') return out;
+    for (const [id, v] of Object.entries(raw)) if (v === true) out.add(id);
+    return out;
+  }
+
+  /**
    * Ops → the v1 state shape, reconciled into the live state object.
    *
    * `stripV2Fields` is applied while `familySpaceId === null`. It is not cosmetic: the v2
@@ -2938,12 +3517,12 @@ class Store {
    */
   _project({ settings = false } = {}) {
     const d = defaultState();
-    const full = materialize(this._log.registers(), {
+    const regs = this._log.registers();
+    const full = materialize(regs, {
       me: this._me,
       familySpaceId: this._familySpaceId,
-      members: new Map(),
-      currentMembers: new Set([this._me]),
-      hiddenMembers: new Set(),
+      ...this._memberCtx(regs),
+      ...this._exposureCtx(),
       defaultSettings: d.settings,
     });
     const next = this._familySpaceId ? full : stripV2Fields(full);
@@ -2998,12 +3577,23 @@ class Store {
    */
   _commit(label, ops, shadow) {
     if (!ops.length) return false;
+    // ONE gid for the whole group, read before anything is appended, because ADR 004 §5 requires
+    // the truth write and the publication derived from it to carry the SAME one.
+    const gid = ops.find((o) => o.gid)?.gid ?? newGid();
     // Captured against the PRE-transaction registers — `captureImages` is explicit that folding
     // first and capturing second records the post-state twice and produces an undo that does
     // nothing. It also refuses any op that is not mine, which IS story 18.4.
     const { pre, post } = captureImages(this._log.registers(), ops, { me: this._me });
     for (const op of ops) this._log.append(op);
     this._project();
+    // ADR 004 §2.3, §5 — the publication rides in the SAME group, so it is one ⌘Z. It is derived
+    // AFTER `_project()` because promotion (§4.1) is what makes `state.notes` the truth this
+    // device may publish, and it is NOT in the undo images on purpose: `core/undo.js` decides
+    // that a publication is derived, and "undoing the truth and letting the publisher re-derive
+    // is the only path that cannot leave the family space describing a state the owner's board no
+    // longer holds." That sentence is only true because `undo()`/`redo()` below call this too.
+    const published = this._publishAndEnqueue(ops, gid);
+    if (published.length) this._project();
     // A `[L]` row's `pref.set` has to reach `state.settings` BEFORE `emit()`, or every listener
     // that redraws on this action reads the stale value (4.2) — and in the two `delete-category`
     // rows it would read an id that this very group just tombstoned. Re-syncing `_projected`
@@ -3011,7 +3601,6 @@ class Store {
     if (applyPrefOps(this.state.settings, ops)) {
       this._projected.settings = structuredClone(this.state.settings);
     }
-    const gid = ops.find((o) => o.gid)?.gid ?? newGid();
     this._stacks.push(gid, label, pre, post, shadow);
     this.schedulePersist();
     this.emit(label);
@@ -3068,6 +3657,22 @@ class Store {
    */
   apply(name, args, label) {
     this._adopt();
+    // A FAMILY MUTATION ON A MAC WITH NO CIRCLE, ANSWERED HERE RATHER THAN THREE LAYERS DOWN.
+    // `core/ops.js:spaceFor` already refuses (it must — it is the last gate before the op is
+    // minted), but its sentence is about an `OpCtx` field, and the caller of `store.apply` is a
+    // click handler in `family/`. This one names the method that fixes it.
+    //
+    // IT THROWS `OpError` AND NOT A PLAIN `Error`, deliberately: R3-21 measured that this door
+    // already has two error classes for a caller to catch (`OpError` and `EntityKeyError`) and
+    // called that a defect. A third would make the defect worse. This refusal IS an
+    // op-construction precondition — it is `spaceFor`'s own refusal, raised one layer up where
+    // the sentence can name the method that fixes it — so it is `spaceFor`'s error class too.
+    if (this._familySpaceId === null && isFamilyMutation(name)) {
+      throw new OpError(
+        `store.apply(${JSON.stringify(name)}): this store is in no Familienkreis. Call `
+        + 'store.useFamilySpace(fsp_…) first — before this, core/ops.js cannot address a family '
+        + 'op at any space (ADR 001 §3) and solo mode emits none by design (story 15.1).');
+    }
     const shadow = this._shadow();
     const ctx = this._ctx();
     const ops = buildMutation(name, ctx, args);
@@ -3163,6 +3768,20 @@ class Store {
         this._warn(
           `remote op ${op.id} refused: it is addressed to personal space ${JSON.stringify(op.space)}, `
           + `not to ${this._personalSpaceId}`);
+        result.refused.push({ id: op.id, reason: 'foreignSpace' });
+        continue;
+      }
+      // The same refusal for the FAMILY space, which had none. Addendum 20.6 is "at most one
+      // Familienkreis", so a `pub.set` addressed to another `fsp_…` is a cross-space replay and
+      // never an ordinary arrival — and unlike the personal case it would have folded into the
+      // register map and rendered, because `materialize` gates a foreign entry on the OWNER being
+      // a current member and never on the op's space. Guarded on `!== null` so a store that has
+      // adopted no circle judges a family op exactly as it did before (that is how every
+      // pre-existing test drives this door).
+      if (cls === 'family' && this._familySpaceId !== null && op.space !== this._familySpaceId) {
+        this._warn(
+          `remote op ${op.id} refused: it is addressed to family space ${JSON.stringify(op.space)}, `
+          + `not to ${this._familySpaceId}`);
         result.refused.push({ id: op.id, reason: 'foreignSpace' });
         continue;
       }
@@ -3406,7 +4025,9 @@ class Store {
     const ctx = this._ctx(undefined, log);
     const ops = [];
     const warn = (m) => this._warn(m);
-    for (const spec of COLLECTION) diffCollection(spec, before[spec.key], after[spec.key], ctx, ops, warn);
+    for (const spec of COLLECTION) {
+      diffCollection(spec, ownRows(before[spec.key]), ownRows(after[spec.key]), ctx, ops, warn);
+    }
     diffPads(before.scratchpads, after.scratchpads, ctx, ops, warn);
     const patch = diffSettings(beforeSettings, afterSettings, this._defaultPrefs());
     if (patch) ops.push(prefSet(ctx, patch));
@@ -3420,6 +4041,21 @@ class Store {
     const before = structuredClone(this.state.settings);
     Object.assign(this.state.settings, patch);
     this._pref(diffSettings(before, this.state.settings, this._defaultPrefs()));
+    // ── STORY 17.3, THE LAST LINK ─────────────────────────────────────────────────────────────
+    // `hiddenMembers` is the ONE pref that changes which entries are on the board rather than how
+    // they look: `materialize` takes it as ctx and `entities.js:projectable` drops a foreign
+    // entry whose owner is in it. Every other setting is read by the RENDERER from
+    // `state.settings`, which is why `setSettings` has never re-projected — and why hiding Papa
+    // changed the legend and left his entries on the board.
+    //
+    // Scoped to the one key on purpose: `settings.js:143,147` fire on every `input` event of a
+    // range slider, and a projection per pixel is exactly the op-storm rule U6 exists to avoid.
+    // `_adopt()` first, for the same reason `mutate()` does it — a direct edit to `state` that
+    // the store has not seen would otherwise be reverted by the projection rather than kept.
+    if (patch && Object.prototype.hasOwnProperty.call(patch, 'hiddenMembers')) {
+      this._adopt();
+      this._project();
+    }
     this.schedulePersist();
     this.emit('settings');
   }
@@ -3453,6 +4089,13 @@ class Store {
     if (!ops.length) return false;
     for (const op of ops) this._log.append(op);
     this._project();
+    // ⌘Z ON A SHARED ENTRY MUST WITHDRAW IT (ADR 004 §5.1, `core/undo.js`'s own reasoning).
+    // A `pub.set` is not undoable and is never inverted; what happens instead is that the truth
+    // is restored and the publisher RE-DERIVES against it — so undoing a share emits the
+    // retraction, and undoing a downgrade re-publishes. Without this line the register map keeps
+    // the level the user just took back, and no owner-side smoke test notices, because the
+    // owner's board is right. `_project()` runs first so promotion is applied.
+    if (this._publishAndEnqueue(ops, ops[0]?.gid ?? null).length) this._project();
     this._stacks.verify(this.state);
     this.schedulePersist();
     this.emit('undo');
@@ -3464,6 +4107,7 @@ class Store {
     if (!ops.length) return false;
     for (const op of ops) this._log.append(op);
     this._project();
+    if (this._publishAndEnqueue(ops, ops[0]?.gid ?? null).length) this._project();   // see undo()
     this._stacks.verify(this.state);
     this.schedulePersist();
     this.emit('redo');
@@ -3825,9 +4469,17 @@ class Store {
    */
   _outboxHorizonCap() {
     let floor = null;
-    for (const line of this.outbox()) {
-      const ts = line.op?.ts;
-      if (isStamp(ts) && (floor === null || cmp(ts, floor) < 0)) floor = ts;
+    // BOTH OUTBOXES, and the union is the point. A family op this device authored is
+    // unacknowledged in exactly the sense §8.1 defines, and folding it into the checkpoint drops
+    // its LINE while keeping its register value — which is E5-2 verbatim, one space to the right:
+    // the entry is on my board, `familyOutbox()` returns 0, `status()` says healthy, and Mama
+    // never sees it. Nothing else here changes: with no family space `_syncedSpaces()` is the
+    // personal space alone and every step takes the byte-identical path it took before.
+    for (const sp of this._syncedSpaces()) {
+      for (const line of this.outbox({ space: sp })) {
+        const ts = line.op?.ts;
+        if (isStamp(ts) && (floor === null || cmp(ts, floor) < 0)) floor = ts;
+      }
     }
     if (floor === null) return undefined;
 

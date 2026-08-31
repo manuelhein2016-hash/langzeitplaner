@@ -741,7 +741,7 @@ export const S4 = deep([
 // `expect = { reachable: true }` on every row — that is the rule, and it does not vary. `role`
 // is not a requirement, it is the DISPOSITION: what closing the row means.
 //
-//   'live'    reachable today. 55 of the 62.
+//   'live'    reachable today. 57 of the 65.
 //   'dead'    LZP-501's superseded engine. Closing the row means DELETING the file.
 //   'defence' a mechanism the design names and the product does not have. Closing the row means
 //             WIRING it, and deleting it instead would close the row while making the product worse.
@@ -776,10 +776,35 @@ export const S5 = deep([
   MOD('src/js/core/migrate1to2.js', 'live'),
   MOD('src/js/core/oplog.js', 'live'),
   MOD('src/js/core/ops.js', 'live'),
+  MOD('src/js/core/project.js', 'defence',
+    'ADR 004 §2 — THE SINGLE CHOKE POINT THROUGH WHICH PLAINTEXT LEAVES A DEVICE. **CLOSED THIS '
+    + 'ROUND — it is now reachable, and the door it came through is `sync/family.js`.** It was '
+    + '`openFinding: P-4` for one round: built by WP-10 and imported by nothing, because its '
+    + 'consumers are the seal seam and the outbox, which were another work package\'s files. '
+    + 'While that held, `sealOp` refused every family `pub.set` at barrier 2 and NOTHING COULD BE '
+    + 'SHARED AT ALL — the correct failure of an unwired boundary ("you cannot publish", never '
+    + '"you publish unchecked"), which is why the row was `defence` and why closing it meant '
+    + 'WIRING the file rather than deleting it. `sync/family.js#sealLine` now passes '
+    + '`assertFamilyPatch` as `ctx.assertFamilyPatch` (barrier 2) alongside `store.familyLevelOf` '
+    + 'as `ctx.levelOf` (barrier 4), so the boundary is both reachable and REQUIRED on the one '
+    + 'path that seals a family op. `PUBLISH_FAILURE_CONTRACT` in the module states what the '
+    + 'store owes it; `PROJECT_CONTRACT` in `crypto/envelope.js` states what the seal seam owes '
+    + 'it.',
+    null),
   MOD('src/js/core/registers.js', 'live'),
   MOD('src/js/core/replace.js', 'live'),
   MOD('src/js/core/stamp.js', 'live'),
   MOD('src/js/core/undo.js', 'live'),
+  MOD('src/js/core/visibility.js', 'live',
+    'ADR 004 §2.1/§3/§5/§7/§9 — the LEVEL and its policy (E7, LZP-701/703/704). `core/project.js` '
+    + 'owns which BYTES may leave; this owns which level an entry has, what a level discloses, '
+    + 'what a change of level withdraws, and that a change of level tells nobody anything. It is '
+    + 'a LEAF (it imports nothing) and it is reachable because `core/entities.js` imports it: '
+    + '`projectable()` and `renderableNote()` used to spell `\'privat\'` and `\'belegt\'` inline, '
+    + 'which is a viewer-side privacy decision written as a string comparison. UNLIKE '
+    + '`core/project.js` this row is `live` on the day it lands — the seam it serves is the '
+    + 'RENDERING side, which ships today, rather than the PUBLISH side, which is still waiting '
+    + 'on the store.'),
   MOD('src/js/crypto/backup.js', 'defence',
     'ADR 002 §7 — the recovery file. Implemented, tested in tier 1, and with NO ROUTE TO IT IN THE '
     + 'UI, so the answer to "my Mac died" was that there is no answer. **WIRED by WP-9**: '
@@ -808,6 +833,17 @@ export const S5 = deep([
   MOD('src/js/family/mount.js', 'live'),
   MOD('src/js/family/pairflow.js', 'live'),
   MOD('src/js/family/pairingui.js', 'live'),
+  MOD('src/js/family/removal.js', 'live'),
+  MOD('src/js/family/sharing.js', 'live',
+    'A7 / ADR 004 §4.3, §7.3, §8 — the popover\'s SHARING CLUSTER (E7, LZP-702). DOM and copy '
+    + 'only: it writes the `visibility` and `coEdit` TRUTH registers through `store.txn` and '
+    + 'constructs no `pub.*` field anywhere, because what leaves the device is '
+    + '`core/project.js`\'s job and there is no second path. It is `live` because '
+    + '`family/mount.js#syncCircleMounts` installs it through `popover.js#useSharing(mod)` — a '
+    + 'PORT rather than an import, and deliberately: `boot.js -> main.js -> popover.js` is the '
+    + 'solo graph, so a static import here would make solo mode statically reach `src/js/family/` '
+    + 'and `tests/tier1/network-scope.test.js` §2 gate 2 refuses exactly that. The port is `null` '
+    + 'until a circle exists and is set back to `null` when one is left (20.3).'),
   MOD('src/js/family/syncstatus.js', 'live'),
   MOD('src/js/ferien.js', 'live'),
   MOD('src/js/find.js', 'live'),
@@ -836,6 +872,19 @@ export const S5 = deep([
     + '`attack-converge-relay.test.js` §2/§3 are closed by it. Still a `defence` — the role is the '
     + 'disposition, not the state.',
     null),
+  MOD('src/js/sync/family.js', 'live',
+    'LZP-608 — the FAMILY sync engine. `sync/personal.js` refuses an `fsp_` space at construction '
+    + '(story 21.2, and the refusal is correct), so before this a Familienkreis armed NO ENGINE AT '
+    + 'ALL: `docs/v2/E6-VERIFICATION.md` §5.2 measured a full member\'s Mac making ZERO /ops '
+    + 'requests in 8 s. Reached from `family/engine.js`\'s `startFamilyEngine`, which '
+    + '`family/mount.js` calls from BOTH arming paths — `start()` for a Mac that also syncs its own '
+    + 'two Macs, and `mountCircleSurfaces()` for a Mac that only ever joined a circle.'),
+  MOD('src/js/sync/keys.js', 'live',
+    'ADR 002 §7.1 steps 4, 5 and 6 — the half PO decision D9 rests on. `admit()` is the receiving '
+    + 'side of §4.2 step 6 (the branded sender set, finding S1); `deliver()` is step 4, ANY member '
+    + 'device wrapping epochs 1..e+1 to a recipient that provably holds none; `rotate()` is §4.1. '
+    + 'Reached from `sync/family.js`, which constructs one per engine rather than taking one — a '
+    + 'key delivery bound to a different space than its engine is the mix-up 21.2 forbids.'),
   MOD('src/js/sync/cursor.js', 'defence',
     'RE-CLASSIFIED FROM `dead`, then WIRED. `createCursors` is the durable per-space sync '
     + 'POSITION, and its own header is the argument for what it now holds: the chain head '
@@ -890,5 +939,5 @@ export const DOMAINS = deep({
 
 /** Counts, so a truncated file is a loud failure rather than a quiet one. */
 export const DOMAIN_SIZES = deep({
-  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 62,
+  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 68,
 });

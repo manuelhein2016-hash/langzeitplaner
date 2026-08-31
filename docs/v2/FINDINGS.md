@@ -3218,3 +3218,83 @@ whether a **circle** does. Fixed in `mount.js#syncCircleMounts`, which mounts *a
 sheet open, because a Mac becomes a member mid-session (the join flow) and stops being one
 mid-session (20.3). The lesson is the guard's shape, not the mount: a capability check is not a
 state check.
+
+---
+
+## 11. E7 — visibility and sharing. What wiring the redaction boundary found.
+
+**Date:** 2026-08-31 · **Tickets:** LZP-701…706 · Full record: `docs/v2/E7-VERIFICATION.md`.
+
+§9 and §10 both closed on the same wall: the family half of the product had a membership lifecycle
+and no content. This section is what happened when the content half was wired — the projection
+(`core/project.js`, built by WP-10 and reachable from nothing), the level policy
+(`core/visibility.js`), the sharing cluster (`family/sharing.js`) and the badge family
+(`layout.js`/`board.js`) all shipped as parts with no path between them — and then **driven end to
+end through the real store, the real `sealOp`, real AES-GCM, real `openOp`, real `foldAuthorized`
+and real `materialize`**.
+
+**What now holds, measured on the emitted ops and the sealed bytes rather than on the rendering:**
+Papa marks an entry Belegt, Mama sees a neutral block with its date, its owner and its duration, and
+the word „Scheidungsanwalt" is in no pre-seal plaintext, no envelope field, no ciphertext byte and
+in no object recovered by decrypting the whole family log under **every** epoch key the family has
+ever held. Papa downgrades to Privat and it leaves Mama's board at the next sync, with an explicit
+`null` in every withdrawable register on her disk. A Privat entry — created, edited, moved, made
+repeating, recategorised and deleted — emits **zero** family ops, counted.
+
+### 11a. The seven findings
+
+| id | finding | severity | owner |
+|---|---|---|---|
+| **E7-1** | **`core/ops.js:makeOp` dropped barrier 3's brand.** `{ ...f }` copies string keys only, and `projectForFamily`'s brand is a non-enumerable **symbol**. So every op built through the shipped constructor reached `sealOp` unbranded and was refused — **the epic could not have worked at all**, and the failure read as a bug in the projection. `makeOp` now carries own symbol keys across, and only when it did not widen the patch (a `born: true` op is a different field set from the one the projection asserted, and branding a widened copy is the "add a key to the object the allowlist produced" attack the freeze exists to stop). | **HIGH** | closed here · mutant **M1**, 21 rows |
+| **E7-2** | **The exposure badge promised a disclosure the server had not received.** `materialize.js:exposureOf` accepts `lastAckedPubLevel` / `pendingPub` and neither was wired, so a **pending downgrade rendered as already withdrawn** — the badge under-reporting what the family can still see, the one direction ADR 004 §6 forbids. | MEDIUM | closed here · **M17** |
+| **E7-2b** | **The newest ACKED level cannot be read off the register map.** The obvious implementation asks the map and treats an unacked winner as "no answer", which renders a pending Geteilt→Belegt as **`privat`** — worse than the bug it fixes. The map keeps only the winner and the winner of a pending downgrade is the op that has not reached the server, so it takes a pass over the log. | MEDIUM | closed here · **M18** |
+| **E7-3** | **Acknowledging a push did not redraw the badge.** `ackPushed` is the only place a server `seq` appears for a local op and it did not re-project, so the board went on saying "not synced yet" until an unrelated edit. Lagging in the safe direction, which is why it was invisible; still wrong (19.3). | LOW | closed here · **M19** |
+| **E7-4** | **P7i is true inside a padding bucket and false below the note-length cap.** Measured through the real `sealOp`: a Geteilt note leaves a Belegt op's 256-byte bucket **below 80 ASCII characters** — inside `ops.js`'s own `str80` and `popover.js`'s `maxLength`. A relay operator, who sees `(spaceId, epoch, deviceShort, seq, length)` in the clear (ADR 003 §6.3), can then tell "Papa shared something" from "Papa marked himself busy" **without a key**. Not a break of INV-R1 — no content escapes, one bit about a level does. The cap counts CHARACTERS and the bucket counts BYTES, so an 80-character astral note is 320 bytes and the gap is wider. Closing it means a second padding tier, a real storage cost (ADR 002 §8.7 prices padding at ~1.4×). **The boundary is measured and pinned**, phrased so that the day it rises above 80 the row must be inverted rather than relaxed. | **MEDIUM** | **OPEN** — PO decision · `crypto/envelope.js` |
+| **E7-5** | **A share undone before it is pushed still transmits a retraction.** `derivePublication` reads `lastPublished` from the locally folded `pub.level`, which includes this device's own unpushed op — so "share, then change your mind" emits `pub.level: 'privat'` plus nulls for an entity no peer ever saw, creating a cell for a uuid they have never heard of. It discloses THAT AN ENTITY EXISTS, the same shape the projection already guards against for a dead-and-never-published entry. The safe half is verified: the first op is refused at barrier 4 (the truth register has moved on), quarantined by `sync/family.js`, and its bytes never reach the relay — **no content leaks**. Making `lastPublished` ack-aware would make the projection depend on transport state and diverge across a member's own two Macs, so it is not an obvious fix. | LOW | **OPEN** · `core/project.js` |
+| **E7-6** | **ADR 004 §5.1's printed `retractPatch` remains unsealable**, confirmed end to end this pass. `pub.alive: false` is refused by `envelope.js` barrier 4 ("a privat payload carries a value"). The shipped `null` is also the better answer, and §4's row proves why: the owner's "→ Privat" and the admin's unshare are **byte-identical on the wire**, so a peer cannot tell which happened — Principle 9 by the absence of a distinguishing byte. | DOC | ADR 004 §5.1 · mutant **M3**, 23 rows |
+| **E7-7** | `interact.js`'s `store.category(catId)?.defaultVisibility` was correct **only by coincidence**: it answers `undefined` for a dangling category and for a level outside the enum, and that `undefined` became `'privat'` only because `ops.js`'s enum validation, `replace.js`'s floor and `materialize.js` all happened to hold. Routed through `visibilityForNewEntry` it holds on its own. No mutant dies today, and that is the point. | LOW | closed here |
+
+### 11b. What integration cost, and the two seams nobody owned
+
+**Five files were wired and three of them shipped dark**, each because its consumer belonged to a
+different work package:
+
+- **`popover.js` hardcoded `visibility: 'privat'`** on the create path ADR 004 §3 names, so **16.4
+  did not fire from the popover at all**. A category default that silently does nothing.
+- **`family/mount.js` never installed the sharing cluster**, so `family/sharing.js` was on disk and
+  unreachable — and it may not be a static import from `popover.js`, because `boot.js → main.js →
+  popover.js` is the solo graph and ADR 003 §7 gate 2 refuses a static path from it into `family/`.
+  It arrives as a **port**, set to `null` when the circle is left (20.3).
+- **`i18n.js` carried none of ADR 004 §4.3's six keys**, so `board.js:FAMILY_COPY` — an interim
+  table written to step aside — was still the authority. It has now stepped aside on its own, and a
+  reworded level takes five DOM rows down with it (**M22**).
+
+**The publication is DERIVED, not emitted by the control**, and that is the decision this pass would
+most like the next reader to keep. `store.js`'s own header states the rule the outbox is built on:
+*"every path that appends a local op is in the outbox automatically, with no publish hook to forget
+at one of them."* A publication minted by the sharing cluster would be the seventh call site — and
+it would be missing from ⌘Z, from a text edit of an already-shared entry, from a delete and from a
+drag. `core/undo.js` had already decided this from the other side: a `pub.set` is deliberately not
+undoable, *"because undoing the truth and letting the publisher re-derive is the only path that
+cannot leave the family space describing a state the owner's board no longer holds."* That sentence
+is only true if a publisher re-derives. It now does, from `_commit`, `undo()` and `redo()` — and ⌘Z
+on a share emits the retraction (**M7**).
+
+### 11c. Still owed after E7
+
+1. **18.2's co-edit write path has no caller.** `projectCoEditPatch` exists and is narrow;
+   `redaction-invariants.test.js` drives a co-editor's op in through `applyRemote` to prove
+   promotion, but nothing in the product *authors* one. LZP-902.
+2. **The admin unshare (18.3) is unsealable.** Barrier 4 reads `ctx.levelOf` from the entity's own
+   `visibility` truth register, and an admin unsharing *someone else's* entry has no such register —
+   `store.familyLevelOf` correctly answers `null`, and "no authenticated level" is a refusal.
+   `retractPatch(kind)` produces the right bytes and no `levelOf` can authorise them.
+3. **`tests/tier1/redaction-failpath.test.js`** is named by ADR 004 §2.3 and does not exist. Its
+   content is covered by `redaction-invariants.test.js` §3 (mutants M5, M6) — a filename the ADR
+   owes rather than a gap.
+4. **ADR 005 §1.1's module tree** has no row for `core/project.js`, `core/visibility.js` or
+   `family/sharing.js`, and names `assertNeverTransmitted` in `fleet.js`, where it cannot live:
+   `fleet.js` is M1's fleet and its own identity gate asserts one member. It ships as
+   `tests/helpers/never-transmitted.js`, a recorder any sealer can feed.
+5. **A4 print density.** The foreign worst case (23 px, fixed) eats 59 % of `print.css`'s 39 px
+   text budget. The suggested rule is in `belegt-render.dom.js`'s report.

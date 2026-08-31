@@ -846,3 +846,183 @@ test('solo mode still reaches nothing — no diagnostics read, no warnings subsc
   assert.equal(status.syncStatusState().sentence, i18n.t('syncSolo'));
   unmount();
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 8 · D9's WAITING STATE — the joiner's first minutes, on the board
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// PO decision D9, ADR 002 §7.1 step 4, addendum F15. A member is IN the circle the moment she
+// redeems and holds no epoch key until another member's Mac wraps to her. `createjoin.js` has
+// exported `familyWaitingState()` — the fact and its two sentences — since the flow landed, AND
+// NOTHING RENDERED IT: `E6-VERIFICATION.md` §5.2 measured Mama's Mac making zero `/ops` requests
+// for ever, and this half of it, which is that her board never said anything either.
+//
+// The three rules from D9 are what these rows assert, and they are the reason this is a `pending`
+// and not a fourth state: never an error, never a spinner, never a demand.
+
+/** D9's fact, as `createjoin.js` produces it. Injected, so a test needs no circle and no relay. */
+const WAITING = Object.freeze({
+  pending: true,
+  line: 'Die gemeinsamen Einträge erscheinen von selbst, sobald der nächste Mac aus dem Kreis synchronisiert.',
+  calm: 'Bis dahin bleibt dein Board genau so, wie es ist. Es gibt nichts zu tun und niemanden zu fragen.',
+});
+const NOT_WAITING = Object.freeze({ pending: false, line: '', calm: '' });
+
+test('§W1 — a member waiting for her first key is told so WITH NO ENGINE AT ALL', () => {
+  // THE SHAPE OF THE BUG THIS ROW EXISTS FOR. `initSyncStatus` is called from ONE place —
+  // `mount.js#start()`, which is story 19.4's OWN-DEVICE sync. A Mac can be a full member of a
+  // Familienkreis and have opted into none of that. Reading D9's fact only when an engine is
+  // mounted therefore renders the calm line on every Mac EXCEPT the one it was written for.
+  //
+  // So this row mounts `sync: null` deliberately. `refreshSyncChrome()` is what `main.js` calls
+  // on every redraw once the family door has been opened, and it is the only driver here.
+  const c = mount(null, { waiting: () => WAITING });
+  assert.equal(status.syncSupported(), false, 'this row is about the Mac with NO personal engine');
+
+  const s0 = status.syncStatusState();
+  assert.equal(s0.rawState, 'pending');
+  assert.equal(s0.waiting.pending, true);
+  // Silence is 19.3's promise that nothing is happening. Something is: she is waiting.
+  assert.equal(s0.silent, false, 'a Mac still waiting for its first key claimed to be silent');
+
+  settle(c);
+  const g = glyph();
+  assert.ok(g, 'D9’s waiting state drew nothing on the board at all');
+  assert.equal(g.classList.contains('pending'), true);
+  assert.equal(g.classList.contains('error'), false, 'a wait was rendered as a fault');
+  assert.equal(g.title, WAITING.line, 'the tooltip is not D9’s sentence');
+  // It is NOT `t('syncSolo')`: she is not solo, and the one thing that sentence promises — that
+  // the board talks to nothing — is the thing that stopped being true when she joined.
+  assert.notEqual(g.title, i18n.t('syncSolo'));
+  unmount();
+});
+
+test('§W2 — the wait is the PENDING ring, never the error one, and an error still out-shouts it', () => {
+  // D9's first rule. Nothing has failed: her board is correct and her entries are safe, and the
+  // ring stays hollow in the ink hierarchy's weakest tone — the same glyph an offline Mac gets,
+  // because it is the same register.
+  const engine = makeEngine({ state: 'healthy' });
+  let c = mount(engine, { waiting: () => WAITING });
+  settle(c);
+  assert.equal(glyph().classList.contains('pending'), true);
+  assert.equal(glyph().classList.contains('error'), false);
+  assert.equal(status.syncStatusState().sentence, WAITING.line);
+
+  // …AND IT ONLY EVER RAISES. A real error is a louder truth than a wait, so the ring FILLS and
+  // the error sentence wins. A waiting state that could argue an error down would be the quiet
+  // signal lying, which is the failure mode this whole module was rewritten to prevent.
+  engine.set({ state: 'error', errorKind: 'auth' });
+  settle(c);
+  assert.equal(glyph().classList.contains('error'), true, 'the wait argued an auth error down');
+  assert.equal(status.syncStatusState().sentence, i18n.t('syncErrAuth'));
+  unmount();
+
+  // And it raises from healthy rather than sitting under it: without the wait, nothing is drawn.
+  c = mount(makeEngine({ state: 'healthy' }), { waiting: () => NOT_WAITING });
+  settle(c);
+  assert.equal(glyph(), null, 'a Mac with nothing to wait for was given a glyph');
+  unmount();
+});
+
+test('§W3 — the wait leaves the instant the keys land, and nobody pressed anything', () => {
+  // D9 part 4: „no action required from anyone, and no notification demanded of them". The flag
+  // is cleared by `mount.js#onKeys` when the RING GROWS; this module's job is to stop saying it
+  // the moment that happens, and vanishing is immediate (see SYNC_DEBOUNCE_MS) because an
+  // indicator that outlives its condition is the one way a quiet signal can lie.
+  let waiting = WAITING;
+  const c = mount(null, { waiting: () => waiting });
+  settle(c);
+  assert.ok(glyph());
+
+  waiting = NOT_WAITING;                                   // the keys arrived; no click, no dialog
+  status.refreshSyncChrome();
+  assert.equal(glyph(), null, 'the calm line outlived the wait');
+  assert.equal(status.syncStatusState().silent, true);
+  unmount();
+});
+
+test('§W4 — the sheet says BOTH of D9’s sentences, and still offers nothing to press', () => {
+  const c = mount(null, { waiting: () => WAITING });
+  settle(c);
+  const body = document.createElement('div');
+  status.buildSyncSection(body, {});
+
+  assert.includes(body.textContent, WAITING.line);
+  // The second half is the one that answers „und was soll ich jetzt tun?" — it only fits here,
+  // and without it the first sentence reads as an instruction to wait rather than a statement.
+  assert.includes(body.textContent, WAITING.calm);
+  assert.equal($$('.sync-waiting-calm', body).length, 1);
+  // 19.2 — no sync button and no manual refresh ANYWHERE, and least of all on the screen of
+  // somebody who has just been told there is nothing to do.
+  assert.equal($$('button', body).length, 0, 'the waiting state offered a control');
+  assert.equal($$('input, select', body).length, 0);
+  // She is not solo and must not be told she is.
+  assert.equal(body.textContent.includes(i18n.t('syncSolo')), false);
+  // The dot in the sheet is the same object in the same condition as the one in the toolbar.
+  assert.equal($('.sync-dot', body).classList.contains('pending'), true);
+  assert.equal($('.sync-dot', body).classList.contains('error'), false);
+  unmount();
+});
+
+test('§W5 — D9’s line never nags, never spins, and never reaches the board', () => {
+  const c = mount(null, { waiting: () => WAITING });
+  settle(c);
+  // NOT ON THE BOARD, and nothing new that moves. Both halves, as everywhere else in this file.
+  assert.equal($$('.board .sync-dot, .board .sync-waiting-calm').length, 0);
+  assert.equal(glyph().parentElement.className.includes('toolbar'), true);
+  assert.includes(status.SYNC_CSS, 'prefers-reduced-motion');
+  // No keyframes at all, and every motion declaration in the sheet is `none`. A pulsing dot is a
+  // spinner with a smaller footprint, and the waiting state is the one place the temptation is
+  // strongest — „something is happening" is exactly what it must not say.
+  assert.equal(/@keyframes/.test(status.SYNC_CSS), false, 'this feature grew an animation');
+  for (const decl of status.SYNC_CSS.match(/(animation|transition)\s*:[^;]*/g) || []) {
+    assert.match(decl, /:\s*none/, `something in this feature moves: „${decl.trim()}"`);
+  }
+
+  // NEVER A DEMAND, in either language, and never a fault word. The sentences are
+  // `createjoin.js`'s and are checked for tone there; this row is the promise that the RENDERER
+  // cannot turn them into a warning by dressing them as one.
+  const body = document.createElement('div');
+  status.buildSyncSection(body, {});
+  const said = `${body.textContent} ${glyph().title}`.toLowerCase();
+  for (const nag of ['fehler', 'error', 'bitte ', 'please', 'achtung', 'warnung', 'jetzt ', '!']) {
+    assert.equal(said.includes(nag), false, `D9’s waiting state nags: „${nag}"`);
+  }
+  assert.equal($$('.sync-dot.error', body).length, 0);
+  unmount();
+});
+
+test('§W6 — the fact is READ FROM `createjoin.js` by default, not re-derived and not left unwired', async () => {
+  // FINDING F-8's LESSON, APPLIED. `familyWaitingState()` was exported and had no consumer for a
+  // whole round; a renderer that only works where a host remembered to pass a port is that
+  // finding again in a new file. So the default is the real reader, and this row drives the
+  // SHIPPED path: no injection, a real circle written into the real store, and the real glyph.
+  const { store: appStore } = await importApp('store.js');
+  const circle = await importApp('family/createjoin.js');
+  const before = { ...appStore.state.settings };
+
+  appStore.setSettings({ familySpaceId: `fsp_${'A'.repeat(22)}`, familyKeysPending: true });
+  assert.equal(circle.familyWaitingState().pending, true, 'the fixture did not arm the fact');
+
+  const c = mount(null);                                  // NO `waiting` port — the default path
+  settle(c);
+  assert.ok(glyph(), 'the shipped default read no waiting state at all');
+  assert.equal(glyph().title, circle.familyWaitingState().line,
+    'the board and `createjoin.js` word D9’s state differently — there are two readings of it');
+
+  // ONE READING, TWO SURFACES. The sheet renders the same sentence object, not a paraphrase.
+  const body = document.createElement('div');
+  status.buildSyncSection(body, {});
+  assert.includes(body.textContent, circle.familyWaitingState().calm);
+
+  // …and `waiting: null` genuinely takes it out, which is what makes every row above falsifiable.
+  const c2 = mount(null, { waiting: null });
+  settle(c2);
+  assert.equal(glyph(), null, '`waiting: null` did not take the durable half out');
+
+  appStore.setSettings({
+    familySpaceId: before.familySpaceId || '',
+    familyKeysPending: before.familyKeysPending === true,
+  });
+  unmount();
+});

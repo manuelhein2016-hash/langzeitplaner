@@ -101,13 +101,16 @@
 // WHAT IS OUT OF SCOPE, AND WHERE ITS SEAM IS
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// LZP-608 — removal end to end, i.e. the epoch rotation ADR 002 §4.1 requires once a member is
-// gone — belongs to a parallel round. The button and its server call are here; the rotation is
-// not. `removeMember()` hands the relay's body, `rotateRequired: true` included, to
-// `ports.afterRemove`, so the day 608 lands it has a caller and a value waiting for it and
-// nothing in this file changes. Until then the copy claims exactly what the server does — access
-// ends, the ops are purged, the wraps are deleted, the member's outstanding invites are revoked —
-// and nothing about future ciphertext, because without the rotation that claim would be false.
+// LZP-608 — removal end to end — HAS LANDED, and it landed exactly where this file said it would:
+// `ports.afterRemove` is now `family/removal.js#afterRemove`, and nothing else in this file
+// changed. That module performs ADR 002 §4.1's rotation to `e+1` and publishes the in-log
+// `member.set{_alive:false}` that takes the removed member's entries off every family board.
+//
+// The copy is still the server's claim and not one word more: access ends, the ops are purged,
+// the wraps are deleted, the outstanding invites are revoked. What the removal ADDS to that is
+// stated by `removal.js#REMOVAL_COPY` at the moment the outcome is known — including, always,
+// Addendum §6's honesty line, which is `sync/keys.js#ROTATION_HONESTY` by identity rather than by
+// a second spelling. This panel does not restate any of it.
 
 import { el, field, toast } from '../ui.js';
 import { t, getLang } from '../i18n.js';
@@ -121,6 +124,7 @@ import { membersUIState } from './membersui.js';
 import {
   confirmRemoveMember, confirmLeaveCircle, confirmDeleteSpace, confirmTransferAdmin,
 } from './leavedelete.js';
+import { afterRemove } from './removal.js';
 
 /** Whichever of a `{de, en}` pair the sheet is currently speaking. */
 const say = (pair) => (getLang() === 'en' ? pair.en : pair.de);
@@ -289,8 +293,35 @@ const DEFAULT_PORTS = Object.freeze({
   /** The two local writes. `pref.set` is a local-space op; settings are never synced (rule U6). */
   setSettings: (patch) => store.setSettings(patch),
   persist: () => (typeof store.persistNow === 'function' ? store.persistNow() : Promise.resolve()),
-  /** LZP-608's seat. Handed the relay's body, `rotateRequired` included. */
-  afterRemove: null,
+  /**
+   * **THE TWO 20.1 OPS, AS PORTS — because they are the half the relay cannot hold.**
+   *
+   * `POST /spaces/:id/rename` stores nothing and `POST /members/transfer` answers
+   * `{authoritative:false, stored:'nothing'}`: ADR 003 §5.1 gives the relay no name column and no
+   * role column, deliberately, so that a compromised relay cannot rewrite either. The
+   * authoritative record for both is an op in the encrypted log — `space.set{name}` and
+   * `space.set{admin, adminPrev}` — and `core/ops.js` rows 25 and 27 are what build them.
+   *
+   * They are PORTS and not bare `store` calls for the same reason `setSettings` is: this panel is
+   * driven in a real WebKit against a fake relay, and a test that injects a relay must be able to
+   * observe what was authored without arming a whole circle in the store first.
+   */
+  apply: (name, args) => store.apply(name, args),
+  /** ADR 001 §4.1 — the head of the accepted admin chain; `transferAdmin`'s `adminPrev`. */
+  adminSeat: () => (typeof store.familyAdmin === 'function' ? store.familyAdmin() : { admin: null, headOpId: null, isMe: false }),
+  /**
+   * LZP-608's seat, FILLED. Handed the relay's body, `rotateRequired` included.
+   *
+   * `family/removal.js#afterRemove` performs ADR 002 §4.1's rotation to `e+1` — wrapped to every
+   * remaining member, with the relay's own `assertCoverage` refusing an incomplete one — and then
+   * publishes the in-log `member.set{_alive:false}` that takes the removed member's shared and
+   * Belegt entries off every family board (ADR 001 §4.2, story 20.2). It returns a verdict and
+   * never throws for an ordinary failure; see `removeMember` below.
+   *
+   * It is a lambda and not the bare reference so a test can still replace the whole port, and so
+   * this file states the ONE argument it passes.
+   */
+  afterRemove: (relayBody) => afterRemove(relayBody),
 });
 
 let ports = { ...DEFAULT_PORTS };
@@ -302,14 +333,25 @@ let ports = { ...DEFAULT_PORTS };
 /**
  * Whether handing over the admin role REACHES the successor.
  *
- * `false` until `core/ops.js` has a `space.set` mutation and the family publish path emits it.
- * It is a named constant and not an inline `false` so the day that lands, the change is this one
- * line and `tests/tier2/family-admin.dom.js` §7 flips with it — and so that a reader of the
- * disabled control finds the reason next to the switch rather than in a commit message.
+ * **`true` since `core/ops.js` grew `transferAdmin` and `claimAdmin` and the family publish path
+ * carries them.** It was `false` for one round because driving the transfer across two real Macs
+ * showed the control was a ONE-WAY DEMOTION: `POST /members/transfer` answers
+ * `{authoritative:false, stored:'nothing'}` by design — the relay has no role column and cannot
+ * have one (ADR 003 §5.1) — so the outgoing admin's own prefs flipped to `member`, the successor
+ * was never promoted, and the circle ended with no admin anywhere and no route back.
+ *
+ * What makes it true now is the op, not the button: `space.set{admin, adminPrev}` (ADR 001 §4.1's
+ * transfer link) is the authoritative record, every peer folds it through `foldAuthorized`, and
+ * `store.familyAdmin()` reads the accepted head back. **`claimAdmin` is a precondition** — a
+ * transfer names the link it supersedes, and on a circle with no genesis link there is nothing to
+ * name and `transferAdmin` refuses rather than minting a rootless assertion.
+ *
+ * It stays a named constant: the control it gates is irreversible, and a reader of it should find
+ * the argument beside the switch.
  *
  * @see ADMIN_COPY.transferBlocked
  */
-export const TRANSFER_PROPAGATES = false;
+export const TRANSFER_PROPAGATES = true;
 
 export function initAdminPanel(deps = {}) {
   ports = { ...DEFAULT_PORTS, ...deps };
@@ -370,15 +412,32 @@ export function createAdminPort(circle) {
     revokeInvite: (inviteId) =>
       call(origin, 'POST', '/api/v1/invites/revoke', undefined, { spaceId, inviteId }),
 
-    /** 20.2. LZP-608's rotation is `ports.afterRemove`'s and it gets `rotateRequired` verbatim. */
+    /**
+     * 20.2. The relay ends the access; `ports.afterRemove` does the other two halves — the
+     * epoch rotation ADR 002 §4.1 requires, and the in-log `member.set{_alive:false}` that takes
+     * the removed member's entries off every family board (LZP-608, `family/removal.js`).
+     *
+     * The relay's body is handed over VERBATIM, `rotateRequired` included, and the outcome rides
+     * back on `res.removal` so the confirmation can say what actually happened rather than
+     * assuming. A port that throws must not turn a completed removal into „das hat nicht
+     * geklappt": the member IS out, the relay said so, and `afterRemove` answers with a verdict
+     * instead of an exception for exactly that reason.
+     */
     async removeMember(memberId) {
       const res = await call(origin, 'POST', '/api/v1/members/remove', undefined, { spaceId, memberId });
-      if (typeof ports.afterRemove === 'function') await ports.afterRemove(res);
-      else if (res.rotateRequired) {
-        // Not silent. ADR 002 §4.1 requires `e+1` after a removal and this build does not perform
-        // it (LZP-608, a parallel round). The removal itself is complete and instant server-side:
-        // every request from that member's devices now fails at ADR 003 §2's auth step 6.
-        console.warn('[admin] removal done; the epoch rotation ADR 002 §4.1 requires is LZP-608 and is not wired');
+      if (typeof ports.afterRemove === 'function') {
+        try {
+          const outcome = await ports.afterRemove(res);
+          if (outcome) res.removal = outcome;
+        } catch (e) {
+          // The relay half is done and is not undone by a client-side failure. Reported loudly,
+          // never raised: raising here would make the panel claim nothing had changed.
+          console.warn('[admin] the removal completed on the server; the follow-up did not', e);
+        }
+      } else if (res.rotateRequired) {
+        // Only reachable when a caller injects `afterRemove: null` on purpose. The default port
+        // is `family/removal.js#afterRemove`.
+        console.warn('[admin] removal done; nothing is wired to perform ADR 002 §4.1\'s rotation');
       }
       return res;
     },
@@ -391,6 +450,20 @@ export function createAdminPort(circle) {
      * the role, so the panel stops offering admin controls to somebody who just gave them away.
      */
     async transferAdmin(memberId) {
+      // ── THE AUTHORITATIVE RECORD, AND IT GOES FIRST ──────────────────────────────────────────
+      //
+      // ADR 001 §4.1's transfer link. `adminPrev` is the opId of the link this one supersedes and
+      // `store.familyAdmin()` is the ONLY supported source of it — the constructor refuses a
+      // `null` prev (a rootless assertion hands the seat to nobody) and refuses an author who is
+      // not the sitting admin.
+      //
+      // **BEFORE the relay call, deliberately.** The relay stores nothing here and its answer is
+      // advisory; the op is the fact. Ordering it second would mean a relay hiccup demoted this
+      // Mac's own prefs while the promotion never entered the log — which is exactly the
+      // headless-circle outcome E6-2 measured. Ordering it first means the worst case is an op
+      // that promotes her and a relay that never heard about it, and the op is what every Mac
+      // folds.
+      ports.apply('transferAdmin', { admin: memberId, adminPrev: ports.adminSeat().headOpId });
       const res = await call(origin, 'POST', '/api/v1/members/transfer', undefined, { spaceId, memberId });
       ports.setSettings({ [CIRCLE_PREFS.role]: CIRCLE_ROLE.member });
       await ports.persist();
@@ -399,6 +472,21 @@ export function createAdminPort(circle) {
 
     /** 20.1 — the rename. Local first, because that is where the name lives. */
     async rename(name) {
+      // 20.1's authoritative half. Without it the name is a PER-MAC FACT: Papa's circle read
+      // „Familie Weber-Schmidt" and Mama's read „—", which is what E6-VERIFICATION §3.4 measured.
+      // The local pref stays as well, because it is what renders before the op has folded and on
+      // a Mac whose keys have not arrived (D9).
+      // The local pref is written EVEN IF the op cannot be authored, and the failure is loud
+      // rather than fatal — the same shape as the relay ping ten lines down. A Mac whose circle
+      // has no admin chain yet (`claimAdmin` not folded) can still name its own board; what it
+      // cannot do is tell anyone else, and the console says exactly that. Swallowing this
+      // silently would restore finding E6-1's rename-is-a-per-Mac-fact, so it is never quiet.
+      try {
+        ports.apply('renameSpace', { name });
+      } catch (e) {
+        console.warn('[admin] the rename could not be authored into the family log, so it is a '
+          + 'fact on THIS Mac only and will not reach the other members (20.1):', e.message);
+      }
       ports.setSettings({ [CIRCLE_PREFS.name]: name });
       await ports.persist();
       try {
@@ -709,15 +797,37 @@ function buildInvites(body, circle, port, l) {
     mint.disabled = true;
     try {
       const inv = await port.createInvite();
-      // The whole invitation, not the bare code: `invitationText` is the artifact 22.1 designs
-      // and it carries the relay's address, which a code alone does not. Nothing in it is key
-      // material — an address and a code is exactly what ADR 002 §7.1 permits an invite to carry.
-      await ports.clipboard(invitationText({
-        origin: circle.origin, code: inv.code, name: circle.name,
-      }));
-      toast(say(ADMIN_COPY.copied)(formatInviteCode(inv.code)));
+      // ⚠ **THE COPY IS A CONVENIENCE AND MAY NOT DESTROY THE INVITE.** Measured in a real
+      // browser: `navigator.clipboard.writeText` threw `NotAllowedError: Document is not focused`,
+      // the rejection escaped to the catch below, and the panel reported „…fehlgeschlagen" and
+      // then drew „Keine offene Einladung" — while the invite HAD been minted on the relay. The
+      // code the admin was about to send existed, was shown nowhere, and could not be recovered:
+      // `POST /invites` stores a verifier, never the code (ADR 002 §7.1), so a code that is not
+      // read out of this response is gone for ever and the row has to be revoked and re-minted.
+      //
+      // The clipboard is a permissioned API that can refuse for reasons that have nothing to do
+      // with the circle — focus, Safari's user-gesture rule, a locked pasteboard. So the mint is
+      // committed first, the list is drawn first, and a copy failure becomes ITS OWN message.
+      let copied = true;
+      try {
+        // The whole invitation, not the bare code: `invitationText` is the artifact 22.1 designs
+        // and it carries the relay's address, which a code alone does not. Nothing in it is key
+        // material — an address and a code is exactly what ADR 002 §7.1 permits an invite to carry.
+        await ports.clipboard(invitationText({
+          origin: circle.origin, code: inv.code, name: circle.name,
+        }));
+      } catch (copyErr) {
+        copied = false;
+        console.warn('[admin] the invitation could not be copied to the clipboard; the code is '
+          + 'shown instead and the invite itself is unaffected:', copyErr);
+      }
       body.insertBefore(hint(say(ADMIN_COPY.shownOnce)), listBox);
       await renderInvites(listBox, port, l);
+      // Shown either way. When the copy worked this is the confirmation; when it did not, it is
+      // the ONLY place the code appears, so it is never conditional on the clipboard.
+      toast(copied
+        ? say(ADMIN_COPY.copied)(formatInviteCode(inv.code))
+        : formatInviteCode(inv.code));
     } catch (e) {
       console.warn('[admin] createInvite failed', e);
       toast(t('familyFailed', String((e && e.message) || e)));
@@ -804,8 +914,9 @@ function buildDangerZone(body, circle, port, rows, isAdmin, api, l) {
     }
     const go = el('button', 'btn-ghost', say(ADMIN_COPY.transferLabel));
     go.type = 'button';
-    // See `ADMIN_COPY.transferBlocked`: without a `space.set{admin}` mutation this is a one-way
-    // demotion that leaves the circle headless. Off until the op can actually be emitted.
+    // `TRANSFER_PROPAGATES` is now true — `port.transferAdmin` authors ADR 001 §4.1's transfer
+    // link before it pings the relay, so the successor is promoted in the log every Mac folds.
+    // The gate stays, because a circle with nobody else in it still has nobody to hand it to.
     const canTransfer = TRANSFER_PROPAGATES && others.length > 0;
     if (!canTransfer) { pick.disabled = true; go.disabled = true; }
     go.addEventListener('click', () => {

@@ -132,6 +132,18 @@ const F2 = [
   ['deleteCategory', { id: 'c1', lastCategoryId: 9 }, 'a numeric lastCategoryId — ACCEPTED into a pref register', 'accept'],
   ['deleteCategoryReassign', { id: 'c1', targetId: 'c1', noteIds: [], barIds: [] }, 'reassigning a category to itself', 'throw'],
   ['deleteCategoryReassign', { id: 'c1', targetId: 'c2', noteIds: [null], barIds: [] }, 'a null id in the fan-out', 'throw'],
+  // ── THE FAMILY VOCABULARY (E6-1), DRIVEN THROUGH THE SAME DOOR ON A SOLO STORE ──────────────
+  // `boot(store)` adopts no Familienkreis, so every one of these is refused BEFORE its arguments
+  // are read — and that is the claim worth pinning here, not the arguments: story 15.1 and 21.5
+  // say a solo Mac emits no family op and makes no request, and this door is where a caller with
+  // hostile args would otherwise try. Each row still carries genuinely hostile input so that the
+  // day a family space IS in force the row keeps its meaning rather than becoming a tautology.
+  ['setMyProfile', { displayName: 42 }, 'a numeric display name — solo store, no Familienkreis', 'throw'],
+  ['attestMyDevice', { deviceShort: 'nope', blob: 'x' }, 'a deviceShort that is not 16 Crockford characters', 'throw'],
+  ['renameSpace', { name: '' }, 'an empty Familienkreis name', 'throw'],
+  ['claimAdmin', {}, 'claiming the admin seat with no space to be admin of', 'throw'],
+  ['transferAdmin', { admin: 'nope', adminPrev: null }, 'a transfer to a non-MemberId with no predecessor link', 'throw'],
+  ['removeMember', { memberId: 'mem_nope' }, 'removing a member named by a malformed id (20.2)', 'throw'],
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -152,16 +164,16 @@ describe('F-2 — the full scope of "apply() throws instead of declining"', () =
     return out;
   }
 
-  test('R3-20 SUCCEEDED (defect, F-2 widened): 27 of 36 hostile inputs THROW out of apply(); F-2 as filed names four of them', async () => {
+  test('R3-20 SUCCEEDED (defect, F-2 widened): 33 of 42 hostile inputs THROW out of apply(); F-2 as filed names four of them', async () => {
     const rows = await runCorpus();
     const wrong = rows.filter((r) => r.actual !== r.expect)
       .map((r) => `${r.name} (${r.why}): expected ${r.expect}, got ${r.actual}${r.err ? ` ${r.err}` : ''}`);
     assert.deepEqual(wrong, [], 'the corpus itself must be accurate');
 
     const thrown = rows.filter((r) => r.actual === 'throw');
-    assert.equal(rows.length, 36);
-    assert.equal(thrown.length, 27,
-      'DEFECT: twenty-seven inputs a file or a peer can supply reach a THROW rather than a decline');
+    assert.equal(rows.length, 42);
+    assert.equal(thrown.length, 33,
+      'DEFECT: thirty-three inputs a file or a peer can supply reach a THROW rather than a decline');
     assert.equal(thrown.filter((r) => /over 80|over 40/.test(r.why)).length, 4,
       'F-2 as filed — the over-length case — is four of those twenty-seven');
 
@@ -179,11 +191,17 @@ describe('F-2 — the full scope of "apply() throws instead of declining"', () =
       'DEFECT: the caller that finally wraps this door has TWO error classes to catch, from two modules');
   });
 
-  test('R3-22 FAILED (held): every one of the 22 named mutations is covered by the corpus above', () => {
+  test('R3-22 FAILED (held): every one of the 28 named mutations is covered by the corpus above', () => {
     const covered = new Set(F2.map(([n]) => n));
     const missing = Object.keys(MUTATIONS).filter((n) => !covered.has(n));
     assert.deepEqual(missing, [], 'a mutation added later without a row here would slip past this attack');
-    assert.equal(Object.keys(MUTATIONS).length, 22);
+    // 22 v1 retrofits + 6 family rows (E6-1, plus 20.2's removeMember). Counted by their DISCRIMINATOR rather than in one
+    // total, so that a family row growing a v1 `sites` entry — which would corrupt
+    // `V1_MUTATE_SITES` and the 22-site proof built on it — reddens this too.
+    const retrofit = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length > 0);
+    const family = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length === 0);
+    assert.equal(retrofit.length, 22);
+    assert.equal(family.length, 6);
   });
 
   // ── R3-23 · INVERTED 2026-08-27 · A3-H3 is CLOSED ────────────────────────────

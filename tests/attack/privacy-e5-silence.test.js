@@ -220,11 +220,23 @@ describe('§3 · a user creates a Familienkreis and then wants it gone', () => {
     // There is no prompt, no confirmation and no per-launch consent — by design (19.2 wants
     // silence), and that design has no counterpart that turns it off.
     const main = stripComments(repoFile('src/js/main.js'));
-    assert.match(main, /if \(!settings \|\| !settings\.syncEnabled \|\| !settings\.personalSpaceId\) return;/);
+    // ⚠ THE GATE GREW A THIRD FIELD AND THE FINDING GOT WIDER, NOT NARROWER. It used to read
+    // `!settings.syncEnabled || !settings.personalSpaceId`; a Mac that had joined a Familienkreis
+    // and opted into nothing else fell through it, ran the whole session on the EPHEMERAL
+    // identity, and could not construct a family engine at all. `familySpaceId` is now a fourth
+    // persisted fact that arms the door — so P-1's claim ("arming is not a per-session choice a
+    // user could decline") is now true of one more path, and this row is asserted by SHAPE rather
+    // than by one literal line, so that widening it again cannot quietly go unnoticed.
+    const from = main.indexOf('async function armFamilyMode');
+    const gate = main.slice(from, main.indexOf('function startFamilyMode', from));
+    assert.ok(gate.length > 0, 'armFamilyMode must still be the arming path this row is about');
+    assert.match(gate, /settings\.syncEnabled/);
+    assert.match(gate, /settings\.personalSpaceId/);
+    assert.match(gate, /settings\.familySpaceId/);
+    assert.match(gate, /return;/, 'the gate must still be able to decline — a solo Mac reaches nothing');
     assert.match(main, /await import\('\.\/family\/mount\.js'\)/);
     // Nothing between the guard and the import asks anybody anything.
-    const between = main.slice(main.indexOf('!settings.personalSpaceId'), main.indexOf("import('./family/mount.js')"));
-    assert.equal(/confirm|prompt|dialog|ask/i.test(between), false, `a consent step appeared: ${between}`);
+    assert.equal(/confirm|prompt|dialog|ask/i.test(gate), false, `a consent step appeared: ${gate}`);
   });
 });
 
@@ -463,16 +475,42 @@ describe('§5 · is solo mode heavier because family mode exists?', () => {
     // section can show the device short", a solo install would be paying for family mode in
     // battery and in entropy. It does none of those, and this is the structural proof:
     // `driveCadence` — the only thing in the product that arms a repeating timer for sync — is
-    // called from `startEngine` and from nowhere else, and `startEngine` is reached only from
-    // `mount.start()`, which `mountSolo` is not.
+    // reached only from an engine start, and no engine start is reachable from `mountSolo`.
+    //
+    // ── UPDATED BY LZP-608, AND THE CLAIM IS UNCHANGED ──────────────────────────────────────
+    // There are now TWO engines and therefore TWO cadence call sites: `startEngine` arms the
+    // personal one (story 19.4, my own two Macs) and `startFamilyEngine` arms the family one
+    // (D9 — the Mac that joined a Familienkreis and, before LZP-608, armed nothing at all and
+    // made zero /ops requests for ever, `E6-VERIFICATION.md` §5.2). Counting call sites is the
+    // PROXY; the claim is that none of them is reachable from `mountSolo`, so both are named
+    // rather than counted, and the solo body is checked against every entry point by name.
     const mount = stripComments(repoFile('src/js/family/mount.js'));
     const engine = stripComments(repoFile('src/js/family/engine.js'));
-    const soloBody = mount.slice(mount.indexOf('export function mountSolo'), mount.indexOf('const timerPorts'));
-    assert.equal(/startEngine|armStore|driveCadence|generateDeviceKeys|createSpaceKey/.test(soloBody), false,
+    const soloBody = mount.slice(
+      mount.indexOf('export function mountSolo'),
+      mount.indexOf('export function mountCircleSurfaces'));
+    assert.ok(soloBody.length > 0 && soloBody.length < mount.length,
+      'NON-VACUITY: the slice is really `mountSolo`\'s body and not the whole file');
+    assert.equal(
+      /startEngine|startFamilyEngine|startCircleEngine|armStore|armCircleIdentity|driveCadence|generateDeviceKeys|createSpaceKey/
+        .test(soloBody), false,
       `mountSolo starts something: ${soloBody}`);
-    assert.equal((engine.match(/driveCadence\(/g) || []).length, 2,
-      'driveCadence must have exactly its definition and its one call site');
+    const sites = (engine.match(/driveCadence\(/g) || []).length;
+    assert.equal(sites, 3,
+      'driveCadence has its definition and exactly TWO call sites — one per engine. A third call '
+      + 'site, or a call from anywhere but an engine start, breaks this row on purpose.');
     assert.match(engine, /const cadence = driveCadence\(sync, p\);/);
+    // AND BOTH OF THEM ARE INSIDE AN ENGINE START. Sliced by name, so a cadence armed at module
+    // scope — which a solo ⚙ WOULD evaluate — fails here rather than passing the count above.
+    for (const [fn, next] of [
+      ['export async function startEngine', 'function driveCadence'],
+      ['export async function startFamilyEngine', '// ═'],
+    ]) {
+      const from = engine.indexOf(fn);
+      assert.ok(from > 0, `${fn} exists`);
+      const body = engine.slice(from, engine.indexOf(next, from));
+      assert.match(body, /driveCadence\(sync, p\)/, `${fn} is where a cadence is armed`);
+    }
   });
 });
 

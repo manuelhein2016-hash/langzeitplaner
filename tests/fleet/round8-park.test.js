@@ -955,18 +955,25 @@ describe('§7 · a hold that ENDED is readable, and the judgement names it', () 
     const callers = ['src/js/sync', 'src/js/family']
       .flatMap((d) => fs.readdirSync(path.join(REPO, d)).filter((n) => n.endsWith('.js')).map((n) => `${d}/${n}`))
       .filter((f) => f !== 'src/js/sync/status.js' && /shelvedDetail/.test(SRC(f)));
-    assert.deepEqual(callers, ['src/js/sync/personal.js'],
-      'THE ROW, INVERTED: the engine hands the shelf in. Measured over the directories, so a '
+    assert.deepEqual(callers, ['src/js/sync/family.js', 'src/js/sync/personal.js'],
+      'THE ROW, INVERTED, AND RE-INVERTED BY LZP-608: BOTH engines hand the shelf in. Round 10 '
+      + 'asserted this list was EMPTY; the first inversion added `personal.js`; the family engine '
+      + 'is the second, and it had to be in the same list rather than exempt from it — a device '
+      + 'waiting for D9\'s key delivery is precisely the device most likely to be holding shelved '
+      + 'envelopes, so a family engine that did not offer its shelf would report the quiet thing '
+      + 'about the one board that actually has something held. Measured over the directories, so a '
       + 'revert dies here by name rather than by a silently empty report.');
 
     // NON-VACUITY: a text match on the file proves a call site was written, not that it RUNS.
     // The behavioural half is `round9-e6.test.js` §3c and the live-engine row below.
-    assert.match(SRC('src/js/sync/personal.js'), /held:\s*lotLoaded\s*\?\s*shelvedDetail\(lot,\s*\[spaceId\]\)\s*:\s*null/,
-      'and it hands in THIS engine\'s lot for THIS space, GUARDED BY `lotLoaded` — not an empty '
-      + 'array that would type-check and answer nothing, and not an unguarded read either: the lot '
-      + 'is empty until `loadLot()` has run, so an unguarded `status()` on a fresh process reports '
-      + 'an empty shelf WITH `unoffered: []` to prove it looked. Measured, before the guard '
-      + 'existed. See `tests/property/sync-domains.test.js` S4-shelved for the behavioural half.');
+    for (const f of callers) {
+      assert.match(SRC(f), /held:\s*lotLoaded\s*\?\s*shelvedDetail\(lot,\s*\[spaceId\]\)\s*:\s*null/,
+        `and ${f} hands in THIS engine's lot for THIS space, GUARDED BY \`lotLoaded\` — not an `
+        + 'empty array that would type-check and answer nothing, and not an unguarded read either: '
+        + 'the lot is empty until `loadLot()` has run, so an unguarded `status()` on a fresh '
+        + 'process reports an empty shelf WITH `unoffered: []` to prove it looked. Measured, '
+        + 'before the guard existed. See `tests/property/sync-domains.test.js` S4-shelved.');
+    }
   });
 });
 

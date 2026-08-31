@@ -37,10 +37,31 @@ import {
   createParkingLot, memoryRecordStore, PARK_REVIVALS,
 } from '../../src/js/sync/outbox.js';
 import { b64u } from '../../src/js/core/b64.js';
+import { stripCommentsAndStrings } from '../helpers/purity.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
 const SRC = (p) => fs.readFileSync(path.join(REPO, p), 'utf8');
+/**
+ * The same source with comments and string literals blanked. `purity.js` owns the scanner; a
+ * second one here would be a second answer to "is this code or is this a sentence". Used for
+ * IDENTIFIER scans, where blanking the strings is exactly right.
+ */
+const CODE = (p) => stripCommentsAndStrings(SRC(p));
+
+/**
+ * The same source with COMMENTS removed and string literals KEPT — because a route is a string,
+ * so `CODE` above blanks the very thing this scan is looking for, and the raw source counts a
+ * route named in prose as a call site. (Measured: before this existed, `family/engine.js` was
+ * reported as a roster fetcher on the strength of one sentence in a docblock.)
+ *
+ * Comment-only, and comment-only in the shape this codebase actually writes: `/* … *\/` blocks,
+ * and lines whose first non-space characters are `//` or `*`. A trailing `// …` after code is
+ * left alone, which is safe here because no route literal has ever lived in one.
+ */
+const NOCOMMENT = (p) => SRC(p)
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
 
 const BOARD = () => ({
   schemaVersion: 1,
@@ -179,19 +200,30 @@ describe('§1 · four Macs, three members, a partition and a race', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §2 · R10-8 · SUCCEEDED — E6 HAS A MEMBER LIST AND NOTHING KEEPS IT FRESH
+// §2 · R10-8 · **HALF CLOSED BY LZP-608** — the roster is refreshed; the FREE RIDE is still unused
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// ADR 003 §3.2 piggybacks the member list on EVERY pull, precisely so a client's roster tracks the
-// circle without a second request. `protocol.js readPullBody` parses it. `pullNow` reads neither.
-// The only roster fetch in `src/` is a single `GET /spaces/:id/members` at mount
-// (`family/mount.js:338`) — one request, at launch, on one code path.
+// THE ROW AS IT WAS, kept so the split is legible:
 //
-// For E6 that means: a member who joins is invisible until the next launch; a member who is
-// removed stays on screen until the next launch; and the client cannot use `removedAt` to explain
-// a hole in the log (`round9-witness.test.js` §4). Three E6 stories, one missing line.
+//   > ADR 003 §3.2 piggybacks the member list on EVERY pull, precisely so a client's roster tracks
+//   > the circle without a second request. `protocol.js readPullBody` parses it. `pullNow` reads
+//   > neither. The only roster fetch in `src/` is a single `GET /spaces/:id/members` at mount
+//   > (`family/mount.js:338`) — one request, at launch, on one code path.
+//
+// **The staleness half is closed and the efficiency half is not, and they are different claims.**
+// `sync/keys.js` fetches the roster inside EVERY key pass, and `sync/family.js` runs a key pass on
+// every `syncNow()` — so a member who joins is visible on the next poll, a member who is removed
+// leaves it on the next poll, and `family/engine.js`'s `refreshAttestations` folds the same
+// reading into `openOp`'s P1 table. It has to be that way round for a reason that is not about
+// freshness at all: ADR 002 §4.2 step 6 makes the roster the ONLY source of the admissible sender
+// set, and a device between §7.1 steps 2 and 6 holds no key, so it cannot fold the log to get one.
+//
+// WHAT IS STILL OPEN, EXACTLY: the roster now costs ONE EXTRA REQUEST PER SYNC, and ADR 003 §3.2
+// already puts the same list in the pull response for free. Neither engine reads `body.members`.
+// That is a bandwidth row, not a correctness row, and the assertions below keep measuring it —
+// including `removedAt`, which `round9-witness.test.js` §4b still needs and still cannot have.
 
-describe('§2 · R10-8 · SUCCEEDED · the roster is fetched once, at mount, and never again', () => {
+describe('§2 · R10-8 · HALF CLOSED · the roster is refreshed every sync, by a SECOND request', () => {
   test('the pull piggyback is served, parsed by the protocol layer, and read by nobody', async () => {
     const clock = simClock(Date.UTC(2026, 11, 10, 9, 0, 0));
     const f = await createFleet({ board: BOARD(), devices: ['A', 'B'], clock });
@@ -218,18 +250,29 @@ describe('§2 · R10-8 · SUCCEEDED · the roster is fetched once, at mount, and
     assert.notEqual(row.removedAt, null,
       '…with `removedAt` set — the timestamp that would let a client say WHY the log has a hole');
 
-    // AND NOBODY READS IT.
-    const engine = SRC('src/js/sync/personal.js');
-    assert.equal(/body\s*\.\s*members|\.members\b/.test(engine), false,
-      'THE ROW: `sync/personal.js` never touches `members`. Every pull carries the answer to '
-      + '"who is in this circle" and the answer is dropped on the floor.');
-    const roster = ['src/js/family/mount.js', 'src/js/family/engine.js', 'src/js/family/familysettings.js']
-      .filter((p) => /\/members['`]|\/members\$\{|spaces\/\$\{[^}]*\}\/members/.test(SRC(p)));
-    assert.deepEqual(roster, ['src/js/family/mount.js'],
-      'and the whole product fetches the roster from exactly one place. `mount.js` calls it once, '
-      + 'at mount. There is no refresh on join, no refresh on removal, and no refresh on a pull '
-      + 'that carried the new list for free. Inverts when `pullNow` folds `body.members` (through '
-      + '`readPullBody`, which already parses it) into whatever E6 makes the roster\'s owner.');
+    // AND NEITHER ENGINE READS IT — the surviving half of R10-8.
+    for (const eng of ['src/js/sync/personal.js', 'src/js/sync/family.js']) {
+      assert.equal(/body\s*\.\s*members|\.members\b/.test(CODE(eng)), false,
+        `THE SURVIVING ROW: \`${eng}\` never touches \`members\`. Every pull carries the answer `
+        + 'to "who is in this circle" and both engines drop it on the floor, then pay for a second '
+        + 'request to ask again. Inverts when a `pullNow` folds `body.members` (through '
+        + '`readPullBody`, which already parses it) into the roster\'s owner.');
+    }
+
+    // WHO FETCHES IT, measured over CODE rather than over comments — a prose mention of the route
+    // is not a call site, and before this row used `stripCommentsAndStrings` it counted one.
+    const roster = [
+      'src/js/family/mount.js', 'src/js/family/engine.js', 'src/js/family/familysettings.js',
+      'src/js/sync/keys.js', 'src/js/sync/family.js', 'src/js/sync/personal.js',
+    ].filter((p) => /\/members['`]|\/members\$\{|spaces\/\$\{[^}]*\}\/members/.test(NOCOMMENT(p)));
+    assert.deepEqual(roster, ['src/js/family/mount.js', 'src/js/sync/keys.js'],
+      'THE INVERSION: there are now TWO fetchers and they answer two different questions. '
+      + '`mount.js` keeps the UI\'s pseudonymous cache — colours for the member list, at sheet '
+      + 'open. `sync/keys.js` fetches it inside every key pass, because ADR 002 §4.2 step 6 makes '
+      + 'the roster the only source of the ADMISSIBLE SENDER SET and a joiner holding no epoch key '
+      + 'cannot fold the log to build one. So the roster is no longer "fetched once, at mount": it '
+      + 'tracks the circle on every sync. What it still costs is a second request, which §3.2 '
+      + 'offers for free — that half of R10-8 is open and is asserted above.');
   });
 });
 

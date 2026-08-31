@@ -445,6 +445,21 @@ const DE = {
   shortcutHint: 'Alle Kürzel: siehe Menüleiste',
   untitledBar: 'Balken',
   hidden: 'ausgeblendet',
+
+  // ── ADR 004 §4.3's own row: `belegt`, `geteilt`, `privat`, `vonMember`, `geaendert`, `neu`,
+  //    in BOTH tables. Glossary §13 is the source; `family/sharing.js:TXT` holds the SENTENCES
+  //    (§7.4's two required strings among them) and this holds the WORDS, because a level's key
+  //    is `core/entities.js:VISIBILITY_LEVELS` and there is one spelling of each.
+  //    `board.js:FAMILY_COPY` is the interim table that steps aside the moment these exist:
+  //    `board.js:ft()` resolves through `t()` FIRST and falls back only while a key is missing.
+  belegt: 'Belegt',
+  geteilt: 'Geteilt',
+  privat: 'Privat',
+  /** 17.6 — attribution shows WHO and WHEN, never WHAT. `%s` is the member's display name. */
+  vonMember: 'von %s',
+  geaendert: 'geändert',
+  /** 17.5 — the quiet dot. A downgrade NEVER dots (Principle 9, ADR 004 §7 rule 2). */
+  neu: 'neu',
 };
 
 const EN = {
@@ -835,6 +850,15 @@ const EN = {
   shortcutHint: 'All shortcuts: see the menu bar',
   untitledBar: 'Bar',
   hidden: 'hidden',
+
+  // ADR 004 §4.3, the English half. `EN` spreads `DE`, so a key added above and NOT overridden
+  // here ships German text to an English board — which is why all six are restated.
+  belegt: 'Busy',
+  geteilt: 'Shared',
+  privat: 'Private',
+  vonMember: 'from %s',
+  geaendert: 'changed',
+  neu: 'new',
 };
 
 const TABLES = { de: DE, en: EN };

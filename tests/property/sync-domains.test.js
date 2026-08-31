@@ -1204,8 +1204,23 @@ describe('S5 · module reachability', () => {
     // `leavedelete.js` became REACHABLE the moment `familysettings.js` called their sections.
     // They existed on disk for a round before that and this walk could not see them — the import
     // graph is the measurement, and an unmounted module is correctly invisible to it.
-    assert.equal(enumerated.length, 62,
-      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 62. If a module `
+    // 62 → 65 across two work packages landing at once: `sync/family.js` and `sync/keys.js`
+    // (E6's completion) and `core/project.js` (ADR 004 §2's choke point, WP-10).
+    // 65 → 66: `core/visibility.js` (E7, LZP-701/703/704) — the level policy, split out of the
+    // redaction boundary so that product questions about the level are not a reason to edit
+    // `core/project.js`. It lands `live` rather than `defence`, because `core/entities.js`
+    // imports it on the RENDERING seam and that seam ships today.
+    // 66 → 67: `family/removal.js` (LZP-608, stories 20.2/20.5) — the epoch rotation a removal
+    // requires and the in-log `member.set{_alive:false}` that takes the removed member's entries
+    // off every family board. Reached from `family/adminpanel.js`'s DEFAULT `afterRemove` port.
+    // 67 → 68: `family/sharing.js` (E7, LZP-702 / A7) — the popover's sharing cluster. It became
+    // visible to this walk the moment `family/mount.js#syncCircleMounts` installed it through
+    // `popover.js#useSharing(mod)`; before that it was on disk and correctly invisible, which is
+    // the ORDER this row depends on. Adding it before the wiring landed would have failed S5b's
+    // `ghosts` check instead (the walk is `reached ∪ nonDomModules()`, and `family/` is in
+    // neither until it is reached) — one change, two orders, only one of them works.
+    assert.equal(enumerated.length, 68,
+      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 68. If a module `
       + 'was added or deleted, add or delete its row rather than changing this number alone.');
   });
 
@@ -1229,7 +1244,19 @@ describe('S5 · module reachability', () => {
     // corresponding S1/S4 row is still waiting for — which is the exact mistake this test exists
     // to make impossible.
     const defences = S5.filter((e) => e.expect.role === 'defence').map((e) => e.value).sort();
+    // `core/project.js` joined this list when WP-10 built it. It is the sharpest row here: it is
+    // the ONLY implementation of ADR 004 §2's choke point, its absence is why `sealOp` refused
+    // every family `pub.set`, and deleting it would have closed the row while making it
+    // impossible for anything ever to be shared.
+    //
+    // **ITS `openFinding` IS NOW CLEARED AND IT STAYS ON THIS LIST**, which is the distinction
+    // the two fields exist to keep apart. `openFinding` asked "is it wired?" and the answer is
+    // yes: `sync/family.js#sealLine` passes `assertFamilyPatch` (barrier 2) and
+    // `store.familyLevelOf` (barrier 4) on the one path that seals a family op. `role: defence`
+    // asks something else — "would deleting this file make the product worse while turning this
+    // row green?" — and for a choke point the answer is permanently yes.
     assert.deepEqual(defences, [
+      'src/js/core/project.js',
       'src/js/crypto/backup.js', 'src/js/crypto/probe.js', 'src/js/sync/chain.js',
       'src/js/sync/cursor.js', 'src/js/sync/outbox.js',
     ]);

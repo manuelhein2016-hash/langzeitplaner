@@ -651,6 +651,12 @@ test('EVERY v1 store.mutate() site has an op constructor — all 22, none missin
   assert.equal(V1_MUTATE_SITES_IN_SOURCE.length, 22, 'the v1 recon found 22 mutate sites');
   const expected = V1_MUTATE_SITES_IN_SOURCE.map(([s]) => s).sort();
   assert.deepEqual([...V1_MUTATE_SITES].sort(), expected);
+  // and the table still contains exactly 22 RETROFIT rows. `MUTATIONS` also carries the family
+  // vocabulary (E6-1), which has no v1 site to name, so this is the count of rows that DO name
+  // one — the claim „all 22, none missing, none invented" said with the number as well as with
+  // the list, because a v1 row that lost its `sites` entry would slip past the list unnoticed.
+  const retrofit = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length > 0);
+  assert.equal(retrofit.length, 22, 'exactly 22 rows are v1 retrofits');
   // and each site's v1 label survives verbatim, so undo-stack labels do not change
   const labelBySite = new Map();
   for (const m of Object.values(MUTATIONS)) for (const s of m.sites) labelBySite.set(s, m.label);
@@ -684,6 +690,14 @@ test('every mutation entry is complete and every op it can build is valid', () =
     recolorCategory: { id: CAT[0], paletteRef: 'gruen' },
     deleteCategory: { id: CAT[0], lastCategoryId: CAT[1] },
     deleteCategoryReassign: { id: CAT[0], targetId: CAT[1], noteIds: ['n1', 'n2'], barIds: ['b1'], lastCategoryId: CAT[1] },
+    // rows 23-28 — the family vocabulary (E6-1, plus 20.2's removal). `makeCtx()` carries
+    // `familySpaceId`, so these build here exactly as they build in `store.apply()`.
+    setMyProfile: { displayName: 'Papa', colorRef: 'blau' },
+    attestMyDevice: { deviceShort: DEV_SHORT, blob: 'aGVhZGVy.c2ln' },
+    renameSpace: { name: 'Familie Weber' },
+    claimAdmin: {},
+    transferAdmin: { admin: MAMA, adminPrev: 'p'.repeat(22) },
+    removeMember: { memberId: MAMA },
   };
   assert.deepEqual(Object.keys(args).sort(), Object.keys(MUTATIONS).sort());
   for (const [name, a] of Object.entries(args)) {

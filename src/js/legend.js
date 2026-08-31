@@ -9,6 +9,53 @@ import { el, openSheet, field } from './ui.js';
 let legendEl = null;
 let notify = () => {};
 
+/**
+ * ── A3 · THE FAMILY HALF OF THE LEGEND, AND IT IS DELIBERATELY A NULL CALLBACK ───────────────
+ *
+ * This is the same seam `settings.js` has as `setFamilySections`, for the same reason and with
+ * the same direction of dependency.
+ *
+ * `legend.js` is in the BOOT GRAPH — `main.js` imports it on every launch, solo or not — so it
+ * may know that a second section EXISTS and may not know what is in it. An import of
+ * `family/membersui.js` here, static or dynamic, would put the member reader one edge away from
+ * every solo launch, which is exactly what ADR 003 §7 gate 2 forbids and what
+ * `tests/attack/privacy-e5-silence.test.js` §5 measures. So the direction is inverted:
+ * `family/membersui.js` — which is only ever evaluated behind `family/mount.js`, the one dynamic
+ * door — calls this, and until it does the legend has one fewer section and nothing else changes.
+ *
+ * ── WHY THE SEAM AND NOT THE MutationObserver IT REPLACES ────────────────────────────────────
+ *
+ * `renderLegend()` opens with `legendEl.textContent = ''`, so anything another module appended
+ * was erased on every category toggle, every „bearbeiten" and every `flashCategory`.
+ * `membersui.js` bridged that with a `MutationObserver` that re-appended when its own node had
+ * gone — correct, and a bridge: it made the family half arrive one animation frame LATE and only
+ * ever as a REPAIR, so between the wipe and the callback the toolbar was briefly a legend with
+ * one section. A `renderLegend()` that calls its second section is not a repair; there is no
+ * frame in which the section is missing, and the observer's cost (one live observer per family
+ * Mac, and a callback on every unrelated toolbar mutation) is gone with it.
+ *
+ * THE OBSERVER IS DELETED. There is no fallback and there must not be one: two mechanisms that
+ * both re-append the same node is how it gets appended twice.
+ *
+ * @type {((host:HTMLElement) => void)|null}
+ */
+let familyLegend = null;
+
+/**
+ * Called by `family/membersui.js#initFamilyLegend`. There is no other caller.
+ *
+ * A call that changes nothing REDRAWS NOTHING. `initMembersUI()` runs its teardown on every
+ * mount, including the first, and a legend that rebuilt itself every time the settings sheet
+ * asked whether this Mac is still in a circle would be v1 paying for a question about family
+ * mode. The redraw happens on the transition, which is the only moment there is anything to see.
+ */
+export function setFamilyLegend(fn) {
+  const next = typeof fn === 'function' ? fn : null;
+  if (next === familyLegend) return;
+  familyLegend = next;
+  renderLegend();
+}
+
 export function initLegend(container, onChange) {
   legendEl = container;
   notify = onChange || (() => {});
@@ -49,6 +96,13 @@ export function renderLegend() {
   const edit = el('button', 'legend-edit', t('edit'));
   edit.addEventListener('click', openCategoryManager);
   legendEl.appendChild(edit);
+
+  // A3's SECOND section, last, and inside the same wipe-and-rebuild that erased it before.
+  // A section that throws must not take „Meine Kategorien" down with it — the categories are v1
+  // and ship on every Mac; the family half is an addition and its failure is its own.
+  if (familyLegend) {
+    try { familyLegend(legendEl); } catch (e) { console.warn('[legend] the family half did not draw', e); }
+  }
 }
 
 export const catName = (c, lang) =>

@@ -286,6 +286,149 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 }
 .note .rep { font-size: 8px; opacity: .75; margin-right: 1px; }
 .note:hover { background: rgba(61, 33, 133, .07); }
+
+/* ── the badge family (deliverable 17, LZP-705/706) ───────────────────────────
+   Five markers, one contested slot, priced together rather than one at a time.
+
+   THE WHOLE FAMILY IS HORIZONTAL. Nothing below changes a line box, a row
+   height or `rowCapacity`, so a family board hosts exactly as many lines per
+   day as a solo one and twelve-months-on-one-screen is untouched. What they
+   spend is the ~60 px of TEXT width a day row has at the default 118 px column
+   (118 − 17 day number − 13 weekday − 27 px lane gutter − 1 px note padding),
+   measured in WebKit:
+
+     ↻ repeat marker      8 px    unchanged from v1
+     „neu" dot            5 px    foreign only
+     initial chip        10 px    foreign only
+     exposure badge       9 px    OWN only
+     Belegt block         0 px    a fill on the note it is already inside
+
+   The exposure badge and the chip/dot pair are mutually exclusive by
+   construction — one is my disclosure of my entry, the other is someone else's
+   entry — so the worst cases are 17 px (mine, repeating, shared → 28 % of the
+   budget) and 23 px (theirs, repeating, new → 38 %). `layout.js:PREFIX_COST_PX`
+   carries the same numbers and the DOM test measures the rendered boxes
+   against them at both 22 px and 18 px.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+/* 17.5 — the quiet „neu" dot. In the board's only accent tone, so it can never
+   be read as the 3 px demoted-holiday dot that sits two elements to its left in
+   the same row. Same 3 px as that dot: one dot vocabulary, two meanings kept
+   apart by hue rather than by size. */
+.note .neu-dot,
+.bar-label .neu-dot {
+  display: inline-block; vertical-align: middle;
+  /* 1 px of left bearing so the dot does not touch the weekday column — a text
+     node has natural side bearing and a 3 px disc has none. Taken OUT of the
+     right margin, so the element still costs the 5 px `PREFIX_COST_PX` prices. */
+  width: 3px; height: 3px; margin: 0 1px 0 1px; border-radius: 50%;
+  background: var(--accent-a);
+  box-shadow: 0 0 0 .5px rgba(61, 33, 133, .5);
+}
+/* On a bar label the dot sits ON the member's colour, and `--accent-a` against
+   `gruen` or `gold` is two tones of the same lime. The ring inverts so the dot
+   holds on all ten member tones rather than on the eight it happens to suit. */
+.bar-label .neu-dot { box-shadow: 0 0 0 .75px rgba(255, 255, 255, .95); }
+
+/* 17.2 — the initial chip. Whose is this, answered before what it is.
+   8 px so a capital letter still has ~5 px of cap height at 6.5 px type; it is
+   the largest thing in the slot because identity is the first question a family
+   board has to answer. */
+.note .chip {
+  display: inline-block; vertical-align: middle;
+  /* 1 px of left bearing, taken out of the right margin so the element still
+     costs the 10 px `PREFIX_COST_PX` prices. A filled chip has no side bearing
+     of its own and butted straight against the weekday column at 18 px — worst
+     in English, where „We" is wider than „Mi". */
+  width: 8px; height: 8px; margin: 0 1px 0 1px; border-radius: 2px;
+  font: 700 6.5px/8px var(--font); color: #fff; text-align: center;
+  letter-spacing: 0; text-transform: uppercase; overflow: hidden;
+}
+
+/* 16.6 — the exposure badge. Two INDEPENDENT channels, because ADR 004 §6 asks
+   for distinct glyphs per level AND for "the same glyph, hollow" when pending,
+   and any single-channel badge collapses one of the two:
+
+     COVERAGE (width of the ink)   how much is out there    3 px = Belegt · 7 px = Geteilt
+     TEXTURE  (solid vs hatch)     whether it got there     solid = acked · hatch = pending
+
+   The box is always 7 px so the prefix column stays aligned; only the INK
+   inside it changes width. A first draft drew a 1 px ring around the box and
+   filled a fraction of it — measured in WebKit at 5×, the ring dominated and
+   pending Belegt and pending Geteilt became the same mark, because a 1 px
+   border around a 5 px interior IS the glyph. Ink-only shapes have no such
+   floor, and the two channels stay orthogonal at every density.
+
+   Drawn in CSS rather than as a glyph: at 7 px a font's ◐ is a lottery, and a
+   box prints at 6 pt where a hairline glyph does not. `currentColor` means the
+   badge is always in the entry's own ink and needs no second colour decision.
+
+   The failure direction is deliberate. If the hatch is too fine to notice, the
+   reader still reads the ACKED level correctly and merely misses that a change
+   is in flight — the secondary signal degrades, never the primary one, and the
+   primary one is the promise ADR 004 §6 makes. */
+.note .exp,
+.bar-label .exp {
+  display: inline-block; vertical-align: middle;
+  width: 7px; height: 7px; margin-right: 2px; border-radius: 1.5px;
+  background-repeat: no-repeat;
+  background-image: linear-gradient(currentColor 0 0);
+}
+.note .exp.belegt,  .bar-label .exp.belegt  { background-size: 3px 100%; }
+.note .exp.geteilt, .bar-label .exp.geteilt { background-size: 100% 100%; }
+/* hollow == not yet on the server (ADR 004 §6: the badge never promises a
+   privacy state that has not reached the log). The COVERAGE above still
+   applies, so the level stays readable through the hatch. */
+.note .exp.pending,
+.bar-label .exp.pending {
+  background-image: repeating-linear-gradient(45deg,
+    currentColor 0 1px, transparent 1px 2.4px);
+}
+
+/* 16.7 — THE BELEGT BLOCK, viewer side. „A neutral block with my colour/initial
+   and the word Belegt": the colour and the initial are the chip, and the word is
+   the only other ink. It costs ZERO extra width — the fill sits inside the
+   padding the note already had.
+
+   The word is `--ink-3` and italic, NOT the owner's colour: a neutral word set
+   in a person's ink reads as something that person wrote. This is also why it is
+   an element rather than a text node — a text node would inherit the member
+   colour from the note's inline style.
+
+   ADR 004 §7.1: a block downgraded from Geteilt renders IDENTICALLY to one that
+   was always Belegt. There is no `.was-geteilt`, no strikethrough, no
+   transition, and nothing in the model from which one could be built. */
+.note.belegt {
+  /* SHRINK TO CONTENT. `.d-body` is a flex column, so the default `stretch`
+     made the fill run the whole row — measured at 6× in WebKit it was the
+     single heaviest mark on a family board, for the one entry that says
+     nothing. At content width the block still reads as a block (nothing else
+     on the board is a filled pill) and the empty rest of the row is the honest
+     picture: there is nothing more here. The BAR carries "this RANGE is taken"
+     at full length, which is where that reading belongs. */
+  align-self: flex-start; max-width: 100%;
+  background: var(--chip); border-radius: 3px;
+  /* The hairline is not decoration: `--chip` and `--bg-weekend` are one hue
+     family two steps apart, so on a weekend or Ferien row the fill alone loses
+     its edge. */
+  box-shadow: inset 0 0 0 1px var(--line-dash);
+  padding: 0 3px; margin-left: -1px;
+}
+.note.belegt:hover { background: #E3DAFF; }
+.note.belegt .redacted-word {
+  /* `em`, not px: `print.css` re-metrics `.note` to 6.5 pt on A4 and 8 pt on
+     A3 (A8 — the family wall poster), and a fixed 8.5 px word would print
+     larger than the shared texts beside it on A4 and smaller on A3. The three
+     BADGES stay fixed, deliberately: a chip scaled to 6.5 pt is ~5.8 px and a
+     capital inside it stops being a letter. Text scales, marks do not. */
+  font: italic 500 .95em/1.2 var(--font); color: var(--ink-3);
+  letter-spacing: .1px;
+}
+
+/* 18.1 — an entry I may not edit gets no editing affordance. The cursor is the
+   whole signal: no outline, no lock glyph, nothing that spends a pixel saying
+   what the absence of a grip already says. */
+.note.readonly, .bar.readonly, .bar-label.readonly { cursor: default; }
 .note.selected {
   outline: 1.5px solid var(--ink-1); outline-offset: 0; border-radius: 3px;
   background: #fff;
@@ -355,6 +498,37 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 }
 .bar-label.selected { box-shadow: 0 0 0 1.5px var(--ink-1); }
 .bar-label .cue { opacity: .85; }
+
+/* 16.7 — the Belegt BAR, viewer side. The stripe keeps the owner's colour and
+   its full length, because duration and owner are the disclosure; only the
+   label is withheld. The hatch is what says "taken, and that is all you get".
+
+   It is a ::before overlay and not a background, because `board.js` sets
+   `bar.style.background = seg.color` inline and an inline shorthand beats any
+   stylesheet `background-image`. The overlay also keeps the ONE colour decision
+   in `layout.js:entryColor` — nothing here has to know a member's tone. */
+.bar.belegt::before {
+  content: ''; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none;
+  background: repeating-linear-gradient(45deg,
+    rgba(255, 255, 255, .58) 0 1.5px, transparent 1.5px 4px);
+}
+/* THE HATCH STOPS AT THE STRIPE. Measured at 1× in WebKit, the same overlay on
+   the label chip turned 8.5 px white italic into a candy-striped blob — the one
+   word the viewer is entitled to, made the least legible thing on the board.
+   The stripe says "blocked"; the label says which word. One channel each. */
+.bar-label.belegt { font-style: italic; }
+
+/* The initial chip inverts inside a label chip — a member-coloured chip on a
+   member-coloured chip is invisible. `--seg-ink` is set inline beside the
+   background so the two can never disagree about which tone this segment is. */
+.bar-label .chip {
+  display: inline-block; vertical-align: middle;
+  width: 8px; height: 8px; margin-right: 2px; border-radius: 2px;
+  font: 700 6.5px/8px var(--font); text-align: center;
+  text-transform: uppercase; overflow: hidden;
+  background: #fff; color: var(--seg-ink, var(--ink-1));
+}
 
 .bar-cont-down, .bar-cont-up {
   position: absolute; z-index: 4; font: 700 9px var(--font); color: inherit;

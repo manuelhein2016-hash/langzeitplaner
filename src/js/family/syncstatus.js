@@ -90,7 +90,46 @@
 // filled in amber-brown, and there is still no spinner, no badge count and no button. The new
 // states are not new signals — they are new REASONS for the two signals that already existed.
 
+// ═════════════════════════════════════════════════════════════════════════════
+// D9's WAITING STATE IS THE THIRD REASON FOR THE SECOND SIGNAL
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// PO decision D9, and the joiner's half of ADR 002 §7.1 step 4: a member is IN the circle the
+// moment she redeems and holds no epoch key until another member's Mac wraps to her. Between
+// those two moments her board is correct and empty, and `E6-VERIFICATION.md` §5.2 measured what
+// she was told about it — nothing, on the board, for ever.
+//
+// THAT STATE IS `pending`, AND THE THREE RULES DECIDE EVERYTHING ABOUT HOW IT LOOKS:
+//
+//   · IT IS NEVER `error`. Nothing has failed. The ring stays HOLLOW, in the ink hierarchy's
+//     weakest tone — the same glyph an offline Mac gets, because it is the same register: your
+//     work is safe, the app is fine, something arrives later. `§1` of `sync-status.dom.js`'s new
+//     block asserts the class is `pending` and never `error`, in both the chrome and the sheet.
+//   · IT IS NEVER A SPINNER, and it is not on the board. It is the one 6 px glyph in the
+//     toolbar that this module has always drawn, with a different sentence behind it.
+//   · IT IS NEVER A DEMAND. `createjoin.js`'s `circleWaiting` / `circleWaitingCalm` are the two
+//     sentences, written for D9 and checked for tone there; this file renders them and does not
+//     re-word them. Nothing in either asks her to fetch somebody or to press anything, and D9
+//     part 4 is the promise they rest on: the keys arrive because the next Mac syncs.
+//
+// ⚠ IT MUST WORK WITH NO ENGINE AT ALL, and that is the finding rather than a nicety. `sync` is
+// this module's PERSONAL engine port and `initSyncStatus` is called only from `mount.js#start()`
+// — story 19.4's own-device sync. A Mac can be a full member of a Familienkreis and have opted
+// into none of that, which is exactly the Mac §5.2 measured. So the waiting fact is read
+// INDEPENDENTLY of `sync`: `syncStatusRaw()` reports it when `supported` is false, and
+// `refreshSyncChrome()` — which `main.js` calls on every redraw the moment the family door has
+// been opened — draws it. Gating D9's line on an engine nobody armed is how the line came to
+// have no renderer in the first place.
+//
+// WHERE THE FACT COMES FROM. `familyWaitingState()` in `createjoin.js`, which owns
+// `CIRCLE_PREFS.pending` and clears it (`mount.js#onKeys`). It is imported rather than
+// re-derived — a second reading of "am I still waiting?" is how the board and the settings sheet
+// come to disagree — and it is still injectable (`initSyncStatus({waiting})`) for the same
+// reason the store is: a test must be able to take the durable half out. The import costs a solo
+// Mac nothing: every module that imports THIS one already imports `createjoin.js`.
+
 import { t, getLang } from '../i18n.js';
+import { familyWaitingState } from './createjoin.js';
 import { el } from '../ui.js';
 import { store as appStore } from '../store.js';
 import {
@@ -199,6 +238,15 @@ let sync = null;
  * that.
  */
 let observability = null;
+/**
+ * @type {(() => {pending:boolean, line:string, calm:string})|null}
+ *
+ * D9's fact. Defaults to `createjoin.js`'s reader for the reason `observability` defaults to the
+ * app's own store: finding F-8 is a seam with no consumer, and a waiting state that only renders
+ * where a host remembered to wire it is that finding again in a new file. `waiting: null` takes
+ * it out, which is what a test asserting the engine half alone wants.
+ */
+let waitingFn = familyWaitingState;
 let unsubscribe = null;
 let unsubscribeWarnings = null;
 let nowFn = () => Date.now();
@@ -238,6 +286,10 @@ export function initSyncStatus(deps = {}) {
   // Without the `in` test there would be no way to mount an engine and deliberately keep the
   // durable half out, which is what the tier 2 fakes need and what a support tool wants.
   observability = 'store' in deps ? deps.store : appStore;
+  // `'waiting' in deps` for the same reason as `'store'`: passing `waiting: null` must MEAN null.
+  waitingFn = 'waiting' in deps
+    ? (typeof deps.waiting === 'function' ? deps.waiting : null)
+    : familyWaitingState;
   nowFn = typeof now === 'function' ? now : () => Date.now();
   scheduleFn = typeof schedule === 'function' ? schedule : (ms, fn) => setTimeout(fn, ms);
   unscheduleFn = typeof unschedule === 'function' ? unschedule : (h) => clearTimeout(h);
@@ -280,6 +332,20 @@ function diagnosticsRaw() {
   try { return observability.diagnostics(); } catch { return null; }
 }
 
+/** D9's fact, or the "nothing to wait for" answer — which is what solo mode must read. */
+const NOT_WAITING = Object.freeze({ pending: false, line: '', calm: '' });
+function waitingNow() {
+  if (!waitingFn) return NOT_WAITING;
+  let w;
+  try { w = waitingFn(); } catch { return NOT_WAITING; }
+  if (!w || w.pending !== true) return NOT_WAITING;
+  return Object.freeze({
+    pending: true,
+    line: typeof w.line === 'string' ? w.line : '',
+    calm: typeof w.calm === 'string' ? w.calm : '',
+  });
+}
+
 /**
  * The raw reading, normalised, with an honest answer when there is no engine at all.
  *
@@ -289,11 +355,17 @@ function diagnosticsRaw() {
  * failure this round is a case where the engine says `healthy` and the disk says otherwise.
  */
 export function syncStatusRaw() {
+  const waiting = waitingNow();
   if (!sync) {
+    // NO PERSONAL ENGINE — and D9's Mac is exactly this Mac. `silent` is 19.3's promise as a
+    // boolean and a member who is still waiting for her first key has not been told anything
+    // yet, so silence has not been earned here either.
     return Object.freeze({
-      state: SYNC_STATE.healthy, pendingOps: 0, consecutiveFailures: 0,
+      state: waiting.pending ? SYNC_STATE.pending : SYNC_STATE.healthy,
+      pendingOps: 0, consecutiveFailures: 0,
       lastPullAt: null, errorKind: null, detail: null, supported: false,
-      observables: Object.freeze([]), blind: Object.freeze([]), silent: true,
+      observables: Object.freeze([]), blind: Object.freeze([]),
+      silent: !waiting.pending, waiting,
     });
   }
   let r;
@@ -318,8 +390,13 @@ export function syncStatusRaw() {
     },
     diagnostics: diagnosticsRaw(),
   });
+  // THE WAITING FACT ONLY EVER RAISES, and it may raise ONLY as far as `pending` — never past a
+  // state the judge already reached. An engine error is a louder truth than a wait and keeps the
+  // filled ring; a wait is a louder truth than silence and takes the hollow one. That asymmetry
+  // is the whole of "D9's calm line is the pending state, never error", written as one line.
+  const state = waiting.pending && j.state !== SYNC_STATE.error ? SYNC_STATE.pending : j.state;
   return Object.freeze({
-    state: j.state,
+    state,
     pendingOps: j.pendingOps,
     consecutiveFailures: j.consecutiveFailures,
     lastPullAt: j.lastPullAt,
@@ -331,7 +408,9 @@ export function syncStatusRaw() {
     /** The rows this build cannot answer. Non-empty means silence has not been earned. */
     blind: j.blind,
     /** 19.3's promise as a boolean, and the only thing allowed to mean "nothing to tell you". */
-    silent: j.silent,
+    silent: j.silent && !waiting.pending,
+    /** D9's fact and its two sentences, so the chrome and the sheet cannot word it differently. */
+    waiting,
   });
 }
 
@@ -386,6 +465,7 @@ export function syncStatusState() {
     observables: raw.observables,
     blind: raw.blind,
     silent: raw.silent,
+    waiting: raw.waiting,
     /** The one sentence the tooltip and the settings section both use. */
     sentence: sentenceFor(state, raw),
   });
@@ -396,7 +476,10 @@ export function syncStatusState() {
  *
  * Four new reasons reached this module and NOT ONE new key was added to `i18n.js`. That is not
  * frugality; `i18n.js` belongs to another owner this round and a UI that invents an untranslated
- * sentence is worse than one that reuses a true one. Each new reason is spoken with the existing
+ * sentence is worse than one that reuses a true one. (D9's waiting state added none either, for
+ * a second reason: its two sentences are `createjoin.js`'s, written and checked for tone there.
+ * Where a family-mode string SHOULD live when one is genuinely new is settled once, in
+ * `family/familysettings.js`'s header — a frozen `{de, en}` in the module, on Principle 7.) Each new reason is spoken with the existing
  * sentence that is ACTUALLY TRUE OF IT:
  *
  *   parked   → `syncErrGeneric` — „Der Abgleich steht gerade. Das Board auf diesem Mac
@@ -419,6 +502,11 @@ export function syncStatusState() {
  * not merely „pending", and one for a line that will not reach the other Mac.
  */
 function sentenceFor(state, raw) {
+  // D9 FIRST, AND BEFORE THE SOLO SENTENCE. A Mac with a circle and no own-device sync is not
+  // solo — `t('syncSolo')` promises that the board talks to nothing, which is the one thing that
+  // is no longer true of her. It comes after `error` by construction: `state` is only `pending`
+  // here when the judge found nothing louder.
+  if (state === SYNC_STATE.pending && raw.waiting.pending) return raw.waiting.line;
   if (!raw.supported) return t('syncSolo');
   if (state === SYNC_STATE.error) {
     // The engine may supply its own `detail` — one plain sentence, per the contract. It is
@@ -523,9 +611,13 @@ export function buildSyncSection(body, api) {
   body.appendChild(el('div', 'section-title', t('syncSectionTitle')));
   const s = syncStatusState();
 
-  if (!s.supported) {
+  if (!s.supported && !s.waiting.pending) {
     // Solo. Not "sync is off" — there is nothing here to switch on, and 21.5 promises the board
     // stays on this Mac. Saying so plainly is the disclosure.
+    //
+    // `&& !s.waiting.pending`: a Mac that joined a Familienkreis without opting into own-device
+    // sync reaches this branch with `supported === false` and must NOT be told its board talks to
+    // nothing. It falls through to the line below, where `s.sentence` is D9's.
     body.appendChild(el('p', 'hint', t('syncSolo')));
     return;
   }
@@ -538,6 +630,16 @@ export function buildSyncSection(body, api) {
   line.appendChild(dot);
   line.appendChild(el('span', 'sync-sentence', s.sentence));
   body.appendChild(line);
+
+  // D9's SECOND sentence, and the sheet is the only place it fits. The chrome gets one sentence
+  // in a tooltip; here there is room for the half that answers "and what am I supposed to do?" —
+  // „Bis dahin bleibt dein Board genau so, wie es ist. Es gibt nichts zu tun und niemanden zu
+  // fragen." It is the sentence that makes the first one a statement rather than an instruction.
+  if (s.waiting.pending) body.appendChild(el('p', 'hint sync-waiting-calm', s.waiting.calm));
+
+  // No engine, so no last-pull time, no enumerated reasons and no 19.2 sentence about a button
+  // that only exists where there is something to press. D9's two lines are the whole section.
+  if (!s.supported) return;
 
   const when = el('p', 'hint sync-when',
     s.lastPullAt ? t('syncLastPull', formatWhen(s.lastPullAt, getLang())) : t('syncNever'));
@@ -626,6 +728,10 @@ export const SYNC_CSS = `
 .sync-line { margin: 0 0 4px; font: 400 12px/1.6 var(--font); color: var(--ink-1); display: flex; align-items: baseline; }
 .sync-sentence { min-width: 0; }
 .hint.sync-when, .hint.sync-no-button, .hint.sync-reason { margin-left: 0; }
+/* D9's second line sits under the first, at the reasons' indent, in the ordinary hint tone. No
+   amber, no rule, no panel: a member waiting for her first key is not in an error state and the
+   one thing this line may never look like is a warning. */
+.hint.sync-waiting-calm { margin: 0 0 6px 13px; }
 .hint.sync-when { margin-bottom: 6px; }
 /* The reasons sit under the sentence they explain, indented by exactly the width of the inline
    dot plus its margin, so the eye reads them as belonging to it rather than as a second list. No

@@ -11,9 +11,45 @@ import { colorOf } from './palette.js';
 import { flashCategory } from './legend.js';
 import { parseISO, dowISO, WD_DE, WD_EN, MONTH_DE, MONTH_EN } from './dates.js';
 import { notesOnDate, barsOnDate } from './core/entities.js';
+// 16.4 / ADR 004 §3. `core/visibility.js` is a LEAF in `core/` — it imports nothing — so this is
+// not a door into `family/` and solo mode reaches only the level POLICY, never the projection.
+import { visibilityForNewEntry } from './core/visibility.js';
 
 let node = null;
 let ctx = null;
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// THE SHARING CLUSTER ARRIVES THROUGH THE ONE DOOR — IT IS NOT IMPORTED (A7, LZP-702)
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// ⚠ THERE IS DELIBERATELY NO `import … from './family/sharing.js'` ABOVE, AND ADDING ONE TURNS A
+// GATE RED. ADR 003 §7 gate 2 and ADR 002 §2.4: nothing under `src/js/family/` may be reachable
+// from the boot graph — statically at all, and dynamically through EXACTLY ONE door,
+// `family/mount.js`. `tests/tier1/network-scope.test.js` §2 asserts both rows, and it caught this
+// module the first time the cluster was wired the obvious way.
+//
+// The gate is not a formality here, it is the better design. Solo mode now fails to render the
+// cluster for TWO independent reasons, either of which suffices:
+//
+//   1. `store._project()` runs `stripV2Fields` while there is no family space, and `visibility`
+//      is not in `V1_ENTRY_FIELDS` — so no entry HAS a level for a control to change
+//      (`sharing.js:sharingApplies` is that absence, read as an answer); and
+//   2. this port is `null`, so not one byte of the module has been evaluated.
+//
+// 16.1 says oversharing must be *structurally* impossible. Two structures, no flag, no `if` that
+// somebody can invert.
+let sharing = null;
+
+/**
+ * Install the sharing cluster. Called from `family/mount.js` — the one door — when a
+ * Familienkreis exists, and from `tests/tier2/sharing-control.dom.js`, which is the same call.
+ * Passing `null` uninstalls it, which is what leaving a circle must do.
+ * @param {Object|null} mod the `family/sharing.js` module namespace
+ */
+export function useSharing(mod) {
+  sharing = mod || null;
+  return sharing;
+}
 
 export const popoverOpen = () => !!node;
 
@@ -72,7 +108,12 @@ const rememberCategory = (tx, catId) => tx.pref({ lastCategoryId: catId });
 
 export function openDayPopover(anchor, date, opts = {}) {
   closePopover();
-  ctx = { date, onChange: opts.onChange || (() => {}) };
+  // `share` is the ONE open disclosure, remembered across `render()` so a level change does not
+  // slam the strip shut under the finger that just used it — and so the §7.4 downgrade sentence
+  // is still on screen at the moment it is true. `{id, kind, lastChange}` or null.
+  // `nameOf` is the display-name port (17.6); there is no roster carrying names on this device
+  // yet, so it is absent and `attributionLine` falls back honestly. See the report.
+  ctx = { date, onChange: opts.onChange || (() => {}), share: null, nameOf: opts.nameOf || null };
   node = el('div', 'popover');
   render();
   document.body.appendChild(node);
@@ -130,6 +171,8 @@ function render() {
     for (const b of bars) node.appendChild(barRow(b));
   }
 
+  reopenSharing();
+
   const add = el('button', 'pop-add', t('addNote'));
   // The new-note row is popover-local until it has text. Creating a store
   // entry up front looked simpler but leaked an invisible empty note whenever
@@ -173,7 +216,11 @@ function startAdd(addBtn, date) {
       unhid = tx.ensureVisible(catId);
       tx.note(uid()).create({
         date, text: v, categoryId: catId, repeatsYearly: false,
-        visibility: 'privat', coEdit: false,
+        // 16.4 / ADR 004 §3 — ONE of the six create paths, and it was the one hardcoding the
+        // floor. The category's default is read exactly once, here, at creation; changing a
+        // default never re-publishes an existing entry, which 16.1 forbids as a bulk disclosure
+        // triggered by a settings click.
+        visibility: visibilityForNewEntry(store.category(catId) ?? null), coEdit: false,
       });
     });
     // Flash after refresh — refresh triggers a board redraw that rebuilds the
@@ -189,28 +236,87 @@ function startAdd(addBtn, date) {
   inp.addEventListener('blur', commit);
 }
 
+/**
+ * 18.1 — only the owner writes, and in the popover that is a CORRECTNESS gate before it is a
+ * permission one.
+ *
+ * A foreign entry's `id` IS its entity key (`fnote:mem_…/uuid`, `materialize.js:foreignCandidate`),
+ * so `tx.note(entry.id).set(…)` would mint the register `note:fnote:mem_…/uuid` in MY personal
+ * space — an entity that cannot exist, in a space that is not its own.
+ *
+ * `sharing.js:canEditEntry` is the EVENTUAL predicate (18.2 makes a co-editable foreign entry
+ * editable), and it is deliberately not used here yet: a co-editor's write is a `pub.set` built
+ * by `core/project.js:projectCoEditPatch`, and no store path publishes anything at all today
+ * (LZP-701's blocker). An editor that cannot write is worse than no editor, so the popover gates
+ * on ownership and LZP-902 switches the predicate over when the write path lands.
+ */
+const writable = (entry) => !entry.isForeign;
+
+/** 17.2 — others' entries carry the MEMBER's colour, never a category colour of mine.
+ *  ADR 004 §4.3 names the `layout.js:142` version of this trap: `colorOf(undefined)` silently
+ *  returns `PALETTE[0]` (blue), which would render Mama's entry as one of my blue ones. The
+ *  popover had the identical fall-through through `store.category()`, whose `|| categories[0]`
+ *  is the same accident by a different route. A member with no colour on this device yet gets
+ *  neutral ink — never a category tone. */
+function paintDot(dot, entry) {
+  if (!entry.isForeign) {
+    dot.style.background = colorOf(store.category(entry.categoryId).paletteRef);
+    dot.title = store.category(entry.categoryId).name;
+    return dot;
+  }
+  dot.style.background = entry.memberColorRef ? colorOf(entry.memberColorRef) : 'var(--ink-4)';
+  dot.title = attribution(entry) || '';
+  return dot;
+}
+
+/** ADR 004 §4.2 — a Belegt block shows the word in place of the text, everywhere. `board.js:137`
+ *  is the same seam on the grid; this is it in the popover, which reads from the same `redacted`
+ *  decoration so the two cannot disagree about what a Belegt entry says. */
+const rowText = (entry, fallback) =>
+  (entry.redacted && sharing ? sharing.levelWord('belegt') : (entry.text ?? entry.label) || fallback);
+
+/** 17.6, through the port. `null` in solo mode, where there is nobody to attribute anything to. */
+const attribution = (entry) =>
+  (sharing ? sharing.attributionLine(entry, { nameOf: ctx?.nameOf }) : null);
+
 function noteRow(n, date) {
   const row = el('div', 'pop-row');
-  const dot = el('button', 'dot');
-  dot.style.background = colorOf(store.category(n.categoryId).paletteRef);
-  dot.title = store.category(n.categoryId).name;
-  dot.addEventListener('click', () =>
-    toggleSwatches(row, n.categoryId, (catId) => {
-      store.txn('recategorise', (tx) => {
-        const x = tx.get('note', n.id);
-        if (!x || x.categoryId === catId) return false;   // the v1 decline protocol, verbatim
-        tx.note(n.id).set({ categoryId: catId });
-        rememberCategory(tx, catId);
-      });
-    })
-  );
+  row.dataset.entry = n.id;
+  row.dataset.kind = 'note';
+  const mine = writable(n);
+
+  const dot = paintDot(el(mine ? 'button' : 'span', 'dot'), n);
+  if (mine) {
+    dot.addEventListener('click', () =>
+      toggleSwatches(row, n.categoryId, (catId) => {
+        store.txn('recategorise', (tx) => {
+          const x = tx.get('note', n.id);
+          if (!x || x.categoryId === catId) return false;   // the v1 decline protocol, verbatim
+          tx.note(n.id).set({ categoryId: catId });
+          rememberCategory(tx, catId);
+        });
+      })
+    );
+  }
   row.appendChild(dot);
 
-  const txt = el('div', 'txt', n.text || '…');
-  txt.dataset.edit = n.id;
-  txt.title = n.text;
-  txt.addEventListener('click', () => startEdit(row, txt, n));
+  const txt = el('div', 'txt', rowText(n, '…'));
+  if (mine) {
+    txt.dataset.edit = n.id;
+    txt.title = n.text;
+    txt.addEventListener('click', () => startEdit(row, txt, n));
+  } else {
+    txt.style.cursor = 'default';
+    txt.title = attribution(n) || '';
+  }
   row.appendChild(txt);
+
+  if (!mine) {
+    // A7's cluster is the viewer's half here: the level, the sentence saying whose it is, and
+    // 17.6's attribution. No control — 18.1.
+    attachCluster(row, n, 'note');
+    return row;
+  }
 
   const rep = el('button', 'act' + (n.repeatsYearly ? ' on' : ''), '↻');
   rep.title = t('repeatsYearly');
@@ -232,6 +338,11 @@ function noteRow(n, date) {
   });
   row.appendChild(rep);
 
+  // A7 / ADR 004 §4.3 — "between popover.js:212 and :214 for notes (after the ↻ toggle, before
+  // delete)". Exactly here, and the ordering matters twice over: `↻` stays the row's FIRST
+  // `.act`, which two characterization probes index by position.
+  attachCluster(row, n, 'note');
+
   const del = el('button', 'act', '✕');
   del.title = t('delete');
   del.addEventListener('click', () => {
@@ -247,33 +358,160 @@ function noteRow(n, date) {
 
 function barRow(b) {
   const row = el('div', 'pop-row');
-  const dot = el('button', 'dot');
-  dot.style.background = colorOf(store.category(b.categoryId).paletteRef);
+  row.dataset.entry = b.id;
+  row.dataset.kind = 'bar';
+  const mine = writable(b);
+
+  const dot = paintDot(el(mine ? 'button' : 'span', 'dot'), b);
   dot.style.borderRadius = '1px';
   dot.style.height = '9px';
   dot.style.width = '4px';
-  dot.title = store.category(b.categoryId).name;
   // Bars need a recolour path too — creation locks in the last-used category,
   // and without this the only fix was delete-and-redraw.
-  dot.addEventListener('click', () =>
-    toggleSwatches(row, b.categoryId, (catId) => {
-      store.txn('recategorise-bar', (tx) => {
-        const x = tx.get('bar', b.id);
-        if (!x || x.categoryId === catId) return false;
-        tx.bar(b.id).set({ categoryId: catId });
-        rememberCategory(tx, catId);
-      });
-    })
-  );
+  if (mine) {
+    dot.addEventListener('click', () =>
+      toggleSwatches(row, b.categoryId, (catId) => {
+        store.txn('recategorise-bar', (tx) => {
+          const x = tx.get('bar', b.id);
+          if (!x || x.categoryId === catId) return false;
+          tx.bar(b.id).set({ categoryId: catId });
+          rememberCategory(tx, catId);
+        });
+      })
+    );
+  }
   row.appendChild(dot);
-  const txt = el('div', 'txt', b.label || t('untitledBar'));
-  txt.title = `${b.startDate} – ${b.endDate}`;
+  const txt = el('div', 'txt', rowText(b, t('untitledBar')));
+  txt.title = mine
+    ? `${b.startDate} – ${b.endDate}`
+    : (attribution(b) || `${b.startDate} – ${b.endDate}`);
   row.appendChild(txt);
   const range = el('span', 'act');
   range.textContent = `${b.startDate.slice(8)}.${b.startDate.slice(5, 7)}.–${b.endDate.slice(8)}.${b.endDate.slice(5, 7)}.`;
   range.style.font = '400 8.5px var(--mono)';
   row.appendChild(range);
+  // ADR 004 §4.3: "`barRow` currently has no ✕ and no ↻ — the cluster must be added to BOTH row
+  // builders or bars lose visibility control in the popover." A shared family holiday bar is the
+  // single most likely thing in the product to be Geteilt (A4, 18.2), so this is not symmetry for
+  // its own sake.
+  attachCluster(row, b, 'bar');
   return row;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The sharing cluster (A7, deliverable 18 · LZP-702) — `family/sharing.js` builds every pixel
+// and every string of it; this file only decides WHERE it hangs and WHICH transaction it writes.
+//
+// ⚠ NO `pub.*` FIELD IS CONSTRUCTED HERE. The two writes below touch the entity's own
+// `visibility` / `coEdit` TRUTH registers in the personal space and nothing else. What leaves the
+// device is built from those registers by `core/project.js:projectForFamily` on the store's
+// publish path — the single choke point of ADR 004 §2 — and there is no second path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The trigger, in the row's existing `.act` slot. Zero rows in the resting state (16.3, 1.x). */
+function attachCluster(row, entry, kind) {
+  if (!sharing || !sharing.clusterApplies(entry)) return;   // solo mode: see `useSharing`
+  const trig = sharing.sharingTrigger(entry);
+  trig.addEventListener('click', () => toggleSharing(row, entry, kind));
+  row.appendChild(trig);
+}
+
+/** One disclosure at a time: the category swatches and the sharing strip are siblings in the
+ *  same slot and would otherwise stack, which at 214 px is two popovers' worth of height. */
+function closeDisclosures() {
+  if (!node) return;
+  node.querySelector('.pop-cat')?.remove();
+  node.querySelector('.pop-share')?.remove();
+  for (const b of node.querySelectorAll('.share-trig')) b.setAttribute('aria-expanded', 'false');
+}
+
+function openSharing(row, entry, kind, lastChange = null) {
+  closeDisclosures();
+  ctx.share = { id: entry.id, kind, lastChange };
+  const strip = sharing.sharingStrip({
+    entry,
+    nameOf: ctx.nameOf,
+    lastChange,
+    // ⚠ THE CALLBACKS CLOSE OVER THE **ID**, NEVER OVER `entry`.
+    //
+    // `store.js:reconcileList` preserves entry-object identity across a mutation on purpose
+    // ("a caller may be holding a reference to one of these"), so `entry` and `tx.get`'s answer
+    // are the SAME OBJECT for a surviving entry — and a mutant that read the captured one
+    // survived the whole 36-cell domain, because on every surviving entry the two reads are
+    // provably equal. They stop being equal for an entry that does NOT survive: a delete plus a
+    // ⌘Z (18.6 — "undo of my own deletion restores the entry as a NEW operation") makes
+    // `reconcileList` push a fresh object, and the strip would then be holding a detached
+    // snapshot of a level the user last saw some time ago.
+    //
+    // Rather than guard against reading it, the closure cannot reach it. There is exactly one
+    // read of the entry on the write path and it is inside the transaction.
+    onLevel: (level) => applyLevel(entry.id, kind, level),
+    onCoEdit: (on) => applyCoEdit(entry.id, kind, on),
+  });
+  row.insertAdjacentElement('afterend', strip);
+  row.querySelector('.share-trig')?.setAttribute('aria-expanded', 'true');
+  return strip;
+}
+
+function toggleSharing(row, entry, kind) {
+  const isOpen = ctx.share && ctx.share.id === entry.id && node.querySelector('.pop-share');
+  if (isOpen) { closeDisclosures(); ctx.share = null; return; }
+  openSharing(row, entry, kind);
+}
+
+/** `render()` rebuilds every row, so the open strip is re-created rather than preserved — which
+ *  is what keeps a level change from slamming it shut under the finger that just used it, and
+ *  what keeps ADR 002 §7.4's downgrade sentence on screen at the moment it is true. */
+function reopenSharing() {
+  const want = ctx?.share;
+  if (!want) return;
+  const row = node.querySelector(`.pop-row[data-entry="${CSS.escape(want.id)}"]`);
+  const entry = currentEntry(want.kind, want.id);
+  if (!row || !entry) { ctx.share = null; return; }
+  openSharing(row, entry, want.kind, want.lastChange);
+}
+
+const currentEntry = (kind, id) =>
+  (kind === 'bar' ? store.state.bars : store.state.notes).find((e) => e.id === id);
+
+/**
+ * 16.3/16.5 — the level change. ONE transaction, therefore one ⌘Z (18.4).
+ *
+ * THE ONLY READ OF THE ENTRY IS `tx.get`, INSIDE THE TRANSACTION. A level that moved under the
+ * open strip — a co-editor, a second Mac, an admin unshare landing between the render and the
+ * click — therefore meets v1's decline protocol rather than an overwrite with a level the user
+ * never saw. See the note at `openSharing` for why the entry is not passed in.
+ */
+function applyLevel(id, kind, level) {
+  if (!sharing) return;
+  let done = null;
+  store.txn('set-visibility', (tx) => {
+    const x = tx.get(kind, id);
+    if (!x) return false;
+    done = sharing.planVisibilityChange(x, level);
+    if (!done) return false;                       // the v1 decline protocol, verbatim
+    tx[kind](id).set(done.patch);
+  });
+  if (!done) return;
+  ctx.share = { id, kind, lastChange: done };
+  refresh();
+}
+
+/** 18.2 — „Familie darf bearbeiten". Refused below Geteilt by `planCoEditChange` as well as by
+ *  the disabled input, so a caller that gets past the DOM still cannot set it (ADR 004 §8). */
+function applyCoEdit(id, kind, on) {
+  if (!sharing) return;
+  let done = null;
+  store.txn('toggle-coedit', (tx) => {
+    const x = tx.get(kind, id);
+    if (!x) return false;
+    done = sharing.planCoEditChange(x, on);
+    if (!done) return false;
+    tx[kind](id).set(done.patch);
+  });
+  if (!done) return;
+  ctx.share = { id, kind, lastChange: null };             // a grant is not a downgrade
+  refresh();
 }
 
 function startEdit(row, txt, n) {
@@ -310,6 +548,8 @@ function startEdit(row, txt, n) {
 function toggleSwatches(row, currentCatId, apply) {
   const existing = node.querySelector('.pop-cat');
   if (existing) { existing.remove(); return; }
+  closeDisclosures();                 // one disclosure at a time — see `closeDisclosures`
+  ctx.share = null;
   const strip = el('div', 'pop-cat');
   for (const c of store.state.categories) {
     const sw = el('button', 'sw');
