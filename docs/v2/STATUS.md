@@ -1,58 +1,85 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-31 · **Stopped at:** **E7 — visibility and sharing, integrated and
-proven on the bytes.** The wall §9 and §10 both closed on — a family with a membership lifecycle and
-no content — is down.
+**Last session:** 2026-08-31 · **Stopped at:** **E6 — Familienkreis, INTEGRATED. A circle now
+shares.** LZP-601…**608** are all verified against the real relay in three real browser contexts.
 
 ---
 
-## E7 — the redaction boundary. LZP-701…706 wired, and the invariant proven on the sealed bytes.
+## The headline: D9 part 4 is demonstrated, and it was the acceptance test for the epic
 
-All six suites green: **2004 · 769 · 101 · 868 · 193 · 32 files.** Full record:
-`docs/v2/E7-VERIFICATION.md`; findings in `FINDINGS.md` §11.
+All six suites green: **2008 · 769 · 101 · 868 · 193 · 32 files.** Full record:
+`docs/v2/E6-VERIFICATION.md`; findings in `FINDINGS.md` §11.
 
-**The invariant ADR 004 exists to enforce is enforced where ADR 004 says it must be: on the emitted
-ops and on the sealed bytes, never on the rendering.** `src/js/core/project.js` is no longer an
-orphan — it is the only path by which a family patch comes into existence, and there is no second
-one. Papa's Mac creates an entry through the real store, the store **derives** the publication, the
-real `sealOp` seals it under a real family key with barriers 2, 3 and 4 injected, Mama's Mac opens
-it with the real `openOp`, folds it with the real `foldAuthorized` and draws it with the real
-`materialize`. The word „Scheidungsanwalt" appears in **no** pre-seal plaintext, **no** envelope
-field, **no** ciphertext byte, and in **no** object recovered by decrypting the whole family log
-under **every epoch key the family has ever held**. Papa downgrades to Privat; the entry leaves
-Mama's board at the next sync and every withdrawable register on her disk holds an explicit `null`.
-A Privat entry — created, edited, moved, made repeating, recategorised, deleted — emits **zero**
-family ops, counted rather than shaped.
+The two previous passes (`FINDINGS.md` §9 and §10) reached the same wall from opposite sides: ADR 002
+§7.1 steps 4–6 had **no client implementation**, so a Familienkreis armed no engine, nothing wrapped
+a key for a peer, and Mom joined, was told calmly that the entries would arrive by themselves, and in
+that build they never did. **That wall is down.**
 
-`tests/attack/redaction-invariants.test.js` is ADR 004 §10's row set: **49 rows in 10 groups**,
-INV-R1…R4 · P7a–P7g, P7i · A3 · 16.1 · 16.6 · 16.7 · Principle 9. **22 mutants, 22 dead**, plus one
-null control that correctly survives. `assertNeverTransmitted` (ADR 004 §10.1) ships as
-`tests/helpers/never-transmitted.js` and runs in every Belegt scenario.
+Three browser contexts against `node server/dev-server.mjs` — three origins, three storage
+partitions, three durable identities — driven through: create → invite → join → **the waiting state
+clearing by itself** → a shared entry appearing on two other boards → a joiner receiving three years
+of history → a name change propagating → **LZP-608's removal with its epoch rotation** → and the
+removed member's board left byte-for-byte intact. Every step is pasted in `E6-VERIFICATION.md` §3.
 
-**The one thing to read first: `FINDINGS.md` §11, row E7-1.** `core/ops.js:makeOp` spread the field
-patch — `{ ...f }` copies string keys only — and `projectForFamily`'s barrier-3 brand is a
-non-enumerable **symbol**. So every op built through the shipped constructor reached `sealOp`
-unbranded and was refused: **the epic could not have worked at all**, and the failure read as a bug
-in the projection. Two more defects came out of writing the row that asks what the exposure badge
-says while the op is still in the outbox (**E7-2**: a pending downgrade rendered as *already
-withdrawn* — the badge under-reporting what the family can still see, the one direction ADR 004 §6
-forbids; **E7-3**: acknowledging a push never redrew it).
+**The one measurement to read.** On Mama's Mac, with `cadence.wake()` — the scheduler's own entry
+point — the only thing called anywhere, and no notification of any kind:
 
-**One measured weakness is stated rather than hidden. E7-4:** ADR 004 §10's **P7i** ("a Belegt op
-and a Geteilt op are the same ciphertext length") is true *inside* a 256-byte padding bucket and
-stops being true **below the product's own `str80` note cap** — so a relay operator can distinguish
-a long shared note from a booking **without a key**. No content escapes; one bit about a level does.
-Closing it means a second padding tier, which is a storage cost and a PO decision. The boundary is
-measured and pinned so that the day it moves, the row must be inverted rather than relaxed.
+```
+keysPending      true  →  FALSE
+epochs held      []    →  [1, 2, 3]     ← ALL epochs: history from genesis is readable
+heldEnvelopes    6     →  0             ← re-judged and applied IN THE SAME PASS
+board            Omas Geburtstag (entered 2023-11-14, yearly)  ← risk R11
+                 Papas Zahnarzt                                 ← 18.1
+                 Mamas Yoga (her own, untouched)
+circle name from the LOG : "Familie Weber-Schmidt"              ← 20.1 propagates
+names she knows          : Mama, Papa                           ← 15.6, E6-1 closed
+```
 
-**Three modules shipped dark and are now wired:** `family/sharing.js` (installed through
-`popover.js#useSharing` as a **port**, because a static import would put solo mode's graph inside
-`src/js/family/` and ADR 003 §7 gate 2 refuses that), `popover.js`'s create path (which hardcoded
-`'privat'`, so **16.4 did not fire from the popover at all**), and `i18n.js`'s six ADR 004 §4.3 keys.
+**The relay holds nothing readable.** Armed search (a planted needle *is* found in the same bytes)
+over the raw 31 554 bytes and the 16 199 decoded from all 553 base64url tokens: no display name, no
+circle name, no entry text, no date. The only member fact in the clear is a palette reference.
+
+**Solo mode is untouched and re-measured after the change** — which had to be re-taken, because
+`main.js`'s arming gate grew a third field: 38 modules, **0** from `family/`/`crypto/`/`sync/`/
+`net.js`, **0** network requests, **no IndexedDB** (no identity minted), DOMContentLoaded 170 ms,
+first run unchanged. Opening ⚙ loads 30 more modules and still requests nothing and mints nothing.
+
+**Story 21.2 re-proved now that two engines exist:** both constructors refuse the other's space with
+no flag and no default; `ring.get(psp_…, 6)` is `false` against a live six-epoch family ring; and
+Papa's Privat entry produced **zero** `pub.set` ops — not a redacted one, none.
+
+## Four findings, every one of which silenced the whole circle
+
+They are `FINDINGS.md` §11b, and the reason none was visible to a green suite is structural: **each
+fails by parking or by declining**, which is the shape this product is designed to have. The ops
+arrive, they are held, the board is empty, nothing is in an error state.
+
+- **E6-7 (HIGH)** — *nothing in `src/js/` ever supplied `ctx.attestOpen`*, so every peer's own
+  attestation op was rejected `badAttestation` and every op behind it parked `unattestedDevice`
+  for ever. **A circle could not admit a single op from anybody.**
+- **E6-7b (HIGH)** — the attestation tables were seeded once at launch, so a member who joins while
+  your app is open stays unattested until you restart. And a Mac in a Familienkreis *and nothing
+  else* never adopted a durable identity at all, so the family engine refused to construct.
+- **E6-9 (HIGH)** — **D9's own window destroyed the ops a joiner authors inside it**: they were
+  quarantined for lacking a key, and a quarantine has no cure.
+- **E6-8 (MEDIUM)** — a clipboard refusal destroyed the invite it was copying, while the invite
+  existed on the relay and its code was unrecoverable.
+
+All four are closed, each with a row in `tests/tier1/sync-family.test.js` §7 that a named mutant
+kills. **E6-1, E6-2, E6-5 and E6-6 are closed too.** The one row from the previous pass that is
+untouched is **E6-3** — global device uniqueness — and it is `server/`'s.
 
 ---
 
-## E6 — the client flows. LZP-601…607 wired, and the lifecycle driven.
+## E6 — the client flows, 2026-08-29. **SUPERSEDED by the section above — kept as the record.**
+
+> ⚠ **Everything below this line is the 2026-08-29 pass and is no longer the state of the tree.**
+> Its central claim — that D9's fourth requirement "cannot be demonstrated at all" — was true then
+> and is false now; `E6-VERIFICATION.md` §3.4 is the demonstration. It is kept unedited because the
+> *argument* in it is why the fix has the shape it has, and because the wall it describes is the
+> thing the next section had to knock down. Read it as history.
+
+### E6 — the client flows. LZP-601…607 wired, and the lifecycle driven. (2026-08-29)
 
 All six suites green: **1932 · 720 · 88 · 868 · 169 · 29 files.** Full record:
 `docs/v2/E6-VERIFICATION.md`; findings in `FINDINGS.md` §10.

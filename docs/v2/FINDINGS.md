@@ -3298,3 +3298,102 @@ on a share emits the retraction (**M7**).
    `tests/helpers/never-transmitted.js`, a recorder any sealer can feed.
 5. **A4 print density.** The foreign worst case (23 px, fixed) eats 59 % of `print.css`'s 39 px
    text budget. The suggested rule is in `belegt-render.dom.js`'s report.
+
+---
+
+## 11. E6 INTEGRATION — a circle that actually shares. What closing the gap found.
+
+**Date:** 2026-08-31 · **Tickets:** LZP-601…**608** · Full record: `docs/v2/E6-VERIFICATION.md`.
+
+§9 and §10 both closed on the same wall from opposite sides: *"E6's convergence question cannot be
+asked of this build"*, because ADR 002 §7.1 steps 4–6 had no client implementation. This section is
+what happened when the family engine, the key delivery, the publish path and the removal driver were
+wired together and three real Macs were put in one circle.
+
+**Suites at the close:** 2008 · 769 · 101 · 868 · 193 · 32 files. All green.
+
+### 11a. The convergence question, asked and answered
+
+Three browser contexts against `node server/dev-server.mjs` (three origins, three storage
+partitions, three durable identities): create → invite → join → **D9's waiting state clearing by
+itself** → a shared entry on two other boards → a joiner receiving three years of history → a name
+change propagating → removal with its epoch rotation → the removed member's board byte-identical.
+
+**D9 part 4 is demonstrated.** On Mama's Mac, with `cadence.wake()` the only thing called anywhere
+and no notification of any kind: `keysPending true → false`, `epochs [] → [1,2,3]`,
+`heldEnvelopes 6 → 0` — six parked envelopes re-judged and applied **in the same pass**, because
+`syncNow()` runs `keys.admit()` *before* the pull. That ordering is the mechanism; the `ringGrew`
+second sweep is a labelled backstop.
+
+The relay's stored bytes were searched with the search **armed** (a planted needle is found in the
+same bytes): no display name, no circle name, no entry text and no date, in the raw 31 554 bytes or
+in the 16 199 decoded from all 553 base64url tokens.
+
+### 11b. Four findings, and why a green suite could not see any of them
+
+**Every one of these silenced the entire circle while looking like normal operation**, because each
+fails by *parking* or by *declining* — which is the shape this product is deliberately designed to
+have. The ops arrive, they are held, the board is empty, and nothing anywhere is in an error state.
+That is the correct failure mode and it is exactly why the absence of a cure has to be tested for.
+
+| id | severity | finding | owner | status |
+|---|---|---|---|---|
+| **E6-7** | HIGH | **Nothing in `src/js/` ever supplied `ctx.attestOpen`.** `authz.js` stage 0a's `attestationVerifies` returns `false` for *every* blob without an opener — fail-closed, correctly. So every peer's `member.set{dev.<short>}` was rejected `badAttestation`, and because that op is the only thing that could ever attest that device, every later op from that peer parked `unattestedDevice` **for ever, curable by nothing**. A circle could not admit a single op from anybody. | `store.js` + `family/engine.js` | **CLOSED** |
+| **E6-7b** | HIGH | The attestation tables were seeded **once, at engine start**. A member who joins while somebody's app is open — the normal case — was unattested on that Mac until it restarted. Same class, one layer down: a Mac in a Familienkreis and nothing else never adopted a durable identity at all, because `main.js#armFamilyMode` gated on 19.4's *personal* opt-in and `useIdentity()` may only be called before `init()`. Its `store._short` was random and `createFamilySync` refused to construct. | `sync/keys.js` + `family/engine.js` + `main.js` | **CLOSED** |
+| **E6-9** | HIGH | **D9's own window destroyed the ops a joiner authors inside it.** `adoptCircleIntoLog` writes Mama's attestation and her name the instant she is admitted, when she holds no key — the state D9 exists for. `sealLine` threw and `pushNow` **quarantined** both, and a quarantine has no cure. The two ops that say who a member *is* were destroyed by the window designed to make her arrival survivable. | `sync/family.js` | **CLOSED** |
+| **E6-8** | MEDIUM | A clipboard refusal destroyed the invite it was copying. `navigator.clipboard.writeText` threw `NotAllowedError`, the rejection escaped `createInvite`, and the panel reported failure and „Keine offene Einladung" **while the invite existed on the relay**. `POST /invites` stores a verifier and never the code, so a code not read out of that response is gone for ever. | `family/adminpanel.js` | **CLOSED** |
+
+**The fixes, each in one sentence.** E6-7: `store.setAttestOpen(fn)` — a seam *separate* from
+`useIdentity`, because an identity is adopted once before `init()` while *who I can verify* changes
+every time the roster does. E6-7b: `sync/keys.js#roster()` gains an `onRoster(members)` port called
+on every read (on `roster()` and not on `admit()`, so `deliver()` and `rotate()` refresh it too and
+there is no second GET), and `main.js`'s gate grows `familySpaceId` with `mount.js#armCircle`
+adopting the identity *without* a personal space. E6-9: a `FamilySyncError` of kind `'key'` leaves
+the line in the outbox and counts it as `opsHeldForKey` — "waiting for a key" is a state, not an
+absence — while a *shape* refusal is still quarantined. E6-8: the mint is committed and the list
+drawn before the copy is attempted, and the toast shows the code whether or not the clipboard
+cooperated.
+
+**Mutants — each named row dies** (isolated copy, one run each, `tests/tier1/sync-family.test.js`):
+
+| mutant | row |
+|---|---|
+| M-A `keys.js#roster` stops calling `onRoster` | `§7c` |
+| M-B a key-less seal is quarantined again | `§7d` |
+| M-C `store.setAttestOpen` becomes a no-op | `§7b` |
+| M-D the fold ignores `ctx.attestOpen` | `§7a` |
+
+### 11c. §10's rows, re-judged
+
+- **E6-1** (`member.set`/`space.set` have no mutation) — **CLOSED.** `MUTATIONS` rows 23–28 plus the
+  publish path. Closing it required closing **E6-7** as well, or the ops would have arrived and been
+  rejected: the two are one defect seen from the two ends of the wire.
+- **E6-2** (admin transfer is a one-way demotion) — **CLOSED.** `transferAdmin` is authored *before*
+  the advisory relay call, `adminPrev` comes from `store.familyAdmin().headOpId`, and
+  `TRANSFER_PROPAGATES` is `true`. `tests/tier2/family-admin.dom.js` §7 is inverted and asserts the
+  op, its `adminPrev` and the ordering.
+- **E6-5** (the „Familie" collision) and **E6-6** (hiding a second member un-hid the first) —
+  **CLOSED**, and E6-6 is now driven through the same seam that had the bug.
+- **E6-3** (leaving bricks that Mac's family mode: global device uniqueness) — **STILL OPEN,
+  `server/`.** Not reachable from this pass. It is the last row of §10 that is untouched.
+
+### 11d. One row this pass CLOSED in the property domain, and why it stayed a `defence`
+
+`S5-core-project` reported `src/js/core/project.js` as reachable-from-nothing (`openFinding: P-4`).
+It is now reachable, and the door is `sync/family.js#sealLine`, which passes `assertFamilyPatch` as
+`ctx.assertFamilyPatch` (ADR 004 §2.2 barrier 2) alongside `store.familyLevelOf` as `ctx.levelOf`
+(barrier 4). Both are **required** by `sealOp` for a family `pub.set`, so the boundary is not merely
+reachable, it is unavoidable on the one path that seals one.
+
+The row keeps `role: 'defence'` and loses its `openFinding`, and the distinction is the point of
+having two fields: `openFinding` asks *"is it wired?"* and the answer is now yes; `role` asks
+*"would deleting this file make the product worse while turning this row green?"* and for a choke
+point that is permanently yes.
+
+`store.familyLevelOf` is barrier 4's source, and the one decision in it is which register it reads.
+`visibility` — the entity's own `gov` truth register — is the only right answer: `pub.level` is the
+level a transition is moving *away* from, so wiring barrier 4 to it makes every first share and
+every downgrade a refusal (finding S5, met from the store's side). A foreign entry answers `null`,
+which barrier 4 turns into a `RedactionError`: **this device may not publish somebody else's entry**,
+and answering with the peer's last-published level instead would let a co-edit re-publish a text its
+owner had since withdrawn.
