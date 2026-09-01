@@ -72,6 +72,39 @@
 //     is used and `diagnostics().durable` is `false`, so an undurable outbox is visible rather
 //     than assumed.
 //
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// TWO ENGINES, ONE SLOT — WHY THE PARKING LOT ASKS ITS STORE WHICH SPACE IT IS
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A Mac in a Familienkreis runs TWO of these lots in one process: `family/engine.js#startEngine`
+// builds one for the personal space and `startFamilyEngine` builds one for the family space, and
+// both are handed a `parkStore` over the SAME durable slot. Each `load()`s the whole slot and
+// each `saveRecords()`s the whole slot back from its own memory, so before this section the
+// second writer erased the first writer's rows — including the SHELF, whose entire promise is
+// that "not replayed is not destroyed" (R8-4). The E7 red team drove it: a personal envelope a
+// ladder had given up on, the only copy on this Mac with the cursor already past it, was gone
+// after one ordinary family park.
+//
+// Two rules close it, and both are properties of THIS file rather than of the port, because the
+// port is the one thing a future caller can get wrong:
+//
+//   1. **A LOT OWNS ONE SPACE, AND THE STORE SAYS WHICH.** A `storage.space` declaration scopes
+//      the lot: `load()` adopts only rows for that space and holds the rest ASIDE, verbatim, and
+//      `persist()` re-reads the slot and writes those foreign rows back out untouched. A store
+//      that declares nothing is assumed exclusive and behaves exactly as it did before — which
+//      is what `memoryRecordStore()` and every single-space test rig are.
+//
+//   2. **THE CAP IS PER SPACE.** `park()` returning `false` means "the caller MUST NOT advance
+//      the cursor past this", so a cap counted over every space in the lot lets a family space
+//      nobody can decrypt STALL THE PERSONAL SPACE'S SYNC. The bound is what it was for the disk
+//      — `cap` rows per space, and a Mac belongs to two — and it is now a bound each space wears
+//      alone. Rule 1 makes this belt-and-braces for a scoped lot; it is the whole defence for an
+//      unscoped one.
+//
+// The residual error of both is a RETENTION, never a loss: on a read this file cannot perform,
+// `persist()` writes back the last foreign set it knows about rather than an empty one, so the
+// worst case is a foreign envelope that gets replayed once more and released again.
+//
 // PURE. No clock, no randomness, no I/O — `storage` and `now` are ports.
 
 import { LIMITS, ENVELOPE_KEYS } from './protocol.js';
@@ -412,12 +445,23 @@ export function createOutbox(ports = {}) {
  * have kept.
  *
  * @param {{storage?:Object, now?:() => number, warn?:(m:string)=>void, cap?:number}} ports
+ *   `storage.space` — see the header's "TWO ENGINES, ONE SLOT". A store that declares it is a
+ *   SLICE of a slot somebody else also writes; a store that does not is exclusive.
  */
 export function createParkingLot(ports = {}) {
   const storage = ports.storage || memoryRecordStore();
   const now = typeof ports.now === 'function' ? ports.now : () => 0;
   const warn = typeof ports.warn === 'function' ? ports.warn : () => {};
   const cap = Number.isInteger(ports.cap) && ports.cap > 0 ? ports.cap : PARK_CAP;
+  /**
+   * THE SPACE THIS LOT OWNS, or `null` for a store that owns its slot outright.
+   *
+   * It comes off the STORE and not off `ports`, because the caller that knows the space
+   * (`family/engine.js`) and the caller that builds the lot (`sync/personal.js`, `sync/family.js`)
+   * are two different files, and only the first one builds the port. The declaration therefore
+   * travels with the thing it is a fact about.
+   */
+  const owned = typeof storage.space === 'string' && storage.space !== '' ? storage.space : null;
 
   /**
    * @typedef {{space:string, oid:string, env:Object, seq:string, reason:string, at:number,
@@ -432,6 +476,15 @@ export function createParkingLot(ports = {}) {
    * @type {ParkRow[]}
    */
   let shelf = [];
+  /**
+   * THE OTHER ENGINE'S ROWS — records in the shared slot whose `space` is not `owned`.
+   *
+   * Held VERBATIM and never read as anything: this lot does not replay them, count them, cure
+   * them or judge their shape. They exist here for one reason, which is that `saveRecords` writes
+   * the whole slot, so the only way to not destroy them is to hand them back. Always `[]` for an
+   * unscoped store. @type {Object[]}
+   */
+  let foreign = [];
   let loaded = false;
   let overflowed = 0;
   /** Persists that FAILED. Each one returned `false` from `park()` and stalled a cursor. */
@@ -453,12 +506,65 @@ export function createParkingLot(ports = {}) {
 
   const record = (r, refused) => ({ ...r, env: { ...r.env }, refused });
 
+  /**
+   * Write the slot: this lot's rows, plus the other engine's rows exactly as they are on disk.
+   *
+   * ── WHY THE READ IS NOT `await`ED UNLESS THE PORT FORCES IT ──────────────────────────────────
+   *
+   * A merge is a read-modify-write, and a read-modify-write with a suspension point in the middle
+   * is a lost update waiting for the two engines to park in the same cadence tick — which is the
+   * ordinary case, not the rare one. The sequence is exact: A reads (suspends), B reads
+   * (suspends), A writes its rows plus the empty set it read, B writes its rows plus the empty
+   * set IT read, and A's row is gone. That would have replaced a certain data loss with an
+   * occasional one, which is a worse bug because it is the kind that survives a test suite.
+   *
+   * So the read is performed WITHOUT `await` when the port answers synchronously, and
+   * `saveRecords` is then INVOKED in the same synchronous turn — `persist()`'s body runs to that
+   * call inside its caller's turn, so nothing can be interleaved between them. `family/engine.js`
+   * builds both slots over `localStorage`, which is a synchronous API, and its ports are
+   * deliberately not `async` for this reason; `tests/fleet/e6-attack-privat.test.js` §2a pins
+   * that and §2i drives two concurrent parks through the seam.
+   *
+   * A port that DOES answer with a promise still works and is still merged — with the microtask
+   * window open, and that is the honest bound: it is the shape `memoryRecordStore()` and
+   * `tests/helpers/fleet.js` use, and both are single-space rigs where there is no other writer.
+   *
+   * A read that THROWS falls back to the last foreign set this session saw. Writing back a stale
+   * foreign row can only resurrect an envelope the other lot has already dealt with — it is
+   * replayed once, opens or parks, and is released again — while writing back nothing is exactly
+   * the silent data loss ADR 002 §5.2.5 forbids. Retention over loss, where the direction is
+   * decidable.
+   */
   const persist = async () => {
+    const mine = [
+      ...rows.map((r) => record(r, false)),
+      ...shelf.map((r) => record(r, true)),
+    ];
+    // THE MERGE. `saveRecords` writes the whole slot, so "my rows" alone is a deletion of
+    // everybody else's — see the header. The other engine's rows go back out untouched.
+    let out = mine;
+    if (owned !== null) {
+      let stored = null;
+      let read = true;
+      try {
+        stored = storage.loadRecords();
+        if (stored !== null && typeof stored === 'object' && typeof stored.then === 'function') {
+          stored = await stored;                     // ← only for a port that leaves no choice
+        }
+      } catch (e) {
+        read = false;
+        warn(`park: the slot could not be re-read before writing (${e && e.message}); the other `
+           + `space's parked envelopes are written back as this session last saw them `
+           + `(${foreign.length}).`);
+      }
+      if (read && Array.isArray(stored)) {
+        foreign = stored.filter((r) => r !== null && typeof r === 'object'
+          && typeof r.space === 'string' && r.space !== owned);
+      }
+      out = foreign.length ? [...foreign, ...mine] : mine;
+    }
     try {
-      await storage.saveRecords([
-        ...rows.map((r) => record(r, false)),
-        ...shelf.map((r) => record(r, true)),
-      ]);
+      await storage.saveRecords(out);
       return true;
     } catch (e) {
       unwritable++;
@@ -480,12 +586,21 @@ export function createParkingLot(ports = {}) {
       }
       rows = [];
       shelf = [];
+      foreign = [];
       revived = 0;
       unopened.clear();
       const seen = new Set();
       if (Array.isArray(list)) {
         for (const r of list) {
           if (r === null || typeof r !== 'object' || typeof r.space !== 'string') continue;
+          // ── THE OTHER ENGINE'S ROWS ARE NOT THIS LOT'S TO ADOPT ────────────────────────────
+          //
+          // Adopting them was the whole of the second half of the finding. A lot that holds the
+          // family space's undecryptable backlog counts it against ITS cap, offers it to ITS
+          // `parked()` replay, and reports it in ITS diagnostics — so a family space nobody can
+          // read stalls the personal space's cursor and the sentence the user is shown names the
+          // wrong space. They are held aside instead, and written back untouched by `persist()`.
+          if (owned !== null && r.space !== owned) { foreign.push(r); continue; }
           if (!isEnvelopeFor(r.env, r.space)) continue;
           if (seen.has(key(r.space, r.env.oid))) continue;
           seen.add(key(r.space, r.env.oid));
@@ -555,11 +670,20 @@ export function createParkingLot(ports = {}) {
       // Already shelved: the bytes are retained, so this is not a stall — but it is not back in
       // the replay set either, and only a relaunch puts it there. Nothing is lost either way.
       if (at(shelf, k) >= 0) return true;
-      if (rows.length >= cap) {
+      // ── THE CAP IS COUNTED PER SPACE, AND THAT IS NOT AN OPTIMISATION ────────────────────────
+      //
+      // Returning `false` here means "the caller MUST NOT advance the cursor past this", i.e. it
+      // STALLS a space. A cap counted over the whole lot therefore lets one space stall another:
+      // a family space this Mac holds no key for fills the lot and the PERSONAL space stops
+      // syncing, for a reason that is not its own and a sentence that names somebody else's
+      // circle. The disk bound is unchanged in kind — `cap` per space, and a Mac belongs to two.
+      let held = 0;
+      for (const r of rows) if (r.space === space) held++;
+      if (held >= cap) {
         overflowed++;
-        warn(`park: the parking lot is full (${cap}). The cursor for ${space} will NOT advance past `
-           + `seq ${seq}, so nothing is lost — but sync for this space has stalled until the `
-           + 'attestation or the key epoch these envelopes need arrives (F-6).');
+        warn(`park: the parking lot for ${space} is full (${cap}). The cursor for ${space} will NOT `
+           + `advance past seq ${seq}, so nothing is lost — but sync for this space has stalled `
+           + 'until the attestation or the key epoch these envelopes need arrives (F-6).');
         return false;
       }
       rows.push({
@@ -719,6 +843,12 @@ export function createParkingLot(ports = {}) {
         durable: storage.durable !== false,
         parked: rows.length,
         cap,
+        // The space this lot owns (`null` = it owns its slot outright), and how many rows in that
+        // slot belong to the OTHER engine and are being carried through untouched. Both are here
+        // so that "two engines over one slot" is a thing a diagnostic can show rather than a thing
+        // only a red team can find.
+        scope: owned,
+        foreign: foreign.length,
         overflowed,
         byReason,
         // ── WHAT A LADDER GAVE UP ON, AND WHAT IT DID NOT DESTROY ────────────────────────────

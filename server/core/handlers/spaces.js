@@ -56,6 +56,29 @@
 // arrive at a state where an honest member is quietly missing three years of history.
 //
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHAT THE RULE IS NOT, AND IT HAS TO BE WRITTEN HERE — findings T5-K1 / T5-K2
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// **It is a ROW COUNT.** `assertCoverage` refuses a rotation unless a `KeyWrap` row EXISTS for
+// every (required recipient, epoch) pair. It has no opinion whatever about what is in the row:
+// the relay cannot open a wrap and must not try, so 156 bytes of noise satisfy it exactly as well
+// as a wrap of the epoch key. A member can therefore rotate with genuine wraps for her friends
+// and garbage for the person she wants to keep out, and this check will pass.
+//
+// That is not a defect in the check — a check that could tell them apart would be a relay that
+// reads the family's keys, which is the one thing this design may never buy. It is a defect in
+// any client that reads a 200, or an epoch number, as evidence that somebody else's key ARRIVED.
+// `src/js/sync/keys.js` §4 did exactly that, in these words — *"observing that an epoch EXISTS is
+// observing that it held"* — and one junk wrap plus one lost race locked a joiner out of a family
+// circle for ever, silently. Its coverage record is now three statements about keys and no
+// statement about epoch numbers, and ADR 002 §4.2's "two server-enforced checks" says ROW COUNT
+// where it used to say coverage, with the residual carried in §8.5.
+//
+// So the honest summary of what this file's coverage check buys, and it is worth having: it stops
+// a rotation that leaves somebody OUT (§4b of `tests/fleet/e6-attack-keydelivery.test.js` drives
+// it), and it stops a client that wraps only the current epoch (§7.1 step 5). It does not, and
+// cannot, stop a member from depositing a row nobody can open.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 // WHY THE WIRE HELPERS LIVE HERE AND NOT IN A NEW MODULE
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // ADR 005 §1.6 enumerates `server/core/handlers/`: meta, ops, spaces, invites, members, devices,
@@ -809,7 +832,14 @@ export function knownRecipients(members, devices) {
 const MAX_REPORTED_GAPS = 24;
 
 /**
- * The check itself: after the write, every required recipient holds every epoch 1..epoch.
+ * The check itself: after the write, a row EXISTS for every required recipient and every epoch
+ * `1..epoch`.
+ *
+ * ⚠ **A ROW COUNT, AND NOTHING MORE** — see "WHAT THE RULE IS NOT" in this file's header, ADR 002
+ * §4.2's "two server-enforced checks", and §8.5's member-driven-denial residual. `have` is a Set
+ * of EPOCH NUMBERS. Nothing here reads `w.wrapped`, and nothing here ever can: adjudicating
+ * between two sets of opaque bytes means opening one. A client that reads a 200 from this check
+ * as "the key reached them" is finding T5-K1.
  *
  * @param {Object} tx a SyncStore (usually a transaction handle)
  * @param {string} spaceId @param {number} epoch @param {string[]} recipients
@@ -905,8 +935,13 @@ export async function createSpace(req, ctx) {
       throw fail('bad_request', { field: 'device.deviceShort', reason: 'registered' });
     }
 
+    // `founderMemberId` is stamped HERE, by the relay, from the member row created six lines
+    // below — never off the body. Finding T5-M1a: it is the anchor that lets `/members/remove`
+    // refuse to purge ADR 001 §4.0's attestation and §4.1's admin genesis link on one member's
+    // say-so. It is not a role column and it never moves; see `schema.prisma`.
     await tx.createSpace({
       id: spaceId, kind, currentEpoch: 1, nextSeq: 0n, headChain: null, createdAt: new Date(at),
+      founderMemberId: member.memberId,
     });
     await tx.claimEpoch(spaceId, 1);
     // A `memberId` colliding with a member of ANOTHER space is not pre-checkable: `listMembers`
@@ -1043,7 +1078,26 @@ export async function rotateEpoch(req, ctx) {
       if (!known.has(w.recipientId)) throw fail('bad_request', { field: 'wraps', reason: 'unknown_recipient' });
     }
 
-    await tx.putKeyWraps(wraps);
+    // ── WHAT THE STORE ACTUALLY DID WITH THESE ROWS, CARRIED BACK TO THE CLIENT ─────────────
+    //
+    // `putKeyWraps` is WRITE-ONCE per (space, epoch, recipient, SENDER) — finding T5-K3, and the reason
+    // is in `adapters/memory.js`: adjudicating between two sets of opaque bytes means opening
+    // one. So a rotation's rows do not all land, and until this pass NOBODY was told which:
+    // `wrapsStored` answered `wraps.length`, the number SUBMITTED, and the store's own
+    // `{stored, kept, refused}` was thrown away at the call site.
+    //
+    // That silence costs an honest client the one thing it needs to know. `sync/keys.js` builds
+    // its wrap set from its own ring and posts it, and there is no route that answers "what is
+    // already there?" — so a rotation that stored nothing at all read exactly like one that
+    // landed whole.
+    //
+    // ⚠ WHAT `wrapsRefused` DOES NOT MEAN. It is NOT an abuse signal, and no rule may be built
+    // on it. The cell includes the DEPOSITOR, so a refusal is always this device re-wrapping its
+    // OWN earlier cell — which every rotation after the first does, for every epoch below its
+    // own, because `wrapSpaceKey` draws a fresh salt and IV each time. A non-zero count is the
+    // ordinary state of an honest relay. (Under the narrower cell it was not a signal either,
+    // for the same reason; it merely also hid a real denial, which the sender column closed.)
+    const put = await tx.putKeyWraps(wraps);
     const purged = await tx.deleteKeyWrapsForDevices(spaceId, staleRecipients(members, devices));
     await assertCoverage(tx, spaceId, epoch, requiredRecipients(members, devices, space.kind));
 
@@ -1059,7 +1113,7 @@ export async function rotateEpoch(req, ctx) {
     const open = await tx.listOpenInvites(spaceId);
     for (const inv of open) await tx.refreshInvite(inv.id, epoch);
 
-    return { purged, invitesRefreshed: open.length };
+    return { purged, invitesRefreshed: open.length, put };
   });
 
   logOk(ctx, { route: 'rotateEpoch', spaceId, deviceShort: auth.deviceShort, status: 200 });
@@ -1068,7 +1122,17 @@ export async function rotateEpoch(req, ctx) {
     body: {
       spaceId,
       currentEpoch: epoch,
+      // SUBMITTED, and it keeps that meaning: it is the count three suites and `dev/two-client.js`
+      // already read, and a field that quietly changes what it counts is worse than a field that
+      // needs a second one beside it. The three below are what the store DID.
       wrapsStored: wraps.length,
+      /** cells that were empty and now hold these bytes */
+      wrapsAdded: out.put ? out.put.stored : wraps.length,
+      /** identical re-posts of a row already held, depositor included — no-ops, not failures */
+      wrapsKept: out.put ? out.put.kept : 0,
+      /** this depositor's own cells, re-wrapped with fresh bytes: refused, its earlier row stands.
+       *  ORDINARY on every rotation after the first — never read this as an attack. */
+      wrapsRefused: out.put ? out.put.refused : 0,
       wrapsPurged: out.purged,
       invitesRefreshed: out.invitesRefreshed,
       serverTime: at,

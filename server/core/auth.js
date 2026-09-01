@@ -749,6 +749,143 @@ export async function verifySignature(sigPubRaw, signature, bytes, ctx) {
   }
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6b. THE ADMIN PROOF — the one kind of authority a blind relay CAN check
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// THE PROBLEM THIS SOLVES, AND THE HALF IT DOES NOT
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// ADR 003 §5.1 removed `Member.role` on purpose — "the admin is resolved from the in-log chain
+// (ADR 001 §4.1)" — and `store-interface.js` puts `role` in `FORBIDDEN_COLUMN_TOKENS` so it
+// cannot come back by accident. The chain lives inside ciphertext the relay may not read (story
+// 21.1). Finding **E2-203-2** states the consequence: the relay cannot authorize "admin only" on
+// any route, and its `fix` field asks for "a verifiable admin proof (a signature by the current
+// admin's RK_sig over the request) it can check without a role column".
+//
+// **Half of that is buildable and half of it is not, and the difference is worth stating before
+// the code, because it is the whole reason this function has the shape it has.**
+//
+//   · BUILDABLE — *"a member of this space, other than the caller, put their recovery key behind
+//     this exact act"*. `Member.recoveryPubSig` is already a relay column (it is what
+//     `POST /devices/adopt` and every device attestation verify under, ADR 002 §2.3 / §7.3), the
+//     signature is over bytes the relay assembles itself, and nothing about the check requires
+//     reading a single byte of anyone's content. That is what this function verifies.
+//
+//   · NOT BUILDABLE HERE — *"and that member is THE ADMIN"*. There is no anchor. The founder is
+//     not derivable: `Member.joinedAt` is the only ordering column and every member of a space
+//     created and joined inside one millisecond carries the same value, so "earliest member" is
+//     ambiguous exactly when an attacker would want it to be. Recording the founder is a SCHEMA
+//     change (`server/prisma/schema.prisma` + `server/core/store-interface.js`), which this file
+//     does not own. Reported as **E2-L1b**.
+//
+// So the property this buys is deliberately weaker than "only the admin may do this" and
+// deliberately stronger than "any single member may do this":
+//
+//     ONE HOSTILE MEMBER, ACTING ALONE, CANNOT.
+//
+// That is the T5 line. ADR 002 §0's T5 row puts "ability to purge another member" in the
+// must-NOT-get column for a family member as adversary, and a family member as adversary is
+// **one** person with **one** patched app and **one** recovery key. She cannot produce a
+// signature under a key that is in somebody else's Keychain, and no amount of client patching
+// changes that. A relay that demands two distinct members' recovery keys for an irreversible act
+// has closed the single-actor attack without ever learning who the admin is.
+//
+// ═════════════════════════════════════════════════════════════════════════════
+// WHAT IS SIGNED, AND WHY THERE IS NO NONCE IN IT
+// ═════════════════════════════════════════════════════════════════════════════
+//
+//     "lzp/admin/1\n" + act + "\n" + spaceId + "\n" + target + "\n" + epoch
+//
+// A fixed-arity newline string, assembled by the relay from values it already holds — never a
+// canonical-JSON re-serialisation of caller bytes, for the same reason `signedString` is not one
+// (ADR 003 §2): a signature whose payload has two spellings is not a signature.
+//
+// **The proof is NOT bound to the request nonce, and that is a decision rather than an
+// oversight.** Binding it would make a proof single-use, and would also mean the client had to
+// know the `Authorization` nonce before it signs — which `src/js/platform/net.js` mints inside
+// `buildRequest` and does not hand out. The reason the weaker binding is safe is that BOTH acts
+// this covers are idempotent and terminal:
+//
+//   · `member.remove` replayed against an already-removed member is the `alreadyRemoved: true`
+//     no-op the route already answers, and a removal forces `e+1` (ADR 002 §4.1), so the epoch in
+//     the payload staleness-bounds the proof to the epoch it was minted in.
+//   · `space.delete` replayed has no space to delete.
+//
+// A proof therefore grants nothing on replay that it did not grant the first time, and the epoch
+// keeps it from outliving the rotation its own act caused.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The domain separator. Distinct from `SIGNED_PREFIX`, so a request signature can never be
+ *  replayed as an admin proof or the other way round. */
+export const ADMIN_PROOF_PREFIX = 'lzp/admin/1\n';
+
+/** The acts a proof may authorize. Closed, and frozen: a third act is a protocol change. */
+export const ADMIN_ACTS = Object.freeze(['space.delete', 'member.remove']);
+
+/**
+ * The exact bytes an admin proof must cover. Exported so a test can build the string a DIFFERENT
+ * way — a swapped act, a neighbouring epoch, another space — and assert the relay refuses it.
+ *
+ * @param {{act:string, spaceId:string, target:string, epoch:number}} p
+ * @returns {string}
+ */
+export function adminProofString(p) {
+  return ADMIN_PROOF_PREFIX + p.act + '\n' + p.spaceId + '\n' + p.target + '\n' + String(p.epoch);
+}
+
+/**
+ * Verify a second member's authorization for one irreversible act.
+ *
+ * Every refusal is a `400 bad_request` naming the FIELD and an enum reason, or a `401
+ * bad_signature` — never a code that would turn this into an oracle. There is nothing to
+ * enumerate: `members` is the same list `GET /spaces/:id/members` already serves to every member
+ * of the space, so a caller learns nothing here they could not read directly.
+ *
+ * @param {unknown} proof the caller's `adminProof` field, out of the SIGNED body
+ * @param {{act:string, spaceId:string, target:string, epoch:number,
+ *          members:Object[], callerMemberId:string}} terms  assembled by the handler from
+ *          values the RELAY holds — never from the body, except `proof` itself
+ * @param {Object} [ctx]
+ * @returns {Promise<{by:string}>} the member whose recovery key stood behind the act
+ * @throws {HttpError} 400 on shape / self-signature / unknown signer, 401 on a bad signature
+ */
+export async function verifyAdminProof(proof, terms, ctx) {
+  const field = 'adminProof';
+  if (!ADMIN_ACTS.includes(terms.act)) throw fail('internal');
+  if (proof === null || typeof proof !== 'object' || Array.isArray(proof)) {
+    throw fail('bad_request', { field, reason: 'admin_proof_shape' });
+  }
+  const by = proof.by;
+  if (typeof by !== 'string' || by.length === 0 || by.length > 64) {
+    throw fail('bad_request', { field, reason: 'admin_proof_by' });
+  }
+  // ── THE TWO-KEY RULE, AND IT IS CHECKED BEFORE THE SIGNATURE ──────────────────────────────
+  // A proof the caller signed for herself is not weaker evidence, it is NO evidence: she already
+  // authenticated this request with a key of her own. Refusing it first also means the expensive
+  // verify never runs for the one shape that could never succeed.
+  if (by === terms.callerMemberId) {
+    throw fail('bad_request', { field, reason: 'admin_proof_self_signed' });
+  }
+  const signer = (terms.members || []).find((m) => m.id === by) || null;
+  if (!signer || (signer.removedAt !== null && signer.removedAt !== undefined)) {
+    throw fail('bad_request', { field, reason: 'admin_proof_signer_not_a_member' });
+  }
+  if (typeof proof.sig !== 'string' || !B64U_RE.test(proof.sig)) {
+    throw fail('bad_request', { field, reason: 'admin_proof_sig' });
+  }
+  const sigBytes = ub64(proof.sig, SIG_BYTES);
+  if (sigBytes === null) throw fail('bad_request', { field, reason: 'admin_proof_sig' });
+
+  const bytes = TE.encode(adminProofString({
+    act: terms.act, spaceId: terms.spaceId, target: terms.target, epoch: terms.epoch,
+  }));
+  const ok = await verifySignature(signer.recoveryPubSig, sigBytes, bytes, ctx);
+  if (!ok) throw fail('bad_signature', { check: 'admin_proof' });
+  return { by };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 7. What this file could not do with the interface it was given
 // ─────────────────────────────────────────────────────────────────────────────
@@ -782,6 +919,27 @@ export const AUTH_INTERFACE_GAPS = Object.freeze([
       'pin the identical two choices or every GET with a query fails 401 bad_signature — which is ' +
       'the single most likely integration failure in this protocol.',
     owner: 'ADR 003 §2 + WP-8',
+  }),
+  Object.freeze({
+    id: 'E2-L1b',
+    what:
+      'HALF CLOSED. `Space.founderMemberId` now exists and is written by the relay itself inside ' +
+      'POST /spaces, from the Member row it creates in the same transaction — so the relay CAN ' +
+      'name the space\'s creator. It still cannot name the current ADMIN: that is an in-log ' +
+      '`transferAdmin` op (ADR 001 §4.1) inside the ciphertext, and Member.joinedAt remains ' +
+      'useless as an ordering signal (createSpace and redeemInvite both set it from ctx.now(), ' +
+      'and it is IDENTICAL for every member of a space created and joined inside one millisecond).',
+    consequence:
+      '`verifyAdminProof` proves "a member of this space, other than the caller, signed this act" ' +
+      'and never "and that member is the admin". What the founder anchor buys is that the ONE ' +
+      'removal whose damage is not confined to its target — the founder\'s, which takes ADR 001 ' +
+      '§4.0\'s attestation and §4.1\'s admin genesis link with it — requires a second member\'s ' +
+      'recovery signature (ADR 003 §3.7, finding T5-M1a). What is STILL OPEN: an ordinary member ' +
+      'may remove any NON-founder on her own word, and two members who collude may remove the ' +
+      'founder. Closing that needs an in-request transfer-certificate chain anchored at ' +
+      'founderMemberId — the cryptographic mirror of the in-log admin chain — which is a ' +
+      'protocol change and not a gate.',
+    owner: 'ADR 003 §3.7 + server/core/handlers/lifecycle.js (the residual: D7 / PO)',
   }),
   Object.freeze({
     id: 'E2-202-C',

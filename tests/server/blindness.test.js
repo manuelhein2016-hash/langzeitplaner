@@ -202,8 +202,18 @@ test('§2 exactly ONE justified String is content rather than an id, and it is t
   // bits — `readWraps` refuses a body that names it — so it states nothing the relay did not
   // already know. Compare `Member.colorRef`, which is a user's CHOICE and is why that row needs
   // a sentence in the Datenschutz copy.
+  //
+  // `founderMemberId` joins it for the same reason, and this comment is the decision this test
+  // exists to force (finding T5-M1a). It is a MEMBER ID, of a row the relay created itself
+  // inside `POST /spaces`, in the same transaction, from a value it had already assigned. No
+  // route sets it and no body field reaches it, so it carries no user choice and states nothing
+  // the relay did not already observe — `Member.spaceId` and `Member.joinedAt` already told it
+  // who was in the space first. It is therefore NOT a new disclosure and needs no new sentence
+  // in 21.3. What it DOES add to a dump is the founder named unambiguously rather than inferred
+  // from four correlations, which `attack-relay-correlate.test.js` already records as SUCCEEDED
+  // and DOCUMENTED (21.3 §7.1) — the census got no new fact, only a cheaper one.
   const content = Object.keys(PLAINTEXT_STRINGS).filter(
-    (k) => !/(^|\.)(id|spaceId|memberId|deviceShort|opId|recipientId|senderDeviceId|createdBy|rid|nonce|key|kind)$/.test(k));
+    (k) => !/(^|\.)(id|spaceId|memberId|founderMemberId|deviceShort|opId|recipientId|senderDeviceId|createdBy|rid|nonce|key|kind)$/.test(k));
   assert.deepEqual(content, ['Member.colorRef']);
   assert.match(PLAINTEXT_STRINGS['Member.colorRef'], /DELIBERATE LEAK/);
   assert.match(PLAINTEXT_STRINGS['Member.colorRef'], /21\.3/);

@@ -35,11 +35,14 @@
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
 // The three verbs share ONE piece of state that must not be computed twice: the **coverage
-// proof** (§4 below) — which recipients this device can PROVE already hold the ring, and at which
-// epoch. `admit` is where the epoch is learned, `deliver` is where the proof is consumed and
-// extended, and `rotate` is where it is re-established. Splitting them would put the proof in a
-// fourth place, and a coverage question with two answers is how a family ends up with a member
-// whose board never fills in.
+// record** (§4 below) — the recipients this device has ITSELF handed the whole ring to. `admit`
+// is where the epoch is learned, `deliver` is where the record is read, and `rotate` is where it
+// is written. Splitting them would put the record in a fourth place, and a coverage question with
+// two answers is how a family ends up with a member whose board never fills in.
+//
+// It is a record of what THIS DEVICE DID and never an inference from what the relay reports, and
+// that distinction is finding **T5-K1** — the one hole in this file a hostile member could open
+// and hold open for ever. §4 has the whole of it.
 //
 // It lives in `src/js/sync/` because it is I/O-free by the same rule the rest of that directory
 // is (ADR 005 §2): the transport, the clock and the durable slot are all injected. It is not in
@@ -167,8 +170,10 @@ const isEpoch = (n) => Number.isSafeInteger(n) && n >= FIRST_EPOCH;
  * @property {() => number} now             injected; `src/js/sync/` reads no clock
  * @property {(m:string) => void} [warn]
  * @property {(epoch:number, key:CryptoKey) => Promise<void>|void} [saveKey]  durable custody
- * @property {{load:Function, save:Function}} [coverStore]  the coverage proof, across launches
- * @property {(r:Object) => void} [onAdmit]  fired once per `admit()` that changed the ring
+ * @property {{load:Function, save:Function}} [coverStore]  the coverage record, across launches
+ * @property {(r:Object) => void} [onAdmit]  fired once per `admit()` that changed the ring AND
+ *                                          left it WHOLE — D9's waiting state clears on coverage,
+ *                                          never on an epoch count (finding T5-K2)
  * @property {Object} [personalIdentity]    what `personalRecipients()` needs, for a `psp_` space
  * @property {SubtleCrypto} [subtle] @property {(n:number)=>Uint8Array} [random]
  */
@@ -206,7 +211,7 @@ export function createKeyDelivery(deps) {
   const ports = { subtle: d.subtle, random: d.random };
   const warn = typeof d.warn === 'function' ? d.warn : () => {};
 
-  // ── §4 · THE COVERAGE PROOF ─────────────────────────────────────────────────────────────────
+  // ── §4 · THE COVERAGE RECORD ────────────────────────────────────────────────────────────────
   //
   // THE QUESTION THIS ANSWERS, AND WHY THE RELAY CANNOT BE ASKED IT.
   //
@@ -218,35 +223,114 @@ export function createKeyDelivery(deps) {
   // "covered" leaves Mom's board empty for ever (D9's exact failure), and a false "uncovered"
   // makes every device in the family rotate on every poll.
   //
-  // THE ONE FACT THAT MAKES IT DERIVABLE. `server/core/handlers/spaces.js` runs `assertCoverage`
-  // INSIDE the rotation transaction, against the member and device rows as they stand AT COMMIT
-  // TIME, and it refuses the rotation unless every required recipient holds every epoch `1..e`.
-  // So coverage is not a hope about other clients — it is a server-enforced invariant, and
-  // observing that an epoch EXISTS is observing that it held.
+  // ═══ WHAT THIS SECTION USED TO CLAIM, AND WHY IT WAS FALSE — finding T5-K1 ═══════════════════
   //
-  // THE INFERENCE, STATED PRECISELY:
+  // It used to read the relay's coverage check as a statement about KEYS, in these words:
   //
-  //     If I read the roster R at a moment when the space was at epoch E,
-  //     and I later read that the space is at epoch E' > E,
-  //     then the rotation that produced E' committed AFTER my read,
-  //     so every recipient in R existed at its commit,
-  //     so every recipient in R holds epochs 1..E'.
+  //     "coverage is not a hope about other clients — it is a server-enforced invariant, and
+  //      observing that an epoch EXISTS is observing that it held."
   //
-  // That is why two slots are kept rather than one. `seen` is the roster read BEFORE a bump;
-  // `proof` is what a bump turns it into. A recipient that appears in the SAME response as the
-  // new epoch is deliberately NOT proven — it may have joined a millisecond after the rotation
-  // committed, which is exactly the case a one-slot design gets wrong and never notices.
+  // `server/core/handlers/spaces.js#assertCoverage` counts `(recipientId, epoch)` ROWS. It cannot
+  // open a wrap and must not try, so an epoch EXISTS as soon as the rows exist — whatever is in
+  // them. ADR 002 §4.2's "two server-enforced checks" now says that in the ADR too, and
+  // `assertCoverage`'s own docblock says it at the place where the counting happens.
   //
-  // WHAT IT COSTS WHEN IT HAS NOTHING. A device with no persisted proof — a fresh install, a
-  // cleared `localStorage`, a Mac paired in yesterday — cannot prove anything about anybody, so
-  // its first successful sync rotates once. That is not a regression: ADR 002 §4.1 rotates on a
-  // device joining a space anyway. It happens ONCE per device, because the rotation it performs
-  // is itself the proof, and it is written down.
-  /** @type {{epoch:number, ids:string[]}|null} */
+  // The red team spent one ordinary member's ordinary API access on the gap. Eve rotates first,
+  // with genuine wraps for herself and for Papa and **well-formed garbage for the joiner**. The
+  // relay takes it: every required row exists. Papa's honest delivery then loses the race, reads
+  // `409 epoch_taken` as *"their wraps cover the same recipients"*, and writes a DURABLE record
+  // saying the joiner holds a ring she cannot open. From that moment no honest device in the
+  // family delivers to her again: empty board, no warning, no error state, for the life of the
+  // install. Deleting the `RACED` branch's claim did not help — `observe()`'s inference (*"the
+  // epoch bumped, so everyone I saw at the old epoch is covered"*) wrote the same false record one
+  // tick later, from the other end.
+  //
+  //     THE ROOT: AN EPOCH BUMP IS NOT EVIDENCE THAT THE BUMP DELIVERED A USABLE KEY.
+  //
+  // Everything above the line — the inference, the two slots, the "a recipient that appears in the
+  // SAME response is deliberately not proven" refinement — was a careful derivation from a premise
+  // that is not true. It is deleted rather than tightened.
+  //
+  // ═══ WHAT IT CLAIMS NOW — THREE SOURCES, EACH ABOUT KEYS ════════════════════════════════════
+  //
+  // A recipient is covered when, and only when, one of these is true. Each is a fact about a KEY
+  // somebody demonstrably held, and none of them is an inference from an epoch number.
+  //
+  //   1. **I DELIVERED TO IT.** This device itself wrapped the whole ring `1..e` to it and the
+  //      relay accepted the rotation. `recordDelivery()` is the only writer, it is called from
+  //      exactly one place — the `200` arm of `rotateTo` — and `observe()` now only ever REMOVES
+  //      ids.
+  //   2. **IT DELIVERED TO ME.** `ring.originOf(space, epoch)` names the device whose wrap this
+  //      device OPENED to get that epoch's key (`how: 'admitted'`, finding S1's provenance). A
+  //      wrap only opens when the KEK derived against that device's own verified `IK_kex` public
+  //      key produces a valid AEAD tag, so a device named there **provably held that key**. If it
+  //      handed me every epoch of `1..e`, it holds the whole ring and is owed nothing. This is
+  //      the ordinary D9 flow read backwards: the joiner does not re-deliver to the member who
+  //      just delivered to her.
+  //   3. **IT IS ME.** Gate 2 of `deliver()` measured it — this pass does not get as far as the
+  //      coverage question unless `ring.covers(spaceId, at)`.
+  //
+  // Not an epoch bump. Not a lost race. Not a roster that stopped changing. Note what source 2 is
+  // NOT: it is a statement about the SENDER of a wrap, never about its other recipients. Eve's
+  // genuine wrap to Papa proves Eve holds the key; it proves exactly nothing about the joiner Eve
+  // wrapped garbage to, which is the whole of T5-K1 and the reason the epoch bump could not be
+  // read as coverage in the first place. A relay that mis-stamps a sender cannot manufacture a
+  // witness either: the KEK is derived against the STAMPED device's public key, so a lie there
+  // produces a refusal (§4.2 step 6's "what the relay can do with it, exactly: lie").
+  //
+  // WHY THAT IS STILL QUIET, WHICH IS THE HALF THAT IS EASY TO GET WRONG. The record is a SET OF
+  // RECIPIENTS and not a claim pinned to one epoch, so a rotation performed by somebody else does
+  // not invalidate it. If the record were epoch-keyed — "everyone I delivered to, AT epoch e" —
+  // then every honest rotation by any device would stale every other device's record, and three
+  // Macs would climb the epoch ladder against each other for ever, on the honest path, with
+  // nobody attacking. That is the false-"uncovered" failure at the top of this section, and it is
+  // the one a fix for T5-K1 walks into. So the epoch in the record is diagnostics; the ids are the
+  // record.
+  //
+  // WHAT IT COSTS. A device with no record — a fresh install, a cleared `localStorage`, a Mac
+  // paired in yesterday, or a record written by a build from before this fix — delivers once, and
+  // once per recipient it has never delivered to. That is bounded by the size of the family, it
+  // converges (the rotation it performs is what fills the record in), and ADR 002 §4.1 rotates on
+  // a device joining a space anyway. It is the same cost the previous design paid; the difference
+  // is that this one pays it against a claim that is true.
+  //
+  // WHAT IT STILL DOES NOT BUY, WRITTEN DOWN RATHER THAN HOPED OVER (ADR 002 §8.5, residual
+  // "member-driven denial of key delivery"). This device can prove what it delivered. It cannot
+  // prove that an epoch minted by SOMEBODY ELSE reached a peer in openable form — no route tells
+  // it, and none can without telling the relay the same thing. So a member who rotates with junk
+  // wraps for a peer still holds that peer at a stale epoch until some device delivers again.
+  // What changed is that the denial is no longer PERMANENT and no longer SILENT: the joiner is
+  // covered by nobody's record, so the first honest tick hands her the whole ring, and while she
+  // is held short her own Mac says so — `keysPending` stays true because it is now answered from
+  // her RING (see `ringIsWhole`), her ops park, and the ladder ends in a visible error. Closing
+  // the residual needs a route by which a member can say "I cannot open epoch e". Owner: ADR 003
+  // and `server/core/handlers/keys.js`. Reported, not worked around silently.
+
+  /**
+   * The recipients THIS DEVICE has itself wrapped the whole ring to, with the epoch of the last
+   * such delivery. **The ids are the record; the epoch is diagnostics** — see above.
+   * @type {{epoch:number, ids:string[]}|null}
+   */
+  let delivered = null;
+  /**
+   * The last roster reading. **DIAGNOSTICS ONLY.** It is never promoted into `delivered`, and the
+   * absence of that promotion is finding T5-K1's fix; `tests/fleet/e6-attack-keydelivery.test.js`
+   * §1b pins it against the exact scenario that exploited it.
+   * @type {{epoch:number, ids:string[]}|null}
+   */
   let seen = null;
-  /** @type {{epoch:number, ids:string[]}|null} */
-  let proof = null;
   let proofLoaded = false;
+
+  /**
+   * The durable record's version, and it is a version rather than a shape check on purpose.
+   *
+   * A v1 record could name a recipient this device never delivered to — that is finding T5-K1 —
+   * so it is exactly the record an upgraded install must NOT read. Reading it would carry the
+   * defect across the update, on the one device the attack had already succeeded against, and
+   * nothing in the shape distinguishes a poisoned record from an honest one. Refusing it costs
+   * one rotation.
+   */
+  const COVER_RECORD_V = 2;
 
   async function loadProof() {
     if (proofLoaded) return;
@@ -254,49 +338,120 @@ export function createKeyDelivery(deps) {
     if (!d.coverStore || typeof d.coverStore.load !== 'function') return;
     try {
       const raw = await d.coverStore.load(spaceId);
+      if (raw && raw.v !== COVER_RECORD_V) {
+        warn(`keys: the coverage record for ${spaceId} was written by a build whose record could `
+          + 'name a recipient this device never delivered to (finding T5-K1). It is discarded; '
+          + 'this device delivers the ring once more than it had to.');
+        return;
+      }
       if (raw && isEpoch(raw.epoch) && Array.isArray(raw.ids)) {
-        proof = { epoch: raw.epoch, ids: raw.ids.filter((x) => typeof x === 'string') };
+        delivered = { epoch: raw.epoch, ids: raw.ids.filter((x) => typeof x === 'string') };
       }
       if (raw && raw.seen && isEpoch(raw.seen.epoch) && Array.isArray(raw.seen.ids)) {
         seen = { epoch: raw.seen.epoch, ids: raw.seen.ids.filter((x) => typeof x === 'string') };
       }
     } catch (e) {
-      // A proof that cannot be read costs one extra rotation, never a lost key. Warn, continue.
+      // A record that cannot be read costs one extra rotation, never a lost key. Warn, continue.
       warn(`keys: the coverage record could not be read (${e && e.message}); this device will re-deliver once`);
     }
   }
 
   async function saveProof() {
     if (!d.coverStore || typeof d.coverStore.save !== 'function') return;
-    try { await d.coverStore.save(spaceId, { ...(proof || { epoch: 0, ids: [] }), seen }); }
-    catch { /* the next launch re-delivers once; that is the whole cost */ }
+    try {
+      await d.coverStore.save(spaceId,
+        { v: COVER_RECORD_V, ...(delivered || { epoch: 0, ids: [] }), seen });
+    } catch { /* the next launch re-delivers once; that is the whole cost */ }
   }
 
   /**
-   * Fold one roster reading into the two slots. Pure except for the two `let`s it owns.
+   * Fold one roster reading in. It can only ever **shrink** the delivery record — that is the
+   * whole of its authority, and the difference between this function and the one T5-K1 exploited.
+   *
+   * A recipient that has left the roster is dropped, so a device id that comes BACK (a revoked
+   * device re-adopted, whose wraps the relay deleted in the same transaction — ADR 002 §4.2
+   * step 4) is a recipient this device has not delivered to, and is delivered to again.
+   *
    * @param {number} epoch the `currentEpoch` THIS RESPONSE carried
    * @param {string[]} ids the recipient ids THIS RESPONSE carried
    */
   function observe(epoch, ids) {
-    if (!isEpoch(epoch)) return;
-    if (seen !== null && epoch > seen.epoch) {
-      // The bump happened after `seen` was read — see the inference above. Everything in that
-      // snapshot is now covered, and the ids in THIS response are not (they may be newer).
-      proof = { epoch, ids: [...new Set(seen.ids)].sort() };
+    const fresh = [...new Set(ids)].sort();
+    if (delivered !== null) {
+      const here = new Set(fresh);
+      const kept = delivered.ids.filter((id) => here.has(id));
+      if (kept.length !== delivered.ids.length) delivered = { epoch: delivered.epoch, ids: kept };
     }
-    seen = { epoch, ids: [...new Set(ids)].sort() };
+    if (!isEpoch(epoch)) return;
+    seen = { epoch, ids: fresh };
   }
 
-  /** Ids in the current roster this device cannot prove hold the ring. */
-  function uncovered(epoch, ids) {
-    const held = proof !== null && proof.epoch === epoch ? new Set(proof.ids) : new Set();
+  /**
+   * Source 2 of §4: the devices that **handed this device every epoch of `1..at`**, read off the
+   * provenance `admitWraps` stamped into the ring. A device that could wrap epoch `e` held epoch
+   * `e`; a device that wrapped all of `1..at` holds the whole ring and is owed no delivery.
+   *
+   * The whole ring and not a majority of it: a device that gave me epochs 1 and 2 while somebody
+   * else gave me 3 is a device I know nothing about at epoch 3, and the cost of being wrong is
+   * D9's silent empty board. Being unsure costs one rotation.
+   *
+   * @param {number} at @returns {Set<string>}
+   */
+  function ringWitnesses(at) {
+    const out = new Set();
+    if (typeof ring.originOf !== 'function') return out;
+    /** @type {Map<string, number>} deviceId → how many of `1..at` it handed to this device */
+    const gave = new Map();
+    for (let e = FIRST_EPOCH; e <= at; e++) {
+      const o = ring.originOf(spaceId, e);
+      if (!o || o.how !== 'admitted' || typeof o.deviceId !== 'string' || o.deviceId === '') continue;
+      gave.set(o.deviceId, (gave.get(o.deviceId) || 0) + 1);
+    }
+    const need = at - FIRST_EPOCH + 1;
+    for (const [id, n] of gave) if (n >= need) out.add(id);
+    return out;
+  }
+
+  /**
+   * Ids in the current roster that none of §4's three sources covers. The ONE input to `deliver()`
+   * gate 3, and the only place the three are combined.
+   *
+   * @param {number} at the epoch the roster reported @param {string[]} ids the roster's recipients
+   */
+  function uncovered(at, ids) {
+    const held = new Set(delivered !== null ? delivered.ids : []);   // 1 · I delivered to it
+    for (const id of ringWitnesses(at)) held.add(id);                // 2 · it delivered to me
+    held.add(me.deviceId);                                           // 3 · it is me
     return ids.filter((id) => !held.has(id)).sort();
   }
 
-  /** A rotation I performed is a proof about exactly the recipients I wrapped to. */
-  function proveMine(epoch, ids) {
-    proof = { epoch, ids: [...new Set(ids)].sort() };
-    seen = { epoch, ids: proof.ids };
+  /**
+   * THE ONLY WRITER THAT ADDS ANYTHING. Called from one place: the `200` arm of `rotateTo`, i.e.
+   * after a rotation THIS DEVICE built out of its OWN ring and the relay accepted. `rotateTo`
+   * wraps epochs `1..next` to every recipient in the roster, not only to the uncovered ones, so
+   * the ids recorded are the ids wrapped to.
+   */
+  function recordDelivery(epoch, ids) {
+    delivered = { epoch, ids: [...new Set(ids)].sort() };
+    seen = { epoch, ids: delivered.ids };
+  }
+
+  /**
+   * **D9's fact, answered from THIS DEVICE'S RING** — finding T5-K2.
+   *
+   * It used to be `parseKeysResponse().keysPending`, which is the relay's answer, and the relay
+   * answers it by counting rows (`handlers/keys.js`, the same count as `assertCoverage`). So a
+   * joiner handed a genuine wrap for the newest epoch and garbage for every older one was told
+   * her keys had arrived, on a device that could not open one thing published before she joined:
+   * an empty board, the waiting sentence withdrawn, and nothing in an error state.
+   *
+   * `ring.covers()` is the question actually being asked and it was three lines away. The ring is
+   * whole when it holds every epoch `1..currentEpoch` — which is the same "1..e" ADR 002 §7.1
+   * step 5 requires of the wrap set, checked where it can be checked with the keys in hand.
+   */
+  function ringIsWhole() {
+    const at = stats.currentEpoch;
+    return isEpoch(at) && ring.covers(spaceId, at);
   }
 
   // ── the roster ──────────────────────────────────────────────────────────────────────────────
@@ -365,6 +520,8 @@ export function createKeyDelivery(deps) {
   const stats = {
     admits: 0, admittedEpochs: 0, deliveries: 0, rotations: 0, refusedRows: 0, unauthorizedRows: 0,
     lastError: null, lastDelivery: null, keysPending: true, currentEpoch: null,
+    /** Admissions that grew the ring and still left it short of `1..currentEpoch` (T5-K2). */
+    partialAdmits: 0,
     /** Finding E2E3-8's price, per member, surfaced rather than swallowed. See `deliver()`. */
     missingRecoveryKex: [],
   };
@@ -414,10 +571,13 @@ export function createKeyDelivery(deps) {
     }
 
     const parsed = parseKeysResponse(res.json);
-    stats.keysPending = parsed.keysPending;
     stats.currentEpoch = parsed.currentEpoch ?? list.currentEpoch;
-    // The roster and the epoch, folded into the proof BEFORE anything is wrapped or admitted, so
-    // a `deliver()` in the same pass reads a proof that includes this observation.
+    // `parsed.keysPending` is deliberately NOT stored here. It is the relay's row count and this
+    // device holds the keys; `ringIsWhole()` below is the same question asked of the ring, after
+    // the admission, which is the only place it can be answered honestly (finding T5-K2).
+    //
+    // The roster and the epoch, folded in BEFORE anything is wrapped or admitted, so a `deliver()`
+    // in the same pass reads a record that has already dropped anybody who left the roster.
     const report = recipientsFrom(list.members);
     observe(list.currentEpoch ?? parsed.currentEpoch, report.recipients.map((r) => r.deviceId));
 
@@ -457,6 +617,21 @@ export function createKeyDelivery(deps) {
         + 'admit. They were refused before any key was derived (ADR 002 §4.2 step 6, finding S1).');
     }
 
+    // ── D9'S WAITING STATE IS A QUESTION ABOUT COVERAGE, NOT ABOUT ARRIVALS — finding T5-K2 ──
+    //
+    // `onAdmit` used to fire on `admitted.length > 0`, and `sync/family.js` turns it into
+    // `onKeys({keysPending:false})` — the one place the calm German sentence is withdrawn. A
+    // joiner handed a genuine wrap for the newest epoch and garbage for every older one therefore
+    // had the sentence withdrawn on a ring of ONE epoch: no history, no error, nothing anywhere
+    // saying a key was missing. `ring.covers()` is the question and it was three lines away.
+    //
+    // A ring that GREW but is still short is not an error either — it is the ordinary state of a
+    // device that admitted mid-rotation — so it is not warned about on the first pass. It is
+    // COUNTED, so `diagnostics()` can say how long a device has been arriving without finishing.
+    const whole = ringIsWhole();
+    stats.keysPending = !whole;
+    if (!whole && admitted.length) stats.partialAdmits += 1;
+
     if (admitted.length) {
       for (const epoch of admitted) {
         if (typeof d.saveKey === 'function') {
@@ -464,7 +639,7 @@ export function createKeyDelivery(deps) {
           catch (e) { warn(`keys: epoch ${epoch} was admitted but could not be stored (${e && e.message}); it will be re-fetched`); }
         }
       }
-      if (typeof d.onAdmit === 'function') {
+      if (whole && typeof d.onAdmit === 'function') {
         try { d.onAdmit({ spaceId, admitted, currentEpoch: stats.currentEpoch }); }
         catch { /* a listener that throws may not cost a key */ }
       }
@@ -474,7 +649,7 @@ export function createKeyDelivery(deps) {
     return {
       ok: true,
       admitted,
-      keysPending: parsed.keysPending,
+      keysPending: stats.keysPending,
       currentEpoch: stats.currentEpoch,
       refused,
       unauthorized,
@@ -497,11 +672,13 @@ export function createKeyDelivery(deps) {
    *   2. this device must HOLD THE WHOLE RING `1..E`. A joiner between §7.1 steps 2 and 6 holds
    *      nothing and must not try: `wrapRingToRecipients` would throw by design rather than build
    *      a partial ring, and a device that cannot deliver is the one WAITING for delivery.
-   *   3. there must be an UNCOVERED recipient (§4 above). This is the gate that keeps a settled
-   *      family silent — the steady state is `COVERED`, on every poll, for ever.
+   *   3. there must be a recipient §4's three sources do not cover. This is the gate that keeps a
+   *      settled family silent — the steady state is `COVERED`, on every poll, for ever — and §4
+   *      is the argument for why it is sound as well as quiet.
    *   4. the rotation must be ACCEPTED. A racer that lost gets `409 epoch_taken` or
-   *      `400 not_next`, which are both the same news — somebody else did it, and their wraps
-   *      cover the same recipients — so the proof is re-derived and this pass stops.
+   *      `400 not_next`, which is one piece of news and one only: **somebody else bumped the
+   *      epoch.** It is NOT news that their wraps opened for anybody, so this pass records
+   *      nothing and stops, and the next tick asks the same question again (finding T5-K1).
    *
    * WHY THE DELIVERY IS A ROTATION AND NOT A BARE WRAP PUSH. There is no route that deposits a
    * wrap outside space creation and epoch rotation, and there should not be: a route that let any
@@ -642,8 +819,9 @@ export function createKeyDelivery(deps) {
       'POST', `/api/v1/spaces/${spaceId}/epoch`, undefined, rotationBody(rotation), {}));
 
     if (res.status === 200) {
-      // The relay took it, so the coverage check passed: every required recipient now holds
-      // 1..next. THAT is the proof, and it is written down before anything else happens.
+      // The relay took a rotation THIS DEVICE built out of ITS OWN ring, wrapping epochs 1..next
+      // to every recipient in `recipients`. That is the one fact §4's record is made of, and it
+      // is written down before anything else happens.
       if (!ring.put(spaceId, next, key)) {
         // Unreachable on an honest path — `next` is `ring.currentEpoch + 1` by construction — and
         // it is not silently ignored: a refused put means this device is about to seal into an
@@ -654,28 +832,60 @@ export function createKeyDelivery(deps) {
         try { await d.saveKey(next, key); }
         catch (e) { warn(`keys: epoch ${next} was published but could not be stored (${e && e.message}); it will be re-fetched from the relay`); }
       }
-      proveMine(next, ids);
+      recordDelivery(next, ids);
       await saveProof();
       stats.rotations += 1;
       stats.deliveries += 1;
       stats.currentEpoch = next;
       stats.lastDelivery = DELIVERY.DELIVERED;
-      if (typeof d.onAdmit === 'function') {
+      // Gated on coverage for the same reason `admit()` is (T5-K2). It is true by construction
+      // here — `deliver()` and `rotate()` both refuse unless this device covers 1..at, and `next`
+      // is `at + 1` — so the gate costs nothing and cannot be the one door left open.
+      if (ringIsWhole() && typeof d.onAdmit === 'function') {
         try { d.onAdmit({ spaceId, admitted: [next], currentEpoch: next }); }
         catch { /* as above */ }
       }
-      return verdict(DELIVERY.DELIVERED, next, ids, owed, 200, null, `${why}: ${rotation.wraps.length} wraps for epochs 1..${next}`);
+      // ── WHY THERE IS NO WARNING HERE ANY MORE, AND WHY THAT IS THE FIX AND NOT ITS LOSS ───
+      //
+      // This raised "the relay kept N wrap cell(s) somebody else had already filled — those
+      // epochs were NOT re-delivered". It was true while a `KeyWrap` cell was
+      // `(space, epoch, recipient)`: whoever wrote first owned the cell, so a joiner's history
+      // could be claimed by a hostile member and this device's honest backfill was refused by
+      // the relay with nothing to show for it.
+      //
+      // The cell now includes the DEPOSITOR, so this device's backfill rows ALWAYS land — they
+      // are its own rows, and nobody else can address them. `wrapsRefused` consequently counts
+      // only this device re-wrapping ITS OWN earlier cells with a fresh salt and IV, which is
+      // what every rotation after the first does for every epoch below its own. Warning on it
+      // would fire on every honest rotation for ever, and a warning that is always on is a
+      // warning nobody reads. The count is still reported, as accounting, in `detail`.
+      const refusedCells = Number(res.json && res.json.wrapsRefused) || 0;
+      return verdict(DELIVERY.DELIVERED, next, ids, owed, 200, null,
+        `${why}: ${rotation.wraps.length} wraps for epochs 1..${next}`
+        + (refusedCells > 0
+          ? `, ${refusedCells} of them this device's own earlier cells, re-wrapped and refused`
+          : ''));
     }
 
     const code = errorOf(res);
     if (code === 'epoch_taken' || (code === 'bad_request' && res.json && res.json.reason === 'not_next')) {
       // SOMEBODY ELSE GOT THERE FIRST, which is the designed outcome of "any member device"
-      // rather than a failure. Their rotation passed the same coverage check over the same rows,
-      // so the recipients this device was worried about are covered by their wraps. The next
-      // `admit()` fetches the epoch; nothing is retried here, because retrying at `e+2` would be
-      // two devices climbing the epoch ladder against each other.
+      // rather than a failure. Nothing is retried here, because retrying at `e+2` would be two
+      // devices climbing the epoch ladder against each other; the next `admit()` fetches the
+      // epoch and the next `deliver()` asks the coverage question again.
+      //
+      // ⚠ **THIS BRANCH RECORDS NOTHING, AND THAT IS FINDING T5-K1's FIX AT THE POINT OF ENTRY.**
+      // It used to read the 409 as *"their rotation passed the same coverage check over the same
+      // rows, so the recipients this device was worried about are covered by their wraps"*. The
+      // relay's check counts rows (ADR 002 §4.2), so what the 409 actually says is that somebody
+      // deposited the required NUMBER of rows — for the joiner, 156 bytes of anything at all. The
+      // winner of the race is the adversary in ADR 002 §0's own table, and this device was
+      // recording her word as its own proof, durably, once, for ever.
+      //
+      // What it does instead: observe the new epoch (diagnostics), keep the record it earned, and
+      // owe the joiner the same delivery it owed her a moment ago. The very next tick pays it.
       const at = isEpoch(res.json && res.json.currentEpoch) ? res.json.currentEpoch : next;
-      proveMine(at, [...new Set([...ids, ...owed])]);
+      observe(at, ids);
       await saveProof();
       stats.lastDelivery = DELIVERY.RACED;
       return verdict(DELIVERY.RACED, at, ids, owed, res.status, code, 'another member device rotated first');
@@ -700,9 +910,17 @@ export function createKeyDelivery(deps) {
     deliver,
     rotate,
     roster,
-    /** The proof, read-only, so a diagnostics pane can show why a device is or is not delivering. */
+    /**
+     * The record, read-only, so a diagnostics pane can show why a device is or is not delivering.
+     *
+     * `proof` keeps its name because that is what it is used as, and `source` states what it is a
+     * proof OF: this device's own deliveries, and nothing anybody else did (§4, finding T5-K1).
+     * `seen` is the last roster reading and proves nothing at all — it is here so that a pane can
+     * show the two side by side, which is what makes a stalled delivery legible.
+     */
     coverage: () => ({
-      proof: proof ? { epoch: proof.epoch, ids: [...proof.ids] } : null,
+      proof: delivered ? { epoch: delivered.epoch, ids: [...delivered.ids] } : null,
+      source: 'self-delivery',
       seen: seen ? { epoch: seen.epoch, ids: [...seen.ids] } : null,
       durable: !!(d.coverStore && typeof d.coverStore.save === 'function'),
     }),
@@ -712,7 +930,7 @@ export function createKeyDelivery(deps) {
       epochs: ring.epochs(spaceId),
       currentEpoch: stats.currentEpoch,
       keysPending: stats.keysPending,
-      coverage: proof ? { epoch: proof.epoch, count: proof.ids.length } : null,
+      coverage: delivered ? { epoch: delivered.epoch, count: delivered.ids.length } : null,
       ...stats,
     }),
   };

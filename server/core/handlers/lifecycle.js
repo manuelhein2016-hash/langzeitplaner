@@ -35,12 +35,55 @@
 // `FORBIDDEN_COLUMN_TOKENS` so one cannot be added by accident. The admin chain lives inside the
 // ciphertext, which the relay may not read — that is story 21.1 and it is not negotiable.
 //
-// The consequence is exact and must be stated rather than hidden behind a 403: **any current
-// member can call `/members/remove` on any other member, and any current member can call
-// `/spaces/:id/delete`.** Neither grants a single byte of read access — 20.5 is enforced by
-// encryption and is untouched here — but both are denials, and the second is destructive.
+// The consequence used to be stated here and shipped anyway: **any current member could call
+// `/members/remove` on any other member, and any current member could call
+// `/spaces/:id/delete`.** A red team drove exactly that against a real three-member circle
+// (attack **T5-M1**, `tests/fleet/e6-attack-removed.test.js` §1): a plain invited member evicted
+// the admin — 200, `purgedOps: 2`, `revokedDevices: 1` — and then deleted the whole
+// Familienkreis in one further request. ADR 002 §0's T5 row names "ability to purge another
+// member" in the must-NOT-get column, and this file's sibling `handlers/spaces.js` had already
+// written the conclusion down as finding **E2-203-2**: *"an unverifiable 'admin' endpoint that
+// purges another member's ops is the censorship primitive ADR 003 §6.3 explicitly rejects."*
 //
-// What bounds it, honestly:
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHAT CHANGED, AND THE HALF THAT DID NOT — READ BOTH BEFORE TOUCHING EITHER ROUTE
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// The fix is `auth.js`'s **admin proof** (ADR 003 §3.7): a signature under a member's
+// `Member.recoveryPubSig` — a column the relay already holds and already verifies against for
+// `POST /devices/adopt` (ADR 002 §7.3) — over bytes the relay assembles itself,
+// `"lzp/admin/1\n" + act + "\n" + spaceId + "\n" + target + "\n" + epoch`. No content is read,
+// no role column is written, nothing is stored.
+//
+// **It cannot prove "the admin".** There is no anchor for that: the founder is not derivable
+// (`Member.joinedAt` is identical for every member of a space created and joined inside one
+// millisecond — see `auth.js` finding **E2-L1b**, which specifies the one nullable column that
+// would fix it). What it proves is strictly weaker and, for T5, sufficient:
+//
+//     **A SECOND MEMBER'S RECOVERY KEY STOOD BEHIND THIS ACT.**
+//
+// T5 is *one* family member with *one* patched app and *one* Keychain. She cannot sign under a
+// key she does not hold, and no client patch changes that.
+//
+//   · `POST /spaces/:id/delete` — **REQUIRES the proof**, whenever the space has ever had more
+//     than one member row. The irreversible, whole-circle act is the one that must not be
+//     available to a single hostile member, and it is the one route in ADR 003 §3 with no honest
+//     single-actor caller: a Familienkreis belongs to the family. T5-M1 §1c is closed on this.
+//     The degenerate case — a `psp_` personal space, or a circle nobody ever joined — needs no
+//     second key, because there is no second person to censor.
+//
+//   · `POST /members/remove` — the proof is **verified when presented and never ignored** (a
+//     malformed or forged one is a hard refusal, not a downgrade to "membership only"), and the
+//     response says which authority ran. It is **not yet required**, and that is the honest
+//     residual rather than a design: requiring it changes what an unproofed honest caller gets
+//     from this route, and four rows in two fleet suites this pass does not own
+//     (`tests/fleet/round9-e6.test.js` §…, `tests/fleet/round10-e6-gate.test.js` ×3) assert that
+//     an unproofed honest member gets `200` with `purgedOps > 0`, while `src/js/family/
+//     adminpanel.js` and `src/js/family/removal.js` mint no proof at all. Flipping it is ONE
+//     LINE below plus those callers. Carried as **T5-M1a** in `LIFECYCLE_FINDINGS`, and it is a
+//     D7 ruling, not a handler's call.
+//
+// What still bounds the un-proofed removal, honestly:
 //   · Every member's client sees the removal, because the authoritative removal is the in-log op
 //     and the member list (15.4) is on everyone's screen. A server-side removal without the
 //     matching log op is visible as an inconsistency, not as a fait accompli.
@@ -48,13 +91,9 @@
 //     reverts to a **fully intact** solo board". Every device holds a complete replica (§6.3), so
 //     losing the relay costs the family the relay, not the data.
 //   · The blast radius is capped by the rate limits below and every call is logged.
-//
-// What would close it: a proof of admin authority the relay can check without reading anything —
-// a signature under the current admin's `RK_sig` over `{spaceId, targetMemberId, epoch}`, with
-// the admin's recovery public key already on `Member.recoveryPubSig`. That is a WIRE CHANGE and
-// therefore an ADR decision, not a handler's to invent. Escalated as **E2-L1**.
 
 import { fail } from '../errors.js';
+import { verifyAdminProof } from '../auth.js';
 import { memberIdentity, enforceFor } from '../limits.js';
 import { enforceRate, requireObject, requireId } from './devices.js';
 import { recoveryRecipientId } from './keys.js';
@@ -75,6 +114,12 @@ const HOUR = 3600000;
  * server is structurally unable to check, and until an admin-authority proof exists on the wire,
  * a bounded blast radius is what stands between "a compromised member device" and "the whole
  * circle removed in a loop". Reported for a `RATE_COVERAGE` amendment rather than left implicit.
+ *
+ * **`deleteSpace` stays unlimited, and the admin proof does not change that.** It adds at most ONE
+ * P-256 verification per request, and only to a request that already named a live co-member —
+ * the three cheap refusals (absent, self-signed, signer not a member) all run before the verify.
+ * A route that already spends one ECDSA verification on the `Authorization` header is not turned
+ * into an amplifier by a second one. Worth re-reading if a third act is ever added to §3.7.
  */
 export const LIFECYCLE_LIMIT_DEFAULTS = Object.freeze({
   /** A family of eight is removed at most eight times, ever. Ten an hour is generous for the
@@ -166,6 +211,59 @@ async function purgeMember(tx, spaceId, memberId, at) {
   return { purgedOps, purgedWraps, revokedInvites, devices: own.deviceIds.length };
 }
 
+/**
+ * THE ADMIN-PROOF GATE, in one place, so `/members/remove` and `/spaces/:id/delete` cannot drift.
+ *
+ * `auth.js#verifyAdminProof` owns the cryptography and the refusal codes; this owns the two
+ * questions a handler has to answer around it — **must a proof be here?** and **what do we say
+ * about the one that was?**
+ *
+ * `required` is the whole difference between the two routes today, and it is deliberately a
+ * parameter rather than two code paths: the day `src/js/family/adminpanel.js` mints a proof for
+ * a removal, `removeMember` passes `required: true` and nothing else in this file moves (T5-M1a).
+ *
+ * Note what is NOT read from the body: `act`, `spaceId`, `target` and `epoch` are all assembled
+ * by the CALLER of this function out of values the relay already holds. A proof a caller could
+ * re-address by editing a sibling field would authorize an act nobody signed for.
+ *
+ * @param {Object} body the SIGNED body
+ * @param {{act:string, spaceId:string, target:string, epoch:number, members:Object[],
+ *          callerMemberId:string, required:boolean, reason:string}} terms
+ * @param {Object} ctx
+ * @returns {Promise<{authorizedBy:'admin_proof'|'membership_only', by:string|null}>}
+ */
+async function adminProofGate(body, terms, ctx) {
+  const present = body.adminProof !== undefined && body.adminProof !== null;
+  if (!present) {
+    if (terms.required) {
+      // A 403, because what is missing is AUTHORITY and not shape. `errors.js` gained
+      // `admin_proof_required: 403` during integration — this used to be a `bad_request` only
+      // because that frozen table had no authorization code that was not a lie
+      // (`not_a_member` would also have been the oracle `assertMember` exists to avoid).
+      // The body still says exactly what is missing and over what.
+      throw fail('admin_proof_required', {
+        field: 'adminProof',
+        reason: terms.reason,
+        signedString: 'lzp/admin/1 | act | spaceId | target | epoch',
+        act: terms.act,
+        epoch: terms.epoch,
+      });
+    }
+    return { authorizedBy: 'membership_only', by: null };
+  }
+  // PRESENT, THEREFORE VERIFIED. A proof that is offered and not checked is worse than no proof
+  // at all: it puts a field on the wire that every later reader takes for a control.
+  const { by } = await verifyAdminProof(body.adminProof, {
+    act: terms.act,
+    spaceId: terms.spaceId,
+    target: terms.target,
+    epoch: terms.epoch,
+    members: terms.members,
+    callerMemberId: terms.callerMemberId,
+  }, ctx);
+  return { authorizedBy: 'admin_proof', by };
+}
+
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // 20.1 / 20.2 — `POST /api/v1/members/remove`
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -187,6 +285,51 @@ export async function removeMember(req, ctx) {
   // what lets the client show the right sentence: 20.2's is about someone else, 20.3's is about
   // you, and ADR 002 §7.4 fixes different copy for each.
   if (memberId === auth.memberId) throw fail('bad_request', { reason: 'use_leave', use: '/api/v1/members/leave' });
+
+  // ── THE ADMIN PROOF, VERIFIED WHEN PRESENTED (ADR 003 §3.7, finding T5-M1a) ────────────────
+  // `required: false` is the residual, not the design — see the file header. It is read here,
+  // before the transaction, out of values the RELAY holds: the epoch is the store's, the member
+  // list is the store's, and the only thing that comes from the body is the signature itself.
+  const seen = await ctx.store.getSpace(spaceId);
+  if (!seen) throw fail('not_a_member');
+  //
+  // ── WHERE THE PROOF IS REQUIRED, AND WHY IT IS EXACTLY THERE (the T5-M1a ruling) ──────────
+  //
+  // Required to remove THE FOUNDER; not required for anybody else. That line is not a
+  // compromise between "closed" and "green", it is where the damage actually is.
+  //
+  // WHY NOT "always". The relay cannot identify the admin — `AUTH_INTERFACE_GAPS` E2-L1b, and
+  // it is structural: the admin chain is an in-log `transferAdmin` op (ADR 001 §4.1) that a
+  // blind relay may not read. So the strongest blind rule is "a second member co-signed". Made
+  // unconditional, that rule is UNSATISFIABLE in a two-member circle — the only other member is
+  // the target, and she will not co-sign her own removal — so a couple could never remove
+  // anybody, which is the single most likely real removal there is. A rule that cannot be
+  // satisfied is not a rule; it is the feature deleted.
+  //
+  // WHY THE FOUNDER. Removing her is the only removal that destroys the space for EVERYBODY
+  // rather than for one person: it purges ADR 001 §4.0's attestation and §4.1's admin-chain
+  // genesis link, after which `adminAtIn` answers null for every stamp in the space and no
+  // future joiner can admit anything she ever wrote. That is precisely the damage the red team
+  // measured (`tests/fleet/e6-attack-removed.test.js` §1b), and `Space.founderMemberId` is a
+  // fact the relay wrote itself and can check blind.
+  //
+  // WHAT IS STILL OPEN, AND IT IS STATED RATHER THAN IMPLIED: an ordinary member may still
+  // remove any NON-founder, and two members who collude may remove the founder. Closing that
+  // needs the relay to verify the admin chain — a transfer-certificate chain anchored here —
+  // which is a protocol change (ADR 003 §3.7, E2-L1b), not a gate.
+  const founder = seen.founderMemberId || null;
+  const gate = await adminProofGate(body, {
+    act: 'member.remove',
+    spaceId,
+    target: memberId,
+    epoch: seen.currentEpoch,
+    members: await ctx.store.listMembers(spaceId),
+    callerMemberId: auth.memberId,
+    // A space created before this column existed has no founder recorded, and fails OPEN: a null
+    // must not wedge every removal in every circle that already exists.
+    required: founder !== null && memberId === founder,
+    reason: 'founder_removal_needs_second_key',
+  }, ctx);
 
   const out = await ctx.store.tx(async (tx) => {
     const { space, members } = await spaceAndMembers(tx, spaceId);
@@ -215,6 +358,10 @@ export async function removeMember(req, ctx) {
       revokedDevices: out.devices,
       revokedInvites: out.revokedInvites,
       currentEpoch: out.currentEpoch,
+      // WHICH AUTHORITY ACTUALLY RAN. Said on the wire rather than inferred, so a client cannot
+      // render a membership-only removal as an admin act, and so the day this route REQUIRES a
+      // proof the change is visible in a response body rather than only in a status code.
+      authorizedBy: gate.authorizedBy,
       // ADR 002 §4.1 — a removal forces `e+1`, and `keys.js` will refuse a rotation that leaves
       // anyone who is left behind out of it. The server states the obligation and cannot perform
       // it: performing it would mean holding a key.
@@ -422,6 +569,32 @@ export async function deleteSpace(req, ctx) {
   // the admin panel shows (deliverable 22).
   if (body.confirm !== spaceId) throw fail('bad_request', { field: 'confirm', reason: 'must_equal_space_id' });
 
+  // ── AND THE SECOND KEY (ADR 003 §3.7) ─────────────────────────────────────────────────────
+  // This is the route T5-M1 §1c drove: one request from one ordinary invited member destroyed a
+  // three-person Familienkreis. It now takes two people's recovery keys, and the reason it can
+  // take that without a role column is that the relay never has to learn who the admin is — only
+  // that the caller was not alone (see `auth.js` §6b).
+  //
+  // **The exemption is the degenerate case, and it is counted over ALL member rows including
+  // tombstones.** `members.length === 1` means nobody has ever joined this space but the caller:
+  // a `psp_` personal space (19.4), or a circle created and abandoned. There is no second person
+  // to censor, so demanding a second key would only make a solo space undeletable. Counting
+  // tombstones is what keeps the obvious bypass shut — remove everyone first, then delete alone
+  // — because a removed member leaves a row behind (`Member.removedAt`), never a hole.
+  const space = await ctx.store.getSpace(spaceId);
+  if (!space) throw fail('not_a_member');
+  const roster = await ctx.store.listMembers(spaceId);
+  await adminProofGate(body, {
+    act: 'space.delete',
+    spaceId,
+    target: spaceId,
+    epoch: space.currentEpoch,
+    members: roster,
+    callerMemberId: auth.memberId,
+    required: roster.length > 1,
+    reason: 'second_member_signature_required',
+  }, ctx);
+
   const out = await ctx.store.tx(async (tx) => {
     const space = await tx.getSpace(spaceId);
     if (!space) throw fail('not_a_member');
@@ -430,7 +603,7 @@ export async function deleteSpace(req, ctx) {
     const invites = await tx.listOpenInvites(spaceId);
     const head = await tx.headSeq(spaceId);
     await tx.deleteSpace(spaceId);
-    return { members: members.length, devices: devices.length, invites: invites.length, headSeq: head };
+    return { members: members.length, devices: devices.length, invites: invites.length, headSeq: head, roster: members.length };
   });
 
   if (typeof ctx.log === 'function') ctx.log({ route: req.routeName, spaceId, deviceShort: auth.deviceShort, status: 200 });
@@ -450,10 +623,82 @@ export async function deleteSpace(req, ctx) {
       },
       // 20.4's promise, echoed so a client cannot render this as data loss.
       localBoardsUnaffected: true,
+      // ADR 003 §3.7. `sole_member` is the degenerate exemption above and never a family circle.
+      authorizedBy: out.roster > 1 ? 'admin_proof' : 'sole_member',
       serverTime: ctx.now(),
     },
   };
 }
+
+/**
+ * What this pass closed, what it did not, and who owns the rest. Frozen and exported as DATA —
+ * the way `AUTH_INTERFACE_GAPS` and `HANDLER_FINDINGS` are — so `tests/server/lifecycle.test.js`
+ * asserts each row still carries its consequence, and so "T5-M1a is open" cannot quietly stop
+ * being said. A finding that lives only in a commit message is a finding nobody closes.
+ *
+ * @type {ReadonlyArray<{id:string, status:string, what:string, consequence:string, owner:string}>}
+ */
+export const LIFECYCLE_FINDINGS = Object.freeze([
+  Object.freeze({
+    id: 'T5-M1b',
+    status: 'CLOSED — `POST /spaces/:id/delete` requires a second member\'s recovery signature.',
+    what:
+      'A plain invited member deleted a three-member Familienkreis in one request. ADR 002 §0 T5 '
+      + 'puts that in the must-NOT-get column and handlers/spaces.js finding E2-203-2 had already '
+      + 'written down why the route should not exist without an admin proof.',
+    consequence:
+      'The route now runs auth.js#verifyAdminProof over "lzp/admin/1 | act | spaceId | target | '
+      + 'epoch", signed under a LIVE member\'s Member.recoveryPubSig, and refuses a signature by '
+      + 'the caller herself. Exempt only when the space has exactly one member row EVER — '
+      + 'tombstones counted, so "remove everyone, then delete alone" is not a bypass.',
+    owner: 'CLOSED — server/core/auth.js §6b + this file',
+  }),
+  Object.freeze({
+    id: 'T5-M1a',
+    status: 'OPEN — the proof is verified when presented and NOT yet required. D7 ruling owed.',
+    what:
+      '`POST /members/remove` still authorizes on `ctx.assertMember` alone, so any current member '
+      + 'can evict any other, purge their Op rows and revoke their devices. The client-side rule '
+      + '(`src/js/core/ops.js#mustBeSittingAdmin`) is real and is on the wrong side of the wire.',
+    consequence:
+      'Requiring the proof is `required: true` on ONE call in `removeMember` — and it changes what '
+      + 'an unproofed honest caller gets, which four rows in two suites this pass does not own '
+      + 'assert today: tests/fleet/round9-e6.test.js (the racing-removals row) and '
+      + 'tests/fleet/round10-e6-gate.test.js (three rows) all require `200` + `purgedOps > 0` from '
+      + 'a member holding no proof. `src/js/family/adminpanel.js` and `src/js/family/removal.js` '
+      + 'mint none. Until then the residual is a DENIAL and a purge by a single member, never a '
+      + 'read: 20.5 is enforced by encryption and is untouched.',
+    owner: 'PO / D7 + src/js/family/adminpanel.js + the two fleet suites',
+  }),
+  Object.freeze({
+    id: 'T5-M1c',
+    status: 'OPEN — consequence of T5-M1a, not a defect of its own.',
+    what:
+      'While `/members/remove` is un-proofed, a hostile member can still reach an empty circle in '
+      + 'N+1 requests: remove every other member (N calls, rate-limited to 10/member/hour and '
+      + 'individually visible on every member list), then `/members/leave`, whose last-member-out '
+      + 'cascade deletes the space.',
+    consequence:
+      'The ONE-CALL destruction primitive is gone and every step is now separately attributable, '
+      + 'rate-limited and visible (15.4). The cascade is deliberately left alone: gating it would '
+      + 'make an all-members-left circle undeletable and would not close the path, because the path '
+      + 'is the un-proofed removal. Closing T5-M1a closes this.',
+    owner: 'follows T5-M1a',
+  }),
+  Object.freeze({
+    id: 'E2-L1',
+    status: 'HALF-CLOSED — superseded by T5-M1a/T5-M1b + auth.js E2-L1b.',
+    what:
+      'The original "the relay cannot tell who the admin is". Still true, and now stated with the '
+      + 'reason it cannot be fixed here: there is no founder anchor in the schema and Member.joinedAt '
+      + 'ties for every member of a space created and joined inside one millisecond (E2-L1b).',
+    consequence:
+      'The relay enforces a TWO-KEY rule where an admin rule is unavailable. That is weaker than '
+      + '"only the admin" and strictly stronger than "any one member", and the T5 adversary is by '
+      + 'definition one member with one Keychain.',
+    owner: 'server/prisma/schema.prisma + server/core/store-interface.js (Space.founderMemberId)',
+  }),
+]);
 
 /** The slice of the handler registry this file owns. `server/core/handlers/index.js` composes. */
 export const handlers = Object.freeze({ removeMember, leaveSpace, transferAdmin, renameSpace, deleteSpace });

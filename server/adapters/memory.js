@@ -41,6 +41,27 @@ const K = (...parts) => JSON.stringify(parts);
 /** A stable placeholder for a column the store is about to assign. */
 const EPOCH0 = new Date(0);
 
+/** Byte equality. Not constant-time on purpose: both operands are the relay's own rows, and
+ *  there is no secret here to leak — a wrap is ciphertext the relay may not open and may compare. */
+function sameBytes(a, b) {
+  if (a === b) return true;
+  if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Is this incoming wrap the row the store already holds? The sender is compared as well as the
+ * bytes even though it is part of the cell key, so this stays a total statement about the row
+ * rather than one that silently depends on how it was looked up: ADR 002 §4.2 step 6 makes the
+ * receiver derive its KEK against the SENDER's key, so identical bytes under a different
+ * depositor are a different row and open under a different key. Used by `putKeyWraps`'
+ * write-once rule (findings T5-K3, T5-K1).
+ */
+function sameWrap(held, incoming) {
+  return held.senderDeviceId === incoming.senderDeviceId && sameBytes(held.wrapped, incoming.wrapped);
+}
+
 /** Shallow copy. Byte arrays are shared and are treated as immutable by every caller. */
 const copy = (row) => (row ? { ...row } : row);
 const copies = (rows) => rows.map(copy);
@@ -52,7 +73,7 @@ function emptyState() {
     ops: new Map(),         // spaceId -> Map<opId, OpRow>
     members: new Map(),     // memberId -> MemberRowDb
     devices: new Map(),     // deviceId -> DeviceRow
-    keyWraps: new Map(),    // spaceId\0epoch\0recipientId -> KeyWrapRow
+    keyWraps: new Map(),    // spaceId\0epoch\0recipientId\0senderDeviceId -> KeyWrapRow
     invites: new Map(),     // id -> InviteRow
     pairs: new Map(),       // rid -> PairSessionRow
     nonces: new Map(),      // deviceShort\0nonce -> expiresAtMs (number)
@@ -343,11 +364,109 @@ export function createStoreEngine(opts) {
     minLastPushedSeq(spaceId) { return minOver(spaceId, 'lastPushedSeq'); },
 
     // key wraps ────────────────────────────────────────────────────────────
+    /**
+     * **WRITE-ONCE, per (spaceId, epoch, recipientId, senderDeviceId).**  Findings T5-K3 + T5-K1.
+     *
+     * This was `state.keyWraps.set(...)` — an upsert — and that one line was the family's key
+     * history handed to whoever asked last. `POST /spaces/:id/epoch` admits any current member
+     * (ADR 002 §4.2, decision D9: "any member device, not only the admin's"), and a rotation
+     * names wraps for epochs 1..e+1. So an ordinary member could deposit bytes of her own
+     * choosing over EVERY row of every recipient for every epoch below her own, and the relay —
+     * which cannot open a wrap and must not try — recorded it as coverage.
+     *
+     * The loss is not visible to anybody who is online: a member's ring lives in her own
+     * `localStorage`. The victims are the readers who have only the relay left — every future
+     * joiner, every device paired in tomorrow, and ADR 002 §7.3's A2 recovery, which is the only
+     * path that survives losing every device. And no honest client could notice: `rotateTo`
+     * builds its wrap set from its own ring and posts it, and no route answers "what is already
+     * there?".
+     *
+     * ── THE CELL, AND WHY THE DEPOSITOR IS PART OF IT ────────────────────────────────────────
+     *
+     * The cell is `(spaceId, epoch, recipientId, senderDeviceId)`. The sender was added during
+     * integration, and it is what makes ONE rule close BOTH findings instead of trading them:
+     *
+     *   · Without the sender, "first writer wins" hands the cell to whoever arrives first —
+     *     which for a JOINER is whoever rotates while she is still catching up. Her cells for
+     *     epochs 1..e are all empty when she appears, so a hostile member fills them with
+     *     garbage, every honest re-delivery for those epochs is refused by the store for ever,
+     *     and she is permanently denied the shared history. Measured: she ended holding `[4]`
+     *     and no history, the board never rendered „Omas Geburtstag", and her ops quarantined.
+     *     That is T5-K1's residual, and it is a denial the relay itself enforces.
+     *
+     *   · With the sender, the honest wrap and the junk COEXIST. Eve still cannot move one byte
+     *     anybody else deposited — a different depositor is a different row, so T5-K3 is closed
+     *     by construction rather than by refusal — and the receiving side already handles the
+     *     rest: `admitWraps` walks a recipient's rows, counts the one that will not open as
+     *     `refused`, and admits the one that does. `assertCoverage` folds a recipient's rows
+     *     into a Set of EPOCH NUMBERS before it counts, so duplicates cannot inflate coverage.
+     *
+     * ── THE RULE ─────────────────────────────────────────────────────────────────────────────
+     *   · the cell is EMPTY   → the row lands.                                        (stored)
+     *   · the cell is FULL and the incoming row is byte-for-byte the stored one → nothing
+     *     happens and nobody is told off. An idempotent re-post.                         (kept)
+     *   · the cell is FULL and the incoming row DIFFERS → the incoming row is REFUSED and the
+     *     stored row stands.                                                          (refused)
+     *
+     * Because the sender is part of the cell, a `refused` row is now always THIS depositor
+     * re-wrapping ITS OWN earlier cell with a fresh salt and IV — which every honest rotation
+     * after the first does, for every epoch below its own. `refused` is therefore ORDINARY
+     * ACCOUNTING and never an abuse signal; it was never one under the narrower cell either,
+     * for exactly the same reason. Nothing may read it as "somebody attacked a cell".
+     *
+     * ── WHY A REFUSED ROW IS NOT A THROWN REQUEST, WHICH IS THE HARDER HALF ──────────────────
+     *
+     * A write-once rule that aborts the whole POST would be a denial of its own, and a total one.
+     * `wrapSpaceKey` draws a fresh 32-byte salt and a fresh 12-byte IV per wrap, so re-wrapping
+     * an epoch NEVER reproduces its bytes. `buildRotation` re-wraps 1..e+1 on every rotation
+     * (`wrapRingToRecipients` refuses to build a partial ring — A4, story 17.1). Therefore EVERY
+     * honest rotation after the first arrives carrying differing bytes for every already-filled
+     * cell. Throwing would 500 the first rotation of every family on earth; refusing the row and
+     * keeping the request turns those cells into no-ops and leaves the coverage check — which
+     * counts rows, not bytes — passing exactly as before.
+     *
+     * The three honest re-posts this was checked against, all of them now no-ops:
+     *   · a RETRIED rotation whose response was lost — same epoch, `409 epoch_taken` on the
+     *     second try, and its 1..e cells refused rather than rewritten;
+     *   · a DUPLICATE delivery — two member devices each handing the same joiner the same ring;
+     *   · a RACE — both members deliver at e+1. The loser's whole transaction rolls back anyway,
+     *     and on the way there its 1..e rows do not disturb the winner's.
+     *
+     * The counts are returned rather than swallowed so that a caller which wants to surface
+     * "somebody tried to rewrite N wraps" has the number. Nothing reads it yet; see the note to
+     * `server/core/handlers/spaces.js`'s owner in this pass's report.
+     *
+     * ── WHAT WRITE-ONCE COSTS, STATED PLAINLY ────────────────────────────────────────────────
+     *
+     * Not the healing path: a live sender re-delivering an epoch a since-revoked device
+     * deposited writes its OWN row beside the stale one, and the recipient opens the one that
+     * opens. C61 asserts exactly that. What it costs instead is ROWS. A recipient's cell for one
+     * epoch can hold one row per depositing device, so a member who wants to waste storage can
+     * deposit a junk row per (epoch, recipient) on every rotation she wins.
+     *
+     * That is bounded and attributable rather than free: `putKeyWraps` is reachable only from
+     * `POST /spaces` (creation, two recipients) and `rotateEpoch`, a rotation carries at most
+     * `MAX_WRAPS` = 1024 rows, and each one burns an epoch it must win a 409 race for and spends
+     * a rate-limit budget under a signed device identity. It is the same shape of cost as the
+     * N attributable removals in `e6-attack-removed` §1e-ii — visible, chargeable, and not a
+     * silent loss of anybody's data, which is what both alternatives were.
+     *
+     * @param {Array<Object>} rows
+     * @returns {{stored:number, kept:number, refused:number}}
+     */
     putKeyWraps(rows) {
       // Validate the whole batch first: a rotation is one transaction, and half a set of wraps
       // is exactly the incomplete coverage ADR 002 §4.2 exists to prevent.
       const clean = (rows || []).map((raw) => normalizeRow('KeyWrap', raw));
-      for (const r of clean) state.keyWraps.set(K(r.spaceId, String(r.epoch), r.recipientId), r);
+      let stored = 0; let kept = 0; let refused = 0;
+      for (const r of clean) {
+        const key = K(r.spaceId, String(r.epoch), r.recipientId, r.senderDeviceId);
+        const held = state.keyWraps.get(key);
+        if (!held) { state.keyWraps.set(key, r); stored++; continue; }
+        if (sameWrap(held, r)) { kept++; continue; }
+        refused++;
+      }
+      return { stored, kept, refused };
     },
 
     getKeyWraps(spaceId, recipientId) {

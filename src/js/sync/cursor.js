@@ -47,6 +47,36 @@
 // and two persisted answers to one question is how they drift apart. A restart that restored the
 // cursor but not the head would silently lose the ability to verify the very next page.
 //
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// TWO ENGINES, ONE MAP — AND WHY A WHOLE-MAP WRITE IS A ROLLBACK
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// The persisted shape is `{[spaceId]: record}`, one map for the device, and on a Mac in a
+// Familienkreis TWO instances of this module are built over it: `family/engine.js#startEngine`
+// for the personal space and `startFamilyEngine` for the family space. Each loaded the whole map
+// and each wrote `saveCursors(api.snapshot())` — its OWN map — over it. The family engine's map
+// never had the personal row, so an ordinary family pull deleted the personal space's verified
+// chain head and, with it, `fromGenesis`: the right to call an unknown witness a fork.
+//
+// **Rank it honestly.** ADR 006 §9.1 W1's transport cursor is not in this file — it rides in
+// `checkpoint().cursors`, written by `store.js` below the board, and it is per space there. What
+// was lost is fork DETECTION on the personal space (ADR 002 §5.4), not an op. That is a
+// diagnostic going quiet, and a diagnostic that goes quiet on its own is still a defect.
+//
+// Two rules, mirroring `sync/outbox.js`'s parking lot:
+//
+//   1. **A CURSOR SET OWNS ONE SPACE, AND THE STORE SAYS WHICH** (`storage.space`). `load()`
+//      adopts only that space's record and holds every other one aside verbatim. Without the
+//      filter the merge below would be WORSE than the bug: this instance would carry a stale
+//      copy of the other engine's record, read once at launch, and write it back over the newer
+//      value — a rollback rather than a deletion.
+//   2. **THE WRITE MERGES.** Every write re-reads the map, replaces only this space's key and
+//      leaves the rest exactly as it found them. `forget()` still deletes, because a key absent
+//      from `snapshot()` is absent from the merge.
+//
+// A store that declares no space is assumed exclusive and behaves precisely as before — which is
+// what `memoryCursorStore()` is, and what `checkpoint().cursors` will be when it lands.
+//
 // PURE. No clock, no randomness, no I/O — `storage` is a port. `src/js/sync/` may not import
 // `src/js/storage.js` (ADR 005 §2's import direction), which is the good kind of constraint here:
 // this module cannot reach the disk on its own even by accident.
@@ -78,12 +108,26 @@ export function memoryCursorStore(initial) {
 
 /**
  * @param {{storage:CursorStore, warn?:(m:string)=>void}} ports
+ *   `storage.space` — see the header's "TWO ENGINES, ONE MAP". A store that declares it is a
+ *   SLICE of a map somebody else also writes; a store that does not is exclusive.
  */
 export function createCursors(ports = {}) {
   const storage = ports.storage || memoryCursorStore();
   const warn = typeof ports.warn === 'function' ? ports.warn : () => {};
   /** @type {Map<string, {seq:string, chain:string, fromGenesis:boolean}>} */
   const cur = new Map();
+  /**
+   * THE SPACE THIS SET OWNS, or `null` for a store that owns its map outright. It comes off the
+   * STORE because `family/engine.js` builds the port and `sync/personal.js` builds this — the
+   * declaration travels with the thing it is a fact about.
+   */
+  const owned = typeof storage.space === 'string' && storage.space !== '' ? storage.space : null;
+  /**
+   * THE OTHER ENGINE'S RECORDS. Held verbatim, never read as anything, written back untouched.
+   * A `Map` and not an object so that a hand-edited `__proto__` key is a key here too.
+   * @type {Map<string, unknown>}
+   */
+  const foreign = new Map();
   let loaded = false;
 
   const blank = () => ({ seq: ZERO_SEQ, chain: '', fromGenesis: false });
@@ -115,6 +159,55 @@ export function createCursors(ports = {}) {
     return { seq: String(s), chain, fromGenesis: raw.fromGenesis === true };
   };
 
+  /**
+   * THE ONE PLACE THIS MODULE WRITES. Merges rather than replaces, for a scoped store.
+   *
+   * It re-reads the map first, because the OTHER engine has been advancing all session and the
+   * snapshot `load()` took is stale by exactly that much. A read that throws falls back to the
+   * set this session last saw — writing back a stale foreign record costs the other engine one
+   * re-pull, which is idempotent by `opId` (ADR 001 §6), while writing back nothing costs it the
+   * chain anchor this whole section exists to stop losing.
+   *
+   * **The read is not `await`ed unless the port forces it**, for the reason `sync/outbox.js`'s
+   * `persist()` spells out at length: a read-modify-write with a suspension point in the middle
+   * is a lost update every time both engines advance in the same cadence tick, and that would be
+   * a worse defect than the one this closes because it would be intermittent. `saveCursors` is
+   * invoked in the same synchronous turn as the read, so nothing can be interleaved between them;
+   * `family/engine.js`'s `chainHeadStore` is synchronous on purpose. A port that answers with a
+   * promise still merges, with the window open — which is `memoryCursorStore()`, a single-space
+   * rig with no second writer.
+   *
+   * Deletion still works: `forget()` removes the key from `cur`, so it is absent from `snapshot()`
+   * and therefore absent from the merge. `foreign` never holds `owned`, so nothing puts it back.
+   *
+   * Throws whatever the store throws — both call sites already handle that.
+   */
+  const persistAll = async () => {
+    const mine = api.snapshot();
+    if (owned === null) return storage.saveCursors(mine);
+    let stored = null;
+    try {
+      stored = storage.loadCursors();
+      if (stored !== null && typeof stored === 'object' && typeof stored.then === 'function') {
+        stored = await stored;                       // ← only for a port that leaves no choice
+      }
+    } catch (e) {
+      stored = null;
+      warn(`cursor: the map could not be re-read before writing (${e && e.message}); the other `
+         + `space's anchor is written back as this session last saw it (${foreign.size} record(s)).`);
+    }
+    if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+      foreign.clear();
+      for (const space of Object.keys(stored)) if (space !== owned) foreign.set(space, stored[space]);
+    }
+    const merged = {};
+    // `space` is never `owned` here, and `snapshot()`'s keys are `cur`'s — neither can be
+    // `__proto__` for any store this product builds, and a `Map` is what kept it out of the way.
+    for (const [space, rec] of foreign) if (space !== '__proto__') merged[space] = rec;
+    Object.assign(merged, mine);
+    return storage.saveCursors(merged);
+  };
+
   const api = {
     /** Hydrate from the store. Idempotent; a second call re-reads. */
     async load() {
@@ -128,8 +221,13 @@ export function createCursors(ports = {}) {
         warn(`cursor: the cursor store could not be read (${e && e.name}: ${e && e.message}); every space starts from 0`);
       }
       cur.clear();
+      foreign.clear();
       if (all && typeof all === 'object' && !Array.isArray(all)) {
         for (const space of Object.keys(all)) {
+          // The other engine's record is HELD ASIDE, not adopted. Adopting it and then merging
+          // would be the rollback described in the header: this instance would write back the
+          // value it happened to read at launch over whatever the owner has advanced to since.
+          if (owned !== null && space !== owned) { foreign.set(space, all[space]); continue; }
           const rec = readRecord(space, all[space]);
           if (rec) cur.set(space, rec);
         }
@@ -223,7 +321,7 @@ export function createCursors(ports = {}) {
       };
       cur.set(space, rec);
       try {
-        await storage.saveCursors(api.snapshot());
+        await persistAll();
       } catch (e) {
         // The cursor moved in memory but not on disk. That is the SAFE direction: the next launch
         // re-pulls from the older cursor and re-applies idempotently. The opposite — persisting a
@@ -246,7 +344,7 @@ export function createCursors(ports = {}) {
       if (!cur.has(space)) return false;
       cur.delete(space);
       try {
-        await storage.saveCursors(api.snapshot());
+        await persistAll();
       } catch (e) {
         warn(`cursor: ${space} was forgotten in memory but the store refused (${e && e.message})`);
       }
@@ -265,6 +363,10 @@ export function createCursors(ports = {}) {
       return {
         loaded,
         durable: storage.durable !== false,
+        // The space this set owns (`null` = it owns its map outright) and how many records in
+        // that map belong to the other engine and are carried through untouched.
+        scope: owned,
+        foreign: foreign.size,
         spaces: api.snapshot(),
       };
     },

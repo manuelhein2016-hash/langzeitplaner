@@ -49,7 +49,9 @@ import { requiredRecipients as coverageRequires } from '../../server/core/handle
 import { LIMITS } from '../../server/core/limits.js';
 import {
   removeMember, leaveSpace, transferAdmin, renameSpace, deleteSpace, LIFECYCLE_LIMIT_DEFAULTS,
+  LIFECYCLE_FINDINGS,
 } from '../../server/core/handlers/lifecycle.js';
+import { adminProofString } from '../../server/core/auth.js';
 // The one cross-boundary import in this file, and it is a TEST-ONLY pin: `devices.js` may not
 // import `src/js/core/` (ADR 005 §2 — `server/core` imports only `server/core`), so its Crockford
 // encoder is a deliberate duplicate. This import makes a drift between the two a red test rather
@@ -141,6 +143,17 @@ async function attest(recPriv, att) {
 
 const SPACE = 'fsp_AAAAAAAAAAAAAAAAAAAAAA';
 const SPACE2 = 'fsp_BBBBBBBBBBBBBBBBBBBBBB';
+/** A circle whose `founderMemberId` IS recorded — `seedSpace`'s SPACE deliberately has none, and
+ *  T5-M1a's rows need both cases to tell "the gate ran" from "the gate could not run". */
+const SPACE3 = 'fsp_CCCCCCCCCCCCCCCCCCCCCC';
+
+/** ADR 003 §3.7 — a second member's recovery signature over bytes the relay assembles itself.
+ *  `adminProofString` is the SERVER's, so a drift between signer and verifier is a red test. */
+async function adminProof(member, act, spaceId, target, epoch) {
+  const bytes = enc.encode(adminProofString({ act, spaceId, target, epoch }));
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, member.recPriv, bytes));
+  return { by: member.id, sig: bytesToB64u(sig) };
+}
 
 let memberCounter = 0;
 const nextMemberId = () => `mem_${String(memberCounter++).padStart(22, 'M')}`;
@@ -149,7 +162,11 @@ const nextMemberId = () => `mem_${String(memberCounter++).padStart(22, 'M')}`;
 async function makeMember(store, spaceId, colorRef, opts) {
   const rec = await genSig();
   const recKex = await genKex();
-  const id = nextMemberId();
+  // `opts.id` lets a caller name the member in advance. Needed by T5-M1a's rows: a Space row must
+  // exist before `addMember` will accept anybody, and `Space.founderMemberId` has to name one of
+  // those members — so the id is chosen first and used in both writes, which is exactly the order
+  // `POST /spaces` uses inside its transaction.
+  const id = (opts && opts.id) || nextMemberId();
   await store.addMember({
     id,
     spaceId,
@@ -672,8 +689,12 @@ for (const adapter of ADAPTERS) {
       assert.equal(r.extra.field, field);
     }
     const space = await store.getSpace(SPACE);
-    assert.deepEqual(Object.keys(space).sort(), ['createdAt', 'currentEpoch', 'headChain', 'id', 'kind', 'nextSeq'],
-      'the Space row has no column a name could land in, and this is the assertion that keeps it that way');
+    assert.deepEqual(Object.keys(space).sort(),
+      ['createdAt', 'currentEpoch', 'founderMemberId', 'headChain', 'id', 'kind', 'nextSeq'],
+      'the Space row has no column a name could land in, and this is the assertion that keeps it '
+      + 'that way. `founderMemberId` was added for finding T5-M1a and is a MEMBER ID the relay '
+      + 'wrote itself at `POST /spaces` — an identifier, not a label: `blindness.test.js` §2 is '
+      + 'where that classification is argued, and it is checked there rather than assumed here.');
   });
 
   T('20.4 — delete cascades everything, needs an explicit confirmation, and touches no other space', async ({ store, as, clock }) => {
@@ -711,6 +732,268 @@ for (const adapter of ADAPTERS) {
     assert.ok(await store.getSpace(SPACE2), 'the other family is untouched');
     assert.equal((await store.listOps(SPACE2, 0n, 10)).ops.length, 1);
     assert.equal((await store.listDevices(SPACE2)).length, 1);
+  });
+
+  T('T5-M1b — a circle with more than one member row cannot be deleted by one person', async ({ store, as, clock }) => {
+    // THE ROW THIS CLOSES. `tests/fleet/e6-attack-removed.test.js` §1c drove it end to end: an
+    // ordinary invited member destroyed a three-person Familienkreis in ONE request, because the
+    // relay's only check was `assertMember` and the relay cannot know who the admin is (ADR 003
+    // §5.1 — no role column, and `FORBIDDEN_COLUMN_TOKENS` keeps it that way).
+    //
+    // What replaces it is NOT an admin check, and the difference matters: the relay verifies that
+    // a SECOND member's recovery key stood behind the act. That is weaker than "only the admin"
+    // and strictly stronger than "any one member" — and T5 is by definition one member with one
+    // Keychain (ADR 002 §0).
+    const admin = await makeMember(store, SPACE, 'gruen');
+    const eve = await makeMember(store, SPACE, 'blau');
+    await store.createSpace({ id: SPACE2, kind: 'FAMILY', currentEpoch: 1, nextSeq: 0n, headChain: null, createdAt: new Date(0) });
+    const outsider = await makeMember(store, SPACE2, 'gruen');
+    const a1 = await register(makeCtx(store, fakeClock()), admin);
+    const e1 = await register(makeCtx(store, fakeClock()), eve);
+    const asEve = { deviceShort: e1.body.deviceShort, deviceId: e1.body.deviceId, memberId: eve.id };
+    const epoch = (await store.getSpace(SPACE)).currentEpoch;
+    const del = (body) => call(deleteSpace, req({ routeName: 'deleteSpace', params: { id: SPACE }, body }), as(asEve));
+
+    const bare = await del({ confirm: SPACE });
+    // 403 and not 400: the request is well formed and she is authenticated — what is missing is
+    // AUTHORITY. `errors.js` gained `admin_proof_required: 403` during integration, which is the
+    // cross-file need this fix originally left open.
+    assert.equal(bare.status, 403);
+    assert.equal(bare.code, 'admin_proof_required');
+    assert.equal(bare.extra.field, 'adminProof');
+    assert.equal(bare.extra.reason, 'second_member_signature_required');
+    assert.ok(await store.getSpace(SPACE), 'the circle is still there');
+
+    // Every shape a patched client reaches for next.
+    const cases = [
+      ['her own key, correctly signed', await adminProof(eve, 'space.delete', SPACE, SPACE, epoch), 400],
+      ['no proof at all', undefined, 403],
+      ['the admin\'s NAME over her signature', { by: admin.id, sig: (await adminProof(eve, 'space.delete', SPACE, SPACE, epoch)).sig }, 401],
+      ['a member of ANOTHER space', await adminProof(outsider, 'space.delete', SPACE, SPACE, epoch), 400],
+      ['the wrong act', await adminProof(admin, 'member.remove', SPACE, SPACE, epoch), 401],
+      ['the neighbouring epoch', await adminProof(admin, 'space.delete', SPACE, SPACE, epoch + 1), 401],
+      ['another circle\'s proof', await adminProof(admin, 'space.delete', SPACE2, SPACE, epoch), 401],
+    ];
+    for (const [hint, adminProofField, status] of cases) {
+      const r = await del(adminProofField === undefined
+        ? { confirm: SPACE }
+        : { confirm: SPACE, adminProof: adminProofField });
+      assert.equal(r.status, status, `${hint}: ${r.status} ${JSON.stringify(r.extra)}`);
+      assert.ok(await store.getSpace(SPACE), `the circle went on ${hint}`);
+    }
+
+    // `confirm` is still checked FIRST — a destructive endpoint refuses the shape fault before it
+    // spends a signature verification, and the old 20.4 assertions keep their meaning.
+    const wrongConfirm = await del({ confirm: SPACE2, adminProof: await adminProof(admin, 'space.delete', SPACE, SPACE, epoch) });
+    assert.equal(wrongConfirm.extra.field, 'confirm');
+
+    // NON-VACUITY: the honest two-key delete works, and says so.
+    const ok = await del({ confirm: SPACE, adminProof: await adminProof(admin, 'space.delete', SPACE, SPACE, epoch) });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.deleted, true);
+    assert.equal(ok.body.authorizedBy, 'admin_proof');
+    assert.equal(ok.body.localBoardsUnaffected, true);
+    assert.equal(await store.getSpace(SPACE), null);
+    assert.ok(await store.getSpace(SPACE2), 'and only this circle');
+    assert.ok(a1.body.deviceId);
+  });
+
+  T('T5-M1b — the exemption counts member ROWS, so "remove everyone, then delete alone" is shut', async ({ store, as, clock }) => {
+    // The obvious bypass, and the one line that closes it: the exemption is `members.length === 1`
+    // over `listMembers`, which returns TOMBSTONES too. A removal sets `Member.removedAt`; it
+    // never deletes the row. So being the last member LEFT STANDING buys nothing.
+    // `seedSpace` writes SPACE with no `founderMemberId`, so the removal below is an ordinary
+    // one and this row keeps testing what it is named for — the DELETE exemption — rather than
+    // T5-M1a's founder gate, which has its own rows.
+    assert.equal((await store.getSpace(SPACE)).founderMemberId, null,
+      'NON-VACUITY for the setup: this circle has no recorded founder, so nothing here is '
+      + 'passing because a removal was refused for an unrelated reason');
+    const admin = await makeMember(store, SPACE, 'gruen');
+    const eve = await makeMember(store, SPACE, 'blau');
+    const e1 = await register(makeCtx(store, fakeClock()), eve);
+    const asEve = { deviceShort: e1.body.deviceShort, deviceId: e1.body.deviceId, memberId: eve.id };
+
+    assert.equal((await call(removeMember, req({ routeName: 'removeMember', body: { spaceId: SPACE, memberId: admin.id } }), as(asEve))).status, 200);
+    const rows = await store.listMembers(SPACE);
+    assert.equal(rows.length, 2, 'NON-VACUITY: the removed row is still a row');
+    assert.equal(rows.filter((m) => m.removedAt === null).length, 1, 'and she really is alone');
+
+    const r = await call(deleteSpace, req({ routeName: 'deleteSpace', params: { id: SPACE }, body: { confirm: SPACE } }), as(asEve));
+    assert.equal(r.status, 403);
+    assert.equal(r.code, 'admin_proof_required');
+    assert.equal(r.extra.reason, 'second_member_signature_required');
+    assert.ok(await store.getSpace(SPACE));
+    // …and she cannot conjure the second key out of the tombstone either: a removed member's
+    // recovery key is refused by NAME, before the signature runs.
+    const dead = await call(deleteSpace, req({
+      routeName: 'deleteSpace', params: { id: SPACE },
+      body: { confirm: SPACE, adminProof: await adminProof(admin, 'space.delete', SPACE, SPACE, (await store.getSpace(SPACE)).currentEpoch) },
+    }), as(asEve));
+    assert.equal(dead.status, 400);
+    assert.equal(dead.extra.reason, 'admin_proof_signer_not_a_member');
+    assert.ok(await store.getSpace(SPACE));
+  });
+
+  T('T5-M1b — a space nobody ever joined needs no second key (19.4), and says which authority ran', async ({ store, as }) => {
+    // The exemption exists for the personal space. Without it a `psp_` — one member, for ever —
+    // would be undeletable, which would be closing the finding by breaking something legitimate.
+    const solo = await makeMember(store, SPACE, 'gruen');
+    const s1 = await register(makeCtx(store, fakeClock()), solo);
+    const r = await call(deleteSpace, req({ routeName: 'deleteSpace', params: { id: SPACE }, body: { confirm: SPACE } }),
+      as({ deviceShort: s1.body.deviceShort, deviceId: s1.body.deviceId, memberId: solo.id }));
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.authorizedBy, 'sole_member');
+    assert.equal(await store.getSpace(SPACE), null);
+  });
+
+  T('T5-M1a — the FOUNDER cannot be removed on one member\'s word', async ({ store, as }) => {
+    // THE ROW THIS CLOSES. `tests/fleet/e6-attack-removed.test.js` §1a/§1b drove it end to end:
+    // an ordinary invited member threw the space's creator out in ONE request, and with him went
+    // ADR 001 §4.0's attestation and §4.1's admin-chain genesis link — after which `adminAtIn`
+    // answers null for every stamp in the space and no future joiner can admit anything he ever
+    // wrote. That is the whole of T5-M1a's damage, and it is a DIFFERENT thing from losing one
+    // member: it destroys the space for everybody.
+    //
+    // `Space.founderMemberId` is written by the relay inside `POST /spaces` from the member row
+    // it creates in the same transaction. Nobody claims it, it never moves, and it is NOT an
+    // admin column — the admin chain is an in-log `transferAdmin` op the relay cannot read.
+    // The space is created FIRST and its founder stamped in a second step, because that is the
+    // only ordering the store permits (`addMember` refuses an unknown space) and it mirrors what
+    // `POST /spaces` does inside one transaction.
+    const founderId = `mem_${'f'.repeat(22)}`;
+    await store.createSpace({
+      id: SPACE3, kind: 'FAMILY', currentEpoch: 1, nextSeq: 0n, headChain: null,
+      createdAt: new Date(0), founderMemberId: founderId,
+    });
+    const founder = await makeMember(store, SPACE3, 'gruen', { id: founderId });
+    const eve = await makeMember(store, SPACE3, 'blau');
+    const oma = await makeMember(store, SPACE3, 'rot');
+    assert.equal((await store.getSpace(SPACE3)).founderMemberId, founder.id,
+      'NON-VACUITY for the setup: the gate below has a founder to recognise');
+    const e1 = await register(makeCtx(store, fakeClock()), eve);
+    const asEve = { deviceShort: e1.body.deviceShort, deviceId: e1.body.deviceId, memberId: eve.id };
+    const epoch = (await store.getSpace(SPACE3)).currentEpoch;
+    const rm = (body) => call(removeMember, req({ routeName: 'removeMember', body }), as(asEve));
+
+    // 1. THE ATTACK: the bare request that used to answer 200.
+    const bare = await rm({ spaceId: SPACE3, memberId: founder.id });
+    assert.equal(bare.status, 403, JSON.stringify(bare));
+    assert.equal(bare.code, 'admin_proof_required');
+    assert.equal(bare.extra.field, 'adminProof');
+    assert.equal(bare.extra.reason, 'founder_removal_needs_second_key');
+    assert.equal((await store.listMembers(SPACE3)).find((m) => m.id === founder.id).removedAt, null,
+      'and he is still a member: a refusal removes nobody');
+
+    // 2. Every mirror-image shape, each refused for its OWN reason.
+    for (const [hint, proof, status, reason] of [
+      ['her own key, correctly signed', await adminProof(eve, 'member.remove', SPACE3, founder.id, epoch), 400, 'admin_proof_self_signed'],
+      ['his NAME over her signature', { by: founder.id, sig: (await adminProof(eve, 'member.remove', SPACE3, founder.id, epoch)).sig }, 401, null],
+      ['a proof for the WRONG ACT', await adminProof(oma, 'space.delete', SPACE3, founder.id, epoch), 401, null],
+      ['the neighbouring epoch', await adminProof(oma, 'member.remove', SPACE3, founder.id, epoch + 1), 401, null],
+      ['a proof naming ANOTHER target', await adminProof(oma, 'member.remove', SPACE3, eve.id, epoch), 401, null],
+    ]) {
+      const r = await rm({ spaceId: SPACE3, memberId: founder.id, adminProof: proof });
+      assert.equal(r.status, status, `${hint}: ${r.status} ${JSON.stringify(r.extra)}`);
+      if (reason) assert.equal(r.extra.reason, reason, hint);
+      assert.equal((await store.listMembers(SPACE3)).find((m) => m.id === founder.id).removedAt, null,
+        `the founder went on ${hint}`);
+    }
+
+    // 3. NON-VACUITY — the honest path is NOT closed. A founder CAN be removed; it takes a
+    //    second live member's key, exactly as 20.4's delete does. Without this the row above
+    //    would pass just as well against a route that always 403s.
+    const ok = await rm({
+      spaceId: SPACE3, memberId: founder.id,
+      adminProof: await adminProof(oma, 'member.remove', SPACE3, founder.id, epoch),
+    });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.removed, true);
+    assert.equal(ok.body.authorizedBy, 'admin_proof');
+  });
+
+  T('T5-M1a — and a NON-founder is still one request away, which is the residual', async ({ store, as }) => {
+    // The half that is NOT closed, pinned so that "T5-M1a is closed" cannot be said of it. The
+    // relay still cannot name the ADMIN: that is an in-log `transferAdmin` op inside the
+    // ciphertext (ADR 001 §4.1, `AUTH_INTERFACE_GAPS` E2-L1b). What it defends is the founder,
+    // because that is the one removal it can recognise blind AND the one whose damage is not
+    // confined to its target.
+    const founderId = `mem_${'f'.repeat(22)}`;
+    await store.createSpace({
+      id: SPACE3, kind: 'FAMILY', currentEpoch: 1, nextSeq: 0n, headChain: null,
+      createdAt: new Date(0), founderMemberId: founderId,
+    });
+    const founder = await makeMember(store, SPACE3, 'gruen', { id: founderId });
+    const eve = await makeMember(store, SPACE3, 'blau');
+    const mama = await makeMember(store, SPACE3, 'rot');
+    assert.ok(founder.id === founderId, 'NON-VACUITY: this circle really has a recorded founder');
+    const e1 = await register(makeCtx(store, fakeClock()), eve);
+    const asEve = { deviceShort: e1.body.deviceShort, deviceId: e1.body.deviceId, memberId: eve.id };
+
+    const r = await call(removeMember, req({ routeName: 'removeMember', body: { spaceId: SPACE3, memberId: mama.id } }), as(asEve));
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.equal(r.body.authorizedBy, 'membership_only',
+      'REPORTED: an ordinary member removes another ordinary member on her own word, and the '
+      + 'response says so rather than implying an authority that did not run');
+  });
+
+  T('T5-M1a — a space with NO recorded founder fails OPEN, so old circles are not wedged', async ({ store, as }) => {
+    // The column is nullable because every Space row written before it existed has no founder.
+    // A null must mean "an ordinary removal", not "no removals at all": failing closed here
+    // would wedge every circle already in the field, which is closing a finding by breaking
+    // something legitimate.
+    assert.equal((await store.getSpace(SPACE)).founderMemberId, null, 'NON-VACUITY: no founder recorded');
+    const admin = await makeMember(store, SPACE, 'gruen');
+    const eve = await makeMember(store, SPACE, 'blau');
+    const e1 = await register(makeCtx(store, fakeClock()), eve);
+    const r = await call(removeMember, req({ routeName: 'removeMember', body: { spaceId: SPACE, memberId: admin.id } }),
+      as({ deviceShort: e1.body.deviceShort, deviceId: e1.body.deviceId, memberId: eve.id }));
+    assert.equal(r.status, 200, JSON.stringify(r));
+    assert.equal(r.body.authorizedBy, 'membership_only');
+  });
+
+  T('T5-M1a — a removal proof is OPTIONAL for a non-founder, and a bad one is never silently downgraded', async ({ store, as }) => {
+    // A proof that is OFFERED is VERIFIED even where it is not REQUIRED — a field on the wire
+    // that a reader takes for a control, and that the relay skips, is worse than no field.
+    const admin = await makeMember(store, SPACE, 'gruen');
+    const eve = await makeMember(store, SPACE, 'blau');
+    const mama = await makeMember(store, SPACE, 'rot');
+    const oma = await makeMember(store, SPACE, 'gelb');     // the co-signer for step 3
+    const e1 = await register(makeCtx(store, fakeClock()), eve);
+    const asEve = { deviceShort: e1.body.deviceShort, deviceId: e1.body.deviceId, memberId: eve.id };
+    const epoch = (await store.getSpace(SPACE)).currentEpoch;
+    const rm = (body) => call(removeMember, req({ routeName: 'removeMember', body }), as(asEve));
+
+    // 1. No proof: still 200, and the response SAYS which authority ran. T5-M1a, on the wire.
+    const bare = await rm({ spaceId: SPACE, memberId: mama.id });
+    assert.equal(bare.status, 200, JSON.stringify(bare));
+    assert.equal(bare.body.removed, true);
+    assert.equal(bare.body.authorizedBy, 'membership_only');
+
+    // 2. A proof that is OFFERED is VERIFIED. A field on the wire that a reader takes for a
+    //    control, and that the relay skips, is worse than no field at all.
+    const forged = await rm({
+      spaceId: SPACE, memberId: admin.id,
+      adminProof: { by: admin.id, sig: (await adminProof(eve, 'member.remove', SPACE, admin.id, epoch)).sig },
+    });
+    assert.equal(forged.status, 401);
+    assert.equal(forged.code, 'bad_signature');
+    assert.equal((await store.listMembers(SPACE)).find((m) => m.id === admin.id).removedAt, null,
+      'a refused proof must not remove anybody');
+    const selfSigned = await rm({
+      spaceId: SPACE, memberId: admin.id,
+      adminProof: await adminProof(eve, 'member.remove', SPACE, admin.id, epoch),
+    });
+    assert.equal(selfSigned.status, 400);
+    assert.equal(selfSigned.extra.reason, 'admin_proof_self_signed');
+
+    // 3. And a GOOD one is admitted and reported, so the day this becomes required nothing else
+    //    in the handler has to move.
+    const proved = await rm({
+      spaceId: SPACE, memberId: admin.id,
+      adminProof: await adminProof(oma, 'member.remove', SPACE, admin.id, epoch),
+    });
+    assert.equal(proved.status, 200, JSON.stringify(proved.body));
+    assert.equal(proved.body.authorizedBy, 'admin_proof');
   });
 
   T('the removal limiter is per member, and its refusal carries Retry-After', async ({ store, clock }) => {
@@ -784,3 +1067,25 @@ for (const adapter of ADAPTERS) {
     assert.ok(await store.getSpace(SPACE), 'and none of them did anything');
   });
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// The findings table — data, not a commit message.
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('every lifecycle finding names its status, its consequence and its owner', () => {
+  const ids = LIFECYCLE_FINDINGS.map((f) => f.id);
+  assert.deepEqual(ids, [...new Set(ids)], 'duplicate finding ids');
+  assert.ok(ids.includes('T5-M1a') && ids.includes('T5-M1b') && ids.includes('T5-M1c'),
+    'the three halves of T5-M1 must all still be stated, closed and open alike');
+  for (const f of LIFECYCLE_FINDINGS) {
+    assert.ok(f.what.length > 60, `${f.id}: "what" must be specific enough to act on`);
+    assert.ok(f.consequence.length > 100, `${f.id}: a finding without a consequence is a TODO`);
+    assert.ok(f.owner.length > 0, `${f.id}: no owner`);
+    assert.match(f.status, /^(CLOSED|OPEN|HALF-CLOSED)\b/, `${f.id}: ${f.status}`);
+  }
+  // The open one must keep naming what it costs to close, because that list IS the ticket.
+  const open = LIFECYCLE_FINDINGS.find((f) => f.id === 'T5-M1a');
+  assert.match(open.consequence, /round9-e6|round10-e6-gate/);
+  assert.match(open.consequence, /adminpanel\.js/);
+  assert.ok(Object.isFrozen(LIFECYCLE_FINDINGS));
+});

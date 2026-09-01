@@ -747,6 +747,58 @@ for (const adapter of ADAPTERS) {
     assert.deepEqual(await store.getKeyWraps(SPACE, MOM.deviceId), []);
   });
 
+  // ── finding T5-K3 · the wrap table is WRITE-ONCE, at the route, on both witnesses ──────────
+  //
+  // `POST /spaces/:id/epoch` admits ANY current member — ADR 002 §4.2 and decision D9, "any
+  // member device, not only the admin's" — and a rotation legitimately names wraps for every
+  // epoch 1..e+1. While `putKeyWraps` was an upsert, that combination let one ordinary member
+  // replace every wrap of every recipient below her own epoch with bytes nobody can open, and
+  // the relay recorded it as coverage: `assertCoverage` counts ROWS, and a blind relay cannot
+  // open a wrap to check. Nobody online notices — a ring lives in the member's own storage.
+  T('a member\'s rotation CANNOT overwrite a wrap somebody else deposited — finding T5-K3', async () => {
+    const { store, clock } = await withSpace(adapter);
+    await joinDirect(store, clock, MOM, 'blau');
+    const founding = await store.getKeyWraps(SPACE, ADMIN.deviceId);
+    assert.equal(founding.length, 1, 'NON-VACUITY: `POST /spaces` really left an epoch-1 row to aim at');
+    const before = [...founding[0].wrapped];
+
+    // MOM rotates, naming junk for epoch 1 of everybody — including the cell the founder filled.
+    const res = await rotateEpoch(rotateReq(SPACE, {
+      epoch: 2,
+      wraps: [
+        wrap(ADMIN.deviceId, 1, 90), wrap(ADMIN.deviceId, 2, 91),
+        wrap(MOM.deviceId, 1, 92), wrap(MOM.deviceId, 2, 93),
+      ],
+    }), asPerson(store, clock, MOM));
+
+    // ACCEPTED, and that is deliberate: write-once is not a coverage rule and must not become
+    // one. She may rotate, and the epoch-2 cells are empty when she gets there. Refusing the
+    // whole request instead would break every honest rotation too — `wrapSpaceKey` draws a fresh
+    // salt and IV per wrap and `wrapRingToRecipients` re-wraps 1..e+1 every time, so an honest
+    // rotation ALSO arrives carrying differing bytes for cells that are already filled.
+    assert.equal(res.status, 200);
+    assert.equal(res.body.currentEpoch, 2, 'the space advanced: the honest half of her request landed');
+
+    const after = await store.getKeyWraps(SPACE, ADMIN.deviceId);
+    // Selected BY DEPOSITOR, because the depositor is part of the cell: her junk row for epoch 1
+    // lands beside his rather than being turned away. That distinction is the whole integration
+    // decision — turning her away is what let a hostile member claim a JOINER's empty cells and
+    // deny her the family's history for ever (T5-K1's residual). Coexistence closes both.
+    const e1 = after.find((w) => w.epoch === 1 && w.senderDeviceId === ADMIN.deviceId);
+    assert.ok(e1, 'the founder\'s own epoch-1 row is still on the relay, under his own name');
+    assert.deepEqual([...e1.wrapped], before,
+      'THE INVARIANT: the founder\'s own epoch-1 wrap is byte-for-byte the row he wrote. The '
+      + 'readers who depend on it are every future joiner, every device paired in tomorrow, and '
+      + 'ADR 002 §7.3\'s A2 recovery — the one path that survives losing every device.');
+    assert.equal(e1.senderDeviceId, ADMIN.deviceId, 'and it still names who really deposited it');
+    assert.equal(after.length, 3,
+      'three rows: his epoch-1, her epoch-1 junk beside it, and her epoch-2. `admitWraps` walks '
+      + 'them and opens the one that opens (ADR 002 §4.2 step 6), so what her junk costs the '
+      + 'founder is one refusal on his own Mac — not a byte of his history.');
+    assert.equal(after.filter((w) => w.epoch === 1).length, 2,
+      'and the junk really is there: this row would pass vacuously if she had written nothing');
+  });
+
   T('a removed member is owed nothing and keeps nothing (T2)', async () => {
     const { store, clock } = await withSpace(adapter);
     await joinDirect(store, clock, MOM, 'blau');

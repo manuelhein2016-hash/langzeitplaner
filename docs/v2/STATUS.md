@@ -1,8 +1,67 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-01 · **Stopped at:** **E8 — family board rendering, INTEGRATED and
-MEASURED AGAINST DENSITY.** LZP-801…807 are applied together, driven, and priced in pixels.
-Full record: `docs/v2/E8-VERIFICATION.md`; findings in `FINDINGS.md` §12.
+**Last session:** 2026-09-01 · **Stopped at:** **T5 — the family red team, ANSWERED AND
+INTEGRATED.** Four parallel fixes merged, one head-on conflict resolved, one authorization ruling
+made. Findings in `FINDINGS.md` §13.
+
+---
+
+## THE T5 HEADLINE: nothing it found was a confidentiality break, and the denial half is closed
+
+A red team attacked a **real three-member Familienkreis** as an invited, attested, non-admin member
+(ADR 002 §0's T5). Its verdict was *„E7 can be built on this engine. It must not ship on it."* —
+and what it could do was never **read**, it was **deny, destroy and redirect**.
+
+**The redaction boundary did not move and is still green.** Five routes at the boundary produce
+**zero bytes** of a Privat entry: barriers 2/3/4, the two branded recipient scopes, the branded
+sender set, the per-space `KeyRing`, both mirror-image constructor refusals
+(`e6-attack-privat.test.js` §1a–§1g), and story 20.5's read half
+(`e6-attack-removed.test.js` §2a–§2d).
+
+**Six of seven findings are closed; the seventh is open by design.**
+
+| finding | was | now |
+|---|---|---|
+| T5-M1a | a member removes the founder in one request | **CLOSED** — `Space.founderMemberId`, a fact the relay writes itself |
+| T5-M1b | a member deletes the whole circle in one request | **CLOSED** — a second member's `RK_sig` |
+| T5-M1c | remove everybody, then leave, and the cascade deletes it | **CLOSED** — by M1a, not by gating the cascade |
+| T5-K1 | an epoch bump read as proof a **key** arrived | **CLOSED** — coverage is now three statements about keys |
+| T5-K2 | D9's waiting state cleared on the relay's row count | **CLOSED** — answered from the ring |
+| T5-K3 | `putKeyWraps` was an upsert: one member could overwrite the family's whole key history | **CLOSED** — write-once, depositor in the cell |
+| T5-K4 | a member attests an outsider's Mac | **OPEN BY DESIGN** — §8.5's mitigation is now built *and* fed |
+
+**The one head-on conflict, and the decision that resolved it.** T5-K3's write-once rule on
+`(spaceId, epoch, recipientId)` closed its own finding and **opened T5-K1's mirror image**: a
+joiner's cells are all empty when she arrives, so a hostile member who rotates first owns them for
+ever and every honest re-delivery is refused *by the relay*. Measured — she ended with one epoch,
+no history, and her ops in an `error` screen. Putting the **depositor in the cell**
+(`@@id([spaceId, epoch, recipientId, senderDeviceId])`) holds both at once, and gives C61's
+healing path back. FINDINGS §13c.
+
+**The authorization ruling, because it is a decision.** The relay **cannot** identify the admin —
+the admin chain is an in-log `transferAdmin` op inside the ciphertext. Requiring a co-signature for
+*every* removal was rejected on measurement, not on taste: mutant **M-M5** reddened **13 fleet and
+31 server rows**, and in a two-member circle the rule is **unsatisfiable**, because the only
+possible co-signer is the target. The gate is therefore on **the founder** — the one removal that
+destroys the space for everybody rather than for one person. The residual (a non-founder is still
+one request away; two colluding members can still remove the founder) is **asserted in rows**, not
+implied. FINDINGS §13b.
+
+**E6 was re-driven end to end** against the changed authorization: create → invite → join → D9's
+waiting state observed *and* clearing itself on ordinary ticks → the shared entry appears → the
+name propagates from the log while the relay holds none → **removal with rotation** (epoch 4 → 5,
+`authorizedBy: membership_only`, one request, honest admin path intact) → the removed member's own
+board byte-for-byte unchanged → and the founder removal refused `403
+founder_removal_needs_second_key`.
+
+**Suites: `test` 2008 · `test:attack` 860 · `test:server` 892 · `test:fleet` 259 ·
+`test:property` 101 — all green.** `test:dom` has **two failures that are not T5's**:
+`belegt-render.dom.js` §7 and `dom-rendering.dom.js` 7.2, both reproduced identically in a pristine
+`git archive HEAD` copy of `81b793d` and both in E8-owned files.
+
+**Owed:** a co-signature UI (`adminpanel.js` / `leavedelete.js` mint no `adminProof`, so the honest
+two-key paths have a working relay and no screen), and the transfer-certificate chain that would
+upgrade the founder anchor to a real admin rule. FINDINGS §13f.
 
 ---
 

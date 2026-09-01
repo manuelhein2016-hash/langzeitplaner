@@ -37,6 +37,24 @@ const isUniqueViolation = (err) => !!err && err.code === 'P2002';
 const toBig = (v) => (typeof v === 'bigint' ? v : BigInt(v || 0));
 const toBytes = (v) => (v == null ? null : v instanceof Uint8Array ? v : new Uint8Array(v));
 
+/** `KeyWrap`'s composite primary key as one comparable string. JSON, so no id alphabet can forge
+ *  a neighbouring cell by joining across the separator — the same argument `memory.js#K` makes. */
+const cellKey = (w) => JSON.stringify([w.spaceId, w.epoch, w.recipientId, w.senderDeviceId]);
+
+/** Byte equality over two rows the relay already holds. No secret, so no constant-time need. */
+function sameBytes(a, b) {
+  if (a === b) return true;
+  if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** The WHOLE row, sender included: ADR 002 §4.2 step 6 derives the KEK against the sender's key,
+ *  so the same bytes under a different depositor are a different row. See `putKeyWraps`. */
+const sameWrap = (held, incoming) => (
+  held.senderDeviceId === incoming.senderDeviceId && sameBytes(toBytes(held.wrapped), toBytes(incoming.wrapped))
+);
+
 /**
  * Map a Prisma row back to the interface's shape.
  * UNVERIFIED (U-BYTES): Prisma returns `Bytes` columns as Node `Buffer`, which IS a Uint8Array,
@@ -353,21 +371,75 @@ function build(db, now, inTransaction) {
 
     // ── key wraps ───────────────────────────────────────────────────────────
     /**
-     * UNVERIFIED (U-WRAPUPSERT): an upsert per row inside one transaction. `createMany` cannot
-     * express "replace on conflict", and a rotation MUST be able to re-wrap an epoch it already
-     * wrapped (ADR 002 §4.2 step 3 re-wraps open invites on every rotation).
+     * **WRITE-ONCE, per (spaceId, epoch, recipientId, senderDeviceId).**  Findings T5-K3, T5-K1.
+     *
+     * This was an `upsert` per row whose `update` replaced `wrapped`, which is the shape of the
+     * finding: any current member may rotate (ADR 002 §4.2 / D9), a rotation names epochs
+     * 1..e+1, and so one member could overwrite the whole family's key history with bytes
+     * nobody can open. The relay cannot adjudicate — it may not open a wrap — so it must not
+     * offer the adjudication at all. **This adapter now issues no UPDATE against `KeyWrap`.**
+     *
+     * The rule, identical to `memory.js#putKeyWraps` (which is the runnable witness for it):
+     * an empty cell is filled, an identical re-post is a no-op, and a differing re-post is
+     * refused with the stored row standing. `wrapSpaceKey` draws a fresh salt and IV per wrap,
+     * so every honest rotation after the first re-posts DIFFERING bytes over epochs 1..e — the
+     * refusal is therefore per row and never a thrown request, or the first rotation of every
+     * family would 500.
+     *
+     * THE CELL INCLUDES THE DEPOSITOR — `(spaceId, epoch, recipientId, senderDeviceId)`. See the
+     * long note in `memory.js#putKeyWraps`: without the sender, "first writer wins" lets one
+     * member permanently deny a JOINER her history by filling her empty cells first, which is
+     * T5-K1's residual. With it, the honest wrap coexists with the junk and the receiving side
+     * opens the one that opens, while T5-K3 stays closed by construction because a different
+     * depositor can never address another depositor's row.
+     *
+     * UNVERIFIED (U-WRAPONCE): the read-then-`createMany` runs inside `impl.tx`, i.e. one
+     * Serializable transaction, so no row can appear between the SELECT and the INSERT; and
+     * `skipDuplicates: true` over `@@id([spaceId, epoch, recipientId, senderDeviceId])` is
+     * belt-and-braces: if a
+     * concurrent transaction did land the cell between the SELECT and the INSERT, the FIRST
+     * WRITER STILL WINS — this call neither overwrites it nor raises P2002. It would then
+     * over-count that row as `stored`; the count is a report, the standing row is the invariant,
+     * and only the second is load-bearing.
+     *
+     * UNVERIFIED (U-WRAPNOUPDATE): with no UPDATE issued anywhere in this file against
+     * `KeyWrap`, and `deleteKeyWrapsForDevices` the only other writer, a stored wrap can be
+     * removed (ADR 002 §4.2 step 4) but never rewritten in place. Postgres itself is not
+     * enforcing this — no trigger, no column grant — so it is a property of this file and of
+     * `memory.js`, and the contract case C34 is what holds both adapters to it.
+     *
+     * @param {Array<Object>} rows
+     * @returns {Promise<{stored:number, kept:number, refused:number}>}
      */
     async putKeyWraps(rows) {
       const clean = (rows || []).map((r) => normalizeRow('KeyWrap', r));
-      if (clean.length === 0) return;
-      await impl.tx(async () => {
+      if (clean.length === 0) return { stored: 0, kept: 0, refused: 0 };
+      return impl.tx(async () => {
+        // A SUPERSET of the cells this batch names — the recipients crossed with the epochs, in
+        // one indexed predicate per space — rather than an OR of up to `MAX_WRAPS` = 1024 triples,
+        // which is a query plan nobody wants on the Hobby tier. The superset is at most the size
+        // of the batch itself (a rotation IS that cross product) and the exact cells are picked
+        // out of it below by `cellKey`.
+        const spaces = [...new Set(clean.map((r) => r.spaceId))];
+        const held = await db.keyWrap.findMany({
+          where: {
+            OR: spaces.map((spaceId) => ({
+              spaceId,
+              epoch: { in: [...new Set(clean.filter((r) => r.spaceId === spaceId).map((r) => r.epoch))] },
+              recipientId: { in: [...new Set(clean.filter((r) => r.spaceId === spaceId).map((r) => r.recipientId))] },
+            })),
+          },
+        });
+        const byCell = new Map(held.map((w) => [cellKey(w), outRow('KeyWrap', w)]));
+        const fresh = [];
+        let kept = 0; let refused = 0;
         for (const r of clean) {
-          await db.keyWrap.upsert({
-            where: { spaceId_epoch_recipientId: { spaceId: r.spaceId, epoch: r.epoch, recipientId: r.recipientId } },
-            create: r,
-            update: { wrapped: r.wrapped },
-          });
+          const there = byCell.get(cellKey(r));
+          if (!there) { fresh.push(r); continue; }
+          if (sameWrap(there, r)) kept++; else refused++;
         }
+        if (fresh.length > 0) await db.keyWrap.createMany({ data: fresh, skipDuplicates: true });
+        return { stored: fresh.length, kept, refused };
       });
     },
 
@@ -579,7 +651,8 @@ export const UNVERIFIED_CLAIMS = Object.freeze([
   { tag: 'U-DEVSPACE', method: 'getDeviceByShort', claim: 'Prisma spells the @@unique([spaceId, deviceShort]) selector `spaceId_deviceShort`, and no row has a spaceId its member does not share.', breaks: 'Auth step 4 cannot resolve a device at all (every request 403 device_revoked), or resolves one in the wrong circle and answers with another member\'s id.' },
   { tag: 'U-DEVSHORTSCAN', method: 'listDevicesByShort', claim: 'A findMany on the non-leading `deviceShort` column is a scan, and that is acceptable at three routes per request.', breaks: 'pair/* auth pays a table scan of every device on the relay per request; at fleet scale that is the Hobby-tier query budget.' },
   { tag: 'U-JOIN', method: 'listDevices', claim: 'where: { member: { spaceId } } is one join, not N+1.', breaks: 'The rotation coverage check and every pull pay a query per member; at eight members and a 45 s cadence that is the Hobby-tier connection budget.' },
-  { tag: 'U-WRAPUPSERT', method: 'putKeyWraps', claim: 'upsert on the composite key replaces a wrap for an epoch already wrapped.', breaks: 'ADR 002 §4.2 step 3 re-wraps open invites on every rotation; without replace it raises a unique violation and the whole rotation aborts.' },
+  { tag: 'U-WRAPONCE', method: 'putKeyWraps', claim: 'The findMany over the incoming cells and the createMany that follows run inside one Serializable transaction, and createMany({skipDuplicates:true}) over @@id([spaceId, epoch, recipientId, senderDeviceId]) inserts the absent rows and silently leaves an occupied cell to its first writer. The findMany deliberately does NOT filter on senderDeviceId: it fetches a superset of the cells and cellKey picks the exact ones out of it.', breaks: 'Finding T5-K3. If skipDuplicates instead replaced, or if the read and the insert were two transactions with a replace between them, one ordinary member could overwrite every wrap of every recipient for every epoch below her own — and the loss is invisible until a future joiner, a newly paired device, or ADR 002 §7.3 A2 recovery asks the relay for the history and gets bytes nobody can open.' },
+  { tag: 'U-WRAPNOUPDATE', method: 'putKeyWraps', claim: 'No statement in this file issues an UPDATE against KeyWrap; deleteKeyWrapsForDevices is the only other writer, so a stored wrap can be deleted but never rewritten in place.', breaks: 'Postgres is not enforcing write-once — there is no trigger and no column grant — so if a later edit reintroduces an upsert here, the schema will accept it without a word and T5-K3 is open again on production while memory.js stays green.' },
   { tag: 'U-CONSUME', method: 'consumeInvite', claim: 'updateMany with usedAt: null in the WHERE gives a row count of 1 to exactly one concurrent caller.', breaks: 'Two people redeem one invite. Both become members; the admin issued one invitation and sees two names, one of which they cannot account for.' },
   { tag: 'U-BURN', method: 'putPairSession', claim: 'The burnedAt guard makes a burn permanent against a replayed pair/offer.', breaks: 'The 5-attempt cap resets on demand. ADR 002 §6.4\'s honest analysis — "an online guessing budget is meaningless" — stops being true, and a 60-bit code faces unlimited guesses.' },
   { tag: 'U-BUMP', method: 'bumpPairAttempts', claim: '{ increment: 1 } is an atomic SET attempts = attempts + 1.', breaks: 'Concurrent failed decrypts lose increments and the budget never reaches 5.' },

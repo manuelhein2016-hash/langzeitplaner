@@ -3546,3 +3546,157 @@ One line of code in a file E8 does not own.
 `git stash` was run twice in this shared tree by earlier passes and swept up other workflows'
 in-flight files both times. **Nobody may stash in this tree.** Every clean-tree comparison in this
 pass used `git archive HEAD | tar -x` into a scratch directory, which touches nothing.
+
+## 13. T5 — the family red team, and the integration pass that answered it
+
+**The round.** After E6 and E7 landed green at `81b793d`, a red team attacked a **real
+three-member Familienkreis** as an invited, attested, non-admin member — ADR 002 §0's T5: one
+member, one patched app, one Keychain. 51 rows.
+
+**The good half, and it is the important half. Nothing it found was a confidentiality break.**
+Five routes at the redaction boundary produced **zero bytes** of a Privat entry. Barriers 2/3/4,
+the two branded recipient scopes, the branded sender set, the per-space `KeyRing` and both
+mirror-image constructor refusals all held, each for a stated reason. That set is unchanged by
+this pass and still green — `tests/fleet/e6-attack-privat.test.js` §1a–§1g, and
+`e6-attack-removed.test.js` §2a–§2d for the read half of story 20.5.
+
+**Its verdict: „E7 can be built on this engine. It must not ship on it."** What a hostile member
+could do was not read. It was **deny, destroy and redirect**. This section records the five
+findings and what the integration pass did with each.
+
+### 13a. The five findings
+
+| id | sev | what | status |
+|---|---|---|---|
+| **T5-M1a** | HIGH | An ordinary member removes **the founder** in one request, taking ADR 001 §4.0's attestation and §4.1's admin-chain genesis link with him — after which `adminAtIn` answers null for every stamp in the space and no future joiner can admit anything he wrote. | **CLOSED** (founder anchor) · residual stated |
+| **T5-M1b** | HIGH | An ordinary member deletes the whole Familienkreis in one request. | **CLOSED** (two-key rule) |
+| **T5-M1c** | HIGH | The long way round: remove everybody, then `/members/leave`, whose last-member-out cascade deletes the space. | **CLOSED** — by M1a, not by gating the cascade |
+| **T5-K1** | HIGH | A lost rotation race discharged the delivery this device owed: an epoch bump was read as proof that the bump delivered a **usable key**. The relay's coverage check is a **row count**. | **CLOSED** (client) + **CLOSED** (store) |
+| **T5-K2** | MEDIUM | D9's waiting state cleared on the relay's `keysPending` row count rather than on the ring the device actually holds. | **CLOSED** |
+| **T5-K3** | HIGH | `putKeyWraps` was an **upsert**. Any member could overwrite every wrap of every recipient for every epoch below her own with bytes nobody can open, and the relay recorded it as coverage. | **CLOSED** |
+| **T5-K4** | MEDIUM | A member attests an outsider's Mac and the family delivers the ring to it. Every barrier passes, because every fact about the row is true. | **OPEN by design** · §8.5's mitigation now FED |
+
+### 13b. The T5-M1a ruling, because it is a decision and not a diff
+
+E2-203-2 asked for "a signature by the **current admin's** `RK_sig`". **That cannot be built**,
+and the reason is structural rather than an omission: the admin chain is an in-log `transferAdmin`
+op (ADR 001 §4.1) inside the ciphertext, and a blind relay may not read it. `Member.joinedAt` is
+useless as a substitute — `createSpace` and `redeemInvite` both set it from `ctx.now()`, and it is
+identical for every member of a space created and joined inside one millisecond
+(`AUTH_INTERFACE_GAPS` E2-L1b).
+
+So the relay's only blind rule is **"a second member co-signed"**. Three shapes were considered:
+
+1. **Required for every removal.** Rejected, and *measured* rather than argued: mutant **M-M5**
+   reddened **13 fleet rows and 31 server rows** — the whole E6 removal demonstration, round 9 and
+   round 10. Worse, in a **two-member circle the rule is unsatisfiable**: the only other member is
+   the target, and she will not co-sign her own removal. A rule that cannot be satisfied is not a
+   rule, it is the feature deleted — and the couple whose relationship ends is the most likely
+   real removal there is.
+2. **`Space.founderMemberId` as an ADMIN column.** Rejected: `transferAdmin` is a real, shipped
+   op, and `leavedelete.js:503` calls it when an admin leaves. Gating on the founder as if he were
+   the admin would break the honest path after every transfer.
+3. **Required to remove THE FOUNDER.** *Adopted.* Not a compromise between "closed" and "green" —
+   it is where the damage is. Removing the founder is the only removal that destroys the space for
+   **everybody** rather than for one person, and it is the one the relay can recognise blind.
+
+`Space.founderMemberId` is written by the relay itself inside `POST /spaces`, from the Member row
+it creates in the same transaction. No route sets it, no body field reaches it, it never moves.
+It is a historical fact the relay observed, as `createdAt` is — **not** a role column, and
+`blindness.test.js` §2 is where that classification is argued and enforced rather than assumed.
+Nullable, and a null **fails OPEN**: a Space row written before the column existed must not be
+wedged.
+
+**What is still open, and it is asserted rather than implied.** An ordinary member may still
+remove any **non-founder** on her own word, and two members who collude may remove the founder.
+Rows: `attack-client-lifecycle.test.js` §D §3, `lifecycle.test.js` "and a NON-founder is still one
+request away", `e6-attack-removed.test.js` §1e-ii. Closing it needs the relay to verify the admin
+chain — an in-request transfer-certificate chain anchored at `founderMemberId` — which is a
+protocol change (ADR 003 §3.7), not a gate.
+
+### 13c. The wrap-cell conflict, and why the cell grew a fourth column
+
+Two parallel fixes collided head-on, and resolving it was the largest single decision in the pass.
+
+T5-K3's fix made `putKeyWraps` **write-once on `(spaceId, epoch, recipientId)`**. Correct for the
+attack it closes — and it handed T5-K1 a new weapon, which the coverage-proof pass measured and
+reported as BLOCKING: **a joiner's cells for epochs `1..e` are all empty when she arrives**, so a
+hostile member who rotates first owns them for ever and every honest re-delivery is refused *by
+the relay*. Measured: Mama ended holding `[4]`, no history, „Omas Geburtstag" never rendered, and
+her ops quarantined into an `error` screen.
+
+The close is to make the **depositor part of the cell** —
+`@@id([spaceId, epoch, recipientId, senderDeviceId])`. Both findings then hold at once:
+
+- Eve cannot move one byte anybody else deposited: a different depositor is a different row, so
+  **T5-K3 is closed by construction rather than by refusal**.
+- The honest wrap and the junk **coexist**, which is the case `admitWraps` already handled — it
+  walks a recipient's rows, counts the one that will not open as `refused`, and admits the one
+  that does. `assertCoverage` folds a recipient's rows into a Set of epoch numbers before it
+  counts, so duplicates cannot inflate coverage.
+- C61's **healing path** — a live sender re-delivering an epoch a since-revoked device deposited —
+  comes back, safely. The intermediate three-column rule had given it up as indistinguishable from
+  the attack; with the sender in the cell nobody ever overwrites anything, so the question does
+  not arise.
+
+**What it costs, stated:** rows, not data. One row per depositing device per `(epoch, recipient)`,
+bounded by `MAX_WRAPS = 1024` per rotation and by the epoch race every rotation must win, under a
+signed device identity and a rate-limit budget — the same shape of attributable, chargeable cost
+as `e6-attack-removed` §1e-ii.
+
+**One consequence had to be un-built.** `sync/keys.js` had gained a warning — "the relay kept N
+wrap cell(s) somebody else had already filled". True under the narrower cell; a **permanent false
+alarm** under this one, because `wrapsRefused` can now only ever be a device re-wrapping its own
+earlier cells with a fresh salt and IV, which every rotation after the first does. It was removed
+rather than kept as reassurance. `wrapsRefused` is **ordinary accounting and never an abuse
+signal**, and `spaces.js`, `memory.js` and `store-interface.js` all say so at the point of use.
+
+### 13d. Two rows that were passing vacuously, found by their own mutants
+
+Recorded because they are the reason mutation testing is worth its cost.
+
+- **`§3a2` / `§1d2` (the three rotation counts).** They asserted that `wrapsAdded + wrapsKept +
+  wrapsRefused === wrapsStored`. That is **vacuously true** of a handler answering
+  `wrapsAdded: wraps.length, wrapsRefused: 0` — mutant **M-E(spaces)** killed *nothing*. Fixed by
+  asserting on a rotation where the store did something different from what was sent
+  (`wrapsRefused > 0` and `wrapsAdded < wrapsStored`); the mutant now dies.
+- **`§3a` (T5-K3's own invariant).** It folded `GET /keys` onto `epoch`, which after the cell
+  change compares against whichever row the relay served last — a test artefact that reads exactly
+  like the attack succeeding. Re-keyed onto `(epoch, senderKexPubRaw)`, the identity the store
+  actually uses, with the depositors derived from each Mac's own device key rather than read back
+  off the response.
+
+### 13e. What the pass changed, by file
+
+| file | change |
+|---|---|
+| `server/prisma/schema.prisma` | `KeyWrap.@@id` gains `senderDeviceId`; `Space.founderMemberId` added, with why it is not a role column |
+| `server/adapters/memory.js` · `prisma.js` | the four-column cell; write-once; `{stored, kept, refused}` |
+| `server/core/store-interface.js` | `Space.founderMemberId` in `MODEL_COLUMNS`, `NULLABLE_FIELDS` and `PLAINTEXT_STRINGS`; E6-I1 amended; C34/C61/C63 rewritten |
+| `server/core/handlers/lifecycle.js` | the founder gate; `admin_proof_required` |
+| `server/core/handlers/spaces.js` | `founderMemberId` stamped at creation; the three rotation counts |
+| `server/core/auth.js` | `verifyAdminProof`, the two-key rule; E2-L1b re-stated as HALF CLOSED |
+| `server/core/errors.js` | `admin_proof_required: 403` — authority, not shape |
+| `server/core/limits.js` | `RATE_COVERAGE.deleteSpace` names the extra verify |
+| `src/js/sync/keys.js` | coverage from **keys** not epochs; `ringIsWhole`; the false-alarm warning removed |
+| `src/js/sync/outbox.js` · `cursor.js` · `family/engine.js` | per-space slot scoping, synchronous ports |
+| `src/js/family/mount.js` | `refreshRoster` carries `devices` — §8.5's mitigation is now fed |
+
+### 13f. Owed after T5
+
+1. **The T5-M1a residual** — an in-request transfer-certificate chain anchored at
+   `founderMemberId`, so the relay can verify the *current admin* and not only the founder.
+   ADR 003 §3.7, `AUTH_INTERFACE_GAPS` E2-L1b.
+2. **A co-signature UI.** `adminpanel.js` and `leavedelete.js` mint no `adminProof`, so the honest
+   two-key paths — deleting a circle with more than one member row, and removing the founder —
+   have a working relay and no screen. `tests/tier2/family-admin.dom.js` stubs the relay and is
+   blind to this.
+3. **ADR 002 §8.5a's remaining residual.** No device can prove that an epoch minted by *somebody
+   else* reached a third party in openable form. Closing it needs a way for a member to report "I
+   cannot open epoch e" → ADR 003 + `server/core/handlers/keys.js`.
+4. **T5-K4 is open by design** and stays a residual: a member may attest an outsider's Mac, and
+   every barrier passes because every fact about the row is true. §8.5's device-count mitigation
+   is now built *and* fed; it is a mitigation, not a fix.
+5. **`prisma.js` is UNVERIFIED** against a real Postgres, as it has been throughout —
+   `U-WRAPONCE` and `U-WRAPNOUPDATE` carry the claims, and the contract cases are what hold both
+   adapters to them.

@@ -295,6 +295,12 @@ async function refreshRoster() {
     if (res.status !== 200 || !res.json) return;
     rosterCache = (res.json.members || []).map((m) => ({
       memberId: m.memberId, colorRef: m.colorRef ?? null, removedAt: m.removedAt ?? null,
+      // `devices` is carried through because ADR 002 §8.5's stated mitigation for "a member
+      // attests an outsider's Mac" is that the roster SHOWS how many devices each member has —
+      // and `membersui.js` renders it from this field. Dropping it here left that mitigation
+      // built and fed by nothing, which is what `e6-attack-keydelivery` §5d measured (T5-K4).
+      // The LENGTH is what is read; the rows themselves carry only public keys and ids.
+      devices: Array.isArray(m.devices) ? m.devices : [],
     }));
     rosterFor = c.spaceId;
   } catch { /* see the doc comment: an unreachable relay is not a sentence */ }

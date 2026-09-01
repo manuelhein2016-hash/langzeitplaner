@@ -66,6 +66,24 @@ model Space {
   /// ADR 002 §5.4 — the chain head. Opaque; diagnostic only.
   headChain    Bytes?
   createdAt    DateTime  @default(now())
+  /// WHO CREATED THIS SPACE.  Finding T5-M1a.
+  ///
+  /// Written by the relay inside `POST /spaces`, from the Member row it creates in the same
+  /// transaction. No route sets it, no body field reaches it, and it NEVER moves afterwards —
+  /// so nobody claims it, and it is a historical fact the relay observed rather than a role.
+  ///
+  /// WHY IT EXISTS. Removing this member purges ADR 001 §4.0's attestation and §4.1's admin
+  /// genesis link from the relay, after which `adminAtIn` answers null for every stamp in the
+  /// space and no future joiner can admit anything the founder ever wrote. It is the one removal
+  /// that destroys the space for everybody rather than for one person, so it — and only it —
+  /// requires a second member's recovery signature (ADR 003 §3.7).
+  ///
+  /// WHAT IT IS NOT: an admin column. The admin chain is an in-log `transferAdmin` op the relay
+  /// cannot read (ADR 001 §4.1), so the relay still cannot name the current admin, and this
+  /// column must never be read as if it could. Nullable because every Space row created before
+  /// this column existed has no founder recorded, and a null must fail OPEN (an ordinary
+  /// removal) rather than wedge those spaces.
+  founderMemberId String?
 
   members Member[]
   ops     Op[]
@@ -227,6 +245,39 @@ model Epoch {
 /// away by a member removal while the wrap it deposited is still being purged. A dangling sender
 /// publishes as `null`, which `SenderSet.lookup` answers `null` for, which is `unauthorized` —
 /// the correct outcome for a key deposited by a device this space no longer admits.
+/// ── WRITE-ONCE.  Finding T5-K3, and the reason `@@id` below is a constraint and not a hint. ──
+///
+/// A row of this table is INSERTED once and thereafter only ever DELETED (ADR 002 §4.2 step 4,
+/// a removed or revoked recipient). It is never UPDATED. No adapter issues an UPDATE against
+/// `KeyWrap`: `memory.js#putKeyWraps` fills an empty cell, no-ops an identical re-post and
+/// refuses a differing one; `prisma.js#putKeyWraps` reads the cells, inserts only the absent
+/// ones, and passes `skipDuplicates` so that even a race leaves the first writer standing.
+///
+/// WHY. `POST /spaces/:id/epoch` admits any current member — ADR 002 §4.2 and decision D9, "any
+/// member device, not only the admin's" — and a rotation legitimately names wraps for every
+/// epoch 1..e+1. While this was an upsert, that meant ONE member could replace every wrap of
+/// every recipient for every epoch below her own with bytes of her choosing, and the relay
+/// recorded it as coverage, because coverage counts ROWS and the relay may not open a wrap.
+/// Nobody online would notice: a member's ring is in her own `localStorage`. The readers who
+/// have only this table are every future joiner, every device paired in tomorrow, and ADR 002
+/// §7.3's A2 recovery — the one path that survives losing every device.
+///
+/// WHY THE DEPOSITOR IS PART OF THE CELL. `senderDeviceId` is in the `@@id` because write-once
+/// on the narrower `(spaceId, epoch, recipientId)` traded one denial for another: a JOINER's
+/// cells for epochs 1..e are all empty when she arrives, so whoever rotates first owns them for
+/// ever and every honest re-delivery is refused by the store. Measured — she held one epoch, no
+/// history, and her ops quarantined (finding T5-K1's residual). With the sender in the key the
+/// honest wrap and the junk COEXIST: `admitWraps` walks a recipient's rows and admits the one
+/// that opens, `assertCoverage` folds them into a Set of epoch numbers so duplicates cannot
+/// inflate coverage, and T5-K3 stays closed because no depositor can address another's row.
+/// The cost is rows rather than data: one row per depositing device per (epoch, recipient),
+/// bounded by MAX_WRAPS = 1024 per rotation and by the epoch race each rotation must win.
+///
+/// WHAT ENFORCES IT, HONESTLY. `@@id([spaceId, epoch, recipientId, senderDeviceId])` makes the
+/// cell unique, so an INSERT is the whole write and a second INSERT cannot land. It does NOT
+/// stop an UPDATE: Postgres has no write-once column and this schema declares no trigger and no
+/// grant. So the rule lives in the two adapters, and `STORE_CONTRACT_CASES` C34/C61/C63 are what
+/// hold them to it — including on the day this schema first meets a real Postgres.
 model KeyWrap {
   spaceId        String
   epoch          Int
@@ -236,7 +287,7 @@ model KeyWrap {
 
   space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
 
-  @@id([spaceId, epoch, recipientId])
+  @@id([spaceId, epoch, recipientId, senderDeviceId])
   @@index([recipientId])
 }
 

@@ -565,7 +565,12 @@ export const RATE_COVERAGE = Object.freeze({
   rotateEpoch: cov([], [], AUTHED_REASON('serialised by first-writer-wins on Epoch; a flood costs the attacker their own space\'s epoch numbers and nothing else')),
   listMembers: cov([], [], AUTHED_REASON('read-only, at most 8 rows (ADR 003 §3.2)')),
   renameSpace: cov([], [], AUTHED_REASON('one column write in the caller\'s own space')),
-  deleteSpace: cov([], [], AUTHED_REASON('idempotent; the second call has nothing to delete')),
+  // T5-M1b: the route now also spends at most ONE extra P-256 verify, on a presented
+  // `adminProof`. Still not an amplifier — a caller must already be an authenticated member of
+  // the space, one verify is the same order as the request's own auth signature, and a refused
+  // proof deletes nothing — but the reason is written down rather than left reading as though
+  // the route were free.
+  deleteSpace: cov([], [], AUTHED_REASON('idempotent; the second call has nothing to delete; at most one extra signature verify for an adminProof')),
   createInvite: cov([], [], AUTHED_REASON('any current member may issue one (E2-203-2: the server cannot check "admin"); bounded instead by MAX_OPEN_INVITES = 20 per space, which bounds what volume here could actually buy — redeemable memberships, not table rows')),
   revokeInvite: cov([], [], AUTHED_REASON('one column write in the caller\'s own space')),
   openInvites: cov([], [], AUTHED_REASON('read-only, space-scoped')),

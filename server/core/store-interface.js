@@ -152,7 +152,7 @@
  * Read this table as the answer to "what can the relay see?" — because it is the whole answer.
  */
 export const MODEL_COLUMNS = Object.freeze({
-  Space:       Object.freeze(['id', 'kind', 'currentEpoch', 'nextSeq', 'headChain', 'createdAt']),
+  Space:       Object.freeze(['id', 'kind', 'currentEpoch', 'nextSeq', 'headChain', 'createdAt', 'founderMemberId']),
   Member:      Object.freeze(['id', 'spaceId', 'colorRef', 'recoveryPubSig', 'recoveryPubKex', 'joinedAt', 'removedAt']),
   Device:      Object.freeze(['id', 'spaceId', 'memberId', 'deviceShort', 'sigPubRaw', 'kexPubRaw', 'attestation', 'lastSeenSeq', 'lastPushedSeq', 'addedAt', 'revokedAt']),
   Op:          Object.freeze(['spaceId', 'seq', 'opId', 'epoch', 'deviceShort', 'witness', 'chain', 'envelope', 'receivedAt']),
@@ -186,7 +186,11 @@ export const OPAQUE_FIELDS = Object.freeze({
 
 /** Columns that may be null / absent. Everything else is required on insert. */
 export const NULLABLE_FIELDS = Object.freeze({
-  Space:       Object.freeze(['headChain']),
+  // `founderMemberId` is nullable so that a Space row written before the column existed — and a
+  // fixture that does not care who founded it — stays insertable. A null founder fails OPEN at
+  // `/members/remove` (an ordinary removal), which is the pre-T5-M1a behaviour: it must not
+  // wedge circles that already exist.
+  Space:       Object.freeze(['headChain', 'founderMemberId']),
   Member:      Object.freeze(['removedAt']),
   Device:      Object.freeze(['revokedAt']),
   Op:          Object.freeze(['witness']),
@@ -209,6 +213,7 @@ export const NULLABLE_FIELDS = Object.freeze({
 export const PLAINTEXT_STRINGS = Object.freeze({
   'Space.id':            'a space id must be addressable; pseudonymous prefix + 22 b64url',
   'Space.kind':          'PERSONAL|FAMILY — the enum, not a name',
+  'Space.founderMemberId': 'a member id — WHO CREATED THIS SPACE. Written by the relay itself inside POST /spaces, from the member row it is creating in the same transaction; there is no route that sets it and no body field that reaches it, so nobody CLAIMS it and it is not a role column. It records a historical fact the relay observed, exactly as createdAt does. Finding T5-M1a: removing this member deletes ADR 001 §4.0\'s attestation and §4.1\'s admin-chain genesis link, after which adminAtIn answers null for every stamp in the space and no future joiner can admit anything the founder ever wrote — so that one removal needs a second member\'s key. It does NOT say who the ADMIN is: the admin chain is an in-log op (transferAdmin) the relay cannot read, and this column never moves.',
   'Member.id':           'pseudonymous member id',
   'Member.spaceId':      'the relation',
   'Member.colorRef':     'THE ONE DELIBERATE LEAK. 15.3 needs @@unique([spaceId,colorRef]) server-side to prevent a colour collision. One palette index per member. It appears verbatim in the Datenschutz copy (21.3).',
@@ -401,7 +406,16 @@ export function normalizeRow(model, row, opts) {
  *   yields 0n. "Unknown" must never mean "collectable" (server.contract.js amendment).
  *
  * KEY WRAPS
- * @property {(rows:KeyWrapRow[]) => Promise<void>} putKeyWraps       upsert on (spaceId,epoch,recipientId)
+ * @property {(rows:KeyWrapRow[]) => Promise<{stored:number, kept:number, refused:number}>} putKeyWraps
+ *   **WRITE-ONCE on (spaceId, epoch, recipientId, senderDeviceId)** — findings T5-K3 and
+ *   T5-K1, amendment E6-I1. An empty cell is filled (`stored`); an identical re-post is a no-op
+ *   (`kept`); a DIFFERING re-post is refused and the row already there stands (`refused`). Per
+ *   ROW and never a thrown request: every honest rotation re-wraps epochs 1..e with fresh salt
+ *   and IV, so a batch that threw on a differing cell would abort every rotation after the first.
+ *   THE DEPOSITOR IS PART OF THE CELL, so two senders' wraps for one (epoch, recipient) COEXIST
+ *   and the receiver opens the one that opens. `refused` therefore always means "this depositor
+ *   re-wrote its own earlier cell", which every honest rotation does — it is accounting, NOT an
+ *   abuse signal, and nothing may read it as one. Contract cases C34, C61, C63.
  * @property {(spaceId:string, recipientId:string) => Promise<KeyWrapRow[]>} getKeyWraps  ALL epochs
  * @property {(spaceId:string, recipientIds:string[]) => Promise<number>} deleteKeyWrapsForDevices
  *
@@ -489,6 +503,10 @@ export const INTERFACE_EXTENSIONS = Object.freeze([
     why: 'ADR 002 §4.2 step 6 (the 2026-08-28 amendment for finding S1) makes the RECEIVING device verify who sent a wrap before it derives a KEK against it, and E3 shipped that as a REQUIRED `ctx.senders` parameter on `admitWraps` indexed by `row.senderKexPubRaw`. No column carried a sender, so `GET /keys` could not publish one and `POST /epoch` 400d a client that tried to send one: `admitWraps` threw on every honest row. The column is written by the RELAY from the request it authenticated — never off the body — so it carries no client-chosen bits and states no fact the relay did not already observe. `GET /keys` publishes the ADR spelling `senderKexPubRaw`, joined from Device.kexPubRaw, so the receiving client and ADR 002 §4.2 step 6 are unchanged. Finding E2E3-3.',
   }),
   Object.freeze({
+    id: 'E6-I1', kind: 'changed', method: 'putKeyWraps',
+    why: 'WAS an upsert on (spaceId, epoch, recipientId); is now WRITE-ONCE, and returns {stored, kept, refused} instead of nothing. Finding T5-K3: POST /spaces/:id/epoch admits any current member (ADR 002 §4.2, decision D9) and a rotation names wraps for epochs 1..e+1, so an upsert let ONE ordinary member replace every wrap of every recipient for every epoch below her own with bytes nobody can open — and the relay recorded it as coverage, because coverage counts ROWS and a blind relay cannot open a wrap to check. The loss is invisible to anybody online (a ring lives in localStorage); it lands on every future joiner, every newly paired device, and ADR 002 §7.3 A2 recovery. The refusal is PER ROW and never a thrown request: wrapSpaceKey draws a fresh salt and IV per wrap and wrapRingToRecipients re-wraps 1..e+1 on every rotation, so every honest rotation after the first carries differing bytes for already-filled cells and a batch-level throw would 500 them all. The cell is (spaceId, epoch, recipientId, senderDeviceId): the DEPOSITOR is part of it. Write-once on the narrower triple closed T5-K3 and opened its mirror image — a joiner\'s cells for epochs 1..e are all empty when she arrives, so a hostile member who rotates first owns them for ever and every honest re-delivery is refused BY THE RELAY. Measured in tests/fleet/e6-attack-keydelivery.test.js: she held one epoch, no history, „Omas Geburtstag" never rendered, and her ops quarantined. With the sender in the cell the honest wrap and the junk coexist, admitWraps admits the one that opens, assertCoverage folds a recipient\'s rows into a Set of epoch numbers so duplicates cannot inflate coverage, and no depositor can address another depositor\'s row. What it costs is ROWS and not data — one row per depositing device per (epoch, recipient), bounded by MAX_WRAPS = 1024 per rotation and by the epoch race every rotation must win, so it is attributable and rate-limited rather than free.',
+  }),
+  Object.freeze({
     id: 'E2-I8', kind: 'added', method: 'Device.lastPushedSeq',
     why: 'Already normative in server.contract.js as an amendment (WRITE progress gates tombstone GC as well as READ progress); listed here because it is absent from ADR 003 §5.1 model Device and the schema now carries it.',
   }),
@@ -525,7 +543,10 @@ export function assertStoreShape(store) {
 // 5. Fixtures — shared by the contract cases and by every handler test to come
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Deterministic filler bytes. Never a signature, never compared byte-wise (ADR 002 §1 rule 1). */
+/** Deterministic filler bytes. Never a signature (ADR 002 §1 rule 1). Deterministic in the seed
+ *  because C34/C61/C63 DO compare them byte-wise: after finding T5-K3 the question "did this row
+ *  change?" is the whole point of the key-wrap cases, and it needs two calls with one seed to
+ *  produce one value. */
 export function bytes(n, seed) {
   const out = new Uint8Array(n);
   let x = (seed === undefined ? 7 : seed) | 0;
@@ -1070,13 +1091,84 @@ export const STORE_CONTRACT_CASES = Object.freeze([
       assert.equal((await store.getKeyWraps(SP, 'dev_nope')).length, 0);
     } },
 
-  { id: 'C34', title: 'putKeyWraps upserts on (spaceId, epoch, recipientId)', tags: ['keys'],
+  { id: 'C34', title: 'putKeyWraps is WRITE-ONCE on (spaceId, epoch, recipientId, senderDeviceId) — finding T5-K3', tags: ['keys', 'T5-K3'],
     run: async ({ makeStore, assert }) => {
+      // INVERTED. This case used to require an upsert — "re-wrapping the same epoch to the same
+      // recipient replaces" — and that requirement WAS the finding. `POST /spaces/:id/epoch`
+      // admits any current member (ADR 002 §4.2, decision D9) and a rotation legitimately names
+      // wraps for every epoch 1..e+1, so "replaces" meant one member could overwrite the whole
+      // family's key history with bytes nobody can open. The relay cannot tell those bytes from
+      // anyone else's, because it may not open a wrap; so it must not offer the write at all.
       const store = await withSpace(makeStore);
-      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 24), senderDeviceId: 'dev_sender' }]);
-      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 25), senderDeviceId: 'dev_sender' }]);
+      const first = bytes(156, 24);
+      const r0 = await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: first, senderDeviceId: 'dev_sender' }]);
+      assert.deepEqual(r0, { stored: 1, kept: 0, refused: 0 });
+
+      const r1 = await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 25), senderDeviceId: 'dev_sender' }]);
+      assert.deepEqual(r1, { stored: 0, kept: 0, refused: 1 },
+        'a DIFFERING re-post of an occupied cell is refused, not applied');
+
       const w = await store.getKeyWraps(SP, 'dev_1');
-      assert.equal(w.length, 1, 're-wrapping the same epoch to the same recipient replaces, it does not accumulate');
+      assert.equal(w.length, 1, 'one depositor, one cell: a refusal accumulates nothing');
+      assert.deepEqual([...w[0].wrapped], [...first],
+        'THE INVARIANT: the bytes are the FIRST writer\'s. A member restored from the ADR 002 '
+        + '§7.3 A2 backup, a device paired in tomorrow and every future joiner have nothing but '
+        + 'this row, and nobody who is merely online would ever see it change.');
+
+      // ── AND THE SAME INVARIANT AGAINST A SECOND DEPOSITOR, WHICH IS THE ATTACK ─────────────
+      // T5-K3 is Eve rotating over somebody else's history. The depositor is part of the cell,
+      // so her row cannot address his: it lands BESIDE it. What must hold — and what this
+      // asserts — is that his row is still there, still his, and still byte-for-byte what he
+      // wrote. That is the whole of the finding; "her write was refused" never was.
+      const r2 = await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 77), senderDeviceId: 'dev_eve' }]);
+      assert.deepEqual(r2, { stored: 1, kept: 0, refused: 0 },
+        'a DIFFERENT depositor writes a different row rather than being turned away — the '
+        + 'refusal was never the point, and turning her away is what denied a joiner her history');
+      const both = await store.getKeyWraps(SP, 'dev_1');
+      assert.equal(both.length, 2, 'two depositors, two rows, one cell each');
+      const his = both.find((x) => x.senderDeviceId === 'dev_sender');
+      assert.deepEqual([...his.wrapped], [...first],
+        'THE INVARIANT, RESTATED AGAINST THE ADVERSARY: not one byte of the first depositor\'s '
+        + 'row moved. `admitWraps` walks both rows and opens the one that opens (ADR 002 §4.2 '
+        + 'step 6), so the coexisting junk costs a refusal on the client and nothing else.');
+    } },
+
+  { id: 'C63', title: 'an IDENTICAL re-post is idempotent, so write-once breaks no honest retry', tags: ['keys', 'T5-K3'],
+    run: async ({ makeStore, assert }) => {
+      // The other half of the fix, and the half that makes it safe to ship. A write-once rule
+      // that refused every re-post would be a denial of its own — the honest paths that re-post
+      // are a retried rotation whose response was lost, a duplicate delivery by two member
+      // devices, and the designed race where both members deliver at e+1.
+      const store = await withSpace(makeStore);
+      const same = bytes(156, 34);
+      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: same, senderDeviceId: 'dev_papa' }]);
+
+      const again = await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 34), senderDeviceId: 'dev_papa' }]);
+      assert.deepEqual(again, { stored: 0, kept: 1, refused: 0 },
+        'byte-for-byte the stored row, sender included: a no-op, and not an error');
+
+      // A batch that mixes a fresh cell with an occupied one lands the fresh one. This is the
+      // shape of EVERY honest rotation after the first — `wrapRingToRecipients` re-wraps
+      // 1..e+1 (A4, story 17.1) and `wrapSpaceKey` draws a fresh salt and IV each time, so the
+      // 1..e cells always differ. If the refusal were a throw instead of a row-level no-op,
+      // this call would abort and no family could ever reach epoch 3.
+      const mixed = await store.putKeyWraps([
+        { spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 99), senderDeviceId: 'dev_papa' },
+        { spaceId: SP, epoch: 2, recipientId: 'dev_1', wrapped: bytes(156, 35), senderDeviceId: 'dev_papa' },
+      ]);
+      // Papa re-wrapping PAPA's own cell: differing bytes, same depositor, so it is refused and
+      // his standing row is what a recipient reads. This is the ONLY shape `refused` ever has
+      // now that the depositor is part of the cell, and it is what every honest rotation does.
+      assert.deepEqual(mixed, { stored: 1, kept: 0, refused: 1 });
+      const w = (await store.getKeyWraps(SP, 'dev_1')).sort((a, b) => a.epoch - b.epoch);
+      assert.deepEqual(w.map((x) => x.epoch), [1, 2], 'the new epoch landed while the old cell held');
+      assert.deepEqual([...w[0].wrapped], [...same]);
+
+      // And a delete really does free the cell: write-once is about REPLACEMENT, not about
+      // permanence. ADR 002 §4.2 step 4 still purges a removed or revoked recipient.
+      assert.equal(await store.deleteKeyWrapsForDevices(SP, ['dev_1']), 2);
+      const after = await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 36), senderDeviceId: 'dev_papa' }]);
+      assert.deepEqual(after, { stored: 1, kept: 0, refused: 0 });
     } },
 
   { id: 'C35', title: 'a recovery recipient rec_<memberId> is storable — finding E3-4', tags: ['keys', 'E3-4'],
@@ -1101,15 +1193,30 @@ export const STORE_CONTRACT_CASES = Object.freeze([
         'ADR 002 §4.2 step 6: the receiver refuses a wrap whose sender is not admissible for this '
         + 'space, and it cannot do that if the store forgot who deposited the row. Two rotations '
         + 'by two different devices must not collapse to one sender.');
-      // The sender is NOT part of the key: re-depositing the same (epoch, recipient) from a
-      // DIFFERENT device replaces the row, sender and all. That is the healing path after a
-      // revocation — the rows a since-revoked device deposited become `unauthorized` on the
-      // receiving side, and the rotation that follows the revocation re-deposits epochs 1..e+1
-      // under a live sender.
-      await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 32), senderDeviceId: 'dev_oma' }]);
+      // ── THE HEALING PATH, KEPT — and this is why the depositor is in the CELL and not only
+      // in the row. An intermediate version of the T5-K3 fix made the cell
+      // `(spaceId, epoch, recipientId)` and refused this write. That closed T5-K3 and opened its
+      // mirror image: the rows a SINCE-REVOKED device deposited read as `unauthorized` on the
+      // receiving side (ADR 002 §4.2 step 6), so a recipient who never admitted that epoch was
+      // stuck with an unopenable cell no live sender could ever replace — and, far worse, a
+      // JOINER's empty cells could be claimed by a hostile member before any honest device
+      // reached them, permanently denying her the family's history (T5-K1's residual, measured).
+      //
+      // Putting the sender in the cell keeps BOTH properties at once, because it stops framing
+      // the question as "who may overwrite this cell?" — nobody ever overwrites anything.
+      const healed = await store.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_1', wrapped: bytes(156, 32), senderDeviceId: 'dev_oma' }]);
+      assert.deepEqual(healed, { stored: 1, kept: 0, refused: 0 },
+        'a second depositor writes her OWN row for the same (epoch, recipient) — she does not '
+        + 'take his, and she is not turned away either');
       const after = await store.getKeyWraps(SP, 'dev_1');
-      assert.equal(after.length, 2, 're-depositing replaces; it does not accumulate a second sender');
-      assert.equal(after.find((x) => x.epoch === 1).senderDeviceId, 'dev_oma');
+      assert.equal(after.length, 3, 'two rows for epoch 1, one per depositor, plus epoch 2');
+      const e1 = after.filter((x) => x.epoch === 1);
+      assert.deepEqual(e1.map((x) => x.senderDeviceId).sort(), ['dev_oma', 'dev_papa'],
+        'both depositors are named, so ADR 002 §4.2 step 6 can judge each row on its own sender');
+      assert.deepEqual([...e1.find((x) => x.senderDeviceId === 'dev_papa').wrapped], [...bytes(156, 30)],
+        'THE T5-K3 INVARIANT, WHICH IS THE ONE THAT MATTERS: the first depositor\'s bytes did '
+        + 'not move. Coexistence is not overwriting — a reader gets both rows and opens the one '
+        + 'that opens, and the relay never had to adjudicate between two sets of opaque bytes.');
     } },
 
   { id: 'C62', title: 'a key wrap without a sender is REFUSED at the adapter boundary', tags: ['keys', 'E2E3-3'],

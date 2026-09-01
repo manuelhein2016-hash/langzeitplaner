@@ -44,6 +44,12 @@ export const ERROR_CODES = Object.freeze({
   bad_signature: 401,
   device_revoked: 403,
   not_a_member: 403,
+  // §3.7 of ADR 003 — an irreversible act that needs a SECOND member's recovery signature
+  // (`/spaces/:id/delete`, and `/members/remove` when the target is the founder). 403 and not
+  // 400: the request is well formed and the caller is authenticated: what is missing is
+  // AUTHORITY. It is not an oracle — the member list it is decided from is the one
+  // `GET /spaces/:id/members` already serves to every member of the space.
+  admin_proof_required: 403,
   // §3.1 — push
   device_mismatch: 403,
   space_mismatch: 400,

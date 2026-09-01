@@ -89,12 +89,12 @@ POST /api/v1/spaces                     create space (15.2)
 POST /api/v1/spaces/:id/epoch           rotate (ADR 002 §4.2) — atomic, coverage-checked   §3.5
 GET  /api/v1/spaces/:id/members         member list + attested device public keys + BLOBS §3.6
 POST /api/v1/spaces/:id/rename          20.1
-POST /api/v1/spaces/:id/delete          20.4 — cascade purge
+POST /api/v1/spaces/:id/delete          20.4 — cascade purge; REQUIRES an admin proof  §3.7
 POST /api/v1/invites                    create   (15.2, 15.5)
 POST /api/v1/invites/redeem             redeem   (15.3)
 POST /api/v1/invites/revoke             revoke   (15.5)
 GET  /api/v1/invites/open?spaceId=…     open invites needing a re-wrap (ADR 002 §4.2 step 3)
-POST /api/v1/members/remove             20.1, 20.2
+POST /api/v1/members/remove             20.1, 20.2; admin proof verified WHEN PRESENT  §3.7
 POST /api/v1/members/leave              20.3
 POST /api/v1/members/transfer           20.1 — mirrors the in-log admin chain; never authoritative
 POST /api/v1/devices                    register an attested device
@@ -293,6 +293,150 @@ read the string and verified P2 + S1 + S2; the column therefore had no type and 
 it would have published two different things (finding E2E3-7). **`POST /invites/redeem` still
 does not verify the signature and must** — one unverifiable blob wedges every future rotation of
 that space, because `familyRecipients()` throws on it.
+
+### 3.7 The admin proof — authority a blind relay can actually check  *(added 2026-09-01, T5-M1)*
+
+**The problem, stated first, because the answer is deliberately not the obvious one.**
+
+§5.1 removed `Member.role` on purpose — *"the admin is resolved from the in-log chain (ADR 001
+§4.1)"* — and `store-interface.js` puts `role` in `FORBIDDEN_COLUMN_TOKENS` so it cannot come back
+by accident. The chain lives inside ciphertext the relay may not read (story 21.1). Finding
+**E2-203-2** (`server/core/handlers/spaces.js`) drew the conclusion in writing and then shipped
+the opposite:
+
+> *"It is NOT inside the model for `POST /members/remove` and `POST /spaces/:id/delete`, **which
+> is why neither is implemented here**: an unverifiable 'admin' endpoint that purges another
+> member's ops is the censorship primitive §6.3 explicitly rejects."*
+
+A red team drove exactly that against a real three-member circle (**T5-M1**,
+`tests/fleet/e6-attack-removed.test.js` §1): an ordinary invited member evicted the admin — `200`,
+`purgedOps: 2`, `revokedDevices: 1`, and his `member.set{dev.*}` attestation and his
+`space.set{admin, adminPrev:null}` genesis link gone with him — and then deleted the whole
+Familienkreis in one further request. ADR 002 §0's T5 row names *"ability to purge another
+member"* in the must-NOT-get column.
+
+#### What is signed
+
+```
+adminProof = { by: "mem_…", sig: <b64u, 64 bytes, ECDSA P-256/SHA-256, P1363> }
+
+bytes      = "lzp/admin/1\n" + act + "\n" + spaceId + "\n" + target + "\n" + epoch
+act        ∈ { "space.delete", "member.remove" }        — a closed set
+target     = the target `memberId` for member.remove; the `spaceId` for space.delete
+epoch      = the space's `currentEpoch` AT THE RELAY, decimal
+```
+
+Signed by **`by`'s `RK_sig`**, whose public half the relay already holds as
+`Member.recoveryPubSig` — the same column `POST /devices/adopt` (ADR 002 §7.3 step 5) and every
+device attestation (§2.3) verify under. **Nothing is stored and nothing is read**: the relay
+assembles the bytes itself from `act`, `spaceId`, `target` and `epoch` values it already holds,
+verifies, and drops the signature. The domain separator is not `lzp/v2\n`, so a request signature
+can never be replayed as an admin proof or the other way round.
+
+**No nonce, deliberately.** Binding the proof to the request's `Authorization` nonce would make it
+single-use and would also force `src/js/platform/net.js` to hand out a nonce it currently mints
+inside `buildRequest`. The weaker binding is safe because both acts are idempotent and terminal: a
+replayed `member.remove` hits the `alreadyRemoved: true` no-op, a replayed `space.delete` has no
+space to delete, and a removal forces `e+1` (ADR 002 §4.1) so the epoch in the payload bounds the
+proof to the epoch it was minted in.
+
+#### What it proves — and the half it does not
+
+| | |
+|---|---|
+| **proved** | a member of this space, **other than the caller**, put their recovery key behind this exact act at this exact epoch |
+| **NOT proved** | and that member is **the admin** |
+
+The second **is not buildable at all**, and saying so is part of the decision — it is structural,
+not a schema oversight. The admin chain is an in-log `transferAdmin` op (ADR 001 §4.1) inside
+ciphertext the relay may not read, and `transferAdmin` is *shipped*: `family/leavedelete.js` calls
+it when an admin leaves. So any column the relay could consult would be stale the moment a family
+used the feature. `Member.joinedAt` is no substitute either — `createSpace` and `redeemInvite`
+both set it from `ctx.now()`, and every member of a space created and joined inside one
+millisecond carries the same value, so "the earliest member" is ambiguous exactly when an attacker
+would want it to be.
+
+**What the relay CAN know is who created the space, because it wrote that row itself.**
+`Space.founderMemberId` (added 2026-09-01, integration) is stamped inside `POST /spaces` from the
+Member row created in the same transaction. No route sets it, no body field reaches it, it never
+moves. It is a historical fact the relay observed, exactly as `createdAt` is — **not** a role
+column, because nobody *claims* it, and `blindness.test.js` §2 is where that classification is
+argued and enforced. It is nullable, and a null **fails OPEN**: a Space row written before the
+column existed must not be wedged.
+
+Upgrading the founder anchor to a real **admin** rule needs an in-request chain of transfer
+certificates from that anchor — the cryptographic mirror of ADR 001 §4.1's in-log chain — which is
+a protocol change and remains owed. Carried as **E2-L1b** in
+`server/core/auth.js#AUTH_INTERFACE_GAPS`.
+
+**So the rule the relay enforces is a TWO-KEY rule, not an admin rule.** That is weaker than "only
+the admin may" and strictly stronger than "any one member may" — and it is the right side of the
+line that matters, because the T5 adversary is *one* family member with *one* patched app and
+*one* Keychain. She cannot sign under a key she does not hold, and no client patch changes that.
+
+#### Where it is required, and where it is not
+
+- **`POST /spaces/:id/delete` — REQUIRED**, whenever the space has ever had more than one member
+  row. This is the irreversible, whole-circle act, and it has no honest single-actor caller: a
+  Familienkreis belongs to the family. Exempt only when `listMembers` returns exactly one row —
+  a `psp_` personal space (19.4), or a circle nobody ever joined — because there is no second
+  person to censor. **The count includes tombstones**, which is what shuts the obvious bypass:
+  a removal sets `Member.removedAt` and never deletes the row, so "remove everyone, then delete
+  alone" does not reach the exemption.
+- **`POST /members/remove` — REQUIRED to remove THE FOUNDER; verified when present otherwise.**
+  *(the T5-M1a ruling, 2026-09-01)*
+
+  **Why not for every removal.** The rule would be **unsatisfiable in a two-member circle**: the
+  only member who could co-sign is the target, and she will not co-sign her own removal. A rule
+  that cannot be satisfied is not a rule, it is the feature deleted — and a couple whose
+  relationship ends is the most likely real removal there is. This was measured, not argued:
+  making the proof unconditional (mutant **M-M5**) reddens **13 fleet rows and 31 server rows**,
+  including the whole E6 removal demonstration, round 9 and round 10.
+
+  **Why for the founder.** It is the only removal whose damage is not confined to its target. It
+  purges ADR 001 §4.0's attestation and §4.1's admin-chain genesis link, after which `adminAtIn`
+  answers null for every stamp in the space and no future joiner can admit anything the founder
+  ever wrote — the space is destroyed for **everybody**. It is also the one removal the relay can
+  recognise blind, from a column it wrote itself.
+
+  Everywhere else a proof is **verified when present**: a forged or self-signed one is a hard
+  refusal and never a downgrade, and the response carries
+  `authorizedBy: "admin_proof" | "membership_only"` so a client cannot render one as the other.
+
+  **The residual, stated because it is not closed.** An ordinary member may still remove any
+  non-founder on her own word, and two members who collude may remove the founder. Bounded by
+  `memberRemovePerMemberHour` and by nothing else, and every removal is separately visible on the
+  member list (15.4). Closing it is the transfer-certificate chain above. Rows:
+  `tests/server/attack-client-lifecycle.test.js` §D §3,
+  `tests/server/lifecycle.test.js` *"a NON-founder is still one request away"*,
+  `tests/fleet/e6-attack-removed.test.js` §1e-ii.
+
+  **Owed to the client.** `src/js/family/adminpanel.js` and `src/js/family/leavedelete.js` mint no
+  `adminProof`, so the two honest two-key paths — deleting a circle with more than one member row,
+  and removing the founder — have a working relay and no screen. `tests/tier2/family-admin.dom.js`
+  stubs the relay and is blind to it.
+
+#### Refusals
+
+**`403 admin_proof_required`** with `{ field: "adminProof", reason }` when a REQUIRED proof is
+absent — `second_member_signature_required` for `space.delete`,
+`founder_removal_needs_second_key` for `member.remove`. 403 and not 400: the request is well
+formed and the caller is authenticated, and what is missing is **authority**.
+
+`400 bad_request` with `{ field: "adminProof", reason }` for a malformed proof
+(`admin_proof_shape`, `admin_proof_by`, `admin_proof_sig`), one the caller signed for herself
+(`admin_proof_self_signed`) and one naming a signer who is not a live member of this space
+(`admin_proof_signer_not_a_member`). `401 bad_signature` with `{ check: "admin_proof" }` when the
+signature does not verify. Nothing here is an enumeration oracle: `GET /spaces/:id/members`
+already serves the caller the same list.
+
+> **CLOSED during integration.** `ERROR_CODES` was a frozen table with no authorization code that
+> fit a missing proof — `not_a_member` would have been a lie and the very oracle §2 step 6/7
+> avoids, and `device_revoked` is worse — so a missing proof answered `400`, honest about the
+> request and wrong about the class. `admin_proof_required: 403` was added and the handler names
+> it.
+
+---
 
 ---
 
@@ -704,11 +848,28 @@ serialiser and fails on any other identifier reaching it. (21.3, 21.4)
   the Option-B trade the addendum already states.
 - `POST /members/remove` and `/members/leave` **purge that member's `Op` rows** in the same
   transaction as the membership write (20.2), using `@@index([spaceId, deviceShort])`.
-- `POST /spaces/:id/delete` cascades everything (20.4).
+- `POST /spaces/:id/delete` cascades everything (20.4) and **requires an admin proof** (§3.7).
 - **There is no per-entity redaction endpoint.** An endpoint that lets any member delete another
   member's ops from the relay is a censorship primitive; one reviewed design shipped exactly that
   and it is rejected here. Downgrade removal is a register overwrite plus the client-side forget
   pass (ADR 004 §5) plus honest copy (ADR 002 §7.4).
+
+  > **AMENDED 2026-09-01 (T5-M1). The two bullets above were in contradiction, and the red team
+  > found the gap between them.** *"There is no per-entity redaction endpoint"* is a rule about
+  > SHAPE — no route names an entity — and it was read as if it were a rule about AUTHORITY.
+  > `POST /members/remove` names a *member* rather than an entity, and it authorized on
+  > `assertMember` and nothing else, so any member could delete any other member's whole `Op`
+  > history from the relay. That is the censorship primitive this bullet rejects, arriving by the
+  > bullet above it. ADR 006 §9.1 sharpens why it matters: *"the durable record of a peer's op is
+  > the server, not the log"* — the purge is not a tidy-up, it is the removal of the only shared
+  > copy.
+  >
+  > **The authority half is now stated here rather than left to the shape half.** A purge is
+  > admissible only where §3.7's admin proof authorizes it. `POST /spaces/:id/delete` enforces
+  > that today. `POST /members/remove` does not yet (finding **T5-M1a**, a D7 ruling), and until
+  > it does the purge on that route is a **known, measured deviation from this section**, carried
+  > in `server/core/handlers/lifecycle.js#LIFECYCLE_FINDINGS` and driven by
+  > `tests/fleet/e6-attack-removed.test.js` §1a/§1b — not a permission this section grants.
 - Tombstone GC is client-side and gated on `Device.lastSeenSeq` (ADR 001 §7.3), for which `ackSeq`
   on push is the input.
 
@@ -884,6 +1045,10 @@ one thing that cannot be exercised here.
 - It never emails, never pushes, never notifies. **No surveillance surface to build on**
   (Principle 9).
 - It holds no key material of any kind.
+- **It never resolves who the admin is, and it no longer needs to in order to refuse a
+  single-actor destruction.** §3.7: the only authority it can verify is *"a member other than the
+  caller signed this act"*, and that is what `POST /spaces/:id/delete` demands. A role column
+  would be the other way of doing it and is forbidden (§5.1, `FORBIDDEN_COLUMN_TOKENS`).
 
 ---
 
@@ -906,3 +1071,17 @@ one thing that cannot be exercised here.
 6. **The chain witness is diagnostic-only** (ADR 002 §5.4, §8.6).
 7. **LZP-901's server-side ownership validation is impossible** (§2). Escalated as R7, not
    reinterpreted.
+8. **`POST /members/remove` still authorizes on membership alone**, so any current member can
+   evict any other and purge their `Op` rows (finding **T5-M1a**; §3.7 has the check and does not
+   yet demand it). Consequence **T5-M1c**: while that stands, a hostile member reaches an empty
+   circle in N+1 requests — remove everyone, then `/members/leave`, whose last-member-out cascade
+   deletes the space. The cascade is deliberately left alone; gating it would make a circle
+   everybody left voluntarily undeletable and would not close the path, because the path is the
+   un-proofed removal. Closing T5-M1a closes both. What bounds it meanwhile:
+   `memberRemovePerMemberHour = 10`, one visible member-list change per removal (15.4), and no
+   read of anything — 20.5 is enforced by encryption and is untouched by any of this.
+9. **The admin proof is a two-key rule, not an admin rule** (§3.7). A circle of two where one
+   member is a tombstone cannot be deleted through `/spaces/:id/delete` at all; the honest exit is
+   `/members/leave`. And a schema without `Space.founderMemberId` (**E2-L1b**) means the relay
+   cannot tell the honest admin from any other co-signer — which is fine for refusing T5 and is
+   not the same thing as enforcing 20.1.

@@ -7,7 +7,8 @@
 | **Tickets** | LZP-301, 302, 303, 304, 305, 306 · supports 502, 601/602, 608, 701, 1003, 1004 |
 | **Stories** | 15.2, 15.3, 15.5, 19.4, 19.5, 20.2, 20.3, 20.5, 21.1, 21.2, 21.3, 21.4, A2 |
 | **Amends** | LZP-301's "libsodium-based design" premise → `LZP-CRYPTO-1` (§1); LZP-302's "macOS Keychain via Tauri" → non-extractable IndexedDB keys + a Keychain *backstop* (§2.2) |
-| **Amended** | 2026-08-29 (E2↔E3 seam) — **§4.2 is amended in four places and §2.3 gains one optional field.** The rotation this section specifies could not be performed by any client over the API ADR 003 specifies, and both sides were green because neither suite ever put one side's output into the other's input. (a) Step 4's POST body is restated exactly: `wraps[]` carries `recipientId` (not `deviceId`), `wrapped` is **base64url of the canonical-JSON `WrapBlob`** (not the object), and it carries **no `invites`** — D9 removed the key material, so the relay refreshes open invites itself and refuses the field. (b) Step 6's `senderKexPubRaw` is **published by the relay, never supplied by a client**: `KeyWrap` gains a relay-stamped `senderDeviceId` and `GET /keys` serves the ADR's field by joining to `Device.kexPubRaw`. (c) `GET /spaces/:id/members` **publishes `Device.attestation`** — the roster step 6 already required, and without it `familyRecipients()` throws on the list the relay serves. (d) Step 2's "plus each member's `RK_kex`" is **SUSPENDED for the family space**: nothing signs `Member.recoveryPubKex`, so wrapping to it hands a curious relay `FSK_{e+1}` silently. §2.3 specifies the binding that lifts the suspension — an OPTIONAL seventh signed field `recoveryPubKex` in `DeviceAttestation`. Findings **E2E3-1 … E2E3-8**. |
+| **Amended** | 2026-09-01 (E7 red team, T5) — **§4.2's coverage check is restated as a ROW COUNT and §8 gains 8.5a.** `assertCoverage` asks whether a `KeyWrap` row EXISTS for every (required recipient, epoch) pair; it reads epoch numbers and never bytes, and it cannot, because telling a wrap from noise means opening one. `src/js/sync/keys.js` §4 had derived a client-side coverage PROOF from it (*"observing that an epoch EXISTS is observing that it held"*), and one junk wrap plus one lost race locked a joiner out of a Familienkreis for ever, silently — finding **T5-K1**. §8.5 covered only the over-wide half of the same absence (a rotator wrapping to devices that should not have the key); **8.5a** adds the mirror image, member-driven DENIAL of key delivery, with what is closed, what remains, and who owns the rest. Finding **T5-K2** is in the same pair: D9's waiting state is now answered from `ring.covers(1..e)` and not from the relay's row count. |
+| | 2026-08-29 (E2↔E3 seam) — **§4.2 is amended in four places and §2.3 gains one optional field.** The rotation this section specifies could not be performed by any client over the API ADR 003 specifies, and both sides were green because neither suite ever put one side's output into the other's input. (a) Step 4's POST body is restated exactly: `wraps[]` carries `recipientId` (not `deviceId`), `wrapped` is **base64url of the canonical-JSON `WrapBlob`** (not the object), and it carries **no `invites`** — D9 removed the key material, so the relay refreshes open invites itself and refuses the field. (b) Step 6's `senderKexPubRaw` is **published by the relay, never supplied by a client**: `KeyWrap` gains a relay-stamped `senderDeviceId` and `GET /keys` serves the ADR's field by joining to `Device.kexPubRaw`. (c) `GET /spaces/:id/members` **publishes `Device.attestation`** — the roster step 6 already required, and without it `familyRecipients()` throws on the list the relay serves. (d) Step 2's "plus each member's `RK_kex`" is **SUSPENDED for the family space**: nothing signs `Member.recoveryPubKex`, so wrapping to it hands a curious relay `FSK_{e+1}` silently. §2.3 specifies the binding that lifts the suspension — an OPTIONAL seventh signed field `recoveryPubKex` in `DeviceAttestation`. Findings **E2E3-1 … E2E3-8**. |
 | | 2026-08-28 (E3 fix pass) — §2.3's "Two shorts, no winner" is rewritten as **"One short, one signer"** and its claim that *"attestOpen (WP-6) MUST enforce P2, which closes this at the root and removes the stall"* is **struck as false**: P2 shipped and the squat still passes it, because `sigPubRaw` is public and the squat copies key and short together. I-3 / R5-7 is closed instead by a **possession proof at fold time** — a `dev.<S>` register is a credential only if the op that wrote it was stamped by the device it attests. §5.2.1's and §5.2.5's I-3 notes amended to match; §5.2.2 gains two obligations (check 4 is now load-bearing for the fold, and nothing may enter the log without passing `openOp`). |
 | | 2026-08-27 (round 4) — §2.3's stated guarantee was untrue in two places and is corrected in place: the four acceptance conditions bind **nothing to `deviceId`** ("A `deviceId` is a label, not an identity"), and `deviceShort → DeviceAttestation` is *argued* rather than enforced, so a contested short now resolves to `null` instead of to a winner ("Two shorts, no winner"). §2.3 also gains "Revocation — the gap, and who owns it" (WP-9) and §8 gains **8.2a**. §5.2.1 and §5.2.5 amended to match; §5.2.4's T5 row extended. |
 
@@ -749,6 +750,41 @@ within a minute") at the mercy of a sleeping laptop.
   coordination data alone and it closes the obvious denial-of-service: a member rotating to a key
   wrapped only to themselves.
 
+  > **AMENDED 2026-09-01 — THE COVERAGE CHECK IS A ROW COUNT. Say so, or a client will read it as
+  > a statement about keys.** Findings **T5-K1** and **T5-K2**.
+  >
+  > `server/core/handlers/spaces.js#assertCoverage` asks, for each required recipient, whether a
+  > `KeyWrap` row EXISTS for every epoch `1..e`. It reads the epoch numbers and never the bytes:
+  >
+  > ```js
+  > const have = new Set((await tx.getKeyWraps(spaceId, r)).map((w) => w.epoch));
+  > ```
+  >
+  > It cannot do more. Telling a genuine wrap from 156 bytes of noise means opening one, and a
+  > relay that can open a wrap is the failure this whole ADR is written against (§0, T3/T4). So
+  > **an epoch exists as soon as the rows exist**, whatever is in them, and a member may rotate
+  > with genuine wraps for the people she likes and garbage for the person she wants to keep out.
+  > The check passes. `GET /spaces/:id/keys` then answers that person `keysPending: false`,
+  > because it counts the same rows.
+  >
+  > **What the check therefore does buy, stated exactly:** it refuses a rotation that leaves a
+  > live device UNNAMED (the denial-of-service above), and it refuses a wrap set that covers only
+  > the current epoch rather than `1..e` (step 5, A4, story 17.1, risk R11). Both are questions
+  > about the SHAPE of the table, which is coordination data by construction.
+  >
+  > **What it does not buy, and what read it as if it did.** `src/js/sync/keys.js` §4 derived its
+  > client-side coverage proof from this check, in as many words — *"coverage is not a hope about
+  > other clients — it is a server-enforced invariant, and observing that an epoch EXISTS is
+  > observing that it held"*. One junk wrap plus one lost race (`409 epoch_taken`, read as *"their
+  > wraps cover the same recipients"*) wrote a durable record saying a joiner held a ring she
+  > could not open, and no honest device in the family ever delivered to her again: empty board,
+  > no warning, nothing in an error state, for the life of the install. The client's coverage
+  > record is now three statements about KEYS — *I delivered to it* (this device's own accepted
+  > rotation), *it delivered to me* (`ring.originOf` names the device whose wrap actually opened,
+  > and a wrap only opens if that device held the key), *it is me* — and no statement about epoch
+  > numbers at all. The residual this leaves on the relay side is §8.5's
+  > "member-driven denial of key delivery".
+
 ### 4.3 The join / removal asymmetry — state it, do not "fix" it
 
 - A **joining** member is granted **all epochs `1…e+1`**. They must be, or Oma's birthday —
@@ -1396,6 +1432,75 @@ existing member, but a malicious relay could still fabricate a whole **member** 
 malicious admin could add a phantom *member* and read the family space. Partial mitigation: the
 member list shows per-member device counts, so an extra device is visible to a curious member.
 A signed, append-only, cross-verified device log is the real fix and is deferred to the backlog.
+
+> **The mitigation is now half-built, and the half that is missing is one field.**
+> *(2026-09-01.)* Until this pass the sentence above described nothing that existed: `MemberRow`
+> in `src/js/family/membersui.js` had no device field and the count reached no screen, which the
+> T5 red team drove — a member attests an outsider's Mac, every barrier passes because every fact
+> about the row is true, and the family's next ordinary sync wraps epochs `1..e+1` to it. The row
+> and its tag exist now (and read only the LENGTH of the relay's array, so a relay answering
+> `devices: 9999` cannot write a nine-thousand into a family's member list). But
+> `family/mount.js#refreshRoster` maps the roster down to `memberId`, `colorRef`, `removedAt`, so
+> `deviceCount` is `null` on every launch and renders as nothing — correctly, because *unknown*
+> and *zero* are different facts. **Owner: `src/js/family/mount.js`.** Driven, both halves, in
+> `tests/fleet/e6-attack-keydelivery.test.js` §5d.
+
+**8.5a A member can DENY a peer the key, and the relay cannot tell.** *(added 2026-09-01 —
+findings **T5-K1** / **T5-K2**; the mirror image of 8.5, and until now this section had only the
+over-wide half.)* 8.5 says a rotator cannot be held to wrapping only to **genuine** devices. The
+same absence runs the other way: a rotator cannot be held to wrapping a **usable key** to every
+device it names. §4.2's coverage check counts rows (see the amendment there), so a member may
+rotate with real wraps for her friends and 156 bytes of noise for the person she wants to keep
+out, get a `200`, and leave that person unable to read anything sealed from that epoch onward.
+Nothing about it is detectable by the relay, and until this pass nothing about it was detectable
+by the other members either.
+
+- **What is closed.** The denial is no longer permanent and no longer silent. An honest device's
+  duty to a recipient is now discharged only by *delivering* to it or by *being delivered to by
+  it*, never by an epoch bump or a lost race, so the first honest tick after the hostile rotation
+  hands the excluded member the whole ring. And the excluded member's own Mac stops claiming
+  otherwise: D9's „Schlüssel ausstehend" is answered from `ring.covers(1..e)` and not from the
+  relay's row count, so a partial ring keeps the waiting state and a partial arrival never
+  withdraws it (that half is **T5-K2**).
+- **What remains.** A member who rotates on every membership change with junk for one peer holds
+  that peer at a stale epoch: no device can prove that an epoch minted by somebody ELSE reached a
+  third party in openable form, and no route can say so without telling the relay the same thing.
+  The victim sees it — parked ops, `keysPending` true, and the deferral ladder ending in a visible
+  error — and every other Mac sees a healthy circle. **Owner:** a route by which a member can
+  report "I cannot open epoch e", which is ADR 003's and `server/core/handlers/keys.js`'s, not
+  this section's.
+- **One interaction, because it is not obvious — and it is now RESOLVED.** T5-K3's first fix made
+  `KeyWrap` write-once per `(spaceId, epoch, recipientId)`, so the FIRST depositor of a cell owned
+  it. Against a *joiner* — whose cells for `1..e` are all empty when she arrives — a hostile
+  rotator who got there first therefore kept those cells, and an honest member's later wraps for
+  them were refused **by the store**. Measured end to end in
+  `tests/fleet/e6-attack-keydelivery.test.js` §1: she held one epoch, no history, „Omas
+  Geburtstag" never rendered, and her ops quarantined into a visible error.
+
+  The cell therefore includes the **depositor** — `(spaceId, epoch, recipientId, senderDeviceId)`
+  — and both rules hold at once. An attacker still cannot move one byte anybody else deposited (a
+  different depositor is a different row, so T5-K3 is closed *by construction* rather than by
+  refusal), and an honest wrap **coexists** with a hostile one, which is a case the receiving side
+  already handles: §4.2 step 6 walks the rows, counts the one that will not open as `refused`, and
+  admits the one that does. `assertCoverage` folds a recipient's rows into a Set of epoch numbers
+  before it counts, so duplicates cannot inflate coverage. §7.3's A2 recovery is what this buys:
+  the founder restored onto an empty ring recovers his whole key history from the relay even after
+  a hostile rotation over every one of his cells.
+
+  **What it costs:** rows, not data. One row per depositing device per `(epoch, recipient)`,
+  bounded by `MAX_WRAPS = 1024` per rotation and by the epoch race every rotation must win, under
+  a signed device identity and a rate-limit budget.
+
+  **And one thing it un-builds.** `wrapsRefused` on a rotation response can now only ever be a
+  device re-wrapping **its own** earlier cells with a fresh salt and IV — which every rotation
+  after the first does, for every epoch below its own. It is ordinary accounting and **never an
+  abuse signal**; a warning built on it would fire for ever on an honest relay, and one was
+  removed from `sync/keys.js` for exactly that reason.
+- **Not the same class as a confidentiality break.** This is denial of service and denial of
+  history against one member by another member of her own circle, in a product whose adversary
+  table (§0, T5) already includes that person. It is not a path to reading anything: every route
+  in this section's neighbourhood was driven by the same attacker in the same pass and produced
+  **zero bytes** of a Privat entry.
 
 **8.6 The relay can censor, and detection is best-effort.** §5.4's witness makes selective
 withholding *detectable in principle* by cross-checking what members claim to have seen; it is

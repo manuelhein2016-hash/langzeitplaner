@@ -203,8 +203,10 @@ export async function startEngine(store, armed, ports) {
     isOnline: p.isOnline,
     onStatus: p.onStatus,
     envelopeStore: sealedEnvelopeStore(),
-    parkStore: parkedEnvelopeStore(),
-    chainStore: chainHeadStore(),
+    // SCOPED. Both slots below are ONE key for the whole device and both engines write them, so
+    // each port declares the space it is a slice of — see the block above `parkedEnvelopeStore`.
+    parkStore: parkedEnvelopeStore(armed.cfg.spaceId),
+    chainStore: chainHeadStore(armed.cfg.spaceId),
   });
 
   // ADR 004 §3 / the WP-3 obligation. `nullPublisher()` RECORDS retractions rather than
@@ -714,8 +716,10 @@ export async function startFamilyEngine(store, armed, circle, ports) {
       saveRingEpoch(circle.spaceId, epoch, b64u(raw));
     },
     envelopeStore: sealedEnvelopeStore(),
-    parkStore: parkedEnvelopeStore(),
-    chainStore: chainHeadStore(),
+    // SCOPED — the other half of the pair `startEngine` builds. Without the space id these two
+    // ports are the personal engine's ports, over the personal engine's rows.
+    parkStore: parkedEnvelopeStore(circle.spaceId),
+    chainStore: chainHeadStore(circle.spaceId),
     coverStore: coverageStore(),
     // The outbound half. One property, and it is the whole of it — see the block above.
     outbound: store.familyOutbound(),
@@ -781,6 +785,12 @@ export async function attestPeer(peer, recSig, createdAt) {
 // them if it owned a slot for each — and it does not yet. **OWED to `storage.js`'s owner** (see
 // `sync/personal.js` §4(b)): three named slots, so a Tauri build writes them beside `board.json`
 // instead of in the WebView's storage.
+//
+// TWO OF THEM ARE NOT PER SPACE, and that is a fact about the disk rather than an oversight:
+// `LS_PARKED` is one list and `LS_CHAIN` is one map, for the device. Both engines write both.
+// Each port therefore DECLARES the space it is a slice of (`space: spaceId`) and the two modules
+// that own the data — `sync/outbox.js` and `sync/cursor.js` — merge on write and adopt only their
+// own rows on read. See those two files' headers; the ports below stay dumb on purpose.
 
 const LS_RING = (spaceId) => `langzeitplaner.ring.${spaceId}`;
 const LS_PEERS = (spaceId) => `langzeitplaner.peers.${spaceId}`;
@@ -857,6 +867,29 @@ function sealedEnvelopeStore() {
 /**
  * The `parkStore` port — P-8's third axis, and the INBOUND twin of `sealedEnvelopeStore` above.
  *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * `space: spaceId` IS THE WHOLE OF THE SCOPING, AND IT IS A DECLARATION AND NOT A FILTER
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ *
+ * `LS_PARKED` is ONE key for the device while `LS_RING` and `LS_PEERS` are per space, and this
+ * file builds this port TWICE — once in `startEngine` for the personal space, once in
+ * `startFamilyEngine` for the family one. Two writers, one slot. The E7 red team drove what that
+ * costs: an ordinary family park wrote the family lot's rows over the slot and destroyed a
+ * personal envelope that a ladder had shelved — the only copy on this Mac, with the cursor
+ * already past it — and the family lot's undecryptable backlog counted against the PERSONAL
+ * lot's cap, so `park()` answered `false` and stalled a cursor for somebody else's reason.
+ *
+ * This port stays as dumb as every other one here: it reads the whole slot and writes the whole
+ * slot, because that is the I/O `src/js/sync/` may not do for itself (ADR 005 §2) and nothing
+ * more. What it adds is one fact it is the only file in a position to know — WHICH SPACE THIS
+ * ONE IS FOR. `sync/outbox.js#createParkingLot` reads it and does the rest: it adopts only this
+ * space's rows, and its `persist()` re-reads the slot and writes the other engine's rows back
+ * untouched. Putting the merge there rather than here is deliberate — the rule then holds for
+ * every caller of the lot, including the ones that build their own port.
+ *
+ * A `spaceId` of `undefined` would silently restore the pre-E7 behaviour, which is why both call
+ * sites pass one and `tests/fleet/e6-attack-privat.test.js` §2a pins that they do.
+ *
  * That one keeps the sealed bytes this device still owes the relay. This one keeps the sealed
  * bytes the relay has already handed over and this device cannot open YET: an op from a Mac whose
  * attestation has not arrived, an epoch whose key has not been fetched, an envelope version or an
@@ -868,11 +901,17 @@ function sealedEnvelopeStore() {
  * `createParkingLot` owns the cap, the replay order and the refuse-rather-than-drop rule; this is
  * only the I/O `src/js/sync/` may not do for itself (ADR 005 §2).
  */
-function parkedEnvelopeStore() {
+function parkedEnvelopeStore(spaceId) {
   return {
     durable: true,
-    async loadRecords() { return readJSON(LS_PARKED, []); },
-    async saveRecords(rows) { writeJSON(LS_PARKED, rows); },
+    space: spaceId,
+    // NOT `async`, and that is the second half of the fix rather than a style choice.
+    // `localStorage` is a synchronous API; wrapping it in a promise puts a microtask boundary in
+    // the middle of `createParkingLot#persist`'s read-modify-write, which is exactly where the
+    // OTHER engine's write slips in when both park in the same cadence tick. A plain value is a
+    // valid answer at every call site — all of them `await` — and it keeps the merge atomic.
+    loadRecords() { return readJSON(LS_PARKED, []); },
+    saveRecords(rows) { writeJSON(LS_PARKED, rows); },
   };
 }
 
@@ -903,11 +942,19 @@ function coverageStore() {
  * else as `since`. What lives here is the chain value the witness verified up to, so a relay that
  * forks the stream ACROSS a relaunch is caught on the first page rather than adopted as the new
  * truth. `sync/cursor.js` owns the record shape and its hostile-input reading.
+ *
+ * `space: spaceId` for the same reason `parkedEnvelopeStore` carries one, and with a sharper
+ * edge: `LS_CHAIN` is a MAP keyed by space, so the second engine's whole-map write did not merely
+ * overwrite the personal space's anchor — it deleted the key, taking `fromGenesis` (the right to
+ * call an unknown witness a fork, ADR 002 §5.4) with it. `sync/cursor.js` merges on write and
+ * adopts only this space's record on read; this port only says which space that is.
  */
-function chainHeadStore() {
+function chainHeadStore(spaceId) {
   return {
-    async loadCursors() { return readJSON(LS_CHAIN, {}); },
-    async saveCursors(all) { writeJSON(LS_CHAIN, all); },
+    space: spaceId,
+    // Synchronous for the same reason `parkedEnvelopeStore` is — see the note there.
+    loadCursors() { return readJSON(LS_CHAIN, {}); },
+    saveCursors(all) { writeJSON(LS_CHAIN, all); },
   };
 }
 

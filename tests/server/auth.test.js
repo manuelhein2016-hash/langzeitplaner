@@ -37,6 +37,7 @@ import {
   b64u, ub64, crock32,
   AUTH_SCHEME, AUTH_PARAMS, SIGNED_PREFIX, SIG_BYTES, NONCE_BYTES, DEVICE_SHORT_RE,
   AUTH_INTERFACE_GAPS,
+  verifyAdminProof, adminProofString, ADMIN_PROOF_PREFIX, ADMIN_ACTS,
 } from '../../server/core/auth.js';
 import { fixtures } from '../../server/core/store-interface.js';
 import { memoryStore } from '../../server/adapters/memory.js';
@@ -726,12 +727,135 @@ test('every recorded interface gap names what breaks and who owns it', () => {
   const ids = AUTH_INTERFACE_GAPS.map((g) => g.id);
   assert.deepEqual(ids, [...new Set(ids)], 'duplicate gap ids');
   for (const g of AUTH_INTERFACE_GAPS) {
-    assert.match(g.id, /^E2-202-[A-Z]$/);
+    // `E2-L…` joined the table with the admin proof (§6b): a gap in the STORE INTERFACE that
+    // this file's authorization code runs into is the same kind of row as a gap in the auth
+    // ladder, and splitting them into two lists would mean one of the two stopped being read.
+    assert.match(g.id, /^(E2-202-[A-Z]|E2-L\d[a-z]?)$/);
     assert.ok(g.what.length > 40, `${g.id}: "what" must be specific enough to act on`);
     assert.ok(g.consequence.length > 80, `${g.id}: a gap without a stated consequence is a TODO`);
     assert.ok(g.owner.length > 0);
   }
   assert.ok(Object.isFrozen(AUTH_INTERFACE_GAPS));
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §6b · THE ADMIN PROOF — attacked, not demonstrated.  ADR 003 §3.7, finding T5-M1b.
+//
+// This is the relay's SECOND authorization mechanism and the first one that is not about a
+// device. Everything below is the same discipline as the request signature above: pin the exact
+// bytes, then vary every component in isolation and require a refusal — because a proof whose
+// payload is "roughly the act" authorizes acts nobody signed for.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+const SP_A = 'fsp_AAAAAAAAAAAAAAAAAAAAAA';
+
+async function recoveryKeypair() {
+  const kp = await webcrypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  return { priv: kp.privateKey, pubRaw: new Uint8Array(await webcrypto.subtle.exportKey('raw', kp.publicKey)) };
+}
+async function signProof(kp, terms) {
+  const bytes = new TextEncoder().encode(adminProofString(terms));
+  return b64u(new Uint8Array(await webcrypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, kp.priv, bytes)));
+}
+const memberRowOf = (id, kp, removedAt = null) => ({ id, spaceId: SP_A, recoveryPubSig: kp.pubRaw, removedAt });
+
+test('§6b the admin-proof string is pinned byte for byte, and its domain is not the request domain', () => {
+  assert.equal(
+    adminProofString({ act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 4 }),
+    'lzp/admin/1\nspace.delete\n' + SP_A + '\n' + SP_A + '\n4');
+  assert.equal(ADMIN_PROOF_PREFIX, 'lzp/admin/1\n');
+  // A request signature and an admin proof must never be interchangeable. Different prefix,
+  // different arity — a caller cannot hand the relay one where it asked for the other.
+  assert.notEqual(ADMIN_PROOF_PREFIX, SIGNED_PREFIX);
+  assert.deepEqual([...ADMIN_ACTS], ['space.delete', 'member.remove']);
+  assert.ok(Object.isFrozen(ADMIN_ACTS));
+});
+
+test('§6b a proof by a second live member verifies — the NON-VACUITY half', async () => {
+  const admin = await recoveryKeypair();
+  const terms = { act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 2 };
+  const members = [memberRowOf('mem_admin', admin), memberRowOf('mem_eve', await recoveryKeypair())];
+  const out = await verifyAdminProof(
+    { by: 'mem_admin', sig: await signProof(admin, terms) },
+    { ...terms, members, callerMemberId: 'mem_eve' });
+  assert.deepEqual(out, { by: 'mem_admin' });
+});
+
+test('§6b every single-actor and mix-and-match shape is refused, each for its own reason', async () => {
+  const admin = await recoveryKeypair();
+  const eve = await recoveryKeypair();
+  const gone = await recoveryKeypair();
+  const terms = { act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 2 };
+  const members = [
+    memberRowOf('mem_admin', admin),
+    memberRowOf('mem_eve', eve),
+    memberRowOf('mem_gone', gone, 1234),
+  ];
+  const run = async (proof, over) => {
+    try {
+      await verifyAdminProof(proof, { ...terms, ...over, members, callerMemberId: 'mem_eve' });
+      return null;
+    } catch (e) { return { status: e.status, code: e.code, reason: e.extra && e.extra.reason }; }
+  };
+  const good = await signProof(admin, terms);
+
+  // THE TWO-KEY RULE: her own key, correctly signed, is the attack this mechanism exists for.
+  assert.deepEqual(await run({ by: 'mem_eve', sig: await signProof(eve, terms) }),
+    { status: 400, code: 'bad_request', reason: 'admin_proof_self_signed' });
+  // A signer who is not in this space, and one who is only a tombstone.
+  assert.equal((await run({ by: 'mem_nobody', sig: good })).reason, 'admin_proof_signer_not_a_member');
+  assert.equal((await run({ by: 'mem_gone', sig: await signProof(gone, terms) })).reason,
+    'admin_proof_signer_not_a_member');
+  // MIX AND MATCH: an honest name over somebody else's signature.
+  assert.equal((await run({ by: 'mem_admin', sig: await signProof(eve, terms) })).code, 'bad_signature');
+  // Every component of the payload, varied in isolation, over a signature that is otherwise good.
+  for (const over of [
+    { act: 'member.remove' },
+    { epoch: 3 },
+    { target: 'mem_admin' },
+    { spaceId: 'fsp_BBBBBBBBBBBBBBBBBBBBBB' },
+  ]) {
+    assert.equal((await run({ by: 'mem_admin', sig: await signProof(admin, terms) }, over)).code,
+      'bad_signature', `a proof survived ${JSON.stringify(over)}`);
+  }
+  // Shapes. None of these may reach the verify at all.
+  for (const p of [null, undefined, '', 0, [], { sig: good }, { by: 'mem_admin' },
+    { by: 'mem_admin', sig: 'not base64url!!' }, { by: 'mem_admin', sig: b64u(new Uint8Array(63)) },
+    { by: 42, sig: good }, { by: 'm'.repeat(200), sig: good }]) {
+    const r = await run(p);
+    assert.equal(r && r.status, 400, `accepted ${JSON.stringify(p)}`);
+  }
+  // And an act outside the closed set is a BUG in the caller, not a client error.
+  assert.equal((await run({ by: 'mem_admin', sig: good }, { act: 'space.rename' })).code, 'internal');
+});
+
+test('§6b no refusal ever echoes a caller\'s bytes, and none is an enumeration oracle', async () => {
+  const admin = await recoveryKeypair();
+  const members = [memberRowOf('mem_admin', admin), memberRowOf('mem_eve', await recoveryKeypair())];
+  const secret = 'Familie Hein — Zahnarzt 14:30';
+  for (const p of [{ by: secret, sig: b64u(new Uint8Array(64)) }, { by: 'mem_admin', sig: secret }]) {
+    try {
+      await verifyAdminProof(p, {
+        act: 'member.remove', spaceId: SP_A, target: 'mem_x', epoch: 1, members, callerMemberId: 'mem_eve',
+      });
+      assert.fail('accepted');
+    } catch (e) {
+      assert.equal(JSON.stringify(e.extra || {}).includes('Zahnarzt'), false);
+      assert.equal(JSON.stringify(e.extra || {}).includes('Hein'), false);
+    }
+  }
+  // "not a member of this space" and "never existed" answer the SAME reason, exactly as step 6/7
+  // does — and neither is worth hiding, because `GET /spaces/:id/members` already serves the
+  // caller this list. What must not happen is a THIRD answer that separates the two.
+  const seen = new Set();
+  for (const by of ['mem_admin_typo', 'mem_zzzz']) {
+    try {
+      await verifyAdminProof({ by, sig: b64u(new Uint8Array(64)) }, {
+        act: 'member.remove', spaceId: SP_A, target: 'mem_x', epoch: 1, members, callerMemberId: 'mem_eve',
+      });
+    } catch (e) { seen.add(`${e.status}:${e.extra.reason}`); }
+  }
+  assert.equal(seen.size, 1, [...seen].join(' | '));
 });
 
 test('auth.js imports nothing outside server/core — the ADR 005 §2 direction holds', () => {

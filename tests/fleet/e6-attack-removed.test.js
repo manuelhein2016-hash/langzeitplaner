@@ -272,15 +272,56 @@ async function buildFreshMac(C, tag) {
 //
 //   Both are implemented now, in `server/core/handlers/lifecycle.js`, behind
 //   `ctx.assertMember(auth.memberId, spaceId)` and nothing else.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// STATE OF THIS ATTACK AFTER THE T5-M1 PASS — READ BEFORE CHANGING A ROW
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+//   §1a, §1b  **STILL SUCCEED.** `POST /members/remove` still authorizes on membership alone.
+//             Carried as finding **T5-M1a** in `lifecycle.js#LIFECYCLE_FINDINGS`: the relay now
+//             HAS the check (`adminProofGate(..., required: false)`) and does not yet demand it,
+//             because demanding it changes what an unproofed honest caller gets and four rows in
+//             two fleet suites — `round9-e6.test.js` and `round10-e6-gate.test.js` ×3 — require
+//             `200` + `purgedOps > 0` from exactly that caller. One parameter, plus those
+//             callers, plus a D7 ruling.
+//
+//   §1c       **INVERTED.** `POST /spaces/:id/delete` now requires a SECOND member's recovery
+//             signature (ADR 003 §3.7). The relay still cannot tell who the admin is — the
+//             founder is not derivable, see `auth.js` finding E2-L1b — but it does not have to:
+//             T5 is ONE member with ONE Keychain, and she cannot sign under a key she does not
+//             hold. The row keeps its old assertions underneath the refusal, plus a non-vacuity
+//             half proving the honest two-key delete still works.
+//
+//   §1e       **NEW, and it is the honest residual.** While §1a stands she can still empty the
+//             circle in N+1 requests. Measured rather than argued (finding T5-M1c).
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§1 · T5-M1 · a plain member evicts the admin and then deletes the circle', () => {
+/**
+ * ADR 003 §3.7's admin proof, minted the way a Mac would: a signature by the SIGNER's recovery
+ * key over bytes the relay assembles for itself. `adminProofString` is imported from the server,
+ * so a drift between what a client signs and what the relay verifies is a red row here.
+ */
+async function adminProof(mac, act, spaceId, target, epoch) {
+  const { adminProofString } = await import('../../server/core/auth.js');
+  const bytes = new TextEncoder().encode(adminProofString({ act, spaceId, target, epoch }));
+  const sig = new Uint8Array(await S.sign(
+    { name: 'ECDSA', hash: 'SHA-256' }, mac.recovery.recSig.privateKey, bytes));
+  return { by: mac.forStore.memberId, sig: Buffer.from(sig).toString('base64url') };
+}
+
+describe('§1 · T5-M1 · INVERTED · a plain member can do neither, and both take a second key', () => {
   let C = null;
   let evicted = null;
   let papaPull = null;
   let papaKeys = null;
   let papaRejoin = null;
   let deleted = null;
+  let deletedTries = null;
+  let deletedHonest = null;
+  let evictedTries = null;
+  let evictedHonest = null;
+  let papaPullAfter = null;
+  let papaOpsOnRelay = 0;
 
   before(async () => {
     C = await circleOfThree();
@@ -288,10 +329,36 @@ describe('§1 · T5-M1 · a plain member evicts the admin and then deletes the c
     await on(C.papa, () => {});
     evicted = await C.eve.transport.request('POST', '/api/v1/members/remove', undefined,
       { spaceId: C.spaceId, memberId: C.papa.forStore.memberId }, {});
+    // Every mirror-image shape a patched client reaches for once the bare request is refused.
+    const ep0 = (await C.relay.store.getSpace(C.spaceId)).currentEpoch;
+    evictedTries = [];
+    for (const [pf, hint] of [
+      [await adminProof(C.eve, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0), 'her own recovery key'],
+      [{ by: C.mama.forStore.memberId, sig: (await adminProof(C.eve, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0)).sig },
+        "Mama's name over Eve's signature"],
+      [await adminProof(C.mama, 'space.delete', C.spaceId, C.papa.forStore.memberId, ep0), 'the wrong act'],
+      [await adminProof(C.mama, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0 + 1), 'the neighbouring epoch'],
+      [await adminProof(C.mama, 'member.remove', C.spaceId, C.eve.forStore.memberId, ep0), 'a proof naming ANOTHER target'],
+    ]) {
+      evictedTries.push([hint, await C.eve.transport.request('POST', '/api/v1/members/remove', undefined,
+        { spaceId: C.spaceId, memberId: C.papa.forStore.memberId, adminProof: pf }, {})]);
+    }
+    // What Papa can still do, measured while he is still IN the circle.
     papaPull = await C.papa.transport.request('GET', '/api/v1/ops',
       { space: C.spaceId, since: '0', limit: '10' }, null, {});
     papaKeys = await C.papa.transport.request(
       'GET', `/api/v1/spaces/${C.spaceId}/keys`, undefined, undefined);
+    papaOpsOnRelay = (await C.relay.store.listOps(C.spaceId, 0n, 1000)).ops
+      .filter((o) => o.deviceShort === C.papa.forStore.deviceShort).length;
+
+    // NON-VACUITY: the founder CAN be removed — it takes a second live member's key. Driven last,
+    // after everything above has been measured on an intact circle, and then UNDONE is impossible
+    // — so the delete half below runs against the circle this leaves.
+    evictedHonest = await C.eve.transport.request('POST', '/api/v1/members/remove', undefined,
+      { spaceId: C.spaceId, memberId: C.papa.forStore.memberId,
+        adminProof: await adminProof(C.mama, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0) }, {});
+    papaPullAfter = await C.papa.transport.request('GET', '/api/v1/ops',
+      { space: C.spaceId, since: '0', limit: '10' }, null, {});
     // He cannot even come back: his member id is taken by his own tombstone (§0e).
     const proof = globalThis.crypto.getRandomValues(new Uint8Array(32));
     const verifier = new Uint8Array(await S.digest('SHA-256', proof));
@@ -307,30 +374,101 @@ describe('§1 · T5-M1 · a plain member evicts the admin and then deletes the c
     });
     deleted = await C.eve.transport.request(
       'POST', `/api/v1/spaces/${C.spaceId}/delete`, undefined, { confirm: C.spaceId }, {});
+    // Every next thing a patched client would try, each refused for its own reason.
+    const ep = (await C.relay.store.getSpace(C.spaceId)).currentEpoch;
+    deletedTries = [];
+    for (const [pf, hint] of [
+      [await adminProof(C.eve, 'space.delete', C.spaceId, C.spaceId, ep), 'her own recovery key'],
+      [{ by: C.mama.forStore.memberId, sig: (await adminProof(C.eve, 'space.delete', C.spaceId, C.spaceId, ep)).sig },
+        "Mama's name over Eve's signature"],
+      [await adminProof(C.papa, 'space.delete', C.spaceId, C.spaceId, ep), "the REMOVED admin's own key"],
+      [await adminProof(C.mama, 'member.remove', C.spaceId, C.spaceId, ep), 'the wrong act'],
+      [await adminProof(C.mama, 'space.delete', C.spaceId, C.spaceId, ep + 1), 'the neighbouring epoch'],
+    ]) {
+      deletedTries.push([hint, await C.eve.transport.request(
+        'POST', `/api/v1/spaces/${C.spaceId}/delete`, undefined,
+        { confirm: C.spaceId, adminProof: pf }, {})]);
+    }
+    // NON-VACUITY: Mama is still in the circle and her key really does open the door.
+    deletedHonest = await C.eve.transport.request(
+      'POST', `/api/v1/spaces/${C.spaceId}/delete`, undefined,
+      { confirm: C.spaceId, adminProof: await adminProof(C.mama, 'space.delete', C.spaceId, C.spaceId, ep) }, {});
   });
 
-  test('§1a · the admin\'s own Mac was thrown out of the circle by an ordinary member', () => {
-    assert.equal(evicted.status, 200, JSON.stringify(evicted.json));
-    assert.equal(evicted.json.removed, true);
-    assert.equal(evicted.json.revokedDevices, 1);
-    assert.equal(papaPull.status, 403);
-    assert.equal(papaPull.json.error, 'device_revoked');
-    assert.equal(papaKeys.status, 403);
-    assert.equal(papaRejoin.status, 400, 'and he cannot rejoin under his own member id');
+  test('§1a · INVERTED · the admin is ANCHORED: an ordinary member cannot throw him out', () => {
+    // WAS: `evicted.status === 200` — one request, and the person who created the Familienkreis
+    // was outside it. That is finding T5-M1a.
+    //
+    // The relay still cannot check "admin": the admin chain is an in-log `transferAdmin` op
+    // inside the ciphertext (ADR 001 §4.1). What it CAN check is who created the space, because
+    // it wrote that row itself — `Space.founderMemberId`, stamped inside `POST /spaces`, never
+    // off a body, never moved afterwards. Removing THAT member takes a second member's recovery
+    // signature (ADR 003 §3.7).
+    assert.equal(evicted.status, 403, JSON.stringify(evicted.json));
+    assert.equal(evicted.json.error, 'admin_proof_required');
+    assert.equal(evicted.json.field, 'adminProof');
+    assert.equal(evicted.json.reason, 'founder_removal_needs_second_key');
+    for (const [hint, res] of evictedTries) {
+      assert.equal(res.status === 400 || res.status === 401 || res.status === 403, true,
+        `the relay accepted ${hint}: ${res.status} ${JSON.stringify(res.json)}`);
+      assert.notEqual(res.json.removed, true, `the relay removed the admin on ${hint}`);
+    }
+    // And he is still there, with everything he had: the refusal is not a partial act.
+    assert.equal(papaPull.status, 200, 'he can still pull');
+    assert.equal(papaKeys.status, 200, 'he can still fetch his keys');
   });
 
-  test('§1b · his ops were DELETED from the relay — including §4.0 and §4.1\'s two founding ops', () => {
-    assert.ok(evicted.json.purgedOps >= 2,
-      `purgedOps: ${evicted.json.purgedOps}. Those are his \`member.set{dev.*}\` attestation and `
-      + 'the `space.set{admin, adminPrev:null}` genesis link — the two ops without which no '
-      + 'future joiner can ever admit anything he ever wrote, and `adminAtIn` answers null for '
-      + 'every stamp in the space');
+  test('§1b · INVERTED · §4.0 and §4.1\'s two founding ops are still on the relay', () => {
+    // The other half, and the half that says WHY the founder is the one member the relay
+    // defends. His `member.set{dev.*}` attestation and his `space.set{admin, adminPrev:null}`
+    // genesis link are not his property — they are what lets EVERY future joiner admit anything
+    // he ever wrote, and `adminAtIn` answers null for every stamp in the space without them.
+    // Losing them is not one member leaving; it is the space destroyed for everybody.
+    assert.ok(papaOpsOnRelay >= 2,
+      `his two founding ops survived the attempt: ${papaOpsOnRelay} of his rows are on the relay`);
   });
 
-  test('§1c · and the same member can then delete the whole Familienkreis', () => {
-    assert.equal(deleted.status, 200, JSON.stringify(deleted.json));
-    assert.equal(deleted.json.deleted, true);
-    assert.ok(deleted.json.purged.members >= 3);
+  test('§1b-ii · NON-VACUITY · with a second live member\'s key the same removal works', () => {
+    // A refusal that refuses everything is not a control, it is an outage — and the honest admin
+    // path has to keep working, which is the whole difference between closing a finding and
+    // breaking a feature. Mama is a member, her recovery key is the one on `Member.recoveryPubSig`,
+    // and one signature from her turns the very same request into the 20.2 removal.
+    assert.equal(evictedHonest.status, 200, JSON.stringify(evictedHonest.json));
+    assert.equal(evictedHonest.json.removed, true);
+    assert.equal(evictedHonest.json.authorizedBy, 'admin_proof');
+    assert.equal(evictedHonest.json.revokedDevices, 1);
+    assert.ok(evictedHonest.json.purgedOps >= 2, 'and it really is the same destructive act');
+    assert.equal(evictedHonest.json.rotateRequired, true);
+    assert.equal(papaPullAfter.status, 403);
+    assert.equal(papaPullAfter.json.error, 'device_revoked');
+  });
+
+  test('§1c · INVERTED · she can no longer delete the Familienkreis — it takes a second key', () => {
+    // WAS: `deleted.status === 200`, one request, three members' circle gone. The relay still
+    // cannot check "admin"; what it now checks is that the caller was not ALONE, which is the
+    // property that actually separates the honest admin from T5 (ADR 003 §3.7, ADR 002 §0 T5).
+    assert.equal(deleted.status, 403, JSON.stringify(deleted.json));
+    assert.equal(deleted.json.error, 'admin_proof_required',
+      '403 and not 400: the request is well formed and she is authenticated — what is missing is '
+      + 'AUTHORITY. `errors.js` gained the code during integration.');
+    assert.equal(deleted.json.field, 'adminProof');
+    assert.equal(deleted.json.reason, 'second_member_signature_required');
+    for (const [hint, res] of deletedTries) {
+      assert.equal(res.status === 400 || res.status === 401 || res.status === 403, true,
+        `the relay accepted ${hint}: ${res.status} ${JSON.stringify(res.json)}`);
+      assert.notEqual(res.json.deleted, true, `the relay deleted the circle on ${hint}`);
+    }
+  });
+
+  test('§1c-ii · NON-VACUITY · with a second live member\'s key the same request works', () => {
+    // A refusal that refuses everything is not a control, it is an outage. Mama is a member, her
+    // recovery key is the one on `Member.recoveryPubSig`, and one signature from her turns the
+    // very same request into the 20.4 delete — every promise it used to make, still made.
+    assert.equal(deletedHonest.status, 200, JSON.stringify(deletedHonest.json));
+    assert.equal(deletedHonest.json.deleted, true);
+    assert.equal(deletedHonest.json.authorizedBy, 'admin_proof');
+    assert.ok(deletedHonest.json.purged.members >= 3);
+    assert.equal(deletedHonest.json.localBoardsUnaffected, true);
   });
 
   test('§1d · the client-side rule exists and is not the one that ran', async () => {
@@ -349,6 +487,77 @@ describe('§1 · T5-M1 · a plain member evicts the admin and then deletes the c
     assert.match(fn, /ctx\.assertMember\(auth\.memberId, spaceId\)/);
     assert.equal(/isAdmin|adminOf|requireAdmin/.test(fn), false,
       'there is no admin check on the route, by design (E2-203-2) — and the route shipped anyway');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §1e · THE RESIDUAL — finding T5-M1c. NEW ROW, and it SUCCEEDS.
+//
+//   §1c closed the ONE-REQUEST destruction primitive. It did not close destruction, and pretending
+//   otherwise would be exactly the "closed by breaking something legitimate" failure the §0
+//   controls exist to catch. While `/members/remove` authorizes on membership alone (§1a, finding
+//   T5-M1a), a hostile member reaches an empty circle in N+1 requests: remove everyone, then
+//   LEAVE — and `leaveSpace`'s last-member-out cascade deletes the space.
+//
+//   The cascade is deliberately NOT gated. Gating it would make a circle everybody left
+//   voluntarily undeletable, and it would not close this path, because the path is the un-proofed
+//   removal. Closing T5-M1a closes this row with it. Measured here so that "T5-M1 is closed"
+//   cannot be said of the half that is not.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('§1e · T5-M1c · INVERTED · the long way round is shut too, because the founder anchors it', () => {
+  let C = null;
+  let removals = [];
+  let founderTry = null;
+  let left = null;
+  let spaceAfter = null;
+
+  before(async () => {
+    C = await circleOfThree();
+    // She may still remove every member who JOINED — that is T5-M1a's residual, and it is the
+    // half this file must not claim is closed.
+    removals.push(await C.eve.transport.request('POST', '/api/v1/members/remove', undefined,
+      { spaceId: C.spaceId, memberId: C.mama.forStore.memberId }, {}));
+    // And then she runs out of circle: the last member standing besides her is the FOUNDER.
+    founderTry = await C.eve.transport.request('POST', '/api/v1/members/remove', undefined,
+      { spaceId: C.spaceId, memberId: C.papa.forStore.memberId }, {});
+    left = await C.eve.transport.request('POST', '/api/v1/members/leave', undefined,
+      { spaceId: C.spaceId }, {});
+    spaceAfter = await C.relay.store.getSpace(C.spaceId);
+  });
+
+  test('§1e · N removals plus one leave no longer empties the circle', async () => {
+    // WAS: "SUCCEEDS · the long way round is still open". Eve reached an empty Familienkreis in
+    // N+1 requests — remove everybody, then `/members/leave`, whose last-member-out cascade
+    // deletes the space. The cascade was deliberately NOT gated, because gating it would make a
+    // circle everybody left voluntarily undeletable and would not have closed the path anyway:
+    // the path was the un-proofed REMOVAL, and that is where it is closed.
+    for (const r of removals) {
+      assert.equal(r.status, 200, JSON.stringify(r.json));
+      assert.equal(r.json.authorizedBy, 'membership_only');
+    }
+    assert.equal(founderTry.status, 403, JSON.stringify(founderTry.json));
+    assert.equal(founderTry.json.reason, 'founder_removal_needs_second_key');
+
+    // She leaves. The cascade does NOT fire, because she is not the last member out — the
+    // founder she could not remove is still standing.
+    assert.equal(left.status, 200, JSON.stringify(left.json));
+    assert.notEqual(left.json.spaceDeleted, true);
+    assert.notEqual(spaceAfter, null, 'THE INVARIANT: the Familienkreis is still there');
+    const live = (await C.relay.store.listMembers(C.spaceId)).filter((m) => m.removedAt === null);
+    assert.deepEqual(live.map((m) => m.id), [C.papa.forStore.memberId],
+      'and the founder is who is left in it');
+  });
+
+  test('§1e-ii · what it still costs her, stated: N attributable, rate-limited, visible requests', () => {
+    // The residual, unchanged in shape and smaller in reach. Every member who JOINED is still one
+    // request away: each removal is separately visible on every member list (15.4), separately
+    // charged against `memberRemovePerMemberHour = 10`, and leaves the honest admin's client
+    // holding a removal with no matching in-log op — an inconsistency rather than a fait
+    // accompli. What she can no longer reach is the founder, and therefore the empty circle.
+    assert.equal(removals.length, 1);
+    assert.equal(removals[0].json.rotateRequired, true);
+    assert.ok(removals[0].json.purgedOps >= 0);
   });
 });
 

@@ -23,11 +23,11 @@
 // held" is only worth reading if it names the thing that held.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §2 — WHAT DID NOT HOLD: TWO ENGINES, ONE DISK
+// §2 — WHAT DID NOT HOLD, AND WHAT NOW DOES: TWO ENGINES, ONE DISK
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// The rings, the outboxes and the transport cursors are correctly per space. **Three durable
-// slots are not.** `src/js/family/engine.js`:
+// The rings, the outboxes and the transport cursors are correctly per space. **Two durable slots
+// are not, and cannot be** — they are one list and one map for the DEVICE:
 //
 //     const LS_RING   = (spaceId) => `langzeitplaner.ring.${spaceId}`;     ← per space
 //     const LS_PEERS  = (spaceId) => `langzeitplaner.peers.${spaceId}`;    ← per space
@@ -35,27 +35,59 @@
 //     const LS_PARKED = 'langzeitplaner.parked';                           ← ONE KEY
 //     const LS_CHAIN  = 'langzeitplaner.chainheads';                       ← ONE KEY
 //
-// and BOTH `startEngine` (personal, line ~206) and `startFamilyEngine` (family, line ~717)
-// construct `parkedEnvelopeStore()` and `chainHeadStore()` over them. Each engine builds its own
-// `createParkingLot` / `createCursors`, each loads the WHOLE slot, and each writes the WHOLE slot
-// back from its own in-memory copy. Two writers, one file, no merge.
+// and BOTH `startEngine` (personal) and `startFamilyEngine` (family) construct
+// `parkedEnvelopeStore()` and `chainHeadStore()` over them. Each engine builds its own
+// `createParkingLot` / `createCursors`. **Before the fix each loaded the WHOLE slot and wrote the
+// WHOLE slot back from its own in-memory copy** — two writers, one file, no merge — and the three
+// rows below measured what that cost: a shelved personal envelope destroyed by an ordinary family
+// park (§2b), the personal engine's cursor stalled by a family backlog it can never cure (§2c),
+// and the personal space's chain anchor deleted by an ordinary family pull (§2d).
 //
-// §2 drives that with the product's own `sync/outbox.js` and `sync/cursor.js` over a store that
-// is the one `family/engine.js` gives them.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE FIX, AND WHERE IT DELIBERATELY DOES NOT LIVE
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// The slots stay device-wide. What changed is that **each port now DECLARES the space it is a
+// slice of** (`space: spaceId`, `family/engine.js`), and the two modules that own the data act on
+// it — which is the half a test can hold, because it is the half that holds for every caller and
+// not only for the two ports this one file happens to build:
+//
+//   · `sync/outbox.js#createParkingLot` — `load()` adopts only its own space's rows and holds the
+//     rest ASIDE verbatim; `persist()` RE-READS the slot and writes the other engine's rows back
+//     untouched; and the cap is counted PER SPACE, because `park()`'s `false` stalls a cursor.
+//   · `sync/cursor.js#createCursors` — `load()` adopts only its own space's record; every write
+//     re-reads the map and replaces only its own key. `forget()` still deletes.
+//
+// Fixing it in the PORT instead would have been shorter and would have been vacuous here: this
+// file builds its own copies of the two ports (below), so a mutation of `family/engine.js` would
+// not have reached a single assertion. The rows drive the product's own `createParkingLot` and
+// `createCursors` through ports shaped exactly like the shipped ones, and §2a pins by source that
+// the shipped ones declare a space at both call sites.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // THE MUTANTS — one run each, in a scratch copy of the tree
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-//   M-E  `sync/outbox.js` — `persist()` re-reads the slot and carries FOREIGN-space rows
-//        through instead of overwriting them.                                        → §2b
-//   M-F  `sync/outbox.js` — the cap counts `rows` for THIS space, not the whole slot.  → §2c
-//   M-G  `sync/cursor.js` — `advance()` merges its snapshot into what the slot already
-//        holds instead of replacing it.                                              → §2d
+//   M-E   `sync/outbox.js` — `persist()` writes its own rows over the slot instead of re-reading
+//         it and carrying the FOREIGN-space rows through.                             → §2b
+//   M-E2  `sync/outbox.js` — `load()` ignores `storage.space` and adopts every space's rows. → §2c
+//   M-F   `sync/outbox.js` — the cap counts every row in the lot, not this space's.    → §2f
+//   M-G   `sync/cursor.js` — the write path replaces the stored map with its own snapshot
+//         instead of merging its key into it.                                         → §2d
+//   M-G2  `sync/cursor.js` — `load()` ignores `storage.space` and adopts every space's record,
+//         so a launch-time copy of the other engine's anchor is written back over it. → §2g
+//   M-E3  `sync/outbox.js` — `persist()` `await`s the re-read unconditionally, re-opening the
+//         microtask window between the read and the write of the merge.               → §2i
+//   M-S   `family/engine.js` — all four call sites build the ports BARE again, so nothing
+//         declares a space and every module below silently reverts.                   → §2a
+//   M-S2  `family/engine.js` — the two ports are `async` again, so `localStorage`'s synchronous
+//         read-modify-write grows a suspension point in the middle of it.              → §2a
 //
 // §1's rows are all FAILED (the barriers held), so they have no mutant: there is nothing to
 // prove can fail. Their non-vacuity control is §1g, which shares an entry successfully on the
-// same rig and asserts the Privat one is still absent.
+// same rig and asserts the Privat one is still absent. §2's own non-vacuity control is §2h: the
+// scoping must not have been bought by making a lot or a cursor set stop working for one space,
+// which is exactly what every one of these fixes can be faked with.
 //
 
 import '../helpers/env.js';
@@ -278,28 +310,37 @@ describe('§1 · 21.2 · five routes into a Privat entry, and the barrier that c
 // §2 · TWO ENGINES, ONE DISK
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-/** The `parkStore` port, exactly as `family/engine.js#parkedEnvelopeStore()` builds it. */
-function parkedEnvelopeStore() {
+/**
+ * The `parkStore` port, exactly as `family/engine.js#parkedEnvelopeStore(spaceId)` builds it —
+ * ONE device-wide key, read whole and written whole, plus the one declaration it now carries.
+ *
+ * It is deliberately as DUMB as the shipped one. Everything the fix does happens on the other
+ * side of this port, in `sync/outbox.js`, which is what makes the mutants below reach it.
+ */
+function parkedEnvelopeStore(spaceId) {
   const KEY = 'langzeitplaner.parked';
   return {
     durable: true,
-    async loadRecords() {
+    space: spaceId,
+    // SYNCHRONOUS, exactly as the shipped one is, and §2i is the row that is about it.
+    loadRecords() {
       try { const raw = LS.getItem(KEY); return raw ? JSON.parse(raw) : []; } catch { return []; }
     },
-    async saveRecords(rows) {
+    saveRecords(rows) {
       try { LS.setItem(KEY, JSON.stringify(rows)); } catch { /* a full disk is not a crash */ }
     },
   };
 }
 
-/** The `chainStore` port, exactly as `family/engine.js#chainHeadStore()` builds it. */
-function chainHeadStore() {
+/** The `chainStore` port, exactly as `family/engine.js#chainHeadStore(spaceId)` builds it. */
+function chainHeadStore(spaceId) {
   const KEY = 'langzeitplaner.chainheads';
   return {
-    async loadCursors() {
+    space: spaceId,
+    loadCursors() {
       try { const raw = LS.getItem(KEY); return raw ? JSON.parse(raw) : {}; } catch { return {}; }
     },
-    async saveCursors(all) {
+    saveCursors(all) {
       try { LS.setItem(KEY, JSON.stringify(all)); } catch { /* as above */ }
     },
   };
@@ -310,100 +351,150 @@ const envFor = (space, ep = 1) => ({
   wit: '', iv: 'AAAAAAAAAAAAAAAA', ct: 'AAAA', sig: 'AAAA',
 });
 
-describe('§2 · the durable slots the two engines share, and what sharing them costs', () => {
+describe('§2 · the durable slots the two engines share, and how they now share them', () => {
   const PSP = mkSpaceId('personal');
   const FSP = mkSpaceId('family');
 
-  test('§2a · the two slots really are one key each, and BOTH engines are wired to them', () => {
-    // This is the shape the rest of §2 is about, pinned as source so a fix is a visible change.
+  test('§2a · the two slots are still one key each, and BOTH engines now DECLARE their space', () => {
+    // The slots stay device-wide — that is a fact about the disk, not the defect. What must be
+    // true is that neither engine builds a port that does not say which space it is a slice of,
+    // because an omitted argument silently restores every one of §2b/§2c/§2d at once.
     assert.match(ENGINE_SRC, /const LS_PARKED = 'langzeitplaner\.parked';/);
     assert.match(ENGINE_SRC, /const LS_CHAIN = 'langzeitplaner\.chainheads';/);
     assert.match(ENGINE_SRC, /const LS_RING = \(spaceId\) =>/, 'the ring IS per space — for contrast');
-    // `parkStore: parkedEnvelopeStore()` and `chainStore: chainHeadStore()` appear twice each:
-    // once in `startEngine` (personal) and once in `startFamilyEngine` (family).
-    assert.equal((ENGINE_SRC.match(/parkStore: parkedEnvelopeStore\(\)/g) || []).length, 2,
-      'both engines write the same parked-envelope slot');
-    assert.equal((ENGINE_SRC.match(/chainStore: chainHeadStore\(\)/g) || []).length, 2,
-      'both engines write the same chain-head slot');
-    // And the file already says the seam is owed — to `storage.js`, for a different reason.
+
+    // The factories take a space and publish it. `space:` is what `sync/outbox.js` and
+    // `sync/cursor.js` read; a factory that took the id and did not publish it would be a no-op.
+    assert.match(ENGINE_SRC, /function parkedEnvelopeStore\(spaceId\) \{[\s\S]*?space: spaceId,/);
+    assert.match(ENGINE_SRC, /function chainHeadStore\(spaceId\) \{[\s\S]*?space: spaceId,/);
+
+    // INVERTED. Both call sites — `startEngine` (personal) and `startFamilyEngine` (family) —
+    // pass a space id, and NEITHER calls the factory bare. The zero-argument spelling is the
+    // whole of the old behaviour, so it is asserted absent rather than merely outnumbered.
+    assert.equal((ENGINE_SRC.match(/parkedEnvelopeStore\(\s*\)/g) || []).length, 0,
+      'no engine may build an unscoped parked-envelope store');
+    assert.equal((ENGINE_SRC.match(/chainHeadStore\(\s*\)/g) || []).length, 0,
+      'no engine may build an unscoped chain-head store');
+    assert.equal((ENGINE_SRC.match(/parkStore: parkedEnvelopeStore\([A-Za-z][\w.]*\)/g) || []).length, 2,
+      'both engines scope the parked-envelope slot');
+    assert.equal((ENGINE_SRC.match(/chainStore: chainHeadStore\([A-Za-z][\w.]*\)/g) || []).length, 2,
+      'both engines scope the chain-head slot');
+    assert.match(ENGINE_SRC, /parkStore: parkedEnvelopeStore\(armed\.cfg\.spaceId\)/, 'the personal one');
+    assert.match(ENGINE_SRC, /parkStore: parkedEnvelopeStore\(circle\.spaceId\)/, 'the family one');
+    assert.match(ENGINE_SRC, /chainStore: chainHeadStore\(armed\.cfg\.spaceId\)/, 'the personal one');
+    assert.match(ENGINE_SRC, /chainStore: chainHeadStore\(circle\.spaceId\)/, 'the family one');
+
+    // INVERTED, second half — see §2i. A merge is a read-modify-write, and an `async` port puts
+    // a microtask boundary in the middle of one. `localStorage` is synchronous; these two ports
+    // must not pretend otherwise, or the certain data loss is traded for an intermittent one.
+    const parkBody = ENGINE_SRC.slice(ENGINE_SRC.indexOf('function parkedEnvelopeStore('));
+    const chainBody = ENGINE_SRC.slice(ENGINE_SRC.indexOf('function chainHeadStore('));
+    assert.match(parkBody.slice(0, 900), /\n    loadRecords\(\) \{/,
+      'the parked-envelope read is synchronous');
+    assert.match(parkBody.slice(0, 900), /\n    saveRecords\(rows\) \{/,
+      'and so is the write — the two must be one uninterruptible step');
+    assert.match(chainBody.slice(0, 900), /\n    loadCursors\(\) \{/);
+    assert.match(chainBody.slice(0, 900), /\n    saveCursors\(all\) \{/);
+    assert.equal(/async (loadRecords|saveRecords)\(/.test(parkBody.slice(0, 900)), false,
+      'no `async` on the parked-envelope port');
+    assert.equal(/async (loadCursors|saveCursors)\(/.test(chainBody.slice(0, 900)), false,
+      'no `async` on the chain-head port');
+
+    // And the file still says the seam is owed — to `storage.js`, for a different reason.
     assert.match(ENGINE_SRC, /OWED to `storage\.js`'s owner/);
   });
 
-  test('§2b · SUCCEEDED · the family lot DESTROYS the personal engine\'s shelved envelopes', async () => {
+  test('§2b · FAILED · the family lot cannot destroy the personal engine\'s shelved envelopes', async () => {
     LS.clear();
     // The personal engine's lot, with one envelope it gave up on. R8-4: "not replayed is not
     // destroyed" — the bytes are SHELVED, out of the replay set, retained for ever, and a
     // relaunch gives them `PARK_REVIVALS` more chances. The shelf is the only copy on this Mac.
-    const personal = createParkingLot({ storage: parkedEnvelopeStore(), now: () => 1 });
-    await personal.load();
-    const shelved = envFor(PSP);
-    assert.equal(await personal.park(PSP, shelved, '7', 'attestation'), true);
-    await personal.refuse(PSP, [shelved.oid]);
-    assert.equal(personal.shelved(PSP).length, 1, 'NON-VACUITY: the bytes really are on the shelf');
-
-    // The family engine's lot loaded BEFORE that happened — an ordinary interleaving: the two
-    // engines start together at launch.
-    const family = createParkingLot({ storage: parkedEnvelopeStore(), now: () => 1 });
-    // Its `load()` runs at launch, when the slot was empty.
-    LS.setItem('langzeitplaner.parked', '[]');
-    await family.load();
-    LS.removeItem('langzeitplaner.parked');
-    await personal.load();                      // re-read: the personal side is intact on disk
-    assert.equal(personal.shelved(PSP).length + personal.parked(PSP).length, 0);
-
-    // Do it in the honest order instead: personal shelves, THEN family parks one of its own.
-    LS.clear();
-    const p2 = createParkingLot({ storage: parkedEnvelopeStore(), now: () => 1 });
-    const f2 = createParkingLot({ storage: parkedEnvelopeStore(), now: () => 1 });
+    // R8-4 held per lot; the question here is whether it holds per DISK.
+    const p2 = createParkingLot({ storage: parkedEnvelopeStore(PSP), now: () => 1 });
+    const f2 = createParkingLot({ storage: parkedEnvelopeStore(FSP), now: () => 1 });
     await p2.load();
     await f2.load();                            // both loaded at launch, both hold []
     const ghost = envFor(PSP);
-    await p2.park(PSP, ghost, '7', 'attestation');
+    assert.equal(await p2.park(PSP, ghost, '7', 'attestation'), true);
     await p2.refuse(PSP, [ghost.oid]);          // ← retained for ever, says R8-4
-    assert.equal(p2.shelved(PSP).length, 1);
+    assert.equal(p2.shelved(PSP).length, 1, 'NON-VACUITY: the bytes really are on the shelf');
 
     await f2.park(FSP, envFor(FSP), '3', 'epoch');   // ← one ordinary family park
 
     // A relaunch: whatever is on disk is what this Mac has.
-    const after = createParkingLot({ storage: parkedEnvelopeStore(), now: () => 1 });
+    const after = createParkingLot({ storage: parkedEnvelopeStore(PSP), now: () => 1 });
     await after.load();
-    assert.equal(after.parked(FSP).length, 1, 'the family envelope survived');
-    assert.equal(after.parked(PSP).length + after.shelved(PSP).length, 0,
-      'THE BREAK: the personal engine\'s retained envelope is gone from the disk. `persist()` '
-      + 'writes `rows + shelf` — ITS OWN — into a slot the other engine also owns, and there is '
-      + 'no merge. R8-4\'s "not replayed is not destroyed" holds per lot and not per disk.');
+    assert.equal(after.shelved(PSP).length + after.parked(PSP).length, 1,
+      'THE FIX: the personal engine\'s retained envelope survived a family park. `persist()` '
+      + 're-reads the slot and writes the OTHER space\'s rows back untouched, so R8-4\'s '
+      + '"not replayed is not destroyed" now holds per DISK and not only per lot.');
+    // On the RELAUNCH the shelf row is revived into the replay set — that is R8-4's cure
+    // condition doing exactly what it exists to do — so look in both lists for it.
+    assert.deepEqual(
+      [...after.parked(PSP), ...after.shelved(PSP)].map((r) => r.oid), [ghost.oid],
+      'and it is the same envelope, byte for byte');
+    assert.equal(after.diagnostics().revived, 1, 'revived by the relaunch, as R8-4 promises');
+
+    // The family row is not collateral of the fix: BOTH survive, which is the whole point of a
+    // merge as against either engine simply winning.
+    const alsoAfter = createParkingLot({ storage: parkedEnvelopeStore(FSP), now: () => 1 });
+    await alsoAfter.load();
+    assert.equal(alsoAfter.parked(FSP).length, 1, 'the family envelope survived too');
+
+    // And the reverse direction, because a merge that only works one way is a coin toss that
+    // happened to land: the PERSONAL engine's write must not destroy the family engine's shelf.
+    const fGhost = envFor(FSP);
+    await f2.park(FSP, fGhost, '9', 'attestation');
+    await f2.refuse(FSP, [fGhost.oid]);
+    await p2.park(PSP, envFor(PSP), '8', 'epoch');
+    const back = createParkingLot({ storage: parkedEnvelopeStore(FSP), now: () => 1 });
+    await back.load();
+    assert.equal([...back.parked(FSP), ...back.shelved(FSP)].some((r) => r.oid === fGhost.oid), true,
+      'the family engine\'s shelf survives a personal park — the merge is symmetric');
   });
 
-  test('§2c · SUCCEEDED · the park CAP is shared, so family traffic can stall the personal cursor', async () => {
+  test('§2c · FAILED · the personal lot does not adopt the family space\'s undecryptable backlog', async () => {
     LS.clear();
     // A small cap, because the shape is the finding and 10 000 rows is the same shape. The
-    // product's cap is `PARK_CAP` and it is counted over `rows`, which after `load()` contains
-    // EVERY space's rows — including the ones this engine can never cure.
+    // product's cap is `PARK_CAP`; what matters is what it is counted OVER.
     assert.equal(PARK_CAP, 10000, 'the product\'s cap, for the record');
     const cap = 4;
-    const family = createParkingLot({ storage: parkedEnvelopeStore(), now: () => 1, cap });
+    const family = createParkingLot({ storage: parkedEnvelopeStore(FSP), now: () => 1, cap });
     await family.load();
     for (let i = 0; i < cap; i++) {
       // eslint-disable-next-line no-await-in-loop
       assert.equal(await family.park(FSP, envFor(FSP), String(i + 1), 'epoch'), true);
     }
+    assert.equal(family.parked(FSP).length, cap, 'NON-VACUITY: the family lot really is full');
+
     // The personal engine starts (or relaunches) and reads the same slot.
-    const personal = createParkingLot({ storage: parkedEnvelopeStore(), now: () => 1, cap });
+    const personal = createParkingLot({ storage: parkedEnvelopeStore(PSP), now: () => 1, cap });
     await personal.load();
-    assert.equal(personal.parked(FSP).length, cap,
-      'it loaded the OTHER engine\'s rows — the lot is per PROCESS, the slot is per DISK');
+    assert.equal(personal.parked(FSP).length, 0,
+      'THE FIX: it did NOT adopt the other engine\'s rows. The lot is per PROCESS and the slot is '
+      + 'per DISK, so a lot that adopts everything counts somebody else\'s undecryptable backlog '
+      + 'against its own cap, offers it to its own replay, and names the wrong space when it stalls.');
+    assert.equal(personal.diagnostics().scope, PSP, 'and it says which space it owns');
+    assert.equal(personal.diagnostics().foreign, cap, 'and how many rows it is carrying for the other');
+
     const mine = await personal.park(PSP, envFor(PSP), '1', 'attestation');
-    assert.equal(mine, false,
-      'THE BREAK: `park()` returns false, which its own contract says means "the caller MUST NOT '
-      + 'advance the cursor past it". A family space nobody can decrypt has stalled the PERSONAL '
-      + 'space\'s sync, and the sentence the user is shown names the family space.');
+    assert.equal(mine, true,
+      '`park()` returns true, so the caller may advance the cursor. A family space nobody can '
+      + 'decrypt no longer stalls the PERSONAL space\'s sync.');
+
+    // And the family lot's rows are still there afterwards — the personal park merged, it did not
+    // win. Without this the row would pass by having destroyed the thing it was protecting.
+    const after = createParkingLot({ storage: parkedEnvelopeStore(FSP), now: () => 1, cap });
+    await after.load();
+    assert.equal(after.parked(FSP).length, cap, 'all four family envelopes are still on disk');
   });
 
-  test('§2d · SUCCEEDED · the family engine rolls the personal space\'s chain anchor backwards', async () => {
+  test('§2d · FAILED · the family engine cannot delete the personal space\'s chain anchor', async () => {
     LS.clear();
-    // Both engines start. Each `createCursors` loads the whole map and writes the whole map.
-    const personal = createCursors({ storage: chainHeadStore() });
-    const family = createCursors({ storage: chainHeadStore() });
+    // Both engines start. Each `createCursors` now loads only its own record and merges its own
+    // key on write.
+    const personal = createCursors({ storage: chainHeadStore(PSP) });
+    const family = createCursors({ storage: chainHeadStore(FSP) });
     await personal.load();
     await family.load();
 
@@ -416,21 +507,176 @@ describe('§2 · the durable slots the two engines share, and what sharing them 
     await family.advance(FSP, '5', { seq: '5', chain: 'BBBB' }, async () => {});
 
     // Relaunch.
-    const after = createCursors({ storage: chainHeadStore() });
+    const after = createCursors({ storage: chainHeadStore(PSP) });
     await after.load();
-    assert.deepEqual(after.head(FSP), { seq: '5', chain: 'BBBB' }, 'the family anchor is there');
-    assert.equal(after.head(PSP), null,
-      'THE BREAK: the personal space\'s verified chain head is gone. `saveCursors(snapshot())` '
-      + 'writes the writer\'s OWN map, and the family engine\'s map never had the personal row.');
-    assert.equal(after.fromGenesis(PSP), false,
-      'and `fromGenesis` — the right to call an unknown witness a fork — went with it');
+    assert.deepEqual(after.head(PSP), { seq: '100', chain: 'AAAA' },
+      'THE FIX: the personal space\'s verified chain head survived an ordinary family pull. The '
+      + 'write merges this space\'s key into the stored map instead of replacing the map with a '
+      + 'snapshot that never had the other engine\'s row in it.');
+    assert.equal(after.fromGenesis(PSP), true,
+      'and `fromGenesis` — the right to call an unknown witness a fork — survived with it');
+
+    const alsoAfter = createCursors({ storage: chainHeadStore(FSP) });
+    await alsoAfter.load();
+    assert.deepEqual(alsoAfter.head(FSP), { seq: '5', chain: 'BBBB' }, 'the family anchor is there too');
+
+    // `forget()` must still DELETE through the merge — 20.3/20.4, a space this Mac has left. A
+    // merge that could not delete would be the opposite defect and would look exactly like a fix.
+    await family.forget(FSP);
+    const gone = createCursors({ storage: chainHeadStore(FSP) });
+    await gone.load();
+    assert.equal(gone.head(FSP), null, 'a forgotten space is gone from the slot');
+    const survived = createCursors({ storage: chainHeadStore(PSP) });
+    await survived.load();
+    assert.deepEqual(survived.head(PSP), { seq: '100', chain: 'AAAA' },
+      'and forgetting the family space did not take the personal anchor with it');
+  });
+
+  test('§2f · the cap is counted PER SPACE, so one space can never stall another', async () => {
+    // The second line of defence, and the only one an UNSCOPED lot has. `sync/outbox.js` is used
+    // by callers that build their own ports — `tests/helpers/fleet.js` does — and a lot that
+    // holds two spaces because nobody told it otherwise must still bound them separately.
+    // `park()` returning `false` means "do not advance the cursor", i.e. it stalls a SPACE; a cap
+    // counted over every row lets a backlog in one space stop sync in another.
+    const cap = 4;
+    const lot = createParkingLot({ now: () => 1, cap });   // no storage, no scope declared
+    await lot.load();
+    assert.equal(lot.diagnostics().scope, null, 'NON-VACUITY: this lot is deliberately unscoped');
+    for (let i = 0; i < cap; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      assert.equal(await lot.park(FSP, envFor(FSP), String(i + 1), 'epoch'), true);
+    }
+    assert.equal(await lot.park(FSP, envFor(FSP), '5', 'epoch'), false,
+      'the family space is at its cap and stalls — that half is unchanged (F-6)');
+    assert.equal(await lot.park(PSP, envFor(PSP), '1', 'attestation'), true,
+      'THE FIX: the personal space has its own bound and is not stalled by somebody else\'s '
+      + 'backlog. The disk cost is unchanged in kind: `cap` per space, and a Mac belongs to two.');
+    assert.equal(lot.overflowed, 1, 'and exactly one refusal was counted, for the space that earned it');
+  });
+
+  test('§2g · a launch-time copy of the other engine\'s anchor cannot be written back over it', async () => {
+    LS.clear();
+    // The failure a merge INTRODUCES if it is bolted on without the read-side scope: an instance
+    // that adopted every record at launch would carry a stale copy of the other engine's anchor
+    // and write it back on its next advance — a ROLLBACK, which is strictly worse than the
+    // deletion §2d measured, because a rolled-back head looks like a valid one.
+    const personal = createCursors({ storage: chainHeadStore(PSP) });
+    await personal.load();
+    await personal.advance(PSP, '100', { seq: '100', chain: 'AAAA' }, async () => {}, { fromGenesis: true });
+
+    // The family engine launches now — after the personal anchor already exists on disk.
+    const family = createCursors({ storage: chainHeadStore(FSP) });
+    await family.load();
+    assert.equal(family.head(PSP), null,
+      'it did not adopt the personal record; `spaces()` holds only what this engine owns');
+    assert.deepEqual(family.spaces(), [], 'nothing at all, in fact — the slot held no family row');
+    assert.equal(family.diagnostics().scope, FSP);
+    assert.equal(family.diagnostics().foreign, 1, 'the personal record is held aside, not adopted');
+
+    // The personal engine keeps working while the family engine is up.
+    await personal.advance(PSP, '200', { seq: '200', chain: 'CCCC' }, async () => {});
+    // …and only THEN does the family engine write.
+    await family.advance(FSP, '5', { seq: '5', chain: 'BBBB' }, async () => {});
+
+    const after = createCursors({ storage: chainHeadStore(PSP) });
+    await after.load();
+    assert.deepEqual(after.head(PSP), { seq: '200', chain: 'CCCC' },
+      'THE FIX: the newer personal anchor stands. The family engine re-reads the map at write '
+      + 'time and never held a copy of the personal record to write back in the first place.');
+  });
+
+  test('§2h · NON-VACUITY · a scoped lot and a scoped cursor set still do their own job', async () => {
+    LS.clear();
+    // Every fix in §2 can be faked by making the scoped side stop working: a lot that adopts
+    // nothing, a cursor set that persists nothing, and §2b/§2c/§2d/§2g all go green. This row is
+    // the control. It uses ONE space, so the sharing is not in the picture at all.
+    const lot = createParkingLot({ storage: parkedEnvelopeStore(PSP), now: () => 1 });
+    await lot.load();
+    const e = envFor(PSP);
+    assert.equal(await lot.park(PSP, e, '3', 'attestation'), true);
+    assert.equal(lot.parked(PSP).length, 1, 'it parks');
+    const relaunch = createParkingLot({ storage: parkedEnvelopeStore(PSP), now: () => 1 });
+    await relaunch.load();
+    assert.deepEqual(relaunch.parked(PSP).map((r) => r.oid), [e.oid], 'and the park is DURABLE');
+    assert.equal(await relaunch.release(PSP, [e.oid]), 1, 'and an op that opened is released');
+    const third = createParkingLot({ storage: parkedEnvelopeStore(PSP), now: () => 1 });
+    await third.load();
+    assert.equal(third.parked(PSP).length + third.shelved(PSP).length, 0,
+      'and the release is durable too — the merge did not resurrect it');
+
+    const cur = createCursors({ storage: chainHeadStore(PSP) });
+    await cur.load();
+    let committed = false;
+    assert.equal(await cur.advance(PSP, '42', { seq: '42', chain: 'DDDD' },
+      async () => { committed = true; }), true);
+    assert.equal(committed, true, 'the commit still runs FIRST (ADR 003 §3.3)');
+    const reread = createCursors({ storage: chainHeadStore(PSP) });
+    await reread.load();
+    assert.deepEqual(reread.head(PSP), { seq: '42', chain: 'DDDD' }, 'and the anchor is DURABLE');
+    assert.equal(await reread.advance(PSP, '7', null, async () => {}), false,
+      'and it still refuses to go backwards');
+  });
+
+  test('§2i · the two engines writing AT THE SAME TIME still both land', async () => {
+    LS.clear();
+    // The failure a merge INTRODUCES if it is bolted on carelessly, and the reason the ports are
+    // synchronous. A merge is a read-modify-write; a read-modify-write with a suspension point in
+    // the middle is a lost update whenever both engines write in the same cadence tick, which is
+    // the ORDINARY case and not the rare one:
+    //
+    //   A reads (suspends) · B reads (suspends) · A writes its rows + the empty set it read ·
+    //   B writes its rows + the empty set IT read · A's row is gone.
+    //
+    // That trades a certain data loss for an intermittent one, which is strictly worse — an
+    // intermittent one survives a suite. Neither call below is awaited until both have been
+    // issued, so if there is a window between the read and the write, this row falls into it.
+    const p = createParkingLot({ storage: parkedEnvelopeStore(PSP), now: () => 1 });
+    const f = createParkingLot({ storage: parkedEnvelopeStore(FSP), now: () => 1 });
+    await p.load();
+    await f.load();
+    const pe = envFor(PSP);
+    const fe = envFor(FSP);
+    const both = await Promise.all([
+      p.park(PSP, pe, '1', 'attestation'),
+      f.park(FSP, fe, '1', 'epoch'),
+    ]);
+    assert.deepEqual(both, [true, true], 'both parks reported success…');
+
+    const after = createParkingLot({ storage: parkedEnvelopeStore(PSP), now: () => 1 });
+    const afterF = createParkingLot({ storage: parkedEnvelopeStore(FSP), now: () => 1 });
+    await after.load();
+    await afterF.load();
+    assert.deepEqual(after.parked(PSP).map((r) => r.oid), [pe.oid],
+      '…and BOTH are on the disk. `park()` returning true while the bytes are not there is R8-5, '
+      + 'and a merge with a suspension point in it is R8-5 by another road.');
+    assert.deepEqual(afterF.parked(FSP).map((r) => r.oid), [fe.oid]);
+
+    // The same shape for the chain anchors, which advance once per pull and therefore collide on
+    // exactly the cadence tick where both engines pull.
+    LS.clear();
+    const cp = createCursors({ storage: chainHeadStore(PSP) });
+    const cf = createCursors({ storage: chainHeadStore(FSP) });
+    await cp.load();
+    await cf.load();
+    await Promise.all([
+      cp.advance(PSP, '100', { seq: '100', chain: 'AAAA' }, async () => {}, { fromGenesis: true }),
+      cf.advance(FSP, '5', { seq: '5', chain: 'BBBB' }, async () => {}),
+    ]);
+    const back = createCursors({ storage: chainHeadStore(PSP) });
+    const backF = createCursors({ storage: chainHeadStore(FSP) });
+    await back.load();
+    await backF.load();
+    assert.deepEqual(back.head(PSP), { seq: '100', chain: 'AAAA' }, 'the personal anchor landed');
+    assert.deepEqual(backF.head(FSP), { seq: '5', chain: 'BBBB' }, 'and so did the family one');
   });
 
   test('§2e · the transport cursor itself is NOT affected, and that is the line that holds', async () => {
     // ADR 006 §9.1 W1's cursor lives in `checkpoint().cursors`, written by `store.js` below the
-    // board, and it is per space there. What §2d loses is `chain.js`'s verification anchor, which
-    // is a DIAGNOSTIC (ADR 002 §5.4, round 9). Naming the boundary is what keeps the finding
-    // honestly ranked: this is a loss of fork DETECTION on the personal space, not a lost op.
+    // board, and it is per space there. What §2d USED to lose is `chain.js`'s verification anchor,
+    // which is a DIAGNOSTIC (ADR 002 §5.4, round 9). Naming the boundary is what kept the finding
+    // honestly ranked — it was a loss of fork DETECTION on the personal space, not a lost op — and
+    // the boundary is worth keeping asserted now that the anchor survives, because it is the
+    // reason this row is a MEDIUM that shipped rather than a CRITICAL that stopped E7.
     const C = await buildCircle(['papa']);
     await refreshRoster(C);
     await found(C);
