@@ -51,6 +51,55 @@ export function useSharing(mod) {
   return sharing;
 }
 
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// THE DISPLAY-NAME PORT (17.6, LZP-805) — ONE RESOLVER FOR THE THREE SURFACES THAT NEED A NAME
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// 17.6 wants „von **Mama**", not „von M". The names live in `member:` registers, which reach the
+// UI through `store._memberCtx()` → `materialize()` → the entry's `initial` — the INITIAL, and
+// deliberately not the name: an entry does not carry the roster. `family/membersui.js` has the
+// roster (`readMembers`), and it is a `family/` module, so no boot-graph file may import it
+// (ADR 003 §7 gate 2, the same rule that keeps `sharing` above behind `useSharing`).
+//
+// So: a port, installed by `family/mount.js` in the same breath as `useSharing`, and read by
+// THREE surfaces — this file's attribution line (17.6), `find.js`'s owner handle (A6) and
+// `print.js`'s member key (A3). They import `memberNameOf` from here rather than each declaring
+// a port of their own, because three ports are three chances for „Mama" to be spelt three ways,
+// and because the install site would then have to remember all three.
+//
+// Absent (solo mode, or a family Mac before the roster folds) the resolver answers `null` and
+// every caller falls back the way `sharing.js:attributionLine` documents: the initial, then
+// „einem Mitglied". Honest at every stage, and never a guess.
+let memberNames = null;
+
+/**
+ * Install the display-name resolver. `family/mount.js` is the one door; `null` uninstalls it,
+ * which is what leaving a circle must do (20.3) — a name that is no longer ours to know.
+ * @param {((memberId: string) => string|null)|null} fn
+ */
+export function useMemberNames(fn) {
+  memberNames = typeof fn === 'function' ? fn : null;
+  return memberNames;
+}
+
+/**
+ * The member's display name, or `null` when there is none to be had.
+ *
+ * Total by construction: a resolver that throws (a roster mid-refresh, a port whose module has
+ * been torn down) must not take a popover, a search or a print sheet with it — provenance is a
+ * courtesy, and a courtesy may not be load-bearing.
+ * @param {string} memberId @returns {string|null}
+ */
+export function memberNameOf(memberId) {
+  if (!memberNames || !memberId) return null;
+  try {
+    const n = memberNames(memberId);
+    return typeof n === 'string' && n.trim() ? n.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 export const popoverOpen = () => !!node;
 
 export function closePopover() {
@@ -111,9 +160,14 @@ export function openDayPopover(anchor, date, opts = {}) {
   // `share` is the ONE open disclosure, remembered across `render()` so a level change does not
   // slam the strip shut under the finger that just used it — and so the §7.4 downgrade sentence
   // is still on screen at the moment it is true. `{id, kind, lastChange}` or null.
-  // `nameOf` is the display-name port (17.6); there is no roster carrying names on this device
-  // yet, so it is absent and `attributionLine` falls back honestly. See the report.
-  ctx = { date, onChange: opts.onChange || (() => {}), share: null, nameOf: opts.nameOf || null };
+  // `nameOf` is the display-name port (17.6). `opts.nameOf` lets a caller override it — that is
+  // how the DOM suites drive a named roster without a Familienkreis — and otherwise it is
+  // `memberNameOf`, the one resolver `family/mount.js` installs. Uninstalled it answers `null`
+  // and `attributionLine` falls back to the initial, then to „einem Mitglied".
+  ctx = {
+    date, onChange: opts.onChange || (() => {}), share: null,
+    nameOf: opts.nameOf || memberNameOf,
+  };
   node = el('div', 'popover');
   render();
   document.body.appendChild(node);
@@ -160,7 +214,10 @@ function render() {
   node.appendChild(head);
 
   const notes = notesOn(date);
-  for (const n of notes) node.appendChild(noteRow(n, date));
+  for (const n of notes) {
+    node.appendChild(noteRow(n, date));
+    appendAttribution(n);
+  }
 
   const bars = barsOn(date);
   if (bars.length) {
@@ -168,7 +225,10 @@ function render() {
     cap.style.margin = '7px 0 1px';
     cap.textContent = t('barsHere');
     node.appendChild(cap);
-    for (const b of bars) node.appendChild(barRow(b));
+    for (const b of bars) {
+      node.appendChild(barRow(b));
+      appendAttribution(b);
+    }
   }
 
   reopenSharing();
@@ -278,6 +338,52 @@ const rowText = (entry, fallback) =>
 /** 17.6, through the port. `null` in solo mode, where there is nobody to attribute anything to. */
 const attribution = (entry) =>
   (sharing ? sharing.attributionLine(entry, { nameOf: ctx?.nameOf }) : null);
+
+/**
+ * 17.6 — „von Mama · geteilt · geändert So.", ON THE ROW, not behind the disclosure (LZP-805).
+ *
+ * ── WHY IT IS NOT ONLY THE `title` AND NOT ONLY THE STRIP ────────────────────────────────────
+ *
+ * Both already existed and neither is what 17.6 asks for. The strip carries the same sentence,
+ * but reaching it is a click on the trigger — and the story's own words are *"provenance is one
+ * glance away"*. A hover tooltip is not a glance either: it costs a second of dwell, it is
+ * invisible to a keyboard, and it cannot be read next to the row above it, which is the actual
+ * question on a family day — „whose are these three?" So the line is rendered, once, under the
+ * row it belongs to. The `title` stays exactly as it was: hover and popover, as the story says.
+ *
+ * ── WHAT IT COSTS, AND WHERE ─────────────────────────────────────────────────────────────────
+ *
+ * ZERO BOARD PIXELS. This is the popover, the one surface v1 built precisely because it is not
+ * the grid ("the one place a day gets room to breathe"); the 22 px row is untouched by this
+ * ticket, and by 17.6, which ends with *"but never printed on the board"*. Measured cost inside
+ * the card: 8.5 px type on an 11 px line box + 3 px of separation ≈ 13 px per attributed row —
+ * and only rows that HAVE provenance pay it. A day with three of my own entries renders exactly
+ * the pixels it rendered in v1.
+ *
+ * ── WHAT IT IS NOT ───────────────────────────────────────────────────────────────────────────
+ *
+ * Provenance, never presence. Who wrote it and when it last changed; never who has looked at it,
+ * who has it open, or whether it has been read (Principle 9, and §6's "no snitch mechanics").
+ * `family/sharing.js:FORBIDDEN_CLAIMS` is the audited list and this line adds no string of its
+ * own — it renders `attributionLine`'s, so there is nothing here that could drift away from it.
+ *
+ * The strip carries the same sentence, so the line stands down while the strip is open for THIS
+ * entry rather than saying it twice in 20 px. That is ONE rule with ONE implementation and it
+ * lives in `openSharing`/`closeDisclosures`, not here — a second copy of it as a `ctx.share`
+ * test at build time would have been right on a re-render and wrong on the click itself, which
+ * inserts the strip without one.
+ */
+function appendAttribution(entry) {
+  const line = attribution(entry);
+  if (!line) return;
+  // `share-attr` is `sharing.js`'s own class — the same 8.5 px ink as the sentence in the strip,
+  // so the two homes of one sentence cannot look like two different facts. Its CSS ships with
+  // the module (`SHARING_CSS`), and every row that can reach this point has already built a
+  // trigger through `ensureSharingCss()`.
+  const n = el('div', 'pop-attr share-attr', line);
+  n.style.padding = '0 0 3px 13px';        // aligned under `.txt`: the 7 px dot + the 6 px gap
+  node.appendChild(n);
+}
 
 function noteRow(n, date) {
   const row = el('div', 'pop-row');
@@ -422,8 +528,16 @@ function closeDisclosures() {
   if (!node) return;
   node.querySelector('.pop-cat')?.remove();
   node.querySelector('.pop-share')?.remove();
+  // 17.6 — the row's own line comes back the moment the strip that was saying it for it goes.
+  for (const a of node.querySelectorAll('.pop-attr[hidden]')) a.hidden = false;
   for (const b of node.querySelectorAll('.share-trig')) b.setAttribute('aria-expanded', 'false');
 }
+
+/** The attribution line that belongs to `row`, if it has one. */
+const attrLineOf = (row) => {
+  const next = row.nextElementSibling;
+  return next && next.classList.contains('pop-attr') ? next : null;
+};
 
 function openSharing(row, entry, kind, lastChange = null) {
   closeDisclosures();
@@ -448,7 +562,12 @@ function openSharing(row, entry, kind, lastChange = null) {
     onLevel: (level) => applyLevel(entry.id, kind, level),
     onCoEdit: (on) => applyCoEdit(entry.id, kind, on),
   });
-  row.insertAdjacentElement('afterend', strip);
+  // 17.6 — one sentence per card. The strip says it too, so the row's line stands down for as
+  // long as the strip is open (`closeDisclosures` brings it back). Hidden rather than removed:
+  // it is the same node, so nothing has to remember how to rebuild it.
+  const line = attrLineOf(row);
+  if (line) line.hidden = true;
+  (line || row).insertAdjacentElement('afterend', strip);
   row.querySelector('.share-trig')?.setAttribute('aria-expanded', 'true');
   return strip;
 }
@@ -559,5 +678,7 @@ function toggleSwatches(row, currentCatId, apply) {
     sw.addEventListener('click', () => { apply(c.id); refresh(); });
     strip.appendChild(sw);
   }
-  row.insertAdjacentElement('afterend', strip);
+  // Below the row AND below its attribution line, if it has one (17.6): the sentence belongs to
+  // the row, and a swatch strip wedged between the two would separate them.
+  (attrLineOf(row) || row).insertAdjacentElement('afterend', strip);
 }

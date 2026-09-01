@@ -266,12 +266,22 @@ function requireFerien(s) {
   skip(`bundled Schulferien table (horizon ${FERIEN_META.horizon}, verified=${FERIEN_META.verified}) no longer covers ${M.firstISO}…${M.lastISO}`);
 }
 
-/** Ferien days for a Bundesland, split by weekend, restricted to the window. */
+/** Ferien days for a Bundesland, split by weekend, restricted to the window.
+ *
+ *  `weekday`/`weekend` must EXCLUDE today, on the same rule `plainDate()` and
+ *  `holidayDate()` above already apply. The window begins on today, so the
+ *  first Ferien weekday in it *is* today whenever the run happens to fall
+ *  inside a Sommerferien — and Today's own tint deliberately outranks `.fer`
+ *  (that rule has its own test, 8.1 · "Today beats a weekend inside Ferien").
+ *  Sampling today here characterised the Today rule a second time under the
+ *  wrong name, and turned 7.2 into a test whose answer depends on the date it
+ *  is run. `all` stays complete: every Ferien day, today included, must shade. */
 function ferienSample(stateCode) {
   const idx = ferienIndex(stateCode, 'de');
   const inWin = WINDOW_DATES.filter((d) => idx.has(d));
-  const weekday = inWin.find((d) => { const w = dowISO(d); return w !== 0 && w !== 6; });
-  const weekend = inWin.find((d) => { const w = dowISO(d); return w === 0 || w === 6; });
+  const plain = inWin.filter((d) => d !== M.today);
+  const weekday = plain.find((d) => { const w = dowISO(d); return w !== 0 && w !== 6; });
+  const weekend = plain.find((d) => { const w = dowISO(d); return w === 0 || w === 6; });
   return { idx, all: inWin, weekday, weekend };
 }
 

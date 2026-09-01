@@ -93,6 +93,85 @@
 // existing user's board. See `renderFamilyLegend`.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
+// THE PER-MEMBER DEVICE COUNT — ADR 002 §8.5's ONE NAMED MITIGATION, AND IT IS NOT A STATISTIC
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// ADR 002 §8.5 („There is no key transparency") accepts, in writing, that a malicious relay or a
+// malicious admin can attest an extra device and receive the family key, and it names exactly ONE
+// mitigation: *"the member list shows per-member device counts, so an extra device is visible to a
+// curious member."* §2.3's revocation note repeats it and draws the conclusion out loud — **"the
+// member list is therefore a security surface, not just a roster"**.
+//
+// It had reached no screen. `server/core/handlers/members.js`'s `MEMBER_PROJECTION` publishes
+// `devices`, the relay fills it, and `family/mount.js:refreshRoster` mapped the response down to
+// `{memberId, colorRef, removedAt}` — so the one fact the whole mitigation is made of was dropped
+// one line before the reader that would have rendered it, and `MemberRow` had no field to put it
+// in. THAT IS FIXED HERE ON THIS SIDE ONLY: `readMembers` now reads `roster[].devices`, and
+// `mount.js` must stop discarding the field. Until it does, the count is `null` — see below for
+// why that renders as nothing rather than as `0`.
+//
+// ── THREE DECISIONS, BECAUSE A SECURITY CONTROL THAT NAGS IS A CONTROL PEOPLE TURN OFF ────────
+//
+//  1. THE COUNT COMES FROM THE RELAY, NOT FROM THE LOG. Everywhere else in this file the log wins
+//     (see „where a member's name comes from"), and here it deliberately does not. The set that
+//     matters for §8.5 is the set a rotating client WRAPS THE EPOCH KEY TO, and
+//     `crypto/spacekeys.js:familyRecipients()` builds that from the relay's device rows. A count
+//     taken from the `dev.<short>` attestations in the log would answer a different question —
+//     „how many devices has this member told the circle about" — and would show `1` for exactly
+//     the device the mitigation exists to reveal. `null` when the roster has not been fetched,
+//     and `null` is „I do not know", never `0`.
+//
+//  2. `1` RENDERS AS NOTHING. It is the default and the quiet state, and the argument is the
+//     exposure badge's verbatim (ADR 004 §6): *"the absence of a badge means private, which is the
+//     default and the quiet state, and a glyph for the quiet state would put ink on every row"*.
+//     A number on all eight rows of a healthy circle is a statistic; a number on the one row that
+//     is not one is a fact worth looking at. **Anything that is not `1` shows** — `2` because that
+//     is the phantom, and `0` because a member the relay lists with no device at all is a row
+//     nobody can wrap to and is equally not the normal case.
+//
+//  3. IT IS NOT PAINTED AS AN ALARM, and that is the hardest of the three to hold. The count that
+//     appears first, on nearly every real installation, is MY OWN `2` — story 19.4 is the PO
+//     pairing his laptop, and it is the intended, requested state. A red tag there would teach
+//     „this number means something is wrong" using the one instance where nothing is. So the tag
+//     is the same quiet `.member-tag` the „du" and „Verwaltung" badges use, and what makes it read
+//     as a control rather than as trivia is the ONE SENTENCE under the list
+//     (`MEMBERS_COPY.devicesMean`) — present only while some row is actually showing a number.
+//     I learn the vocabulary on the row whose answer I already know; the day it appears on Papa's
+//     row I know what I am looking at and the sentence is still there.
+//
+// WHAT THIS DOES NOT DO, so nobody mistakes it for more: it does not verify anything. §8.5's real
+// fix is a signed, append-only, cross-verified device log and is in the backlog. This makes an
+// extra device VISIBLE TO A CURIOUS MEMBER, which is the whole of what the ADR claims.
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 17.5 — THE „neu" DOT IS NOT IN THE LEGEND, AND THAT IS THE DECISION, NOT AN OMISSION
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// 17.5's dot belongs to an ENTRY and is drawn on the entry: `board.js:210`'s `neuDot()`, 5 px in
+// the note's prefix slot, priced beside the other four markers in `layout.js:PREFIX_COST_PX` and
+// measured in `belegt-render.dom.js` §5. The obvious next move — aggregate it onto the member's
+// chip in the legend, so „Papa has new ink" is visible without scanning twelve months — was
+// considered here and is REFUSED. Three reasons, in the order they decided it:
+//
+//  1. **AN AGGREGATE PER PERSON IS A PRESENCE INDICATOR.** The dot on an entry says *this ink is
+//     new*. A dot on Papa's chip says *Papa has been active*, which is a fact about a person and
+//     not about the board — and Principle 9's list of forbidden mechanics opens with exactly that:
+//     „No presence indicators, no read receipts". The two are one pixel apart on screen and on
+//     opposite sides of the principle.
+//  2. **IT IS A COUNTER WITH THE DIGITS FILED OFF.** Principle 10 asks that changes „arrive
+//     quietly, never as popups or badges demanding attention", and 17.5 says „no popups, no
+//     counters, no push". A mark in the CHROME — which is on screen at every scroll position, in
+//     every month, until it is discharged — is the badge-on-the-app-icon shape that sentence
+//     exists to refuse. The board's dot is on the ink itself, where you meet it by looking at the
+//     day; that is the wall-calendar behaviour 17.5 names.
+//  3. **IT WOULD FIRE LOUDEST FOR A MEMBER I HAVE HIDDEN.** 17.3 lets me take Papa off my board.
+//     A chip dot would then be the only thing left saying „Papa did something you are not looking
+//     at" — nagging me about precisely the thing I chose not to see.
+//
+// So the family half of the legend has NO marker, and `family-legend.dom.js` §3 pins that: a peer
+// adding an entry lights the board and leaves the toolbar exactly as it was, byte for byte.
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
 // WHAT THIS FILE MAY NOT DO
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
@@ -161,6 +240,37 @@ export const MEMBERS_COPY = Object.freeze({
   },
   you: { de: 'du', en: 'you' },
   admin: { de: 'Verwaltung', en: 'Admin' },
+
+  // ── the device count (ADR 002 §8.5) ────────────────────────────────────────────────────────
+  //
+  // „Geräte" and not „Macs": the count is of DEVICE ROWS on the relay, and a row is whatever
+  // presented a key. Naming the hardware would quietly promise that the relay knows what kind of
+  // machine it is, which is the assumption the whole mitigation exists to distrust.
+  //
+  // The singular exists although `1` never renders (see the header): `0` and `2` are not the only
+  // reachable values — a member could have three — and a copy table with a hole in it is how a
+  // future caller ends up printing „1 Geräte".
+  deviceCount: {
+    de: (n) => (n === 1 ? '1 Gerät' : `${n} Geräte`),
+    en: (n) => (n === 1 ? '1 device' : `${n} devices`),
+  },
+  // The tooltip on the tag, and the reason it is a whole sentence rather than „Geräte": the tag
+  // is two characters wide and has to be able to explain itself where it stands.
+  deviceCountTip: {
+    de: (who, n) => `${who}: ${n === 1 ? 'ein Gerät' : `${n} Geräte`} im Kreis angemeldet.`,
+    en: (who, n) => `${who}: ${n === 1 ? 'one device' : `${n} devices`} registered in the circle.`,
+  },
+  // 20.5's neighbour, and the sentence that makes the number a control instead of trivia. It is
+  // rendered ONLY while some row is showing a count, so a healthy circle carries no explanation
+  // of a number nobody can see. Neither half may be dropped: what is normal, and what to do.
+  devicesMean: {
+    de: 'Jedes Gerät im Kreis kann die geteilten Einträge lesen. Ein Mac pro Person ist der '
+      + 'Normalfall; zwei sind es, wenn jemand Laptop und Rechner gekoppelt hat. Steht hier eine '
+      + 'Zahl, die niemand erklären kann, frag nach — und nimm die Person notfalls aus dem Kreis.',
+    en: 'Every device in the circle can read the shared entries. One Mac per person is the normal '
+      + 'case; two when somebody has paired a laptop. If a number here is one nobody can explain, '
+      + 'ask — and remove the person from the circle if the answer does not come.',
+  },
 
   // 20.5, and the one sentence that keeps the whole panel honest. It sits under the member list,
   // where the „Verwaltung" badge is visible, and not in an About page nobody opens.
@@ -255,6 +365,9 @@ export const MEMBERS_COPY = Object.freeze({
  * @property {boolean} isMe
  * @property {boolean} isAdmin
  * @property {boolean} hidden           17.3, device-local
+ * @property {number|null} deviceCount  ADR 002 §8.5 — how many non-revoked device rows the RELAY
+ *                                      holds for this member. `null` is „not known on this
+ *                                      launch" (no roster yet) and is not the same fact as `0`.
  */
 
 /**
@@ -263,7 +376,13 @@ export const MEMBERS_COPY = Object.freeze({
  * @property {() => string|null} [adminId]      the admin's MemberId, from the `space:` register
  * @property {() => boolean} [keysPending]      D9: I am a member and hold no epoch key yet
  * @property {(profile:{displayName:string, colorRef:string}) => Promise<void>} [setProfile]
- * @property {() => Array<{memberId:string, colorRef:string|null, removedAt:string|null}>} [roster]
+ * @property {() => Array<{memberId:string, colorRef:string|null, removedAt:string|null,
+ *           devices?:Array<{deviceId?:string, revokedAt?:string|null}>}>} [roster]
+ *           The relay's member list. `devices` is `MEMBER_PROJECTION`'s own field and carries
+ *           `DEVICE_PROJECTION`'s rows; only its LENGTH is read here, and only the non-revoked
+ *           rows are counted (ADR 002 §8.5 — see the header). **`family/mount.js:refreshRoster`
+ *           currently drops the field on the way in**; until it stops, `deviceCount` is `null`
+ *           everywhere and the tag renders nowhere, which is the correct rendering of „unknown".
  * @property {() => Map} [registers]  the RegisterMap to read members out of. Defaults to
  *           `store.registers()`, which is what the shipped app passes nothing for. It exists so
  *           `tests/tier2/family-members.dom.js` can drive eight members through the REAL legend
@@ -336,6 +455,44 @@ export function initialOf(name) {
 }
 
 /**
+ * ADR 002 §8.5 — how many devices the RELAY holds for each member, from the roster it published.
+ *
+ * `Map<memberId, number>`, and a member is ABSENT from the map rather than `0` when the roster
+ * did not describe her devices at all. The distinction is the whole reason this is a Map and not
+ * a plain count: `null` („I have not been told") and `0` („the relay says nobody") are different
+ * facts, only one of them is worth a tag, and collapsing them would put a `0 Geräte` badge beside
+ * all eight members of a healthy circle whose roster fetch happened to fail (19.3 — an
+ * unreachable relay is not a sentence, and it is certainly not eight of them).
+ *
+ * A REVOKED DEVICE IS NOT COUNTED. `revokedAt` is `DEVICE_PROJECTION`'s own field and a revoked
+ * row is wrapped no further epoch key (ADR 002 §4.2 step 4 deletes its `KeyWrap`s), so it is not
+ * one of the devices that can read what is shared from here on. It stays in the response, which
+ * is why it has to be excluded HERE and cannot be excluded by not asking.
+ *
+ * Nothing about the shape is trusted: `devices` arrives from the network, and a relay that
+ * answered `devices: 9999` or `devices: {length: 9999}` must produce „unknown", not a nine-
+ * thousand-device scare on somebody's mother's screen.
+ *
+ * @param {Array|undefined} roster @returns {Map<string, number>}
+ */
+function deviceCounts(roster) {
+  const out = new Map();
+  for (const r of Array.isArray(roster) ? roster : []) {
+    const id = r && r.memberId;
+    if (typeof id !== 'string' || !id) continue;
+    if (!Array.isArray(r.devices)) continue;              // absent ⇒ unknown, never zero
+    let n = 0;
+    for (const d of r.devices) {
+      if (!d || typeof d !== 'object') continue;
+      if (d.revokedAt) continue;
+      n += 1;
+    }
+    out.set(id, n);
+  }
+  return out;
+}
+
+/**
  * Every member the log knows, as rows.
  *
  * PURE over `(regs, ctx)` so the two surfaces and the tests read the same function. It reads
@@ -356,6 +513,7 @@ export function readMembers(regs, ctx = {}) {
   const adminId = ctx.adminId ?? null;
   const hidden = ctx.hidden instanceof Set ? ctx.hidden : new Set(ctx.hidden || []);
   const rows = new Map();
+  const devices = deviceCounts(ctx.roster);
 
   for (const key of regs ? regs.keys() : []) {
     if (typeof key !== 'string' || !key.startsWith('member:')) continue;
@@ -380,6 +538,7 @@ export function readMembers(regs, ctx = {}) {
       isMe: me !== null && memberId === me,
       isAdmin: adminId !== null && memberId === adminId,
       hidden: hidden.has(memberId),
+      deviceCount: devices.has(memberId) ? devices.get(memberId) : null,
     });
   }
 
@@ -406,6 +565,7 @@ export function readMembers(regs, ctx = {}) {
       isMe: me !== null && id === me,
       isAdmin: adminId !== null && id === adminId,
       hidden: hidden.has(id),
+      deviceCount: devices.has(id) ? devices.get(id) : null,
     });
   }
 
@@ -591,6 +751,10 @@ export function buildMembersSection(body, api) {
   body.appendChild(list);
 
   body.appendChild(prose(say(rows.length > 1 ? MEMBERS_COPY.listHint : MEMBERS_COPY.empty)));
+  // ADR 002 §8.5's sentence, and ONLY when the list is actually showing a number. It sits above
+  // 20.5's, in the same voice and the same ink: both are the honest limits of what this panel is,
+  // and neither is a warning. See decision 3 in the header.
+  if (rows.some(showsDeviceCount)) body.appendChild(prose(say(MEMBERS_COPY.devicesMean)));
   if (view.adminId) body.appendChild(prose(say(MEMBERS_COPY.adminMeans)));
 
   buildSelfEdit(body, api, view);
@@ -611,10 +775,47 @@ function memberRow(r, view) {
   if (r.isMe) tags.appendChild(el('span', 'member-tag', say(MEMBERS_COPY.you)));
   if (r.isAdmin) tags.appendChild(el('span', 'member-tag', say(MEMBERS_COPY.admin)));
   if (r.hidden) tags.appendChild(el('span', 'member-tag member-tag-off', say(MEMBERS_COPY.hiddenSuffix)));
+  const dev = deviceTag(r);
+  if (dev) tags.appendChild(dev);
   row.appendChild(tags);
   void view;
   return row;
 }
+
+/**
+ * ADR 002 §8.5's tag, or `null` — LAST in the row, after „du" and „Verwaltung".
+ *
+ * Last because the two identity badges answer „who is this", which is 15.4's question and the one
+ * a reader is scanning for; the device count answers „is anything odd here", which is a question
+ * you ask of the list rather than of a row. Putting it first would make every row start with a
+ * security fact.
+ *
+ * @param {MemberRow} r @returns {HTMLElement|null}
+ */
+function deviceTag(r) {
+  if (!showsDeviceCount(r)) return null;
+  const n = r.deviceCount;
+  const tag = el('span', 'member-tag member-tag-dev', say(MEMBERS_COPY.deviceCount)(n));
+  tag.dataset.devices = String(n);
+  tag.title = say(MEMBERS_COPY.deviceCountTip)(
+    r.displayName || say(MEMBERS_COPY.waitingNoName), n,
+  );
+  return tag;
+}
+
+/**
+ * Whether one row shows its count. Exported shape of decision 2 in the header: **`1` is silent,
+ * `null` is silent, everything else speaks.**
+ *
+ * It is a named predicate and not an inline `!== 1` because two places have to agree about it —
+ * the tag, and the sentence under the list that explains the tag — and a list that explained a
+ * number nobody could see (or, worse, showed a number with no explanation) is the failure this
+ * costs one function to make impossible.
+ *
+ * @param {MemberRow} r @returns {boolean}
+ */
+const showsDeviceCount = (r) => typeof r.deviceCount === 'number'
+  && Number.isFinite(r.deviceCount) && r.deviceCount !== 1;
 
 /**
  * 15.6 — my own name and colour, and nothing else on this panel is editable.
@@ -731,9 +932,15 @@ export function openFamilyPopover() {
         body.appendChild(w);
       }
       const list = el('div', 'member-list');
-      for (const r of sortForList(membersUIState().members)) list.appendChild(memberRow(r, view));
+      const rows = sortForList(membersUIState().members);
+      for (const r of rows) list.appendChild(memberRow(r, view));
       body.appendChild(list);
       body.appendChild(prose(say(MEMBERS_COPY.hiddenIsLocal)));
+      // The same rule as the settings section: a number never appears without its sentence. The
+      // popover is a glance during work and carries no other explanation, so this is the one
+      // place where leaving it out would have been defensible — and where the number would then
+      // be a bare `2` on somebody's row with nothing to read.
+      if (rows.some(showsDeviceCount)) body.appendChild(prose(say(MEMBERS_COPY.devicesMean)));
     },
   });
 }
@@ -782,10 +989,23 @@ function teardownFamilyLegend() {
 /**
  * Draw (or redraw) the family half of the legend. Idempotent; safe to call on every redraw.
  *
+ * `hostEl` IS THE NODE `legend.js` HANDS THE SEAM, and taking it closes a two-sources-of-truth
+ * gap that had not bitten yet: `renderLegend()` calls `familyLegend(legendEl)` — the element
+ * `initLegend()` was actually mounted on — and this function used to ignore the argument and
+ * re-derive the host from its own `legendSelector`. On the shipped page both answer `.legend` and
+ * nothing was wrong; on any page where they differ (a second board, a test host, a future
+ * settings-sheet legend) the two halves of one legend would have drawn into two different
+ * elements, and the symptom would have been a family section that renders somewhere plausible
+ * and never updates. The seam's argument wins; the selector stays as the fallback for the direct
+ * calls this module makes to itself (`commitProfile`, the chip's own click).
+ *
+ * @param {HTMLElement} [hostEl] the legend element, when a caller already has it
  * @returns {HTMLElement|null} the section, or null when there is nothing to draw
  */
-export function renderFamilyLegend() {
-  const host = document.querySelector(legendSelector);
+export function renderFamilyLegend(hostEl) {
+  const host = (hostEl && typeof hostEl.appendChild === 'function')
+    ? hostEl
+    : document.querySelector(legendSelector);
   const existing = document.getElementById(FAMILY_LEGEND_ID);
   const view = membersUIState();
   const rows = view.supported ? sortForLegend(view.members) : [];
@@ -994,6 +1214,13 @@ button.member-chip:hover { filter: brightness(1.08); }
   background: var(--chip); border-radius: 3px; padding: 1px 5px; white-space: nowrap;
 }
 .member-tag-off { background: transparent; box-shadow: inset 0 0 0 1px var(--line-1); }
+
+/* ADR 002 §8.5's device count. THE SAME QUIET TAG AS „du" AND „Verwaltung", and the restraint is
+   the decision (header, decision 3): the first count anybody sees is their OWN 2 after pairing a
+   laptop (19.4), and painting that amber would teach „this number means trouble" on the one
+   instance where it means nothing at all. Tabular figures only, so 2 and 12 keep the same digit
+   advance and a column of counts does not shimmer as the list re-sorts on a rename. */
+.member-tag-dev { font-variant-numeric: tabular-nums; }
 
 /* Section prose, not a field annotation — see prose() above and app.css:496. */
 .hint.member-prose { margin-left: 0; margin-top: 0; }

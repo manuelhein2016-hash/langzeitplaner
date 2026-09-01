@@ -606,8 +606,13 @@ test('membersUIState() is the ONE membership reader, in the shape the admin pane
   assert.equal(view.supported, true);
   assert.deepEqual(Object.keys(view).sort(),
     ['adminId', 'keysPending', 'me', 'members', 'supported']);
+  // `deviceCount` joined the row in E8 (LZP-802): ADR 002 §8.5's one named mitigation had no
+  // field to live in, so the per-member device count the relay publishes reached no screen. It is
+  // ADDITIVE — `manageRows` below still reads the same seven fields and is asserted to — and it
+  // is listed here rather than exempted, because this line is the thing that made adding it a
+  // deliberate act instead of a silent one.
   assert.deepEqual(Object.keys(view.members[0]).sort(),
-    ['alive', 'colorRef', 'displayName', 'hidden', 'initial', 'isAdmin', 'isMe', 'memberId']);
+    ['alive', 'colorRef', 'deviceCount', 'displayName', 'hidden', 'initial', 'isAdmin', 'isMe', 'memberId']);
 
   const admin = await importApp('family/adminpanel.js');
   const rows = admin.manageRows(view.members, 'de');

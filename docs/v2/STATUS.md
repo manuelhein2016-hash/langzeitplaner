@@ -1,7 +1,54 @@
 # v2 — where the work stands
 
-**Last session:** 2026-08-31 · **Stopped at:** **E6 — Familienkreis, INTEGRATED. A circle now
-shares.** LZP-601…**608** are all verified against the real relay in three real browser contexts.
+**Last session:** 2026-09-01 · **Stopped at:** **E8 — family board rendering, INTEGRATED and
+MEASURED AGAINST DENSITY.** LZP-801…807 are applied together, driven, and priced in pixels.
+Full record: `docs/v2/E8-VERIFICATION.md`; findings in `FINDINGS.md` §12.
+
+---
+
+## THE E8 HEADLINE: the family is on the board and the board did not move
+
+Seven other people, **3 059 notes and 416 bars across two years**, produce a board whose row height,
+row block, board height, column width, note-body width, toolbar height and board top are
+**`deepEqual` to the solo board built from the same fixture** (`tests/tier2/family-density.dom.js`
+§4, in the shipping WebKit, with non-vacuity asserted in the same row: 192 → 715 notes and
+40 → 135 bar segments in the DOM). E8 is bought **entirely out of horizontal space**:
+
+```
+                          prefix     text left   line box
+v1 · plain own note         0 px       62 px       10 px
+E8 · own WORST           16.8 px     45.2 px       10 px    (published ownWorst 17)
+E8 · foreign WORST       22.8 px     39.2 px       10 px    (published foreignWorst 23)
+```
+
+**The line box is 10 px in all seven marker combinations** — a marker that grew it by one pixel would
+grow it on all 372 rows of all 12 columns. Toolbar **40 px** at 0, 2 and 8 members. A4 print strip
+**15.5 px** with 0, 7 and 8 members, one page in every case.
+
+**Deliverable 17 holds at 22 px and does NOT hold at 18 px, and that is stated rather than smoothed
+over.** One row carrying the visibility badge, the Belegt block, the initial chip, the „neu" dot and
+the ↻ **at once**, plus `+n` and three lanes: **7 painted marks, 0 collisions, smallest 3 × 3 px,
+every gap ≥ 1 px** — mutation-tested, a −4 px chip margin reddens it and names the overlap. At 18 px
+the capacity rule gives the row one line, so three of the five marks go into `+5`. Nothing
+overprints; the loss is v1's own rule, not an E8 collision. **FINDINGS §12b, owner: design.**
+
+**LZP-1007 is met with an order of magnitude in hand.** Worst main-thread drag frame **8.7 ms of the
+16.7 ms 60 fps budget** in Chromium, **≤ 6 ms** in WebKit, 600 measured frames over three gesture
+kinds, **zero frames over budget**. A member toggle costs exactly one redraw (39–42 ms at eight
+members; 13 ms once all seven are hidden, which is the solo board's own cost). **What is not claimed:
+a wall-clock frame rate** — neither available engine renders to a visible window here, so rAF is
+suspended in both and raster/composite is unmeasured.
+
+**Two v1 characterization rows were red at HEAD and both are now green** — `dom-rendering.dom.js` 7.2
+and `belegt-render.dom.js` §7, both calendar drift (today inside Sommerferien; 3 October in the
+second column), both reproduced in a pristine `git archive HEAD` copy with every E8 change absent,
+both fixed in the fixture and mutation-tested. FINDINGS §12a.
+
+**Owed, and named:** 17.5 renders nothing in the shipped app (`_project()` supplies none of
+`isNewOf`'s three inputs — §12d, and `isNewOf` **fails open**, so wire all three or none); 17.6's
+hover half is missing and every member name in the product is still an initial because
+`family/mount.js` never installs `useMemberNames` (§12e). `test:fleet` is red on the **parallel
+workflow's** uncommitted founder-removal guard and is 244/244 at HEAD (§12c).
 
 ---
 
@@ -203,7 +250,22 @@ register blocking a family-mode release: finding E3-1**, and it is an input to *
 ## 2. Suites — run these first tomorrow to confirm nothing rotted
 
 ```bash
-# CURRENT — re-measured 2026-08-29 at the close of the ROUND-10 integration pass. ALL SIX GREEN.
+# CURRENT — re-measured 2026-09-01 at the close of the E8 INTEGRATION pass.
+npm test              # tier 1, pure logic          → 2008 pass / 0 fail
+npm run test:property # property harness + domains  →  101 pass / 0 fail
+npm run test:attack   # adversarial corpus          →  860 pass / 0 fail
+npm run test:server   # the sync server             →  892 pass / 0 fail
+npm run test:fleet    # two, three and FOUR Macs    →  252 pass / 6 FAIL  ← NOT E8's; 244/244 at
+                      #                               HEAD. The parallel `server/*` workflow's new
+                      #                               founder-removal guard vs its own red team,
+                      #                               `tests/fleet/e6-attack-removed.test.js`.
+                      #                               FINDINGS §12c.
+npm run test:dom      # real headless WKWebView     → 36 files, 642 pass / 0 fail, tier 2 PASS
+
+# ⚠ A suite result taken while another workflow is writing this tree is not a result: test:server
+#   reported 888/4 during one such overlap and 892/0 on four consecutive clean runs afterwards.
+
+# 2026-08-29, the ROUND-10 integration pass — superseded
 npm test              # tier 1, pure logic          → 1932 pass / 0 fail
 npm run test:attack   # adversarial corpus          →  720 pass / 0 fail
 npm run test:property # property harness + domains  →   88 pass / 0 fail   ← sync-domains: 0 UNEXPECTED, 0 STALE

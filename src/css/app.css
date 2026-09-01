@@ -513,6 +513,41 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
   background: repeating-linear-gradient(45deg,
     rgba(255, 255, 255, .58) 0 1.5px, transparent 1.5px 4px);
 }
+/* ── 17.2 AT BAR-LANE WIDTH — the ownership rail (LZP-801) ──────────────────
+   THE DEFECT THIS CLOSES, measured on the real board and not argued from the
+   spec: member colours and category colours are the SAME ten tones in two
+   namespaces (15.x design note). A `.bar` carries nothing but its colour — the
+   initial chip lives on the `.bar-label`, once per month segment — so at 6 px
+   MY „Familie" bar and Papa's bar are the identical #5D9E33 stripe. On the
+   8-member fixture, ALL TWELVE COLUMNS contained a colour rendered both by one
+   of my bars and by somebody else's; in Dec '26 the two sat in adjacent lanes,
+   overlapping, indistinguishable. 17.2 promises „whose is this?" is answered
+   before „what is it?", and at bar-lane width it was not answered at all.
+
+   THE CHANNEL: a 1 px light rail inset into the stripe's own edge. Foreign
+   stripes read outlined, mine read solid.
+
+     · it costs ZERO px. Not one pixel of row height, lane width or gutter —
+       `inset: 0` on the stripe that was already there. Principle 1 is not
+       charged for this.
+     · it is not hue, so it survives the colour-blind case the palette note
+       (§10) warns about and it survives a greyscale print as a value break.
+     · it is ORTHOGONAL to the Belegt hatch. `.belegt` is a subset of
+       `.foreign` (only a peer's entry is ever redacted), so the two co-occur
+       constantly and must not be one channel: the hatch is 45° ACROSS the
+       stripe and says „content withheld"; the rail is ALONG its edge and says
+       „not mine". `::after` paints above `::before`, so the rail stays crisp
+       on a hatched bar.
+     · `::after`, not `box-shadow` on `.bar`, because `.bar:hover` and
+       `.bar.selected` already own that property and an inset added there would
+       be dropped by both — exactly in the two states where the user is asking
+       „whose is this?" hardest. */
+.bar.foreign::after {
+  content: ''; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .85);
+}
+
 /* THE HATCH STOPS AT THE STRIPE. Measured at 1× in WebKit, the same overlay on
    the label chip turned 8.5 px white italic into a candy-striped blob — the one
    word the viewer is entitled to, made the least legible thing on the board.

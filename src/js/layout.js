@@ -61,6 +61,30 @@ export const PREFIX_COST_PX = Object.freeze({
 });
 
 /**
+ * What E8 (LZP-801 / LZP-803) adds to the bill. **Zero, on every axis.**
+ *
+ * The brief's rule is "measure what your additions cost a row and say so", and
+ * the honest answer for this epic is that all three additions are re-orderings
+ * and overlays inside geometry that already existed:
+ *
+ *   ownership rail (17.2, `.bar.foreign::after`)   0 px — `inset: 0` on the
+ *       6 px stripe that was already drawn. It converts 1 px of the stripe's
+ *       own ink into a light rail; the lane, the gutter and the column keep
+ *       every pixel they had.
+ *   mine-before-theirs lanes (17.4)                0 px — a comparator prefix.
+ *   the label scan's two fallbacks (3.7)           0 px — the same one chip per
+ *       month segment, on a different row.
+ *
+ * So a family board is EXACTLY as tall and EXACTLY as wide as a solo one, and
+ * `rowCapacity` still takes one argument. `tests/tier2/family-render.dom.js`
+ * §7 measures the board's full geometry with and without the family and
+ * asserts the difference is nil rather than trusting this comment.
+ */
+export const FAMILY_LAYOUT_COST_PX = Object.freeze({
+  rowHeight: 0, laneWidth: 0, gutter: 0, columnWidth: 0, noteTextWidth: 0,
+});
+
+/**
  * A foreign entry whose member record has not arrived yet.
  *
  * ADR 004 §4.3: a foreign entry must NEVER fall through to `colorOf(undefined)`,
@@ -192,6 +216,32 @@ export function visibleStart(settings, today = todayISO()) {
 }
 
 /**
+ * Mine before theirs — the ONE ordering rule the family layer adds (LZP-803).
+ *
+ * v1's principle 3 says the user's own entries always win visual priority, and
+ * D4 accepted 17.2's "my board stays mine". Neither survives a first-fit sweep
+ * ordered by date alone: `assignLanes` hands lanes out in start-date order, so
+ * three of Mama's long stripes take lanes 0–2 for six months and MY OWN
+ * vacation bar becomes a "+n" badge on MY OWN board. Measured on the 8-member
+ * × 2-year fixture `tests/tier2/family-render.dom.js` §6 builds, with this term
+ * removed: **41 % of my own bar segments were pushed out of the lanes.** §6
+ * now asserts the exact property instead of the percentage — every segment of
+ * mine that a SOLO board draws is still drawn once seven other people are on
+ * the board — and prints the lottery numbers as `diag`.
+ *
+ * It is a PREFIX of the existing comparator, not a replacement, so the rest of
+ * v1's order (start asc, end desc, id asc) decides everything below it. On a
+ * solo board every bar answers 0 and the term is provably inert — which is why
+ * `core-materialize.test.js`'s lane snapshots and `migration.test.js`'s
+ * ordering rows do not move.
+ *
+ * It does NOT rescue me from the cap: four of my own overlapping bars still
+ * cost the fourth one its lane (3.8 is about the board's legibility, not about
+ * ownership). It only stops someone else's plan from outranking mine.
+ */
+const ownFirst = (a, b) => (a.isForeign ? 1 : 0) - (b.isForeign ? 1 : 0);
+
+/**
  * Global lane assignment (3.4/3.8).
  * Lanes are decided once across the whole timeline, not per column, so a bar
  * keeps the same lane when it crosses a month boundary — otherwise a six-month
@@ -200,6 +250,7 @@ export function visibleStart(settings, today = todayISO()) {
 export function assignLanes(bars) {
   const sorted = [...bars].sort(
     (a, b) =>
+      ownFirst(a, b) ||
       (a.startDate < b.startDate ? -1 : a.startDate > b.startDate ? 1 : 0) ||
       (b.endDate < a.endDate ? -1 : b.endDate > a.endDate ? 1 : 0) ||
       (a.id < b.id ? -1 : 1)
@@ -305,21 +356,68 @@ export function buildBoard(state, opts = {}) {
     // in any month where a base lane is free across its whole segment it is
     // rescued into that lane. The rescue is per-column, so such a bar may sit
     // in different lanes in different months — visible beats stable here.
-    overflowSegs.sort((a, b) => a.startDay - b.startDay);
-    for (const seg of overflowSegs) {
-      let placed = -1;
+    //
+    // ═══ AND THE ONE PLACE THE FAMILY COULD STILL TAKE A LANE FROM ME ════════
+    // Ordering the GLOBAL sweep mine-first is not enough on its own, and the
+    // 8-member fixture found the hole: my bars get their solo lanes there, but
+    // the RESCUE is a second, per-column allocation, and a foreign bar that won
+    // a base lane in the global sweep sits in `segs` and blocks it. Measured:
+    // one of my segments per ~40 vanished from a month it is drawn in on the
+    // solo board — for no reason the user could see, and with no way to get it
+    // back except leaving the family.
+    //
+    // So the rescue runs in three passes and the invariant becomes exact:
+    // **the lanes my bars occupy are the lanes they occupy on a solo board.**
+    //
+    //   (1) my overflow segs are rescued against MY segs only — which IS the
+    //       solo answer, because a solo board has no others to consider;
+    //   (2) any foreign seg now sitting under one of mine yields its lane and
+    //       goes back into the pool. Only an OWN seg can evict, and an evicted
+    //       seg can never evict in turn, so this terminates in one round;
+    //   (3) the family fills what is left, by start day, exactly as before.
+    //
+    // On a solo board pass 1 IS v1's loop, pass 2 finds nothing and pass 3 is
+    // empty — so `layout.test.js`'s rescue rows, `laneMap` orders and
+    // `core-materialize.test.js`'s segment snapshots are untouched.
+    // ═════════════════════════════════════════════════════════════════════════
+    const hits = (a, b) => !(a.endDay < b.startDay || a.startDay > b.endDay);
+    const freeLane = (seg, pool) => {
       for (let l = 0; l < MAX_LANES; l++) {
-        const clash = segs.some(
-          (s) => s.lane === l && !(seg.endDay < s.startDay || seg.startDay > s.endDay)
-        );
-        if (!clash) { placed = l; break; }
+        if (!pool.some((s) => s.lane === l && hits(s, seg))) return l;
       }
-      if (placed >= 0) {
-        seg.lane = placed;
-        segs.push(seg);
-      } else {
-        for (let d = seg.startDay; d <= seg.endDay; d++) laneOverflow[d] += 1;
+      return -1;
+    };
+
+    overflowSegs.sort((a, b) => ownFirst(a.bar, b.bar) || a.startDay - b.startDay);
+    const dropped = [];
+
+    // (1) mine, against mine
+    for (const seg of overflowSegs) {
+      if (seg.foreign) continue;
+      const placed = freeLane(seg, segs.filter((s) => !s.foreign));
+      if (placed >= 0) { seg.lane = placed; segs.push(seg); }
+      else dropped.push(seg);
+    }
+    // (2) foreign segs yield to mine
+    const evicted = [];
+    for (let i = segs.length - 1; i >= 0; i--) {
+      const s = segs[i];
+      if (!s.foreign) continue;
+      if (segs.some((o) => !o.foreign && o.lane === s.lane && hits(o, s))) {
+        segs.splice(i, 1);
+        evicted.push(s);
       }
+    }
+    // (3) theirs, against everything that is left
+    const theirs = overflowSegs.filter((s) => s.foreign).concat(evicted)
+      .sort((a, b) => a.startDay - b.startDay);
+    for (const seg of theirs) {
+      const placed = freeLane(seg, segs);
+      if (placed >= 0) { seg.lane = placed; segs.push(seg); }
+      else dropped.push(seg);
+    }
+    for (const seg of dropped) {
+      for (let d = seg.startDay; d <= seg.endDay; d++) laneOverflow[d] += 1;
     }
 
     // ── day rows ─────────────────────────────────────────────────────────────
@@ -382,15 +480,62 @@ export function buildBoard(state, opts = {}) {
     // ── label rows ───────────────────────────────────────────────────────────
     // 3.7 — one label per month segment. Prefer a row inside the segment that
     // has no ink of its own, so the chip never covers a note.
+    //
+    // ═══ WHY THIS GREW TWO FALLBACKS (LZP-803) ═══════════════════════════════
+    // v1's scan is a single loop with ONE fallback: `dy = 0`. That fallback is
+    // reached when no ink-free row exists in the first six — rare on a solo
+    // board, and MEASURED AT 100 % ON THE 8-MEMBER FIXTURE, where 99 % of day
+    // rows carry ink. Two things then went wrong at once, and only the second
+    // is a real defect:
+    //
+    //   1. every label sits on its segment's top row. Unavoidable: when every
+    //      row is inked there is no uninked row to move to. v1 already accepted
+    //      this trade and it stands.
+    //   2. `dy = 0` IGNORES `usedLabelRows`, so two or three segments in the
+    //      same column land on the SAME row — and `.bar-label` is opaque, 66 px
+    //      wide and right-anchored per lane, so the higher lane paints over the
+    //      lower one and one bar's label becomes UNREADABLE. Measured: 21 % of
+    //      the fixture's 135 labels. That is information destroyed, not density
+    //      spent, and it is what the two passes below close.
+    //
+    // Pass A is v1's loop, unchanged, and it decides every case v1's tests pin.
+    // Pass B fires only where v1 fell through to `dy = 0`, and prefers the
+    // LEAST-inked unclaimed row — a generalisation of pass A's binary test
+    // (ink 0 IS pass A's `free`), tie-broken to the earliest row, so a board on
+    // which pass A already answered cannot reach a different answer here.
+    // Pass C fires only when the whole six-row window is claimed, and looks
+    // down the rest of the segment for any unclaimed row: overprinting is the
+    // one outcome worth walking away from the segment top to avoid.
+    // Pass D is v1's `dy = 0`, still the last word when a short segment has
+    // nowhere left to go — three 1-day bars in one column cannot have three
+    // distinct label rows.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /** How much ink a row already carries. 0 is exactly v1's `free`. */
+    const inkOf = (day) =>
+      (day.holidayShown ? 1 : 0) + day.notes.length + (day.overflow > 0 ? 1 : 0);
+
     const usedLabelRows = new Set();
     for (const seg of segs) {
-      let dy = 0;
-      for (let i = 0; i < Math.min(seg.rows, 6); i++) {
+      const win = Math.min(seg.rows, 6);
+      let dy = -1;
+      let best = -1, bestInk = Infinity;
+      for (let i = 0; i < win; i++) {                                  // pass A + B
         const day = days[seg.topRow + i];
-        if (!day || day.empty) continue;
-        const free = !day.holidayShown && day.notes.length === 0 && day.overflow === 0;
-        if (free && !usedLabelRows.has(seg.topRow + i)) { dy = i; break; }
+        if (!day || day.empty || usedLabelRows.has(seg.topRow + i)) continue;
+        const ink = inkOf(day);
+        if (ink === 0) { dy = i; break; }                              // pass A — v1
+        if (ink < bestInk) { best = i; bestInk = ink; }                // pass B
       }
+      if (dy === -1) dy = best;
+      if (dy === -1) {                                                 // pass C
+        for (let i = Math.max(0, win); i < seg.rows; i++) {
+          const day = days[seg.topRow + i];
+          if (!day || day.empty || usedLabelRows.has(seg.topRow + i)) continue;
+          dy = i; break;
+        }
+      }
+      if (dy === -1) dy = 0;                                           // pass D — v1
       seg.labelRow = seg.topRow + dy;
       usedLabelRows.add(seg.labelRow);
     }

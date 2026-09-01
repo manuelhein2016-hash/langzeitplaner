@@ -3397,3 +3397,152 @@ every downgrade a refusal (finding S5, met from the store's side). A foreign ent
 which barrier 4 turns into a `RedactionError`: **this device may not publish somebody else's entry**,
 and answering with the peer's last-published level instead would let a co-edit re-publish a text its
 owner had since withdrawn.
+
+---
+
+## 12. E8 — family board rendering. What integrating it against DENSITY found.
+
+**Opened 2026-09-01 by the E8 integration pass.** Full record: `docs/v2/E8-VERIFICATION.md`.
+Three build streams landed LZP-801…807; this pass applied them together, measured what they cost
+the thing the product exists to do, and drove the result. **Suites at the close: 2008 · 101 · 860 ·
+892 · 252/258 (six red, none E8's — 12c) · tier 2 36 files / 642 rows, all green.**
+
+The headline is a measurement, not a claim: **seven other people, 3 059 notes and 416 bars across
+two years produce a board whose geometry is `deepEqual` to the solo board built from the same
+fixture** — row height, row block, board height, column width, note-body width, toolbar height,
+board top. E8 is bought **entirely out of horizontal space**, and the worst prefix (22.8 px) is
+under the 23 px `layout.js` publishes for it.
+
+### 12a. Two v1 CHARACTERIZATION rows were red at HEAD — both calendar drift, both CLOSED
+
+The brief's oracle is v1. Two rows were red on 2026-09-01, **both reproduced in a pristine
+`git archive HEAD` copy with every E8 change absent**, and both were the same defect class: *a
+characterization test whose answer depends on the month it is run in*.
+
+- **E8-1 (MEDIUM) — `dom-rendering.dom.js` 7.2, „a weekday in Ferien". CLOSED.** The window opens on
+  today; `ferienSample()` took the **first** Ferien weekday in it, which on any run inside a
+  Sommerferien **is today** — and Today's tint deliberately outranks `.fer` (8.1 has its own test for
+  exactly that). The row was silently re-characterising the Today rule under the wrong name. Fixed by
+  excluding `M.today` from the sample, the rule `plainDate()` and `holidayDate()` two functions above
+  already apply. **Mutant:** `.day.fer { background: transparent }` reddens the repaired row, so the
+  fix moved the fixture and not the assertion.
+- **E8-2 (MEDIUM) — `belegt-render.dom.js` §7, „hiding a member … repacks the lanes". CLOSED.** `COL`
+  is the second visible column — **October** whenever the app opens in September — and the test puts
+  two notes on **day 3**, Tag der Deutschen Einheit. The holiday takes line 1 (DESIGN-DECISIONS §B),
+  capacity drops to one, and a row that placed two notes placed one. Fixed with `NO_LAYERS` on both
+  `withBoard` calls — the constant `family-render.dom.js` already introduced for this hazard.
+
+**The class, for whoever writes the next fixture:** any row-count assertion must own its ambient
+layers, and any day-of-month or first-match fixture must be **scanned for** rather than guessed.
+
+### 12b. E8-3 (MEDIUM, OPEN) — deliverable 17 does NOT hold at 18 px, and that is the finding
+
+Deliverable 17 asks for the five badges „all coexisting at 24-px rows". At the **22 px default** they
+do, and it is measured rather than asserted: one day row carrying a visibility badge (16.6), a Belegt
+block (16.7), an initial chip (17.2), a „neu" dot (17.5) and a ↻ (9.2) **simultaneously**, plus `+n`
+and three bar lanes, gives **7 painted marks, 0 collisions, smallest mark 3 × 3 px, every gap ≥ 1 px**
+(`family-density.dom.js` §1). The audit is mutation-tested: `.note .chip { margin: 0 -4px }` reddens
+it and names both boxes and the overlap in pixels.
+
+**At 18 px — v1's own minimum — it does not.** The capacity rule gives an 18 px row one line, so the
+same day draws **one** entry and three of the five marks; the visibility badge and the ↻ go into
+`+5`. Nothing overprints, nothing is illegible, and the entries that lose their place are counted and
+reachable through the popover — the loss is DESIGN-DECISIONS §B's capacity rule, **not an E8
+collision**. But the deliverable's sentence is true at 22 and false at 18, and that is better said
+here than discovered on paper. **Owner: design.** Either the deliverable is scoped to the default row
+height, or 17.7's Komfort/Kompakt setting (LZP-808, `[Could]`) becomes the answer — both ends of the
+range it would extend are now measured.
+
+### 12c. E8-4 (HIGH, OPEN, NOT E8's) — `test:fleet` is red on the parallel workflow's own red team
+
+`tests/fleet/e6-attack-removed.test.js` §1 and §1e fail with
+`{"error":"admin_proof_required","reason":"founder_removal_needs_second_key"} · 403 !== 200`.
+The `server/*` workflow has landed a **founder-removal guard** in the uncommitted
+`server/core/auth.js` + `server/core/errors.js` and has not yet inverted its own red team against it —
+the same shape as E6's `§5d`. **`test:fleet` is 244/244 at pristine HEAD** and E8 touches nothing the
+fleet suite loads. **Owner: the `server/*` workflow.**
+
+Related, and a rule rather than a finding: `test:server` reported **888/4** during a run that
+overlapped one of that workflow's writes and **892/0** on four consecutive clean runs afterwards.
+**A suite result taken while another workflow is writing the tree is not a result.**
+
+### 12c-2. E8-7 (LOW, co-dependent by design) — one red-team row must invert WITH `deviceCount`
+
+E8's files were also run **alone on top of HEAD**, in a `git worktree`: tier 1 **2008/0**, property
+**101/0**, attack **860/0**, server **868/0**, fleet **243/1**. The single red row is
+`tests/fleet/e6-attack-keydelivery.test.js` **§5d** —
+`MemberRow has no device field, so §8.5's mitigation is not rendered anywhere · expected false,
+actual true`. At HEAD that is an *attack-SUCCEEDED* row asserting ADR 002 §8.5's only stated
+mitigation is absent; `membersui.js` adding `deviceCount` to `MemberRow` makes it present, so the row
+**must** invert with the fix (§7c's rule). **The inversion already exists in the shared working
+tree**, written by the `server/*` workflow inside the same file, which is why the full tree shows it
+green. E8 does not own that file and does not stage it: the two commits are **co-dependent on one
+row**, the branch tip is green once both land, and whoever lands second should confirm `test:fleet`.
+
+### 12d. E8-5 (HIGH, OPEN) — LZP-804 has a board half and no inputs: 17.5 renders nothing today
+
+`store.js:_project()` passes `materialize` no `seqOf`, no `lastSeenSeq` and no `levelDecreased`, and
+nothing anywhere advances `settings.lastSeenSeq.<spaceId>`. `isNewOf` therefore always answers
+`false`. The dot is built, priced (3 × 3 px painted, `PREFIX_COST_PX.neu` 5 px) and proven
+Principle-9 clean — and **it cannot fire in the shipped app**. Carried forward from the
+`build:legend-neu` pass and re-confirmed here on the running board.
+
+**The hazard that makes this worse than a missing feature:** `materialize.js:359–371` — `ctx.seqOf`
+and `ctx.levelDecreased` are **independent optional hooks** and `isNewOf` **fails open**. A caller
+that supplies the seq source and forgets the suppression gets a „neu" dot on **every downgrade**,
+silently, with nothing on screen that looks wrong — the exact mechanic Principle 9 forbids. A
+tripwire in `family-legend.dom.js` §3 requires the two hook names to appear together in `store.js` or
+not at all; it is green today because `_project()` supplies neither, and it goes red the moment
+somebody wires half of it.
+
+**And a design question that must be answered in the same change:** hiding Papa (17.3) filters his
+entries at `layout.js` before they can dot, so a single per-space `lastSeenSeq` scalar marks his new
+ink „seen" without it ever having been shown — un-hiding him then silently produces old ink. Either
+the advance excludes hidden members, or 17.3 is documented as discarding their „neu" state.
+
+### 12e. E8-6 (MEDIUM, OPEN) — 17.6 says *hover/popover* and the hover half says an initial
+
+Driven on a real register map through the real `materialize` (E8-VERIFICATION §5), on Mama's board
+with Papa as a peer:
+
+- Papa's shared note renders `title="Zahnarzt"` — `board.js:renderNote` joins the text with
+  `exposureTitle`, and a foreign entry has no exposure of mine, so the tooltip is the bare text. **No
+  „von Papa", no „geändert".** The popover half is built and correct; the hover half is missing.
+  Owner: `board.js`.
+- His Belegt bar renders `title="P · Belegt · 2026-10-12 – 2026-10-18"` — right in shape, but the
+  owner is an **initial**, and it stays an initial even with `useMemberNames` installed, because
+  `redactedTitle` never consults it.
+
+**Both trace to one uninstalled port.** `src/js/family/mount.js` never calls
+`popover.useMemberNames(...)`, so `memberNameOf` answers `null` everywhere and every name in the
+product falls back to a letter. Proven by installing it live: the print member key goes from `Ⓟ P` to
+`Ⓟ Papa` and the A4 strip's ink from 336.5 px to 467.4 px of 1 062 — still one line, still one page.
+One line of code in a file E8 does not own.
+
+### 12f. What was attacked and HELD — recorded so it is not re-attacked
+
+- **Geometry.** Solo vs family on the 8 × 2 y fixture: `deepEqual` on seven measurements, with
+  non-vacuity asserted in the same row (192 → 715 notes, 40 → 135 bar segments in the DOM).
+- **17.3 is a toggle, not a dimmer.** With all seven members hidden the board is the solo board
+  **entry for entry** — 192 notes, 40 bars, 2 overflow badges on both sides — and the print strip
+  returns to v1's exact ink width, 202.6 px to the tenth.
+- **A8 on paper.** The A4 strip is **15.5 px tall** with 0, 7 and 8 members, and a hidden member is
+  off the paper: 7 member items → 0, divider gone. Measured with the `@media print` rules lifted onto
+  the screen — a height read without that lift is 0 px, and `0 === 0` is a green cell that measured
+  nothing, which §6 now asserts against explicitly.
+- **The 60 fps AC.** Worst main-thread drag frame **8.7 ms of 16.7** in Chromium and **≤ 6 ms** in the
+  shipping WebKit, across 600 measured frames and three gesture kinds, zero frames over budget. E8
+  roughly doubles the median frame cost (0.6 → 1.2 ms) and leaves 15.5 ms unspent. **What is NOT
+  claimed:** a wall-clock frame rate — neither available engine renders to a visible window here, so
+  rAF is suspended in both, and raster/composite is therefore unmeasured.
+- **Principle 9.** A downgrade produces no dot, **no gap** (`noteBox` and `dayBox` equal to an
+  untouched entry's — a suppressed marker that still reserved its 5 px would be a downgrade detector
+  made of whitespace), no markup difference, no `title` difference, no `aria-*` difference, and no
+  change to the toolbar's `innerHTML`. A control row proves added ink *does* dot, so the silence is a
+  result and not a broken renderer.
+
+### 12g. Process — the stash rule, restated because it has now bitten twice
+
+`git stash` was run twice in this shared tree by earlier passes and swept up other workflows'
+in-flight files both times. **Nobody may stash in this tree.** Every clean-tree comparison in this
+pass used `git archive HEAD | tar -x` into a scratch directory, which touches nothing.

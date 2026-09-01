@@ -665,14 +665,24 @@ test('§6 · the pending badge says "not yet", and never says "live"', () => {
 // §7 · 17.3 — the per-member toggle, and the prototype chain it must not read
 // ═════════════════════════════════════════════════════════════════════════════
 
+// The header at COL says the second column keeps the fixture clear of today's
+// row shading. It does not keep it clear of a HOLIDAY: at rowHeight 22 the
+// capacity rule gives a row two lines, a Feiertag takes line 1, and a row that
+// placed two notes silently places one. COL is October whenever the app is
+// opened in September, and day 3 is then Tag der Deutschen Einheit — which is
+// exactly why this test was red on 2026-09-01 and green in August. A row-count
+// assertion has to own its ambient layers rather than inherit the calendar's.
+// (Same reasoning, same constant name, as `family-render.dom.js`.)
+const NO_LAYERS = { feiertage: false, schulferien: false, otherStates: false };
+
 test('§7 · hiding a member takes their entries off the board and repacks the lanes', () => {
   const notes = [own('b7a', 3, 'meins'), foreign('b7b', 3, 'geteilt', { text: 'ihres' })];
   const bars = [foreignBar('b7c', 5, 9, 'geteilt', { label: 'Urlaub' }), ownBar('b7d', 5, 9, 'Projekt')];
-  withBoard({ notes, bars }, () => {
+  withBoard({ notes, bars, settings: { layers: NO_LAYERS } }, () => {
     assert.equal(notesAt(3).length, 2);
     assert.equal($$(`#board .col[data-month="${COL.key}"] .bar`).length, 2);
   });
-  withBoard({ notes, bars, settings: { hiddenMembers: { mem_mama: true } } }, () => {
+  withBoard({ notes, bars, settings: { layers: NO_LAYERS, hiddenMembers: { mem_mama: true } } }, () => {
     assert.equal(notesAt(3).length, 1, 'only mine is left');
     assert.equal(bodyTextOf(notesAt(3)[0]), 'meins');
     assert.equal($$(`#board .col[data-month="${COL.key}"] .bar`).length, 1);
