@@ -71,6 +71,33 @@ const VERIFIER_LEN = 32;
 export const MAX_OPEN_INVITES = 20;
 
 /**
+ * How many LIVE members one space may hold. ADR 003 §3.2 — *"It is at most 8 rows of pseudonymous
+ * ids"* — and until this round that sentence was a comment and not a check: `grep -rn
+ * 'MAX_MEMBERS|too_many_members' server/core/` was empty, so a member could mint identities into
+ * a circle without limit.
+ *
+ * **What this is, and what it is not.** It is not a fix for finding **T5-M2**. Nothing here can
+ * be: a `Member` row is not a person, and a blind relay cannot compare two of them to one human,
+ * so a second identity in an eight-seat circle is still a second identity. What a cap does is
+ * turn *"the number of second keys she can hold is not bounded by anything"* into a bounded,
+ * stated number, at the size the protocol already assumes everywhere — the pull projection ships
+ * `members` on every response because it is "at most 8 rows", `family/createjoin.js` picks from
+ * ten colour tones for "at most eight members", and `lifecycle.js` sizes
+ * `memberRemovePerMemberHour` on "a family of eight". A relay that promises eight rows on the
+ * wire and admits eighty is lying to its own client.
+ *
+ * **TOMBSTONES DO NOT COUNT, deliberately** — the opposite choice from `deleteSpace`'s
+ * `roster.length > 1` exemption, and for the opposite reason. There, counting tombstones shuts a
+ * bypass ("remove everyone, then delete alone"). Here, counting them would mean a family of five
+ * that has said goodbye to three people over two years cannot invite a sixth: a seat freed by a
+ * removal or a leave is a seat. The abuse it re-opens — remove, invite, remove, invite — costs a
+ * request per identity, is charged against `memberRemovePerMemberHour = 10`, and is visible on
+ * every member list (15.4); and it never exceeds eight live rows, which is the number this cap
+ * is about.
+ */
+export const MAX_LIVE_MEMBERS = 8;
+
+/**
  * Compare two byte strings without an early exit.
  *
  * The realistic attack on this comparison is not a timing attack — an attacker who could feed
@@ -120,6 +147,30 @@ const CREATE_FIELDS = ['spaceId', 'inviteId', 'verifier'];
  * every issued invite is visible to every member through `GET /invites/open`, every redemption
  * shows up in the member list (15.4), and the open-invite cap keeps the blast radius at twenty.
  *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * ⚠ AND THIS LINE IS WHAT MAKES `lifecycle.js`'s TWO-KEY RULE SATISFIABLE BY ONE PERSON
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * Finding **T5-M2**. `verifyAdminProof` requires two distinct `Member` rows to sign an
+ * irreversible act. This route lets any member mint a code, `redeemInvite` below admits a fresh
+ * `memberId` + `recoveryPubSig` + self-attested device, and **nothing anywhere compares two
+ * member rows to one human — a blind relay cannot.** So Eve invites herself, redeems as a second
+ * identity, keeps both recovery keys in her own Keychain, and co-signs her own founder removal.
+ *
+ * **The obvious close was costed and rejected, and it is written here rather than in a commit
+ * message so nobody re-proposes it as new.** Requiring the inviter to be the founder — or an
+ * admin — is mutant **N-1**, and it *over-closes*: it reddens `tests/fleet/e6-attack-removed`
+ * §0e/§0f and `tests/server/attack-client-lifecycle` §D ×2, and it contradicts this paragraph's
+ * own shipped design (15.5, and D9's "any existing member wraps the ring to her"). It is also
+ * the wrong shape: a founder-signed invite would make the FOUNDER the admin, which
+ * `transferAdmin` — a real, shipped op — is there to stop being true.
+ *
+ * The two closes that are the right shape are both somebody else's file: an **admin-signed**
+ * invite verifiable against an in-request transfer-certificate chain (ADR 003 §3.7's owed
+ * protocol change), or moving the co-signature **into the op log**, where ADR 001 §4's admin
+ * chain already lives and where a client — unlike the relay — can see who a member is. Until one
+ * of those, `admin_proof` is a field and not a control, and `lifecycle.js#PROVES_NOT` says so on
+ * every response. What this file DOES do about it is bound the fleet: `MAX_LIVE_MEMBERS`.
+ *
  * @param {Object} req @param {Object} ctx @returns {Promise<Object>} ServerRes
  */
 export async function createInvite(req, ctx) {
@@ -153,6 +204,14 @@ export async function createInvite(req, ctx) {
     const open = await tx.listOpenInvites(spaceId);
     if (open.length >= MAX_OPEN_INVITES) {
       throw fail('bad_request', { field: 'inviteId', reason: 'too_many_open', open: open.length });
+    }
+
+    // ADR 003 §3.2's eight seats, refused EARLY. The authoritative check is at redemption (below,
+    // where the seat is actually taken); this one exists so an admin learns the circle is full
+    // before she composes an invitation email around a code that cannot work.
+    const live = (await tx.listMembers(spaceId)).filter((m) => m.removedAt === null).length;
+    if (live >= MAX_LIVE_MEMBERS) {
+      throw fail('bad_request', { field: 'inviteId', reason: 'space_full', live, max: MAX_LIVE_MEMBERS });
     }
 
     await tx.putInvite({
@@ -266,6 +325,14 @@ export async function redeemInvite(req, ctx) {
     const existing = await tx.listMembers(spaceId);
     if (existing.some((m) => m.id === member.memberId)) {
       throw fail('bad_request', { field: 'member.memberId', reason: 'exists' });
+    }
+    // ADR 003 §3.2's eight seats, enforced where the seat is taken. Inside the transaction and
+    // after `consumeInvite`, so a full circle ROLLS THE CONSUMPTION BACK: the code still works
+    // once somebody leaves, exactly as the colour-collision path does. Round 2, finding T5-M2 —
+    // this bounds the sybil fleet; it does not close it, and `lifecycle.js#PROVES_NOT` says so.
+    const live = existing.filter((m) => m.removedAt === null).length;
+    if (live >= MAX_LIVE_MEMBERS) {
+      throw fail('bad_request', { field: 'member.memberId', reason: 'space_full', live, max: MAX_LIVE_MEMBERS });
     }
     if (await tx.getDevice(device.deviceId)) throw fail('bad_request', { field: 'device.deviceId', reason: 'registered' });
     if (await tx.getDeviceByShort(spaceId, device.deviceShort)) {

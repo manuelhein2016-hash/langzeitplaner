@@ -1,12 +1,63 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-01 · **Stopped at:** **T5 — the family red team, ANSWERED AND
-INTEGRATED.** Four parallel fixes merged, one head-on conflict resolved, one authorization ruling
-made. Findings in `FINDINGS.md` §13.
+**Last session:** 2026-09-02 · **Stopped at:** **ROUND 3 — the member adversary's SECOND pass,
+answered and integrated.** Three parallel fixes merged, one fix landed by the integration pass
+itself (the presenter binding), every fix mutation-tested, both red teams re-run, the honest
+circle re-driven, the redaction boundary re-attacked from the refusals this round invented.
+Findings in `FINDINGS.md` §14.
 
 ---
 
-## THE T5 HEADLINE: nothing it found was a confidentiality break, and the denial half is closed
+## THE ROUND-3 HEADLINE: the boundary held a third time, and the ship answer is NOT YET — for three named reasons, none of them confidentiality
+
+A second member-adversary attacked the gate that answered the first, and returned
+**„No. E6/E7 cannot ship on this engine."** Its framing was that both fixes rested on premises the
+T5 threat model does not grant: *that a `Member` row is a person, and that an epoch number is
+scarce.* Both are now addressed in the only two ways a blind relay can — the epoch premise is
+**made true** by a budget; the person premise is **not** made true, it is demoted on the wire and
+bounded, because no relay can make it true.
+
+**ZERO BYTES OF A PRIVAT ENTRY, for the third round running — and this pass did not merely re-run
+the old rows.** Every fix in the round invented new refusal bodies, and a refusal is a response
+body assembled by a handler holding the roster. So the boundary was re-measured across the four
+refusals that did not exist before this round — the presenter-mismatch `401`, the already-removed
+`400`, the `space_full` `400`, and the founder-less `403` with its two new prose fields — and it is
+clean across all of them, with a **positive control** proving the search would have found a leak
+(`e6-gate-privat.test.js` §2a, new).
+
+### The ship question, item by item
+
+| question | answer |
+|---|---|
+| epoch freeze closed? | **Priced, not closed — and the record says so.** The budget bounds the ratchet; it does **not** reach §2a, because that is not a volume attack — **one** poisoned rung freezes the space. `limits.js` pins `/DOES NOT CLOSE/`. |
+| two-key rule real or demoted? | **Honestly demoted, and bounded.** A two-*row* rule, said so on every 200 and every 403; `MAX_LIVE_MEMBERS = 8` bounds the sybil fleet. Not closed — T5-M2 is a PO ruling. |
+| founder anchor live-checked? | **Yes, CLOSED.** Cost stated: a founder-less two-member circle cannot remove, only leave. |
+| proof bound to presenter and target? | **Yes, both — CLOSED this pass.** `lzp/admin/2` puts the caller in the signed bytes; an act already done authorizes nothing. |
+| parking slot per space? | **Yes, CLOSED.** Plus R8-5 restored in production, where `writeJSON` had been swallowing a failed park on every full disk. |
+
+**Can E6/E7 ship? NOT YET — three items, all decisions or screens, none of them unknowns:**
+
+1. **A co-signature UI is now a shipping PREREQUISITE, not an owed screen.** The founder-liveness
+   rule means a founder-less circle needs a second key for *every* removal, and `adminpanel.js` /
+   `leavedelete.js` mint no proof. The relay is ready; the client cannot drive it. **Blocking.**
+2. **T5-M2 is a PO/D7 ruling.** A `Member` row is not a person and no blind relay can make it one.
+3. **Two priced-not-closed residuals** — the epoch poisoning (needs ADR 002 §8.5a's report path)
+   and the unbounded shelf (`sync/outbox.js`).
+
+**Suites: `test` 2086 · `test:server` 903 · `test:attack` 860 · `test:fleet` 317 ·
+`test:property` 101 — all green.** `test:dom` has **17 failures that are not this round's**: the
+tier-2 density sweep (§A, §B, §C, §D, §E), committed at `c797993` by the *other* round-2
+adversary and owned by the parallel workflow. Verified identical, row for row, to the session
+baseline. Zero dependencies, no `node_modules`.
+
+**One new defect, found by the mutation harness rather than by a test** (FINDINGS §14d): a
+redaction row scanned ciphertext for the two-character needle `'n0'` and went red ≈0.5% of runs by
+pure chance — and a needle that short could never have distinguished a leak from luck either. Both
+needles are now long enough that a hit is a leak. 20 consecutive green runs.
+
+---
+
+## THE T5 HEADLINE (round 2, superseded above but kept): nothing it found was a confidentiality break, and the denial half is closed
 
 A red team attacked a **real three-member Familienkreis** as an invited, attested, non-admin member
 (ADR 002 §0's T5). Its verdict was *„E7 can be built on this engine. It must not ship on it."* —

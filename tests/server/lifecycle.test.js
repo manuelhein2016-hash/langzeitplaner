@@ -49,7 +49,7 @@ import { requiredRecipients as coverageRequires } from '../../server/core/handle
 import { LIMITS } from '../../server/core/limits.js';
 import {
   removeMember, leaveSpace, transferAdmin, renameSpace, deleteSpace, LIFECYCLE_LIMIT_DEFAULTS,
-  LIFECYCLE_FINDINGS,
+  LIFECYCLE_FINDINGS, PROVES, PROVES_NOT,
 } from '../../server/core/handlers/lifecycle.js';
 import { adminProofString } from '../../server/core/auth.js';
 // The one cross-boundary import in this file, and it is a TEST-ONLY pin: `devices.js` may not
@@ -149,8 +149,8 @@ const SPACE3 = 'fsp_CCCCCCCCCCCCCCCCCCCCCC';
 
 /** ADR 003 §3.7 — a second member's recovery signature over bytes the relay assembles itself.
  *  `adminProofString` is the SERVER's, so a drift between signer and verifier is a red test. */
-async function adminProof(member, act, spaceId, target, epoch) {
-  const bytes = enc.encode(adminProofString({ act, spaceId, target, epoch }));
+async function adminProof(member, presenter, act, spaceId, target, epoch) {
+  const bytes = enc.encode(adminProofString({ act, spaceId, target, epoch, presenter }));
   const sig = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, member.recPriv, bytes));
   return { by: member.id, sig: bytesToB64u(sig) };
 }
@@ -766,13 +766,13 @@ for (const adapter of ADAPTERS) {
 
     // Every shape a patched client reaches for next.
     const cases = [
-      ['her own key, correctly signed', await adminProof(eve, 'space.delete', SPACE, SPACE, epoch), 400],
+      ['her own key, correctly signed', await adminProof(eve, eve.id, 'space.delete', SPACE, SPACE, epoch), 400],
       ['no proof at all', undefined, 403],
-      ['the admin\'s NAME over her signature', { by: admin.id, sig: (await adminProof(eve, 'space.delete', SPACE, SPACE, epoch)).sig }, 401],
-      ['a member of ANOTHER space', await adminProof(outsider, 'space.delete', SPACE, SPACE, epoch), 400],
-      ['the wrong act', await adminProof(admin, 'member.remove', SPACE, SPACE, epoch), 401],
-      ['the neighbouring epoch', await adminProof(admin, 'space.delete', SPACE, SPACE, epoch + 1), 401],
-      ['another circle\'s proof', await adminProof(admin, 'space.delete', SPACE2, SPACE, epoch), 401],
+      ['the admin\'s NAME over her signature', { by: admin.id, sig: (await adminProof(eve, eve.id, 'space.delete', SPACE, SPACE, epoch)).sig }, 401],
+      ['a member of ANOTHER space', await adminProof(outsider, eve.id, 'space.delete', SPACE, SPACE, epoch), 400],
+      ['the wrong act', await adminProof(admin, eve.id, 'member.remove', SPACE, SPACE, epoch), 401],
+      ['the neighbouring epoch', await adminProof(admin, eve.id, 'space.delete', SPACE, SPACE, epoch + 1), 401],
+      ['another circle\'s proof', await adminProof(admin, eve.id, 'space.delete', SPACE2, SPACE, epoch), 401],
     ];
     for (const [hint, adminProofField, status] of cases) {
       const r = await del(adminProofField === undefined
@@ -784,11 +784,11 @@ for (const adapter of ADAPTERS) {
 
     // `confirm` is still checked FIRST — a destructive endpoint refuses the shape fault before it
     // spends a signature verification, and the old 20.4 assertions keep their meaning.
-    const wrongConfirm = await del({ confirm: SPACE2, adminProof: await adminProof(admin, 'space.delete', SPACE, SPACE, epoch) });
+    const wrongConfirm = await del({ confirm: SPACE2, adminProof: await adminProof(admin, eve.id, 'space.delete', SPACE, SPACE, epoch) });
     assert.equal(wrongConfirm.extra.field, 'confirm');
 
     // NON-VACUITY: the honest two-key delete works, and says so.
-    const ok = await del({ confirm: SPACE, adminProof: await adminProof(admin, 'space.delete', SPACE, SPACE, epoch) });
+    const ok = await del({ confirm: SPACE, adminProof: await adminProof(admin, eve.id, 'space.delete', SPACE, SPACE, epoch) });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal(ok.body.deleted, true);
     assert.equal(ok.body.authorizedBy, 'admin_proof');
@@ -827,7 +827,7 @@ for (const adapter of ADAPTERS) {
     // recovery key is refused by NAME, before the signature runs.
     const dead = await call(deleteSpace, req({
       routeName: 'deleteSpace', params: { id: SPACE },
-      body: { confirm: SPACE, adminProof: await adminProof(admin, 'space.delete', SPACE, SPACE, (await store.getSpace(SPACE)).currentEpoch) },
+      body: { confirm: SPACE, adminProof: await adminProof(admin, eve.id, 'space.delete', SPACE, SPACE, (await store.getSpace(SPACE)).currentEpoch) },
     }), as(asEve));
     assert.equal(dead.status, 400);
     assert.equal(dead.extra.reason, 'admin_proof_signer_not_a_member');
@@ -886,11 +886,11 @@ for (const adapter of ADAPTERS) {
 
     // 2. Every mirror-image shape, each refused for its OWN reason.
     for (const [hint, proof, status, reason] of [
-      ['her own key, correctly signed', await adminProof(eve, 'member.remove', SPACE3, founder.id, epoch), 400, 'admin_proof_self_signed'],
-      ['his NAME over her signature', { by: founder.id, sig: (await adminProof(eve, 'member.remove', SPACE3, founder.id, epoch)).sig }, 401, null],
-      ['a proof for the WRONG ACT', await adminProof(oma, 'space.delete', SPACE3, founder.id, epoch), 401, null],
-      ['the neighbouring epoch', await adminProof(oma, 'member.remove', SPACE3, founder.id, epoch + 1), 401, null],
-      ['a proof naming ANOTHER target', await adminProof(oma, 'member.remove', SPACE3, eve.id, epoch), 401, null],
+      ['her own key, correctly signed', await adminProof(eve, eve.id, 'member.remove', SPACE3, founder.id, epoch), 400, 'admin_proof_self_signed'],
+      ['his NAME over her signature', { by: founder.id, sig: (await adminProof(eve, eve.id, 'member.remove', SPACE3, founder.id, epoch)).sig }, 401, null],
+      ['a proof for the WRONG ACT', await adminProof(oma, eve.id, 'space.delete', SPACE3, founder.id, epoch), 401, null],
+      ['the neighbouring epoch', await adminProof(oma, eve.id, 'member.remove', SPACE3, founder.id, epoch + 1), 401, null],
+      ['a proof naming ANOTHER target', await adminProof(oma, eve.id, 'member.remove', SPACE3, eve.id, epoch), 401, null],
     ]) {
       const r = await rm({ spaceId: SPACE3, memberId: founder.id, adminProof: proof });
       assert.equal(r.status, status, `${hint}: ${r.status} ${JSON.stringify(r.extra)}`);
@@ -904,7 +904,7 @@ for (const adapter of ADAPTERS) {
     //    would pass just as well against a route that always 403s.
     const ok = await rm({
       spaceId: SPACE3, memberId: founder.id,
-      adminProof: await adminProof(oma, 'member.remove', SPACE3, founder.id, epoch),
+      adminProof: await adminProof(oma, eve.id, 'member.remove', SPACE3, founder.id, epoch),
     });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     assert.equal(ok.body.removed, true);
@@ -973,7 +973,7 @@ for (const adapter of ADAPTERS) {
     //    control, and that the relay skips, is worse than no field at all.
     const forged = await rm({
       spaceId: SPACE, memberId: admin.id,
-      adminProof: { by: admin.id, sig: (await adminProof(eve, 'member.remove', SPACE, admin.id, epoch)).sig },
+      adminProof: { by: admin.id, sig: (await adminProof(eve, eve.id, 'member.remove', SPACE, admin.id, epoch)).sig },
     });
     assert.equal(forged.status, 401);
     assert.equal(forged.code, 'bad_signature');
@@ -981,7 +981,7 @@ for (const adapter of ADAPTERS) {
       'a refused proof must not remove anybody');
     const selfSigned = await rm({
       spaceId: SPACE, memberId: admin.id,
-      adminProof: await adminProof(eve, 'member.remove', SPACE, admin.id, epoch),
+      adminProof: await adminProof(eve, eve.id, 'member.remove', SPACE, admin.id, epoch),
     });
     assert.equal(selfSigned.status, 400);
     assert.equal(selfSigned.extra.reason, 'admin_proof_self_signed');
@@ -990,10 +990,86 @@ for (const adapter of ADAPTERS) {
     //    in the handler has to move.
     const proved = await rm({
       spaceId: SPACE, memberId: admin.id,
-      adminProof: await adminProof(oma, 'member.remove', SPACE, admin.id, epoch),
+      adminProof: await adminProof(oma, eve.id, 'member.remove', SPACE, admin.id, epoch),
     });
     assert.equal(proved.status, 200, JSON.stringify(proved.body));
     assert.equal(proved.body.authorizedBy, 'admin_proof');
+  });
+
+  T('T5-M3 — a founder-less circle needs a second key for EVERY removal, and the cost is named', async ({ store, as }) => {
+    // ROUND 2. `founderMemberId` names a member id, and a member id stops being a member: the
+    // founder transfers admin and leaves (the shipped path, `leavedelete.js`), or leaves and
+    // rejoins under a new id. Either way every live member is a non-founder and the gate stopped
+    // existing — after which one member removes the rest and `leaveSpace`'s last-member-out
+    // cascade deletes the circle. The anchor is now asked whether the founder is LIVE.
+    const founderId = `mem_${'f'.repeat(22)}`;
+    await store.createSpace({
+      id: SPACE3, kind: 'FAMILY', currentEpoch: 1, nextSeq: 0n, headChain: null,
+      createdAt: new Date(0), founderMemberId: founderId,
+    });
+    const founder = await makeMember(store, SPACE3, 'gruen', { id: founderId });
+    const eve = await makeMember(store, SPACE3, 'blau');
+    const mama = await makeMember(store, SPACE3, 'rot');
+    const oma = await makeMember(store, SPACE3, 'gelb');
+    const opa = await makeMember(store, SPACE3, 'lila');     // the co-signer for the last step
+    const e1 = await register(makeCtx(store, fakeClock()), eve);
+    const asEve = { deviceShort: e1.body.deviceShort, deviceId: e1.body.deviceId, memberId: eve.id };
+    const rm = (body) => call(removeMember, req({ routeName: 'removeMember', body }), as(asEve));
+    const epoch = (await store.getSpace(SPACE3)).currentEpoch;
+
+    // NON-VACUITY for the "before" state: while he is here, an ordinary removal is one request.
+    assert.equal((await rm({ spaceId: SPACE3, memberId: mama.id })).status, 200);
+
+    // The founder goes — by the honest exit, which is `removeMember`'s sibling and not an attack.
+    await store.removeMember(founder.id, Date.now());
+
+    const bare = await rm({ spaceId: SPACE3, memberId: oma.id });
+    assert.equal(bare.status, 403, JSON.stringify(bare));
+    assert.equal(bare.code, 'admin_proof_required');
+    assert.equal(bare.extra.reason, 'founder_gone_every_removal_needs_second_key');
+    assert.match(bare.extra.checks, /Member rows/, 'the refusal says what would satisfy it…');
+    assert.match(bare.extra.doesNotCheck, /two distinct PEOPLE/, '…and what that would not prove');
+    assert.equal((await store.listMembers(SPACE3)).find((m) => m.id === oma.id).removedAt, null);
+
+    // NON-VACUITY for the "after" state: a gate, not an outage. A third live row satisfies it.
+    const ok = await rm({
+      spaceId: SPACE3, memberId: oma.id,
+      adminProof: await adminProof(opa, eve.id, 'member.remove', SPACE3, oma.id, epoch),
+    });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.authorizedBy, 'admin_proof');
+    assert.equal(ok.body.proves, PROVES.admin_proof);
+    assert.equal(ok.body.provesNot, PROVES_NOT);
+  });
+
+  T('T5-M4 — a spent proof is refused, and an UNPROOFED retry is still the idempotent 200', async ({ store, as }) => {
+    // The epoch was supposed to bound a proof because "a removal forces e+1". The relay only SAYS
+    // that; a client performs the rotation and the attacker is the client. What the relay can
+    // check for itself is that the act has already happened.
+    const admin = await makeMember(store, SPACE, 'gruen');
+    const eve = await makeMember(store, SPACE, 'blau');
+    const oma = await makeMember(store, SPACE, 'rot');
+    const e1 = await register(makeCtx(store, fakeClock()), eve);
+    const asEve = { deviceShort: e1.body.deviceShort, deviceId: e1.body.deviceId, memberId: eve.id };
+    const rm = (body) => call(removeMember, req({ routeName: 'removeMember', body }), as(asEve));
+    const epoch = (await store.getSpace(SPACE)).currentEpoch;
+    const proof = await adminProof(oma, eve.id, 'member.remove', SPACE, admin.id, epoch);
+
+    assert.equal((await rm({ spaceId: SPACE, memberId: admin.id, adminProof: proof })).status, 200);
+    assert.equal((await store.getSpace(SPACE)).currentEpoch, epoch, 'NON-VACUITY: nobody rotated');
+
+    const again = await rm({ spaceId: SPACE, memberId: admin.id, adminProof: proof });
+    assert.equal(again.status, 400, JSON.stringify(again));
+    assert.equal(again.extra.reason, 'admin_proof_target_already_removed');
+    assert.equal(again.extra.alreadyRemoved, true,
+      'a success synonym: the client renders „ist bereits entfernt", never a failed removal');
+
+    // AND THE HONEST CONTROL, in the same row so it cannot be lost: 20.2's idempotency is intact
+    // for the retry that carries no proof, which is every retry the shipped client makes today.
+    const retry = await rm({ spaceId: SPACE, memberId: admin.id });
+    assert.equal(retry.status, 200, JSON.stringify(retry));
+    assert.equal(retry.body.alreadyRemoved, true);
+    assert.equal(retry.body.removed, false);
   });
 
   T('the removal limiter is per member, and its refusal carries Retry-After', async ({ store, clock }) => {
@@ -1077,6 +1153,8 @@ test('every lifecycle finding names its status, its consequence and its owner', 
   assert.deepEqual(ids, [...new Set(ids)], 'duplicate finding ids');
   assert.ok(ids.includes('T5-M1a') && ids.includes('T5-M1b') && ids.includes('T5-M1c'),
     'the three halves of T5-M1 must all still be stated, closed and open alike');
+  assert.ok(ids.includes('T5-M2') && ids.includes('T5-M3') && ids.includes('T5-M4'),
+    'round 2\'s three — the premise, the anchor and the token — must all still be stated');
   for (const f of LIFECYCLE_FINDINGS) {
     assert.ok(f.what.length > 60, `${f.id}: "what" must be specific enough to act on`);
     assert.ok(f.consequence.length > 100, `${f.id}: a finding without a consequence is a TODO`);
@@ -1087,5 +1165,52 @@ test('every lifecycle finding names its status, its consequence and its owner', 
   const open = LIFECYCLE_FINDINGS.find((f) => f.id === 'T5-M1a');
   assert.match(open.consequence, /round9-e6|round10-e6-gate/);
   assert.match(open.consequence, /adminpanel\.js/);
+  // T5-M2 is a PO ruling and the row has to keep saying so, plus BOTH closes, or it degrades into
+  // "known issue" and nobody ever picks it up.
+  const premise = LIFECYCLE_FINDINGS.find((f) => f.id === 'T5-M2');
+  assert.match(premise.status, /^OPEN\b/);
+  assert.match(premise.status, /RULING/i, 'T5-M2 is a decision, not a diff');
+  assert.match(premise.consequence, /N-1/, 'the rejected close must stay named, with its cost');
+  assert.match(premise.consequence, /op log/, 'and so must the one that is somebody else\'s file');
+  // T5-M4 was HALF-CLOSED with a scheduling constraint attached — "do it before any co-signature
+  // UI exists". Round 3 did it. The row must now say BOTH halves are closed AND keep the two
+  // things a "closed" row usually loses: which half was which, and what the binding does not buy.
+  // A finding that closes into three words is a finding whose next reader re-opens it by accident.
+  const token = LIFECYCLE_FINDINGS.find((f) => f.id === 'T5-M4');
+  assert.match(token.status, /^CLOSED\b/);
+  assert.match(token.status, /PRESENTER|presenter/,
+    'the half that was open must be named in the status, not just implied by "CLOSED"');
+  assert.match(token.status, /before any co-signature UI/i,
+    'and the deadline it was landed against stays on the record now that it was MET — a condition '
+    + 'that vanishes once satisfied is one nobody can check was');
+  assert.match(token.consequence, /lzp\/admin\/2/, 'the wire format, byte for byte');
+  assert.match(token.consequence, /never off the body/i,
+    'where the presenter comes from — one read off the BODY would be no binding at all');
+  assert.match(token.consequence, /401 bad_signature/,
+    'the refusal is the existing one, so the binding adds no enumeration oracle');
+  assert.match(token.consequence, /DOES NOT BUY/,
+    'and T5-M2 must stay untouched by it: two rows are still not two people');
+  assert.match(token.consequence, /§3d/, 'with the row that used to say SUCCEEDED');
   assert.ok(Object.isFrozen(LIFECYCLE_FINDINGS));
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// THE DEMOTION (T5-M2) — the sentences the wire carries about its own gate.
+//
+// `admin_proof` is a field name the relay cannot live up to: it compares two `Member` ROWS, and
+// `handlers/invites.js` lets one person hold two of them. These strings are the whole of what
+// stands between that and a screen telling a family that two PEOPLE agreed, so they are pinned
+// here rather than left to a comment that a tidying pass deletes.
+// ═════════════════════════════════════════════════════════════════════════════
+
+test('the gate says on the wire what it checked, and what it did not', () => {
+  assert.match(PROVES.admin_proof, /Member rows/,
+    'the strong case must say ROWS — never "members", never "people"');
+  assert.equal(/\bpeople\b|\bpersons?\b/i.test(PROVES.admin_proof), false);
+  assert.match(PROVES.membership_only, /one live Member row/);
+  assert.match(PROVES.sole_member, /one Member row/);
+  assert.match(PROVES_NOT, /two distinct PEOPLE/);
+  assert.match(PROVES_NOT, /admin/, 'and it must still deny the admin half, which is E2-L1b');
+  assert.match(PROVES_NOT, /T5-M2/, 'with the finding id, so the reader can follow it');
+  assert.ok(Object.isFrozen(PROVES));
 });

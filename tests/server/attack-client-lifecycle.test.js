@@ -107,8 +107,10 @@ const wireMember = (p) => ({
  * assembles for itself. Nothing here is a shortcut — `adminProofString` is imported from the
  * server so a drift between what the client signs and what the relay verifies is a red test.
  */
-async function adminProof(signer, act, spaceId, target, epoch) {
-  const bytes = TE.encode(adminProofString({ act, spaceId, target, epoch }));
+async function adminProof(signer, presenter, act, spaceId, target, epoch) {
+  const bytes = TE.encode(adminProofString({
+    act, spaceId, target, epoch, presenter: presenter.memberId,
+  }));
   const sig = new Uint8Array(await S.sign({ name: 'ECDSA', hash: 'SHA-256' }, signer.recPriv, bytes));
   return { by: signer.memberId, sig: b64u(sig) };
 }
@@ -692,7 +694,7 @@ for (const adapter of ADAPTERS) {
     const ep = (await srv.store.getSpace(spaceId)).currentEpoch;
     assert.equal((await srv.call(admin, 'POST', `/spaces/${spaceId}/delete`, {}, {
       confirm: spaceId,
-      adminProof: await adminProof(second, 'space.delete', spaceId, spaceId, ep),
+      adminProof: await adminProof(second, admin, 'space.delete', spaceId, spaceId, ep),
     })).status, 200);
     assert.equal(await srv.store.getSpace(spaceId), null);
     assert.notEqual(await srv.store.getSpace(otherSpace), null);
@@ -876,8 +878,8 @@ test('§D ATTACK remove any member, without being the admin / HALF-DEFENDED — 
   // full for `space.delete` in the row below, and the two mirror-image shapes are checked here
   // because a gate is only as good as the proof it demands.
   for (const [proof, hint] of [
-    [await adminProof(honest, 'member.remove', spaceId, admin.memberId, 1), 'her OWN recovery key'],
-    [{ by: admin.memberId, sig: (await adminProof(honest, 'member.remove', spaceId, admin.memberId, 1)).sig },
+    [await adminProof(honest, honest, 'member.remove', spaceId, admin.memberId, 1), 'her OWN recovery key'],
+    [{ by: admin.memberId, sig: (await adminProof(honest, honest, 'member.remove', spaceId, admin.memberId, 1)).sig },
       'his name over HER signature'],
   ]) {
     let ok = false;
@@ -888,39 +890,25 @@ test('§D ATTACK remove any member, without being the admin / HALF-DEFENDED — 
     assert.equal(ok, false, `the relay accepted ${hint}`);
   }
 
-  // ── 2. NON-VACUITY: the honest path is NOT closed ─────────────────────────────────────────
-  // A founder CAN be removed — it takes a second live member's key, exactly as 20.4's delete
-  // does. Without this the row above would pass just as well against a route that always 403s.
-  const ep = (await srv.store.getSpace(spaceId)).currentEpoch;
-  const okRes = await srv.call(honest, 'POST', '/members/remove', {}, {
-    spaceId,
-    memberId: admin.memberId,
-    adminProof: await adminProof(kid, 'member.remove', spaceId, admin.memberId, ep),
-  });
-  assert.equal(okRes.status, 200, JSON.stringify(okRes.body));
-  assert.equal(okRes.body.removed, true);
-  assert.equal(okRes.body.authorizedBy, 'admin_proof');
-  assert.equal(okRes.body.revokedDevices, 1);
-  await expectFail(() => srv.call(admin, 'GET', '/ops', { space: spaceId }, undefined),
-    403, 'device_revoked', 'the removed creator, one request later');
-
-  // ── 3. THE RESIDUAL, MEASURED ─────────────────────────────────────────────────────────────
+  // ── 2. THE RESIDUAL, MEASURED — AND IT IS MEASURED WHILE THE FOUNDER IS STILL HERE ────────
   // Every non-founder is still one request away, and the only thing bounding it is the rate
   // limit. This is the half of E2-L1 that is NOT closed, and it is asserted so that "T5-M1a is
   // closed" cannot be said of it.
+  //
+  // The loop INTERLEAVES the invite and the removal, for two reasons that are both properties of
+  // the code under test rather than test tidiness. `invites.js#MAX_LIVE_MEMBERS` is ADR 003
+  // §3.2's eight seats, enforced since round 2, so twelve simultaneous victims cannot exist; and
+  // a removal frees a seat (tombstones are deliberately not counted there), so invite-remove-
+  // invite is exactly the shape a hostile member is left with. Which is the honest measurement:
+  // `memberRemovePerMemberHour = 10` now bounds a LOOP, not a one-shot sweep of a full circle.
   let refused = null;
-  const victims = [];
+  let removed = 0;
   for (let i = 0; i < LIMITS.memberRemovePerMemberHour + 2; i++) {
     const p = await person(`c${i}`, `203.0.113.${170 + i}`);
     const iv = await mintInvite(srv, honest, spaceId);
-    const r = await srv.call(p, 'POST', '/invites/redeem', {}, redeemBody(iv, p));
-    assert.equal(r.status, 200);
-    victims.push(p);
-  }
-  let removed = 0;
-  for (const v of victims) {
+    assert.equal((await srv.call(p, 'POST', '/invites/redeem', {}, redeemBody(iv, p))).status, 200);
     try {
-      await srv.call(honest, 'POST', '/members/remove', {}, { spaceId, memberId: v.memberId });
+      await srv.call(honest, 'POST', '/members/remove', {}, { spaceId, memberId: p.memberId });
       removed++;
     } catch (e) { refused = e; break; }
   }
@@ -928,18 +916,84 @@ test('§D ATTACK remove any member, without being the admin / HALF-DEFENDED — 
 
   // THE ACCOUNTING, stated rather than a bare number, because the number moved when the gate
   // landed and a silently-adjusted constant would hide why. `enforceFor` is charged BEFORE the
-  // proof gate (`limits.js` reasons that verifying P-256 is the expensive half), so her four
-  // earlier calls on this route — the bare attempt, the two forgeries, and the co-signed one —
-  // each spent budget whether they succeeded or not. That is the right order: an attacker must
-  // not get a free supply of refusals to probe with.
-  const spentBefore = 4;
+  // proof gate (`limits.js` reasons that verifying P-256 is the expensive half), so her three
+  // earlier calls on this route — the bare attempt and the two forgeries — each spent budget
+  // whether they succeeded or not. That is the right order: an attacker must not get a free
+  // supply of refusals to probe with.
+  const spentBefore = 3;
   assert.equal(removed, LIMITS.memberRemovePerMemberHour - spentBefore,
-    `she removed ${removed} more, having already spent ${spentBefore} on this route`);
+    `she removed ${removed}, having already spent ${spentBefore} on this route`);
   assert.equal(removed + spentBefore, LIMITS.memberRemovePerMemberHour,
     'the per-member-hour budget is still the only thing standing between one patched app and '
-    + 'every NON-FOUNDER in the circle — refused attempts included. Closing that needs the relay '
-    + 'to verify the admin chain — a transfer certificate anchored at `founderMemberId` — which '
-    + 'is a protocol change (ADR 003 §3.7), not a gate.');
+    + 'every NON-FOUNDER in a circle whose founder is present — refused attempts included. '
+    + 'Closing that needs the relay to verify the admin chain — a transfer certificate anchored '
+    + 'at `founderMemberId` — which is a protocol change (ADR 003 §3.7), not a gate.');
+
+  // ── 3. NON-VACUITY: the honest path is NOT closed ─────────────────────────────────────────
+  // A founder CAN be removed — it takes a second live member's key, exactly as 20.4's delete
+  // does. Without this the row above would pass just as well against a route that always 403s.
+  // The clock moves an hour first because §2 deliberately spent the whole budget; the subject of
+  // this half is the GATE, and a `rate_limited` here would prove nothing about it.
+  c.advance(3600000);
+  const ep = (await srv.store.getSpace(spaceId)).currentEpoch;
+  const okRes = await srv.call(honest, 'POST', '/members/remove', {}, {
+    spaceId,
+    memberId: admin.memberId,
+    adminProof: await adminProof(kid, honest, 'member.remove', spaceId, admin.memberId, ep),
+  });
+  assert.equal(okRes.status, 200, JSON.stringify(okRes.body));
+  assert.equal(okRes.body.removed, true);
+  assert.equal(okRes.body.authorizedBy, 'admin_proof');
+  assert.equal(okRes.body.revokedDevices, 1);
+  // …and the response does not let that enum imply more than the relay checked. T5-M2.
+  assert.match(okRes.body.proves, /Member rows/);
+  assert.match(okRes.body.provesNot, /two distinct PEOPLE/);
+  await expectFail(() => srv.call(admin, 'GET', '/ops', { space: spaceId }, undefined),
+    403, 'device_revoked', 'the removed creator, one request later');
+
+  // ── 4. AND NOW THE ANCHOR NAMES A TOMBSTONE — INVERTED, finding T5-M3 (round 2) ────────────
+  // This is the state §2's residual used to survive into, and the second member-adversary drove
+  // it: with the founder gone, EVERY live member is a non-founder, so the gate stopped existing
+  // and one member could clear the circle and ride `leaveSpace`'s last-member-out cascade to a
+  // delete. The relay reaches the same state on the honest path too — the founder transfers
+  // admin and leaves — so this is not only an attack, it is a Tuesday.
+  //
+  // The anchor is now asked whether the founder is LIVE. She is not, so the relay has lost the
+  // one blind fact that told a survivable removal from a space-destroying one, and it stops
+  // guessing: every removal in this space takes a second member row.
+  const late = await person('lila', '203.0.113.200');
+  const lateInv = await mintInvite(srv, honest, spaceId);
+  assert.equal((await srv.call(late, 'POST', '/invites/redeem', {}, redeemBody(lateInv, late))).status, 200);
+  await expectFail(
+    () => srv.call(honest, 'POST', '/members/remove', {}, { spaceId, memberId: late.memberId }),
+    403, 'admin_proof_required', 'an ordinary removal in a circle whose founder has gone');
+  assert.equal((await srv.store.listMembers(spaceId)).find((m) => m.id === late.memberId).removedAt, null,
+    'and nobody went: a refusal removes nobody');
+
+  // NON-VACUITY for the inversion — the rule is satisfiable while a third row is standing, so
+  // this is a gate and not an outage.
+  const ep2 = (await srv.store.getSpace(spaceId)).currentEpoch;
+  const lateOk = await srv.call(honest, 'POST', '/members/remove', {}, {
+    spaceId,
+    memberId: late.memberId,
+    adminProof: await adminProof(kid, honest, 'member.remove', spaceId, late.memberId, ep2),
+  });
+  assert.equal(lateOk.status, 200, JSON.stringify(lateOk.body));
+  assert.equal(lateOk.body.authorizedBy, 'admin_proof');
+
+  // ── 5. AND A SPENT PROOF IS NOT A STANDING ONE — finding T5-M4 (round 2) ───────────────────
+  // The epoch has not moved: the relay only ANSWERS `rotateRequired: true`, and the client that
+  // would perform the rotation is the attacker. So the same bytes used to authorize the same act
+  // again, for ever. They no longer do — an act that has already happened is not an act a proof
+  // can authorize — and the client must read this 400 as „ist bereits entfernt", never as a
+  // failed removal (ADR 003 §3.7).
+  assert.equal((await srv.store.getSpace(spaceId)).currentEpoch, ep2, 'NON-VACUITY: nobody rotated');
+  const spent = await adminProof(kid, honest, 'member.remove', spaceId, late.memberId, ep2);
+  await expectFail(
+    () => srv.call(honest, 'POST', '/members/remove', {}, {
+      spaceId, memberId: late.memberId, adminProof: spent,
+    }),
+    400, 'bad_request', 'the same proof, spent a second time');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -970,13 +1024,13 @@ test('§D ATTACK delete the whole Familienkreis, without being the admin / DEFEN
   // 2. Every shape a patched client would try next, and each is refused for its OWN reason.
   const bad = [
     [{ by: honest.memberId, sig: b64u(rnd(64)) }, 'a proof she signed for herself'],
-    [await adminProof(honest, 'space.delete', spaceId, spaceId, ep), 'her own recovery key, correctly signed'],
+    [await adminProof(honest, honest, 'space.delete', spaceId, spaceId, ep), 'her own recovery key, correctly signed'],
     [{ by: admin.memberId, sig: b64u(rnd(64)) }, 'the admin\'s NAME with a random signature'],
-    [{ by: admin.memberId, sig: (await adminProof(honest, 'space.delete', spaceId, spaceId, ep)).sig },
+    [{ by: admin.memberId, sig: (await adminProof(honest, honest, 'space.delete', spaceId, spaceId, ep)).sig },
       'the admin\'s name over HER signature — the mix-and-match'],
-    [await adminProof(admin, 'member.remove', spaceId, spaceId, ep), 'a proof for the WRONG ACT'],
-    [await adminProof(admin, 'space.delete', spaceId, spaceId, ep + 1), 'the neighbouring epoch'],
-    [await adminProof(admin, 'space.delete', `fsp_${b64u(rnd(16))}`, spaceId, ep), 'another circle\'s proof'],
+    [await adminProof(admin, honest, 'member.remove', spaceId, spaceId, ep), 'a proof for the WRONG ACT'],
+    [await adminProof(admin, honest, 'space.delete', spaceId, spaceId, ep + 1), 'the neighbouring epoch'],
+    [await adminProof(admin, honest, 'space.delete', `fsp_${b64u(rnd(16))}`, spaceId, ep), 'another circle\'s proof'],
     [{ by: admin.memberId }, 'no signature at all'],
     ['', 'a string where an object goes'],
     [[], 'an array where an object goes'],
@@ -1004,7 +1058,7 @@ test('§D ATTACK delete the whole Familienkreis, without being the admin / DEFEN
   //    promise the old row checked is still made in the response.
   const res = await srv.call(honest, 'POST', `/spaces/${spaceId}/delete`, {}, {
     confirm: spaceId,
-    adminProof: await adminProof(admin, 'space.delete', spaceId, spaceId, ep),
+    adminProof: await adminProof(admin, honest, 'space.delete', spaceId, spaceId, ep),
   });
   assert.equal(res.status, 200, JSON.stringify(res.body));
   assert.equal(res.body.deleted, true);

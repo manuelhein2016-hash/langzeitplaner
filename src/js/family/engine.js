@@ -786,11 +786,22 @@ export async function attestPeer(peer, recSig, createdAt) {
 // `sync/personal.js` §4(b)): three named slots, so a Tauri build writes them beside `board.json`
 // instead of in the WebView's storage.
 //
-// TWO OF THEM ARE NOT PER SPACE, and that is a fact about the disk rather than an oversight:
-// `LS_PARKED` is one list and `LS_CHAIN` is one map, for the device. Both engines write both.
-// Each port therefore DECLARES the space it is a slice of (`space: spaceId`) and the two modules
-// that own the data — `sync/outbox.js` and `sync/cursor.js` — merge on write and adopt only their
-// own rows on read. See those two files' headers; the ports below stay dumb on purpose.
+// ONE OF THEM IS NOT PER SPACE, and that is a fact about the disk rather than an oversight:
+// `LS_CHAIN` is one map for the device, and both engines write it. That port therefore DECLARES
+// the space it is a slice of (`space: spaceId`) and the module that owns the data —
+// `sync/cursor.js` — merges on write and adopts only its own record on read. See that file's
+// header; the ports below stay dumb on purpose.
+//
+// `LS_PARKED` USED TO BE THE SECOND, AND IS NOT ANY MORE. A slot is a per-space slot — the shape
+// `LS_SEALED` has always had — because the cap that bounds a lot is per space and the write that
+// fills it was not: both engines wrote the WHOLE slot, so the personal lot's every write carried
+// the family lot's whole undecryptable backlog with it, and a slot the family space had filled
+// was a slot the personal space could not write into. `park()` then answered `false` for somebody
+// else's reason, which `sync/outbox.js` defines as "the caller MUST NOT advance the cursor past
+// this" — family traffic stalling personal sync while the family lot sat nowhere near its own
+// cap. The `space:` declaration below stays, and so does the merge on the other side of the port:
+// it is what makes the lot correct for ANY shared slot, and it is now belt as well as braces for
+// this one (`foreign` is structurally empty here). See `tests/fleet/e6-gate-slots.test.js` §2.
 
 const LS_RING = (spaceId) => `langzeitplaner.ring.${spaceId}`;
 const LS_PEERS = (spaceId) => `langzeitplaner.peers.${spaceId}`;
@@ -871,24 +882,42 @@ function sealedEnvelopeStore() {
  * `space: spaceId` IS THE WHOLE OF THE SCOPING, AND IT IS A DECLARATION AND NOT A FILTER
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  *
- * `LS_PARKED` is ONE key for the device while `LS_RING` and `LS_PEERS` are per space, and this
- * file builds this port TWICE — once in `startEngine` for the personal space, once in
- * `startFamilyEngine` for the family one. Two writers, one slot. The E7 red team drove what that
- * costs: an ordinary family park wrote the family lot's rows over the slot and destroyed a
+ * This file builds this port TWICE — once in `startEngine` for the personal space, once in
+ * `startFamilyEngine` for the family one. Two writers. The E7 red team drove what ONE SLOT cost
+ * them: an ordinary family park wrote the family lot's rows over the slot and destroyed a
  * personal envelope that a ladder had shelved — the only copy on this Mac, with the cursor
  * already past it — and the family lot's undecryptable backlog counted against the PERSONAL
  * lot's cap, so `park()` answered `false` and stalled a cursor for somebody else's reason.
  *
- * This port stays as dumb as every other one here: it reads the whole slot and writes the whole
- * slot, because that is the I/O `src/js/sync/` may not do for itself (ADR 005 §2) and nothing
- * more. What it adds is one fact it is the only file in a position to know — WHICH SPACE THIS
- * ONE IS FOR. `sync/outbox.js#createParkingLot` reads it and does the rest: it adopts only this
- * space's rows, and its `persist()` re-reads the slot and writes the other engine's rows back
- * untouched. Putting the merge there rather than here is deliberate — the rule then holds for
- * every caller of the lot, including the ones that build their own port.
+ * The round-2 team then drove the half those two fixes are not about. The COUNT was scoped and
+ * the DELETION was closed, but the WRITE was still one write over one key: every personal park
+ * re-serialised the family lot's entire backlog, so a slot the family space had filled was a slot
+ * the personal space could not write into at all — 24 rows under a cap of 3, and `park()` false
+ * while the family lot sat nowhere near its own cap. The cap is not the lever (a cap that counted
+ * the shelf would let one ladder burn-out permanently shrink a lot — `round8-park.test.js` §6.5)
+ * and neither is the stall (a `park()` that answered `true` on a write that did not land is R8-5,
+ * the cursor released over bytes that are not on the disk). **The lever is the key**, and it is
+ * the one `LS_SEALED` beside it has always had: `${LS_PARKED}.${spaceId}`, one slot per space.
  *
- * A `spaceId` of `undefined` would silently restore the pre-E7 behaviour, which is why both call
- * sites pass one and `tests/fleet/e6-attack-privat.test.js` §2a pins that they do.
+ * What is left after that is one disk, honestly shared: a device whose storage is genuinely full
+ * cannot write either slot, and that stall is real and correct. What was NOT honest was the
+ * sentence — `writeJSON` swallowed the failure, so the lot was told the bytes had landed when
+ * they had not (R8-5 in the shipped port, in production, on every full disk) and nothing named
+ * the space whose backlog filled the disk. So `saveRecords` now THROWS what `localStorage` threw,
+ * which is what `sync/outbox.js#persist` is written to catch, and it names the foreign slot in
+ * the message the user is shown.
+ *
+ * This port stays as dumb as every other one here otherwise: it reads a slot and writes a slot,
+ * because that is the I/O `src/js/sync/` may not do for itself (ADR 005 §2). It keeps the one
+ * fact it is the only file in a position to know — WHICH SPACE THIS ONE IS FOR — because
+ * `sync/outbox.js#createParkingLot` reads `space` to scope the cap, the replay set and the
+ * diagnostics, and because the merge on the far side must stay correct for every OTHER caller
+ * that builds its own port over a shared slot. Here it is now belt as well as braces: with a key
+ * per space the lot's `foreign` set is structurally empty.
+ *
+ * A `spaceId` of `undefined` would put every space back in one slot named `…parked.undefined`,
+ * which is why both call sites pass one and `tests/fleet/e6-attack-privat.test.js` §2a pins that
+ * they do.
  *
  * That one keeps the sealed bytes this device still owes the relay. This one keeps the sealed
  * bytes the relay has already handed over and this device cannot open YET: an op from a Mac whose
@@ -900,19 +929,99 @@ function sealedEnvelopeStore() {
  * Same shape as every other record store here, one key per space. `sync/outbox.js`'s
  * `createParkingLot` owns the cap, the replay order and the refuse-rather-than-drop rule; this is
  * only the I/O `src/js/sync/` may not do for itself (ADR 005 §2).
+ *
+ * THE LEGACY SLOT IS READ, NEVER DELETED. A Mac upgrading into this build has envelopes under the
+ * old device-wide `LS_PARKED`, and they are the only copy of ops whose cursor has already moved
+ * past them (ADR 002 §5.2.5: parked, never dropped). `loadRecords` therefore falls back to that
+ * list — filtered to THIS space, so the other engine's rows are not adopted and not copied into
+ * this slot — until this space has a slot of its own. The old key is left where it is: the other
+ * space has not migrated yet, and a delete here would be exactly the silent loss that rule
+ * forbids.
+ *
+ * EXPORTED, unlike its three neighbours, and for one reason: `tests/fleet/e6-gate-slots.test.js`
+ * §2 used to REPRODUCE this port because it was module-private, and a reproduction of a defect is
+ * a test that cannot see the fix — every row of it stayed green over the fixed file. It now
+ * drives these bytes. Nothing in `src/` calls it but the two engines below.
  */
-function parkedEnvelopeStore(spaceId) {
+export function parkedEnvelopeStore(spaceId) {
+  const slot = `${LS_PARKED}.${spaceId}`;
   return {
     durable: true,
     space: spaceId,
-    // NOT `async`, and that is the second half of the fix rather than a style choice.
-    // `localStorage` is a synchronous API; wrapping it in a promise puts a microtask boundary in
-    // the middle of `createParkingLot#persist`'s read-modify-write, which is exactly where the
-    // OTHER engine's write slips in when both park in the same cadence tick. A plain value is a
-    // valid answer at every call site — all of them `await` — and it keeps the merge atomic.
-    loadRecords() { return readJSON(LS_PARKED, []); },
-    saveRecords(rows) { writeJSON(LS_PARKED, rows); },
+    // NOT `async`, and that is a property of the fix rather than a style choice. `localStorage`
+    // is a synchronous API; wrapping it in a promise puts a microtask boundary in the middle of
+    // `createParkingLot#persist`'s read-modify-write, which is where another writer over a shared
+    // slot slips in. A plain value is a valid answer at every call site — all of them `await`.
+    loadRecords() {
+      const own = readJSON(slot, null);
+      return Array.isArray(own) ? own : legacyParkedFor(spaceId);
+    },
+    saveRecords(rows) { writeParked(slot, rows); },
   };
+}
+
+/**
+ * The pre-per-space slot, read for THIS space only. See the note above: read, never deleted, and
+ * never merged into this space's slot as somebody else's rows.
+ */
+function legacyParkedFor(spaceId) {
+  const rows = readJSON(LS_PARKED, null);
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((r) => r !== null && typeof r === 'object' && r.space === spaceId);
+}
+
+/**
+ * Write one space's parked slot, and THROW when the write did not land.
+ *
+ * The other stores here use `writeJSON`, which swallows — losing a cached roster or a coverage
+ * record to a full disk costs one extra delivery and nothing else. These bytes are different:
+ * they are the only copy of ops the relay has already handed over, and `sync/outbox.js` is
+ * written around the rule that a failed write is the same answer as a full lot, so that `park()`
+ * returns `false` and the cursor is NOT advanced over envelopes that are not on the disk (R8-5).
+ * A swallowed throw tells the lot a fact about the disk that is false. So this one propagates.
+ *
+ * `sync/outbox.js#persist` catches it and shows the message, which is why the message says the
+ * one thing this file is in a position to know and the lot is not: whether the disk is full of
+ * THIS space's envelopes or of another space's.
+ */
+function writeParked(slot, rows) {
+  try {
+    localStorage.setItem(slot, JSON.stringify(rows));
+  } catch (e) {
+    const name = (e && e.name) || 'Error';
+    const msg = (e && e.message) || 'the write did not land';
+    throw new Error(`${name}: ${msg}${foreignParkNote(slot)}`);
+  }
+}
+
+/**
+ * The sentence that names the OTHER space — N-7.
+ *
+ * A stall the user is shown says "sync has STALLED"; without this it does not say that the reason
+ * is a circle they may not even be looking at. One space's backlog can still fill a device's
+ * storage — that is one disk, honestly shared, and no key scheme changes it — but it must not be
+ * anonymous. Best effort by construction: no `length`/`key` on the storage, or a throw from it,
+ * and the sentence is simply omitted rather than guessed at.
+ */
+function foreignParkNote(slot) {
+  let biggest = null;
+  let bytes = 0;
+  try {
+    if (typeof localStorage.key !== 'function') return '';
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (typeof k !== 'string' || k === slot) continue;
+      if (k !== LS_PARKED && !k.startsWith(`${LS_PARKED}.`)) continue;
+      const n = (localStorage.getItem(k) || '').length;
+      if (n > bytes) { bytes = n; biggest = k; }
+    }
+  } catch { return ''; }
+  if (biggest === null || bytes === 0) return '';
+  const other = biggest === LS_PARKED ? 'a space not yet migrated to its own slot'
+    : biggest.slice(LS_PARKED.length + 1);
+  return ` — and the disk is not full of THIS space's envelopes: ${other} is holding ${bytes} `
+    + 'bytes of parked envelopes on the same disk. Sync for this space is stalled by that space, '
+    + 'and clearing space there is what un-stalls it.';
 }
 
 /**

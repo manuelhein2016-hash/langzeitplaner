@@ -1022,6 +1022,12 @@ const ROTATE_FIELDS = ['epoch', 'wraps', 'invites'];
  *   · `epoch > currentEpoch + 1` is refused, because the coverage rule spans 1..epoch and an
  *     unbounded jump is an unbounded amount of work bought with one request.
  *
+ * **And the ladder is metered** — `RATE_RULES.epochRotate`, 20 rungs per member per hour
+ * (finding T2-E1). "Epoch discipline" above bounds how far ONE request may move the counter and
+ * says nothing at all about how often; that gap was the finding, because the counter only goes
+ * up and the honest client's payload grows with it. The budget is spent on a CLIMB and never on
+ * a lost race — see the block at the call site, which is where the reasoning lives.
+ *
  * **Everything is one transaction and every failure rolls the whole thing back**, including the
  * `Epoch` row. A rotation that fails coverage must not consume `e+1`: if it did, the honest
  * rotator that comes next gets `409 epoch_taken` for an epoch whose key nobody holds, and the
@@ -1031,9 +1037,7 @@ const ROTATE_FIELDS = ['epoch', 'wraps', 'invites'];
  */
 export async function rotateEpoch(req, ctx) {
   const spaceId = readId(req.params || {}, 'id', SPACE_ID_RE, 'params');
-  // Authenticate before parsing the body. A wrap list is up to 1024 base64 entries and this route
-  // carries no rate limiter — `limits.js` RATE_COVERAGE.rotateEpoch, whose reasoning DOES hold
-  // here: the caller must already be a known, unrevoked device of a current member. That
+  // Authenticate before parsing the body. A wrap list is up to 1024 base64 entries, so the
   // membership check is what stands between a stranger and the parse.
   const { auth } = await requireActiveMember(req, ctx, spaceId);
 
@@ -1046,6 +1050,48 @@ export async function rotateEpoch(req, ctx) {
   // for it (finding E2E3-3). `requireActiveMember` has already resolved it off the stored row,
   // so it is the relay's own observation and not a claim.
   if (typeof auth.deviceId !== 'string' || !DEVICE_ID_RE.test(auth.deviceId)) throw fail('not_a_member');
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // THE LADDER BUDGET  (finding T2-E1 · limits.js RATE_RULES.epochRotate, E2-L9)
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // This route was declared unlimited, on the argument that "a flood costs the attacker their
+  // own space's epoch numbers and nothing else". `limits.js` RATE_COVERAGE.rotateEpoch now
+  // carries the measurement that refutes it: `assertCoverage` is a ROW COUNT and rows already
+  // deposited count, so a rotation costs an attacking member ONE wrap per recipient, while
+  // `sync/keys.js#rotateTo` sends `recipients × 1..next` and `readWraps` refuses more than
+  // `MAX_WRAPS`. An unmetered counter that only goes up therefore walks the shipped client past
+  // a wall no route can undo.
+  //
+  // ⚠ **WHAT IS METERED IS THE CLIMB, NOT THE REQUEST, AND THAT IS THE WHOLE DESIGN.**
+  //
+  // The obvious shape — charge every authenticated attempt on entry — closes the ladder and
+  // BUILDS A DENIAL INTO THE FIX. A device that loses the epoch race has no choice but to try
+  // again: ADR 002 §4.2 makes retrying the protocol ("the client re-fetches its wraps and stops
+  // if it now holds the key"), and in a family where two Macs deliver on their own timers,
+  // losing is ordinary. Under an entry charge the loser pays for every loss, so a member whose
+  // partner happens to rotate faster is metered out of her own circle's key delivery by the
+  // honest behaviour of an honest peer. Metering the SCARCE THING — an epoch number, which only
+  // a winner consumes — has no such victim: the climber pays for each rung she takes and the
+  // loser pays nothing. Control row: `tests/fleet/e6-gate-keys.test.js` §2d, which is the only
+  // row in the suite that dies if this charge moves above the pre-flight.
+  //
+  // The pre-flight read is deliberately NOT authoritative and deliberately does not reject.
+  // `getSpace` here decides only "would this request take a rung"; the transaction below re-reads
+  // under the lock and remains the only place an epoch is claimed. So the error precedence of
+  // this handler is unchanged — a malformed body is still a 400 before anything else is decided —
+  // and the honest race between this read and the transaction costs one unit, at most, to a
+  // device that then gets its `409 epoch_taken` for free.
+  //
+  // What is left unbudgeted by this choice is REQUEST VOLUME on a route that is post-auth,
+  // space-scoped and idempotent-on-failure — which is the part of the old reason that was always
+  // sound: the caller is a known, unrevoked device of a current member, so a flood is
+  // attributable and revocable with one column write.
+  const preflight = await ctx.store.getSpace(spaceId);
+  if (preflight && epoch === preflight.currentEpoch + 1) {
+    await enforceFor(req, ctx, 'epochRotate', auth);
+  }
+
   const wraps = readWraps(body.wraps, epoch, spaceId, auth.deviceId);
   // ADR 002 §4.2 step 3 listed `invites` because the pre-D9 rotation re-wrapped the invite blobs.
   // D9 deleted the blobs, so there is nothing for a client to send: the server refreshes every

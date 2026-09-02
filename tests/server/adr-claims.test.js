@@ -116,3 +116,58 @@ test('ADR 003 §5.1 records the namespace decision AND refuses to oversell it', 
   assert.match(s, /not a control/i,
     'the composite index is a speed bump for ad-hoc SQL, and the operator can CREATE INDEX');
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §3.7 — the admin proof, and the three things it must keep REFUSING to claim
+//
+// This section is where a reader goes to find out what a co-signature is worth, and every one of
+// its honest sentences was written because a red team found the confident one to be false. A
+// tidying pass that trims "it does not prove X" leaves a paragraph that reads like a control and
+// a relay that counts rows. So the anti-claims are pinned harder than the claims.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+test('ADR 003 §3.7 refuses to call a `Member` row a person — T5-M2', () => {
+  const s = section(ADR003, '#### What a `Member` row is not');
+  assert.match(s, /cannot compare|cannot\b[^.]*one human|two `Member` rows to one human/i,
+    'the premise must be stated as an inability of the RELAY, not softened into an assumption');
+  assert.match(s, /invites herself|second identity/i, 'and the attack that shows it must be named');
+  assert.match(s, /`provesNot`|provesNot/,
+    'the wire field that carries the demotion must be named, or the ADR and the code drift');
+  assert.match(s, /MAX_LIVE_MEMBERS/, 'the bound that WAS landed, so it is not re-proposed as new');
+  assert.match(s, /N-1/, 'the rejected close must keep its measured cost attached');
+  assert.match(s, /ADR 001/, 'and the close that is somebody else\'s file must keep its address');
+  assert.match(s, /field, not a control/i, 'the one-line summary a hurried reader will take away');
+});
+
+test('ADR 003 §3.7 states the founder-liveness rule AND the two costs it charges — T5-M3', () => {
+  const s = section(ADR003, '#### Where it is required, and where it is not');
+  assert.match(s, /no longer live/i, 'the rule');
+  assert.match(s, /unsatisfiable/i,
+    'a rule that cannot be satisfied in a two-member circle must SAY so where it is specified');
+  assert.match(s, /prerequisite/i,
+    'and the honest price — the co-signature UI is now a shipping prerequisite, not an owed screen');
+});
+
+test('ADR 003 §3.7 withdraws the epoch argument rather than quietly keeping it — T5-M4', () => {
+  const s = section(ADR003, '#### What is signed');
+  assert.match(s, /SAYS, not something it DOES/i,
+    '"a removal forces e+1" was the whole basis for having no nonce, and it was wrong');
+  assert.match(s, /admin_proof_target_already_removed/, 'what replaced it');
+  assert.match(s, /success synonym/i,
+    'the client contract that comes with the refusal, or a lost response reads as a failure');
+  assert.match(s, /lzp\/admin\/2/,
+    'the presenter binding must carry its wire format byte for byte, or it becomes folklore');
+  assert.match(s, /before any co-signature UI/i,
+    'and the deadline it was landed against, kept in the record now that it was MET — a '
+    + 'condition that vanishes once it is satisfied is a condition nobody can check was');
+  // ROUND 3: the second half is closed, and the ADR must say what the binding does NOT buy.
+  // Without this, "a proof is bound to its presenter" reads as though it answered T5-M2.
+  assert.match(s, /presenter\s*=|`presenter`/,
+    'the sixth component must be named where the payload is specified');
+  assert.match(s, /never off the body|off the authenticated device|authenticated device's/i,
+    'and where it comes from — a presenter read off the BODY would be no binding at all');
+  assert.match(s, /401 `?bad_signature`?|`401 bad_signature`/i,
+    'the refusal must be the existing one, so the binding adds no enumeration oracle');
+  assert.match(s, /cannot make two rows into two people|two \*\*people\*\*/i,
+    'and what it does NOT buy — T5-M2 is untouched by it');
+});

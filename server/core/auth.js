@@ -783,14 +783,34 @@ export async function verifySignature(sigPubRaw, signature, bytes, ctx) {
 // So the property this buys is deliberately weaker than "only the admin may do this" and
 // deliberately stronger than "any single member may do this":
 //
-//     ONE HOSTILE MEMBER, ACTING ALONE, CANNOT.
+//     TWO DISTINCT `Member` ROWS OF THIS SPACE PUT A RECOVERY KEY BEHIND THIS ACT.
 //
-// That is the T5 line. ADR 002 §0's T5 row puts "ability to purge another member" in the
-// must-NOT-get column for a family member as adversary, and a family member as adversary is
-// **one** person with **one** patched app and **one** recovery key. She cannot produce a
-// signature under a key that is in somebody else's Keychain, and no amount of client patching
-// changes that. A relay that demands two distinct members' recovery keys for an irreversible act
-// has closed the single-actor attack without ever learning who the admin is.
+// ═════════════════════════════════════════════════════════════════════════════
+// ⚠ AND THAT SENTENCE USED TO END "…SO ONE HOSTILE MEMBER, ACTING ALONE, CANNOT". IT DOES NOT.
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Finding **T5-M2**, from the second member-adversary round. The old wording read the third
+// premise off the first two and the premise is not granted:
+//
+//     **a `Member` row is not a person.** `handlers/invites.js#createInvite` states "any member
+//     may issue an invite, not only the admin"; `redeemInvite` admits a fresh `memberId` + a
+//     caller-chosen `recoveryPubSig` + a self-attested device; and NOTHING anywhere compares two
+//     member rows to one human. A blind relay cannot: the two facts it would need — *is this row
+//     a distinct human*, *which row is the admin* — are both outside it by construction.
+//
+// So Eve invites herself, redeems with a second identity, holds both recovery keys in her own
+// Keychain, and co-signs her own act. ADR 002 §0's T5 row — "one family member, one patched app,
+// one Keychain" — grants her exactly that: one Keychain holds as many recovery keys as she cares
+// to generate.
+//
+// **What this function still buys, stated exactly.** She cannot sign under a key held by somebody
+// who is not her. Against an adversary who has NOT provisioned a second identity — which is every
+// state a shipped client can reach on its own — the gate is real, and every refusal below is
+// real. Against one who has, it counts to two and gets two. `handlers/lifecycle.js` therefore
+// puts `PROVES` / `PROVES_NOT` on every response and every 403 rather than letting the field name
+// `adminProof` do the talking, and `MAX_LIVE_MEMBERS` bounds how many identities one person can
+// park in a circle. Closing it needs a signed invite chain or an in-log co-signature — see
+// `AUTH_INTERFACE_GAPS` E2-L1b and `LIFECYCLE_FINDINGS` T5-M2.
 //
 // ═════════════════════════════════════════════════════════════════════════════
 // WHAT IS SIGNED, AND WHY THERE IS NO NONCE IN IT
@@ -805,38 +825,79 @@ export async function verifySignature(sigPubRaw, signature, bytes, ctx) {
 // **The proof is NOT bound to the request nonce, and that is a decision rather than an
 // oversight.** Binding it would make a proof single-use, and would also mean the client had to
 // know the `Authorization` nonce before it signs — which `src/js/platform/net.js` mints inside
-// `buildRequest` and does not hand out. The reason the weaker binding is safe is that BOTH acts
-// this covers are idempotent and terminal:
+// `buildRequest` and does not hand out. The argument for the weaker binding was that BOTH acts
+// are idempotent and terminal: a replayed `member.remove` is the `alreadyRemoved: true` no-op, a
+// replayed `space.delete` has no space to delete, and "a removal forces `e+1` (ADR 002 §4.1)" so
+// the epoch staleness-bounds the proof.
 //
-//   · `member.remove` replayed against an already-removed member is the `alreadyRemoved: true`
-//     no-op the route already answers, and a removal forces `e+1` (ADR 002 §4.1), so the epoch in
-//     the payload staleness-bounds the proof to the epoch it was minted in.
-//   · `space.delete` replayed has no space to delete.
+// ═════════════════════════════════════════════════════════════════════════════
+// ⚠ THE EPOCH ARGUMENT IS WRONG, AND THE STRING NAMES NO BENEFICIARY — finding **T5-M4**
+// ═════════════════════════════════════════════════════════════════════════════
 //
-// A proof therefore grants nothing on replay that it did not grant the first time, and the epoch
-// keeps it from outliving the rotation its own act caused.
+//   · **"a removal forces e+1" is something the relay SAYS, not something it DOES.**
+//     `removeMember` answers `rotateRequired: true`; a *client* performs the rotation, and the
+//     adversary is the client. So the epoch component bounds nothing on its own: the same bytes
+//     re-authorized the same act for as long as nobody rotated. HALF-CLOSED in
+//     `handlers/lifecycle.js`: a proof presented against an already-removed target is refused
+//     (`admin_proof_target_already_removed`) — an act that has already happened is not an act a
+//     proof can authorize.
+//
+//   · **The string named no beneficiary, so a proof was a BEARER token.** Mama co-signed so that
+//     *Papa* may remove Oma; nothing in `"lzp/admin/1\n" + act + spaceId + target + epoch` said
+//     who may present it, so *Eve* presented it and got `200`.
+//
+//     **CLOSED, round 3.** The prefix is `lzp/admin/2` and the string carries a fifth component:
+//
+//         "lzp/admin/2\n" + act + "\n" + spaceId + "\n" + target + "\n" + epoch + "\n" + presenter
+//
+//     with `presenter = terms.callerMemberId` — a value assembled from the AUTHENTICATED device's
+//     member row (ADR 003 §2 step 5), never from the body, so it cannot be re-addressed by
+//     editing a sibling field any more than `act` or `target` can. A co-signature is now minted
+//     FOR one member and is bytes to everybody else: presenting somebody else's proof fails the
+//     signature check and is a `401 bad_signature`, not a 400, because from the relay's side a
+//     proof over different bytes is simply a wrong signature and there is nothing to enumerate.
+//
+//     What held this up was ONE OWNER PER FILE and nothing else — three fleet helpers mint the
+//     bytes through `adminProofString`, and the integrating pass owns all of them. It landed
+//     **before any co-signature UI exists**, which was the condition: a bearer token gets much
+//     worse once a screen starts minting them and handing them between Macs.
+//
+//     WHAT IT DOES NOT BUY, and the reason T5-M2 is untouched by it: Eve holding two member rows
+//     mints her own second-row proof naming HERSELF as presenter. Binding the beneficiary stops a
+//     proof travelling between two PEOPLE; it cannot make two rows into two people.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** The domain separator. Distinct from `SIGNED_PREFIX`, so a request signature can never be
- *  replayed as an admin proof or the other way round. */
-export const ADMIN_PROOF_PREFIX = 'lzp/admin/1\n';
+ *  replayed as an admin proof or the other way round. `/2` is T5-M4's presenter binding: the
+ *  version bump is the point — a `/1` proof over four fields can never verify here again. */
+export const ADMIN_PROOF_PREFIX = 'lzp/admin/2\n';
 
 /** The acts a proof may authorize. Closed, and frozen: a third act is a protocol change. */
 export const ADMIN_ACTS = Object.freeze(['space.delete', 'member.remove']);
 
 /**
  * The exact bytes an admin proof must cover. Exported so a test can build the string a DIFFERENT
- * way — a swapped act, a neighbouring epoch, another space — and assert the relay refuses it.
+ * way — a swapped act, a neighbouring epoch, another space, another presenter — and assert the
+ * relay refuses it.
  *
- * @param {{act:string, spaceId:string, target:string, epoch:number}} p
+ * `presenter` is the member id of the caller the proof is minted FOR (T5-M4). It is required:
+ * `undefined` would silently stringify into the bytes and make an unbound proof verifiable
+ * again, so a missing presenter throws here rather than degrading to `lzp/admin/1` semantics.
+ *
+ * @param {{act:string, spaceId:string, target:string, epoch:number, presenter:string}} p
  * @returns {string}
  */
 export function adminProofString(p) {
-  return ADMIN_PROOF_PREFIX + p.act + '\n' + p.spaceId + '\n' + p.target + '\n' + String(p.epoch);
+  if (typeof p.presenter !== 'string' || p.presenter.length === 0) {
+    throw new TypeError('adminProofString: presenter is required (T5-M4, lzp/admin/2)');
+  }
+  return ADMIN_PROOF_PREFIX + p.act + '\n' + p.spaceId + '\n' + p.target + '\n'
+    + String(p.epoch) + '\n' + p.presenter;
 }
 
 /**
- * Verify a second member's authorization for one irreversible act.
+ * Verify a second `Member` ROW's authorization for one irreversible act — never a second
+ * person's, and never the admin's (T5-M2, above).
  *
  * Every refusal is a `400 bad_request` naming the FIELD and an enum reason, or a `401
  * bad_signature` — never a code that would turn this into an oracle. There is nothing to
@@ -854,6 +915,12 @@ export function adminProofString(p) {
 export async function verifyAdminProof(proof, terms, ctx) {
   const field = 'adminProof';
   if (!ADMIN_ACTS.includes(terms.act)) throw fail('internal');
+  // T5-M4: the presenter is now part of the signed bytes, so a caller the handler could not name
+  // is a HANDLER bug, not a caller error — `internal`, never a 400 that would tell the caller
+  // anything. Every route that reaches here has already run `authenticate`.
+  if (typeof terms.callerMemberId !== 'string' || terms.callerMemberId.length === 0) {
+    throw fail('internal');
+  }
   if (proof === null || typeof proof !== 'object' || Array.isArray(proof)) {
     throw fail('bad_request', { field, reason: 'admin_proof_shape' });
   }
@@ -861,10 +928,15 @@ export async function verifyAdminProof(proof, terms, ctx) {
   if (typeof by !== 'string' || by.length === 0 || by.length > 64) {
     throw fail('bad_request', { field, reason: 'admin_proof_by' });
   }
-  // ── THE TWO-KEY RULE, AND IT IS CHECKED BEFORE THE SIGNATURE ──────────────────────────────
+  // ── THE TWO-ROW RULE, AND IT IS CHECKED BEFORE THE SIGNATURE ──────────────────────────────
   // A proof the caller signed for herself is not weaker evidence, it is NO evidence: she already
   // authenticated this request with a key of her own. Refusing it first also means the expensive
   // verify never runs for the one shape that could never succeed.
+  //
+  // This is the ONLY distinctness this function can enforce, and it is distinctness of ROWS.
+  // `by !== callerMemberId` is two member ids; two member ids are two Keychain entries; two
+  // Keychain entries can be one Mac and one person (T5-M2). Nothing below changes that, and
+  // nothing here should be written as though it did.
   if (by === terms.callerMemberId) {
     throw fail('bad_request', { field, reason: 'admin_proof_self_signed' });
   }
@@ -878,8 +950,12 @@ export async function verifyAdminProof(proof, terms, ctx) {
   const sigBytes = ub64(proof.sig, SIG_BYTES);
   if (sigBytes === null) throw fail('bad_request', { field, reason: 'admin_proof_sig' });
 
+  // T5-M4: the fifth component is the PRESENTER, and it is `terms.callerMemberId` — the member
+  // row behind the authenticated device, which this function already holds and already refused
+  // to equal `by` twenty lines up. A proof minted for Papa is now bytes Eve cannot use.
   const bytes = TE.encode(adminProofString({
     act: terms.act, spaceId: terms.spaceId, target: terms.target, epoch: terms.epoch,
+    presenter: terms.callerMemberId,
   }));
   const ok = await verifySignature(signer.recoveryPubSig, sigBytes, bytes, ctx);
   if (!ok) throw fail('bad_signature', { check: 'admin_proof' });
@@ -930,15 +1006,20 @@ export const AUTH_INTERFACE_GAPS = Object.freeze([
       'useless as an ordering signal (createSpace and redeemInvite both set it from ctx.now(), ' +
       'and it is IDENTICAL for every member of a space created and joined inside one millisecond).',
     consequence:
-      '`verifyAdminProof` proves "a member of this space, other than the caller, signed this act" ' +
-      'and never "and that member is the admin". What the founder anchor buys is that the ONE ' +
-      'removal whose damage is not confined to its target — the founder\'s, which takes ADR 001 ' +
-      '§4.0\'s attestation and §4.1\'s admin genesis link with it — requires a second member\'s ' +
-      'recovery signature (ADR 003 §3.7, finding T5-M1a). What is STILL OPEN: an ordinary member ' +
-      'may remove any NON-founder on her own word, and two members who collude may remove the ' +
-      'founder. Closing that needs an in-request transfer-certificate chain anchored at ' +
+      '`verifyAdminProof` proves "a member ROW of this space, other than the caller\'s, signed ' +
+      'this act" and never "and that row is a second PERSON" (T5-M2) nor "and that member is the ' +
+      'admin". What the founder anchor buys is that the ONE removal whose damage is not confined ' +
+      'to its target — the founder\'s, which takes ADR 001 §4.0\'s attestation and §4.1\'s admin ' +
+      'genesis link with it — requires a second member row\'s recovery signature (ADR 003 §3.7, ' +
+      'finding T5-M1a); and, since round 2, that a space whose founder row is no longer LIVE ' +
+      'requires one for EVERY removal, because the anchor has stopped naming anybody the relay ' +
+      'can defend (T5-M3). What is STILL OPEN: while the founder is present an ordinary member ' +
+      'may remove any NON-founder on her own word; two members who collude may remove the ' +
+      'founder; and ONE person holding two Member rows is indistinguishable from those two ' +
+      'members. Closing the first two needs an in-request transfer-certificate chain anchored at ' +
       'founderMemberId — the cryptographic mirror of the in-log admin chain — which is a ' +
-      'protocol change and not a gate.',
+      'protocol change and not a gate. Closing the third needs a signed invite chain, or the ' +
+      'co-signature moved into the log where a client can see who a member is.',
     owner: 'ADR 003 §3.7 + server/core/handlers/lifecycle.js (the residual: D7 / PO)',
   }),
   Object.freeze({

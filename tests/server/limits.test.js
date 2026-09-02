@@ -379,7 +379,7 @@ test('the routes left unlimited are the ones the ADR leaves unlimited, and they 
   assert.deepEqual(unlimited, [
     'createInvite', 'deleteSpace', 'fetchKeys', 'leaveSpace',
     'listMembers', 'meta', 'openInvites', 'pairAnswer', 'pairDeliver',
-    'renameSpace', 'revokeDevice', 'revokeInvite', 'rotateEpoch', 'transferAdmin',
+    'renameSpace', 'revokeDevice', 'revokeInvite', 'transferAdmin',
   ], 'this list IS the review surface for "what can be called without a budget"');
 
   // ── the four that left this list at integration (LZP-207) ──────────────────
@@ -389,9 +389,16 @@ test('the routes left unlimited are the ones the ADR leaves unlimited, and they 
   // very device they are signed by) or one whose central claim the server cannot check
   // ("admin-only", finding E2-203-2). LZP-202..204 were charging local budgets and saying so;
   // integration moved the numbers into RATE_RULES so they are reviewable in one table.
+  // ── and the FIFTH, which left the list after the round-2 member adversary (T2-E1) ──────────
+  // `rotateEpoch`'s excuse was wrong about arithmetic rather than about authentication: "a flood
+  // costs the attacker their own space's epoch numbers and nothing else". `assertCoverage` is a
+  // row count and already-deposited rows count, so a rotation costs an attacking member one wrap
+  // per recipient while `sync/keys.js#rotateTo` sends `recipients × 1..next` — an unmetered
+  // ladder walks the shipped client past MAX_WRAPS into a state no route can undo.
   for (const [route, rule] of [
     ['createSpace', 'spaceCreate'], ['registerDevice', 'deviceRegister'],
     ['adoptDevice', 'deviceAdopt'], ['removeMember', 'memberRemove'],
+    ['rotateEpoch', 'epochRotate'],
   ]) {
     const c = RATE_COVERAGE[route];
     assert.equal(c.why, null, `${route} is budgeted now; it must not also carry an excuse`);
@@ -408,6 +415,77 @@ test('the routes left unlimited are the ones the ADR leaves unlimited, and they 
   assert.match(RATE_COVERAGE.pairAnswer.why, /E2-205-3/);
   assert.match(RATE_COVERAGE.pairDeliver.why, /E2-205-3/);
   assert.match(RATE_COVERAGE.meta.why, /store/i);
+});
+
+test('T2-E1: the epoch ladder is metered, per MEMBER, and the refuted premise is on the record', () => {
+  // The finding: `RATE_COVERAGE.rotateEpoch` was unlimited because "a flood costs the attacker
+  // their own space's epoch numbers and nothing else", and that clause was measured false —
+  // `assertCoverage` counts rows, already-deposited rows count, so one rotation costs an
+  // attacking member ONE wrap per recipient while `sync/keys.js#rotateTo` sends
+  // `recipients × 1..next` and `readWraps` refuses more than `MAX_WRAPS`. Past
+  // `MAX_WRAPS / recipients` the honest rotation no longer fits in a request, the cap is per
+  // REQUEST, and no route prunes an epoch. Driven end to end in
+  // `tests/fleet/e6-gate-keys.test.js` §1.
+  const rule = RATE_RULES.epochRotate;
+  assert.ok(rule, 'the rule that bounds the epoch ladder is gone');
+  assert.equal(rule.limit, 'epochRotationsPerMemberHour');
+  assert.equal(rule.windowMs, 3600000);
+  assert.equal(rule.phase, 'post-auth', 'a rotator is authenticated before the budget is known');
+
+  // THE IDENTITY IS THE DECISION, not the number. `ip` would hand a member a fresh ladder budget
+  // for the price of moving networks; a space-wide budget would let one hostile member spend the
+  // circle's whole allowance and 429 the honest admin trying to rotate her out — which is the
+  // denial being closed, rebuilt as the fix (`e6-gate-keys` §2a).
+  assert.equal(rule.identity, 'member');
+
+  // The number, and the honest paths it must not bind: the budgets that CAUSE rotations are
+  // themselves 10/hour, so this must sit above them rather than snug against them.
+  assert.equal(LIMITS.epochRotationsPerMemberHour, 20);
+  for (const cause of ['memberRemovePerMemberHour', 'deviceRegPerIpHour',
+    'deviceAdoptPerIpHour', 'invitesPerIpHour']) {
+    assert.ok(LIMITS.epochRotationsPerMemberHour > LIMITS[cause],
+      `${cause} can force a rotation; a ladder budget at or below it would 429 an honest path`);
+  }
+
+  // and the refuted premise must be RECORDED, not deleted — a limiter whose reason is lost is a
+  // limiter the next reviewer removes as unexplained.
+  const ext = LIMIT_EXTENSIONS.find((e) => e.name === 'epochRotationsPerMemberHour');
+  assert.ok(ext, 'the ladder budget has no LIMIT_EXTENSIONS row');
+  assert.match(ext.reason, /T2-E1/);
+  assert.match(ext.reason, /MAX_WRAPS/, 'the arithmetic that makes the ladder absorbing');
+  assert.match(ext.reason, /NOTHING ELSE/, 'quote the clause that was measured false');
+
+  // THE TWO THINGS A READER MUST NOT HAVE TO REDISCOVER, and they are the reason this rule is
+  // shaped the way it is rather than the obvious way:
+  //   1. the budget is spent on the CLIMB, not on the attempt — an entry charge would meter the
+  //      loser of an honest race at the rate of its winner (`e6-gate-keys` §2d);
+  //   2. it does NOT close `e6-gate-keys` §2a. That row reads like a race a rung budget bounds
+  //      and is not one: a single rotation carrying wraps nobody can open leaves every honest
+  //      device ringless at the current epoch, and no rate bounds "one".
+  assert.match(ext.reason, /CLIMB AND NOT THE REQUEST/);
+  assert.match(ext.reason, /DOES NOT CLOSE/,
+    'a limiter credited with a finding it does not close is just the next false premise');
+  assert.match(ext.reason, /§2a/, 'name the row it does NOT close, or nobody will look again');
+});
+
+test('T2-E1b: "at most eight members" is a cardinality gate, and this table stops claiming to hold it', () => {
+  // ADR 003 §3.2's "at most 8 rows" was a sentence about families, not a check: when the round-2
+  // adversary looked, `grep -rn 'MAX_MEMBERS|too_many_members' server/core/` was empty and she
+  // reached eight live members from one Mac. `listMembers`'s coverage row stated the 8 as though
+  // the relay enforced it, which is the shape of claim this whole table exists to prevent.
+  //
+  // The cap itself is NOT this file's, and the assertion says where it is instead rather than
+  // reaching into another owner's file to check: a rate rule bounds a RATE, and a membership
+  // ceiling is a cardinality refusal on the one route that admits a member.
+  const why = RATE_COVERAGE.listMembers.why;
+  assert.match(why, /redeemInvite/, 'name where the cap belongs, or nobody builds it');
+  assert.doesNotMatch(why, /at most 8 rows \(ADR 003 §3\.2\)/,
+    'the old wording asserted a bound this table does not hold');
+
+  // and the reason it is not merely cosmetic must survive next to the rule it affects: the wall
+  // `epochRotate` prices sits at MAX_WRAPS / recipients, so the roster size is an input to it.
+  const ext = LIMIT_EXTENSIONS.find((e) => e.name === 'epochRotationsPerMemberHour');
+  assert.match(ext.reason, /eight/i, 'the ladder budget is sized against a family, and says so');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -3285,10 +3285,28 @@ on a share emits the retraction (**M7**).
 1. **18.2's co-edit write path has no caller.** `projectCoEditPatch` exists and is narrow;
    `redaction-invariants.test.js` drives a co-editor's op in through `applyRemote` to prove
    promotion, but nothing in the product *authors* one. LZP-902.
-2. **The admin unshare (18.3) is unsealable.** Barrier 4 reads `ctx.levelOf` from the entity's own
+2. ~~**The admin unshare (18.3) is unsealable.** Barrier 4 reads `ctx.levelOf` from the entity's own
    `visibility` truth register, and an admin unsharing *someone else's* entry has no such register —
    `store.familyLevelOf` correctly answers `null`, and "no authenticated level" is a refusal.
-   `retractPatch(kind)` produces the right bytes and no `levelOf` can authorise them.
+   `retractPatch(kind)` produces the right bytes and no `levelOf` can authorise them.~~
+   **CLOSED 2026-09-02 (E9 / LZP-903)**, and closed WITHOUT letting the caller declare a level —
+   which was the trap, because a caller-declared level is finding S5 rebuilt. `ADR 004 §2.2b`
+   is the amendment: barrier 4 gained a **retraction clause** that applies the string literal
+   `'privat'` to a patch that can only be a withdrawal (`pub.level: 'privat'`, every other field an
+   explicit null) and vouches for it with a **second authenticated source that is not the caller** —
+   `ctx.adminOf(op.space)`, the family space's `admin` register as resolved by the admin chain and
+   folded by `foldAuthorized`, which must equal `op.act`. `familyLevelOf` is unchanged and still
+   answers `null` for a foreign key. Producer: `core/project.js:adminUnshareOp`; driver:
+   `family/unshare.js`; 105-cell domain in `tests/tier1/unshare.test.js` U1.
+   **What the close FOUND, and it is a second defect, not a nicety:** §5's "the owner's client also
+   sets its local `visibility` to `'privat'` in a follow-up txn" had no implementation and without
+   it 18.3's "it reverts" is true only until the owner next touches the entry — `derivePublication`
+   reads the level from `visibility` and `lastPublished` from the folded `pub.level`, which
+   disagree after a moderation, so the owner's very next keystroke re-publishes the whole Geteilt
+   patch and silently undoes it. `core/project.js:adminUnshareFollowUp(regs, ctx)` is built, pure
+   and tested (U3, U3-a) and **has no caller**: it needs one call from `store.applyRemote` after
+   `foldAuthorized`. Owner: `src/js/store.js`. Measured in U3-b, which is written to be INVERTED
+   the day the caller lands.
 3. **`tests/tier1/redaction-failpath.test.js`** is named by ADR 004 §2.3 and does not exist. Its
    content is covered by `redaction-invariants.test.js` §3 (mutants M5, M6) — a filename the ADR
    owes rather than a gap.
@@ -3700,3 +3718,131 @@ Recorded because they are the reason mutation testing is worth its cost.
 5. **`prisma.js` is UNVERIFIED** against a real Postgres, as it has been throughout —
    `U-WRAPONCE` and `U-WRAPNOUPDATE` carry the claims, and the contract cases are what hold both
    adapters to them.
+
+## 14. ROUND 3 — the member adversary's second pass, and the integration that answered it
+
+**The round.** A second member-adversary attacked the gate that answered the first one, then
+re-attacked the redaction boundary from every state each round created. Three fixers worked in
+parallel against its findings — the epoch budget, the two-key premise, the parking slot — and this
+is the integration pass that landed the cross-file work, mutation-tested every fix, re-ran both
+red teams, re-drove the honest circle, and answered the ship question.
+
+**The standing result held for a third round. Zero bytes of a Privat entry**, and this pass did
+not merely re-run the old rows: every fix in the round *invented new refusal bodies*, and a
+refusal is a response body assembled by a handler that is holding the roster. So the boundary was
+re-measured across the four refusals that did not exist before — the presenter-mismatch `401`, the
+already-removed `400`, the `space_full` `400`, and the founder-less `403` with its two new prose
+fields — and it is clean across all of them (`tests/fleet/e6-gate-privat.test.js` §2a, new).
+
+**The adversary's verdict was „No. E6/E7 cannot ship on this engine."** Its framing was the brief:
+
+> Both are the fixes resting on a premise the T5 threat model does not grant: **that a `Member`
+> row is a person, and that an epoch number is scarce.**
+
+Both premises are now addressed *in the only two ways a blind relay can*: the epoch premise is
+made true by a budget (E2-L9), and the person premise is **not** made true — it is demoted on the
+wire and bounded, because no relay can make it true. That distinction is the whole of §14b.
+
+### 14a. What this integration pass landed itself
+
+| # | what | why it was this pass's job |
+|---|---|---|
+| 1 | **N-3 — the presenter binding** (`lzp/admin/2`). `adminProofString` gains a sixth component, `presenter = terms.callerMemberId`; `verifyAdminProof` passes it. | The two-key fixer costed it and could not land it: three fleet helpers mint the bytes and it owned none of them. **The integrating pass owns all three.** It landed *before any co-signature UI exists*, which was the stated condition. |
+| 2 | The `e6-gate-privat.test.js` §1d patch | Predicted by the two-key fixer, in a file it did not own. |
+| 3 | **§2a of `e6-gate-privat.test.js`** — the boundary re-attacked across the round's four new refusal bodies, with a **positive control** proving the search machinery is live | Nobody owned "what the new error paths emit"; each fixer saw only its own. |
+| 4 | The owed **ADR 003 §6.1 amendment**, all five budgets (E2-L3 … E2-L9) | Carried as `AMENDMENT OWED` in `limits.js` since round 2. |
+| 5 | **A latent flake in a redaction row**, found by the mutation harness and fixed | §14d — it is the one genuinely new defect this pass found. |
+
+### 14b. The ship question, item by item
+
+| # | question | answer | rows |
+|---|---|---|---|
+| 1 | Is the **epoch freeze** closed? | **Priced, not closed — and the record says so.** `epochRotationsPerMemberHour: 20` bounds the ratchet, keyed on the member, spent only where a request takes a rung. But §2a is **not** a volume attack: **one** poisoned rung freezes the space, so no rung budget reaches it. Closing it needs ADR 002 §8.5a's report path. `limits.js` pins `/DOES NOT CLOSE/` so a limiter cannot be credited with a finding it does not close. | `e6-gate-keys` §1a §1b §1c §2a §2d §3d |
+| 2 | Is the **two-key rule** a real control or honestly demoted? | **Honestly demoted, and bounded.** It is a *two-row* rule, not a two-person rule: `PROVES`/`PROVES_NOT` ride every 200 and `checks`/`doesNotCheck` every 403, and the strong string is asserted to contain no "people"/"person". `MAX_LIVE_MEMBERS = 8` bounds the sybil fleet for the first time. It is **not closed** — T5-M2 is a PO ruling, and both closes are somebody else's file. | `e6-gate-removal` §1d §1e §1f §1g; `lifecycle.test.js` T5-M2 |
+| 3 | Is the **founder anchor** live-checked? | **Yes, CLOSED.** `required` now asks `founderLive`, false for a tombstone *and* for a row that is gone. Cost stated, not hidden: in a founder-less **two**-member circle the rule is unsatisfiable — each can still leave, the last one out takes the space, every device holds a complete replica. | `e6-gate-removal` §2a §2a-ii §2b §2c |
+| 4 | Is the proof bound to its **presenter** and its **target**? | **Yes — both halves, CLOSED this pass.** Target: an act already done authorizes nothing (`admin_proof_target_already_removed`). Presenter: `lzp/admin/2` puts the caller in the signed bytes. Refusal is the existing `401 bad_signature`, so no new oracle. **What it does not buy:** Eve holding two rows mints her own proof naming herself — it stops a proof travelling between two *people*, it cannot make two rows into two people. | `e6-gate-removal` §3d §3e §3e-ii; `auth.test.js` §6b |
+| 5 | Is the **parking slot** per space? | **Yes, CLOSED.** `${LS_PARKED}.${spaceId}`, legacy slot read-never-deleted, the port exported so §2 drives shipped bytes, and R8-5 restored in production (`writeJSON` swallowed, so a failed park reported success on every full disk). The **shelf** still has no bound — narrowed, not closed. | `e6-gate-slots` §2a–§2h |
+
+**Can E6/E7 ship on this engine now? Not yet — and what remains is three items, none of them a
+confidentiality question.**
+
+1. **A co-signature UI is now a shipping prerequisite, not an owed screen.** T5-M3's founder
+   anchor means a founder-less circle needs a second key for *every* removal, and
+   `adminpanel.js` / `leavedelete.js` mint no proof. The relay is ready and the client cannot
+   drive it. This is the blocking item.
+2. **T5-M2 is a PO/D7 ruling.** A `Member` row is not a person and no blind relay can make it
+   one. The two real closes — an admin-signed invite on the transfer-certificate chain, or the
+   co-signature moved into the op log — are protocol work. Until then `admin_proof` is a field
+   that says on the wire that it is not a control.
+3. **Two priced-not-closed residuals**: the epoch poisoning (§2a, needs ADR 002 §8.5a's report
+   path) and the unbounded shelf (`sync/outbox.js`).
+
+**What changed since the adversary's "cannot ship" is that all three are now decisions or
+screens rather than unknowns**, every one of them is measured by a row that says SUCCEEDED, and
+nothing in the round touched the redaction boundary.
+
+### 14c. The mutation table — every fix, plus both over-closing controls
+
+Every mutant is a `tar` scratch copy; the real tree is never mutated and `git stash` is never
+used. Baseline noise in a copy: `tests/attack/v1-frozen-store.test.js` shells out to `git show`
+and fails with no `.git`. **Every row below is a kill that was observed, not predicted.**
+
+| mutant | the fix it reverts | rows that died |
+|---|---|---|
+| **N-5-inv** — the `enforceFor` block deleted | E2-L9, the epoch budget | `e6-gate-keys` §1a §1b §1c §3d **+** `limits.test.js` "a route that declares a rate rule must actually reach store.rateAllow" |
+| **M-ENTRY** — charge every attempt, not every climb | the *shape* of E2-L9 | **`e6-gate-keys` §2d only** — the honest-loser control, and nothing else. This is the row that proves the charge belongs at the rung. |
+| **M-IP** — `identity: 'ip'` | the key of E2-L9 | `limits.test.js` T2-E1 **+** `e6-gate-keys` §1a §1b §3d |
+| **M-NUM** — 20 → 4 | the size of E2-L9 | `limits.test.js` T2-E1 (the "above every 10/hour cause" loop) + 3 more |
+| **M-N2** — anchor stops asking `founderLive` | T5-M3 | `e6-gate-removal` §1f §2a §2b · `lifecycle.test.js` T5-M3 ×2 · `attack-client-lifecycle` §D |
+| **M-N3** — presenter dropped from the bytes | T5-M4(a), **this pass** | `e6-gate-removal` §3d · `auth.test.js` §6b ×2 |
+| **M-N4** — a spent proof accepted again | T5-M4(b) | `e6-gate-removal` §3e · `lifecycle.test.js` T5-M4 ×2 · `attack-client-lifecycle` §D |
+| **M-CAP** — `MAX_LIVE_MEMBERS = 99` | the sybil bound | `e6-gate-removal` §1g |
+| **M-DEMOTE** — `proves`/`provesNot` dropped | the demotion | `e6-gate-removal` §2a-ii · `lifecycle.test.js` T5-M3 ×2 · `attack-client-lifecycle` §D |
+| **M-PROVES-WORD** — the strong string says "people" | the demotion's *wording* | `lifecycle.test.js` "the gate says on the wire what it checked" + 3 more |
+| **M1** — `slot = LS_PARKED` (device-wide again) | the per-space slot | `e6-gate-slots` §2a §2b §2c §2d §2f §2g **and §2e, the honest-path control** |
+| **M2 (= N-8)** — `saveRecords → writeJSON` | R8-5 in the shipped port | `e6-gate-slots` §2b §2c **§2h** |
+| **M3** — no legacy read | the upgrade path | `e6-gate-slots` §2g |
+| **M4 (= N-7)** — `foreignParkNote → ''` | the honest stall sentence | `e6-gate-slots` §2c |
+
+**The two over-closing controls — the routes deliberately NOT taken.** These are the evidence,
+because in each case what dies is something legitimate:
+
+| control | what it would close | the honest rows that die — which is why it was refused |
+|---|---|---|
+| **N-1** — only the founder may mint an invite | the sybil (T5-M2) | **15 rows.** `e6-attack-removed` §0e §0f — a removed member returning under a fresh pseudonym, which ADR 002 §8.4 states *as designed*; `attack-client-lifecycle` §D ×2; and, decisively, `e6-gate-privat` §1b §1c §1d — **the redaction-boundary rows themselves stop being drivable.** It is also the wrong shape: a founder-signed invite makes the *founder* the admin, which `transferAdmin` exists to stop being true. |
+| **N-6** — count the shelf against the cap | the unbounded shelf | tier-1 `§4 · the cap, and what happens AT the cap` and `"space made by a release is space the lot will use again"`; `round8-park` §6.5; and `e6-gate-slots` §2a, the row that states the residual honestly. The cap's contract is "the caller MUST NOT advance the cursor", so charging the shelf to it stalls a space for rows that are already dealt with. |
+
+### 14d. One defect this pass found, and it was found by the harness rather than by a test
+
+`tests/tier1/sync-personal.test.js` — *"THE RELAY IS BLIND — the note text is nowhere in the bytes
+it stored (21.1)"* — went red roughly **once in two hundred runs**, and it took a mutation run to
+notice, because a flake in a green suite reads as noise.
+
+It is not a leak. The row scanned ciphertext for the entity id `'n0'`, and an *n*-character needle
+appears by chance in *B* bytes of good ciphertext with probability ≈ `B / 256ⁿ` — for two
+characters over the ~300 bytes this row scans, **≈ 0.5% per run** (measured, not estimated).
+
+The reason it is worth a register entry is the second half: a needle that short was also **the
+weakest possible evidence in the direction it was pointing**. It would have appeared in random
+noise anyway, so it could never have distinguished a leak from luck — a row that cannot fail for
+the right reason is not a control. Both needles are now long enough (11 and 8 characters, false
+positive ≈ 1e-23 and 1e-17) that a hit is a leak and never a coincidence, and the row gained a
+non-vacuity assertion that the needles really were on the Mac. 20 consecutive green runs.
+
+### 14e. Owed after round 3
+
+1. **The co-signature UI** — `adminpanel.js` / `leavedelete.js`. **A shipping prerequisite now**,
+   not an owed screen (item 1 of the ship answer).
+2. **T5-M2 — the PO/D7 ruling.** An admin-signed invite on the transfer-certificate chain
+   (E2-L1b), or the co-signature in the op log (ADR 001 §4).
+3. **ADR 002 §8.5a's "I cannot open epoch e" report path** — `handlers/keys.js` + the wire. This
+   is the blocking item for `e6-gate-keys` §2a, *not* a rate limit.
+4. **The `§1c` residual** — a prune/compaction route, or a `rotateTo` that sends only the missing
+   rows. `src/js/sync/keys.js`.
+5. **The unbounded shelf** — `src/js/sync/outbox.js`. The bound belongs on the shelf, not on the
+   cap: N-6 is measured above as over-closing.
+6. **`sync/keys.js` should treat `429 rate_limited` on `POST /spaces/:id/epoch` as a
+   retry-after-`Retry-After`**, not a failure — the relay now emits it.
+7. **`storage.js`** — the "three named slots" obligation is now **four** by name.
+8. **`store.js` / `sealedEnvelopeStore`** — `writeJSON` still swallows for `LS_SEALED`. Worth the
+   same R8-5 question the parked slot just answered.

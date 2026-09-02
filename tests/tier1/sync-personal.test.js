@@ -370,13 +370,32 @@ describe('§1 M1 "Zwei Macs" — the whole private board syncs end to end', () =
   });
 
   test('THE RELAY IS BLIND — the note text is nowhere in the bytes it stored (21.1)', async () => {
-    await on(F.A, () => { F.A.store.apply('editNotePopover', { id: 'n0', text: 'Zahnarzt Mittwoch' }); });
+    // THE NEEDLES ARE LONG ON PURPOSE, and this is not cosmetic. A substring probe over
+    // ciphertext is a probabilistic test: an `n`-character needle appears by chance in `B` bytes
+    // of good ciphertext with probability ≈ B / 256^n. The entity id used to be checked as the
+    // two-character `'n0'`, which is ≈ 0.5% per run over the ~300 bytes this row scans — a suite
+    // that goes red roughly once in two hundred green runs, for no reason. Worse, it was the
+    // weakest possible evidence in the direction it was pointing: a needle that SHORT would
+    // appear in random noise anyway, so it could never have distinguished a leak from luck.
+    //
+    // A distinctive id and a distinctive sentence make both halves real: at eleven and eight
+    // characters the false-positive rate is ~1e-23 and ~1e-17, so a hit here is a LEAK and never
+    // a coincidence — and that is the only reading under which this row is worth having.
+    const ID = 'n0-blindheit';
+    await on(F.A, () => {
+      F.A.store.apply('createNotePopover', {
+        id: ID, date: '2026-06-07', text: 'Zahnarzt Mittwoch', categoryId: 'c1',
+      });
+    });
     await on(F.A, () => eA.pushNow());
     const page = await relay.store.listOps(F.spaceId, 0n, 500);
     assert.ok(page.ops.length > 0, 'the relay stored something');
     const all = page.ops.map((o) => Buffer.from(o.envelope).toString('latin1')).join('');
     assert.equal(all.includes('Zahnarzt'), false, 'the plaintext is not in the stored envelope');
-    assert.equal(all.includes('n0'), false, 'nor is the entity id');
+    assert.equal(all.includes(ID), false, 'nor is the entity id');
+    // NON-VACUITY: the needles really were on this Mac, so "absent from the envelope" is a fact
+    // about the envelope and not about a note that was never written.
+    assert.equal(F.A.store.state.notes.find((n) => n.id === ID).text, 'Zahnarzt Mittwoch');
     // …and there is no authoring time column at all (ADR 003 §5.1's deliberate omission).
     assert.equal('ts' in page.ops[0], false);
   });

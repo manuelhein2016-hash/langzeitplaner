@@ -301,9 +301,11 @@ async function buildFreshMac(C, tag) {
  * key over bytes the relay assembles for itself. `adminProofString` is imported from the server,
  * so a drift between what a client signs and what the relay verifies is a red row here.
  */
-async function adminProof(mac, act, spaceId, target, epoch) {
+async function adminProof(mac, presenter, act, spaceId, target, epoch) {
   const { adminProofString } = await import('../../server/core/auth.js');
-  const bytes = new TextEncoder().encode(adminProofString({ act, spaceId, target, epoch }));
+  const bytes = new TextEncoder().encode(adminProofString({
+    act, spaceId, target, epoch, presenter: presenter.forStore.memberId,
+  }));
   const sig = new Uint8Array(await S.sign(
     { name: 'ECDSA', hash: 'SHA-256' }, mac.recovery.recSig.privateKey, bytes));
   return { by: mac.forStore.memberId, sig: Buffer.from(sig).toString('base64url') };
@@ -333,12 +335,12 @@ describe('§1 · T5-M1 · INVERTED · a plain member can do neither, and both ta
     const ep0 = (await C.relay.store.getSpace(C.spaceId)).currentEpoch;
     evictedTries = [];
     for (const [pf, hint] of [
-      [await adminProof(C.eve, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0), 'her own recovery key'],
-      [{ by: C.mama.forStore.memberId, sig: (await adminProof(C.eve, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0)).sig },
+      [await adminProof(C.eve, C.eve, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0), 'her own recovery key'],
+      [{ by: C.mama.forStore.memberId, sig: (await adminProof(C.eve, C.eve, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0)).sig },
         "Mama's name over Eve's signature"],
-      [await adminProof(C.mama, 'space.delete', C.spaceId, C.papa.forStore.memberId, ep0), 'the wrong act'],
-      [await adminProof(C.mama, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0 + 1), 'the neighbouring epoch'],
-      [await adminProof(C.mama, 'member.remove', C.spaceId, C.eve.forStore.memberId, ep0), 'a proof naming ANOTHER target'],
+      [await adminProof(C.mama, C.eve, 'space.delete', C.spaceId, C.papa.forStore.memberId, ep0), 'the wrong act'],
+      [await adminProof(C.mama, C.eve, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0 + 1), 'the neighbouring epoch'],
+      [await adminProof(C.mama, C.eve, 'member.remove', C.spaceId, C.eve.forStore.memberId, ep0), 'a proof naming ANOTHER target'],
     ]) {
       evictedTries.push([hint, await C.eve.transport.request('POST', '/api/v1/members/remove', undefined,
         { spaceId: C.spaceId, memberId: C.papa.forStore.memberId, adminProof: pf }, {})]);
@@ -356,7 +358,7 @@ describe('§1 · T5-M1 · INVERTED · a plain member can do neither, and both ta
     // — so the delete half below runs against the circle this leaves.
     evictedHonest = await C.eve.transport.request('POST', '/api/v1/members/remove', undefined,
       { spaceId: C.spaceId, memberId: C.papa.forStore.memberId,
-        adminProof: await adminProof(C.mama, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0) }, {});
+        adminProof: await adminProof(C.mama, C.eve, 'member.remove', C.spaceId, C.papa.forStore.memberId, ep0) }, {});
     papaPullAfter = await C.papa.transport.request('GET', '/api/v1/ops',
       { space: C.spaceId, since: '0', limit: '10' }, null, {});
     // He cannot even come back: his member id is taken by his own tombstone (§0e).
@@ -378,12 +380,12 @@ describe('§1 · T5-M1 · INVERTED · a plain member can do neither, and both ta
     const ep = (await C.relay.store.getSpace(C.spaceId)).currentEpoch;
     deletedTries = [];
     for (const [pf, hint] of [
-      [await adminProof(C.eve, 'space.delete', C.spaceId, C.spaceId, ep), 'her own recovery key'],
-      [{ by: C.mama.forStore.memberId, sig: (await adminProof(C.eve, 'space.delete', C.spaceId, C.spaceId, ep)).sig },
+      [await adminProof(C.eve, C.eve, 'space.delete', C.spaceId, C.spaceId, ep), 'her own recovery key'],
+      [{ by: C.mama.forStore.memberId, sig: (await adminProof(C.eve, C.eve, 'space.delete', C.spaceId, C.spaceId, ep)).sig },
         "Mama's name over Eve's signature"],
-      [await adminProof(C.papa, 'space.delete', C.spaceId, C.spaceId, ep), "the REMOVED admin's own key"],
-      [await adminProof(C.mama, 'member.remove', C.spaceId, C.spaceId, ep), 'the wrong act'],
-      [await adminProof(C.mama, 'space.delete', C.spaceId, C.spaceId, ep + 1), 'the neighbouring epoch'],
+      [await adminProof(C.papa, C.eve, 'space.delete', C.spaceId, C.spaceId, ep), "the REMOVED admin's own key"],
+      [await adminProof(C.mama, C.eve, 'member.remove', C.spaceId, C.spaceId, ep), 'the wrong act'],
+      [await adminProof(C.mama, C.eve, 'space.delete', C.spaceId, C.spaceId, ep + 1), 'the neighbouring epoch'],
     ]) {
       deletedTries.push([hint, await C.eve.transport.request(
         'POST', `/api/v1/spaces/${C.spaceId}/delete`, undefined,
@@ -392,7 +394,7 @@ describe('§1 · T5-M1 · INVERTED · a plain member can do neither, and both ta
     // NON-VACUITY: Mama is still in the circle and her key really does open the door.
     deletedHonest = await C.eve.transport.request(
       'POST', `/api/v1/spaces/${C.spaceId}/delete`, undefined,
-      { confirm: C.spaceId, adminProof: await adminProof(C.mama, 'space.delete', C.spaceId, C.spaceId, ep) }, {});
+      { confirm: C.spaceId, adminProof: await adminProof(C.mama, C.eve, 'space.delete', C.spaceId, C.spaceId, ep) }, {});
   });
 
   test('§1a · INVERTED · the admin is ANCHORED: an ordinary member cannot throw him out', () => {

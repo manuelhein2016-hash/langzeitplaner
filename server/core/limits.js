@@ -91,6 +91,7 @@ export const LIMITS = Object.freeze({
   memberRemovePerMemberHour: 10,
   pairTtlMs: 180000,
   bytesPerPairBox: 8192,
+  epochRotationsPerMemberHour: 20,
 });
 
 /**
@@ -145,7 +146,7 @@ export const LIMIT_EXTENSIONS = Object.freeze([
     tag: 'E2-L3',
     name: 'spacesPerIpHour',
     value: 5,
-    adr: 'ADR 003 §6.1 — AMENDMENT OWED (finding E2-203-6)',
+    adr: 'ADR 003 §6.1 — AMENDED 2026-09-02, §6.1 "the caps this table did not have" (finding E2-203-6)',
     reason:
       'RATE_COVERAGE used to mark `POST /spaces` unlimited under AUTHED_REASON ("reachable only ' +
       'after the full ADR 003 §2 chain"). That reasoning is true of every other authenticated ' +
@@ -158,7 +159,7 @@ export const LIMIT_EXTENSIONS = Object.freeze([
     tag: 'E2-L4',
     name: 'deviceRegPerIpHour',
     value: 10,
-    adr: 'ADR 003 §6.1 — AMENDMENT OWED (finding E2-205-2, decided by LZP-204)',
+    adr: 'ADR 003 §6.1 — AMENDED 2026-09-02, §6.1 "the caps this table did not have" (finding E2-205-2, decided by LZP-204)',
     reason:
       'CLOSES E2-205-2. `POST /devices` is authorized by an attestation signed under ' +
       'Member.recoveryPubSig, which stops FORGERY and not VOLUME: an attacker can burn function ' +
@@ -171,7 +172,7 @@ export const LIMIT_EXTENSIONS = Object.freeze([
     tag: 'E2-L5',
     name: 'deviceAdoptPerIpHour',
     value: 10,
-    adr: 'ADR 003 §6.1 — AMENDMENT OWED (finding E2-205-2)',
+    adr: 'ADR 003 §6.1 — AMENDED 2026-09-02, §6.1 "the caps this table did not have" (finding E2-205-2)',
     reason:
       'The A2 half of E2-L4. `POST /devices/adopt` (ADR 002 §7.3 step 5) runs the identical ' +
       'check, so it gets an identical budget — in a SEPARATE bucket, so that a burst of recovery ' +
@@ -181,7 +182,7 @@ export const LIMIT_EXTENSIONS = Object.freeze([
     tag: 'E2-L6',
     name: 'memberRemovePerMemberHour',
     value: 10,
-    adr: 'ADR 003 §6.1 — AMENDMENT OWED (finding E2-L1/lifecycle, decided by LZP-204)',
+    adr: 'ADR 003 §6.1 — AMENDED 2026-09-02, §6.1 "the caps this table did not have" (finding E2-L1/lifecycle, decided by LZP-204)',
     reason:
       'THE ONE DELIBERATE DISAGREEMENT WITH RATE_COVERAGE\'S OLD REASONING, now resolved in the ' +
       'table rather than in a handler comment. `removeMember` used to be declared unlimited on ' +
@@ -213,6 +214,45 @@ export const LIMIT_EXTENSIONS = Object.freeze([
       '002 §5.3\'s construction. 8 KB is far above anything the protocol produces and far below ' +
       'anything usable as free storage on someone else\'s relay. Without a cap, `boxA`/`boxB`/' +
       '`delivery` are three opaque columns an unauthenticated caller can write to.',
+  }),
+  Object.freeze({
+    tag: 'E2-L9',
+    name: 'epochRotationsPerMemberHour',
+    value: 20,
+    adr: 'ADR 003 §6.1 — AMENDED 2026-09-02, §6.1 "the caps this table did not have" (finding T2-E1, the epoch-ladder freeze)',
+    reason:
+      'CLOSES T2-E1. RATE_COVERAGE.rotateEpoch used to read "a flood costs the attacker their ' +
+      'own space\'s epoch numbers and NOTHING ELSE", and the member adversary MEASURED that ' +
+      'clause false. `assertCoverage` is a ROW COUNT and rows already deposited count, so one ' +
+      'rotation costs an attacker ONE wrap per recipient, while `sync/keys.js#rotateTo` sends ' +
+      'recipients x 1..next on EVERY rotation and `readWraps` refuses more than MAX_WRAPS = ' +
+      '1024. An unmetered counter that only goes up therefore walks the shipped client past a ' +
+      'wall it cannot come back from: no route prunes an epoch, MAX_WRAPS is per REQUEST and ' +
+      'there is no second request, so past the wall ADR 002 §4.1\'s "a removal forces e+1" is ' +
+      'unperformable BY ANYONE FOR EVER and no joiner can be delivered to again. ' +
+      'WHAT IS METERED IS THE CLIMB AND NOT THE REQUEST. `spaces.js#rotateEpoch` spends this ' +
+      'budget only where the request would actually take a rung (epoch === currentEpoch + 1); a ' +
+      'rotation that loses the race and 409s costs nothing. A device that loses the race has no ' +
+      'choice but to retry — ADR 002 §4.2 says so — so charging every attempt would meter the ' +
+      'VICTIM of a race at the same rate as its winner, and in a family where two Macs deliver ' +
+      'on their own timers that is an honest denial built into the fix. Control row: ' +
+      'e6-gate-keys §2d. ' +
+      'WHAT THIS RULE DOES NOT CLOSE, stated because the first reading of the finding got it ' +
+      'wrong: e6-gate-keys §2a. That row looked like a race a rung budget would bound, and it is ' +
+      'not — one rotation carrying wraps nobody can open leaves every honest device noRing at ' +
+      'the current epoch, so one is enough and no rate bounds "one". That is ADR 002 §8.5a\'s ' +
+      'owed report path (T5 residual 3), not a limiter. This rule bounds how many epochs may be ' +
+      'poisoned in an hour (§3d) and nothing more. ' +
+      'WHY TWENTY, AND WHY PER MEMBER PER HOUR. An honest rotation is caused by a membership or ' +
+      'device event (ADR 002 §4.1) and by nothing else — a family that adds and removes nobody ' +
+      'rotates zero times a week — and `keys.js#deliver` batches every uncovered recipient into ' +
+      'ONE rotation, so even a marathon onboarding of eight people with three devices each is a ' +
+      'handful. The budgets that CAUSE rotations are already 10/hour apiece ' +
+      '(memberRemovePerMemberHour, deviceRegPerIpHour, deviceAdoptPerIpHour, invitesPerIpHour), ' +
+      'so twenty is above any single member\'s plausible honest cause and cannot bind an honest ' +
+      'path. Keyed on the MEMBER and not on the space: a per-space ladder budget would let one ' +
+      'hostile member spend the circle\'s whole allowance and 429 the honest admin trying to ' +
+      'rotate her out, which is the denial being closed, re-created as the fix.',
   }),
 ]);
 
@@ -500,6 +540,16 @@ export const RATE_RULES = Object.freeze({
     limit: 'memberRemovePerMemberHour', windowMs: HOUR, identity: 'member', phase: 'post-auth',
     adr: 'ADR 003 §6.1 amendment owed — 10 removals per member per hour (E2-L6)',
   }),
+
+  // ── added after the round-2 member adversary (T2-E1); see LIMIT_EXTENSIONS E2-L9 ──────────
+  // The one rule in this table whose absence was itself the finding. It is `post-auth` and keyed
+  // on the MEMBER because the adversary IS a member: an IP key would hand her a fresh ladder
+  // budget for the price of a coffee shop, and a space key would let her spend the honest
+  // admin's.
+  epochRotate: Object.freeze({
+    limit: 'epochRotationsPerMemberHour', windowMs: HOUR, identity: 'member', phase: 'post-auth',
+    adr: 'ADR 003 §6.1 amendment owed — 20 rotations per member per hour (T2-E1 / E2-L9)',
+  }),
 });
 
 /** Rule names, frozen, so a typo is a 500 at composition rather than a silently absent limiter. */
@@ -559,11 +609,73 @@ export const RATE_COVERAGE = Object.freeze({
   adoptDevice: cov(['deviceAdopt'], [], null),
   removeMember: cov([], ['memberRemove'], null),
 
+  // ── THE FIFTH `why` THAT WAS WRONG — and this one was wrong about ARITHMETIC ───────────────
+  //
+  // `rotateEpoch` carried, until the round-2 member adversary measured it:
+  //
+  //     AUTHED_REASON('serialised by first-writer-wins on Epoch; a flood costs the attacker
+  //                    their own space's epoch numbers and nothing else')
+  //
+  // Both halves are true sentences and the conclusion does not follow from them. First-writer-
+  // wins serialises rotations; it does not BOUND them, because the loser simply re-reads
+  // `currentEpoch` and asks for the next one. And "nothing else" is false by a factor that grows
+  // without limit: `assertCoverage` is a row count and rows ALREADY DEPOSITED count, so a
+  // rotation costs an attacker ONE wrap per recipient — while `sync/keys.js#rotateTo` sends
+  // `recipients × 1..next` on every rotation and `readWraps` refuses more than `MAX_WRAPS`
+  // (1024, `handlers/spaces.js`). The attacker's cost per epoch is flat; the honest client's is
+  // linear in the epoch SHE chose. Past `MAX_WRAPS / recipients` the honest rotation stops
+  // fitting in a request, the cap is per REQUEST with no continuation, and NO ROUTE PRUNES AN
+  // EPOCH — so ADR 002 §4.1's "a removal forces `e+1`" becomes unperformable by anybody, for
+  // ever, and no joiner can be delivered to again. Measured end to end through the shipped
+  // client in `tests/fleet/e6-gate-keys.test.js` §1.
+  //
+  // ⚠ THE RULE METERS THE CLIMB, NOT THE REQUEST. `handlers/spaces.js#rotateEpoch` spends this
+  // budget only where the request would take a rung (`epoch === currentEpoch + 1`); a rotation
+  // that loses the race and 409s costs nothing. That asymmetry is not a softening. A device that
+  // loses the race has no choice but to retry — ADR 002 §4.2 makes retrying the protocol — so an
+  // entry charge would meter the VICTIM of a race at the same rate as its winner, and two Macs
+  // delivering on their own timers is the ordinary state of a family. Control: `e6-gate-keys`
+  // §2d, which is the only row in the suite that dies if the charge moves above the pre-flight.
+  // What stays unbudgeted is REQUEST VOLUME, which is the half of the old reason that was always
+  // sound: the caller is a known, unrevoked device of a current member.
+  //
+  // ⚠ AND WHAT THIS RULE DOES NOT CLOSE, because the first reading of the finding claimed it did.
+  // `e6-gate-keys` §2a — a joiner starved for ever — reads like a race a rung budget would bound.
+  // It is not. ONE rotation carrying wraps nobody can open leaves every honest device `noRing` at
+  // the current epoch, so it can never rotate to the next one; the eleven that followed in the
+  // original row changed nothing the first had not already done. No rate bounds "one". The
+  // control that reaches it is ADR 002 §8.5a's owed "I cannot open epoch e" report (T5 residual
+  // 3), in `handlers/keys.js` and on the wire. This rule bounds how many epochs may be poisoned
+  // in an hour (§3d) and nothing more, and §2a is still an adversary SUCCESS.
+  //
+  // ⚠ WHAT THE BUDGET DOES AND DOES NOT CLOSE, because a limiter is not a repair. It PRICES the
+  // ladder: reaching the wall becomes hours of continuous, authenticated, attributable rotation
+  // by a named member — long enough for `removeMember` to end it — instead of one unattended
+  // burst. It does not make the ladder reversible. The residual is a pruning/compaction route,
+  // or a `rotateTo` that sends only the rows that are missing; both are protocol work
+  // (ADR 002 §4.2, ADR 003 §3.7), and `e6-gate-keys.test.js` §1c keeps the wall itself on the
+  // record so the residual cannot be forgotten.
+  rotateEpoch: cov([], ['epochRotate'], null),
+
   // ── authenticated, and bounded by the auth identity rather than by a bucket ─
   revokeDevice: cov([], [], AUTHED_REASON('acts only on the caller\'s own member\'s devices')),
   fetchKeys: cov([], [], AUTHED_REASON('read-only, space-scoped, bounded by the wrap count')),
-  rotateEpoch: cov([], [], AUTHED_REASON('serialised by first-writer-wins on Epoch; a flood costs the attacker their own space\'s epoch numbers and nothing else')),
-  listMembers: cov([], [], AUTHED_REASON('read-only, at most 8 rows (ADR 003 §3.2)')),
+  // ⚠ THE "AT MOST 8" IN THIS LINE WAS NOT A BOUND THIS FILE HELD, and the line used to read as
+  // though it were. ADR 003 §3.2 says the piggybacked roster is "at most 8 rows"; when the
+  // round-2 adversary looked, `grep -rn 'MAX_MEMBERS|too_many_members' server/core/` was EMPTY,
+  // and she reached eight live members — five of them one Mac — without meeting a refusal.
+  //
+  // The cap is real work and it is NOT this file's. A rate rule bounds a RATE; a membership
+  // ceiling is a CARDINALITY refusal on the one route that admits a member —
+  // `handlers/invites.js#redeemInvite`, beside the colour and open-invite checks it already
+  // runs. That is where it belongs and that is where the two-key/lifecycle round is landing it
+  // (`MAX_LIVE_MEMBERS`). This row's job is only to stop asserting a bound it does not hold.
+  //
+  // It matters here for one reason beyond tidiness: the recipient set is what `MAX_WRAPS = 1024`
+  // (`handlers/spaces.js`) is divided by, so the epoch wall that `epochRotate` above now prices
+  // sits at `MAX_WRAPS / recipients`. An unbounded roster walks that wall toward the attacker,
+  // and `epochRotationsPerMemberHour` is sized against a family, not against a crowd.
+  listMembers: cov([], [], AUTHED_REASON('read-only, one row per member; ADR 003 §3.2\'s "at most 8" is a cardinality gate for redeemInvite and never was a fact this table could rely on')),
   renameSpace: cov([], [], AUTHED_REASON('one column write in the caller\'s own space')),
   // T5-M1b: the route now also spends at most ONE extra P-256 verify, on a presented
   // `adminProof`. Still not an amplifier — a caller must already be an authenticated member of

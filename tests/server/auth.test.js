@@ -760,20 +760,35 @@ async function signProof(kp, terms) {
 const memberRowOf = (id, kp, removedAt = null) => ({ id, spaceId: SP_A, recoveryPubSig: kp.pubRaw, removedAt });
 
 test('§6b the admin-proof string is pinned byte for byte, and its domain is not the request domain', () => {
+  // T5-M4 (round 3): SIX components, and the sixth is the PRESENTER. The version moved with the
+  // arity on purpose — a `lzp/admin/1` proof over four fields can never verify here again, so an
+  // old bearer token stops being a token rather than becoming a shorter one.
   assert.equal(
-    adminProofString({ act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 4 }),
-    'lzp/admin/1\nspace.delete\n' + SP_A + '\n' + SP_A + '\n4');
-  assert.equal(ADMIN_PROOF_PREFIX, 'lzp/admin/1\n');
+    adminProofString({
+      act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 4, presenter: 'mem_eve',
+    }),
+    'lzp/admin/2\nspace.delete\n' + SP_A + '\n' + SP_A + '\n4\nmem_eve');
+  assert.equal(ADMIN_PROOF_PREFIX, 'lzp/admin/2\n');
   // A request signature and an admin proof must never be interchangeable. Different prefix,
   // different arity — a caller cannot hand the relay one where it asked for the other.
   assert.notEqual(ADMIN_PROOF_PREFIX, SIGNED_PREFIX);
   assert.deepEqual([...ADMIN_ACTS], ['space.delete', 'member.remove']);
   assert.ok(Object.isFrozen(ADMIN_ACTS));
+
+  // A MISSING presenter must THROW and never silently stringify into the bytes: `undefined`
+  // appended is a payload nobody signed for, and it would re-open T5-M4 by accident rather than
+  // by decision. This is the assertion that kills a "make presenter optional" regression.
+  for (const bad of [undefined, null, '', 42]) {
+    assert.throws(
+      () => adminProofString({ act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 4, presenter: bad }),
+      /presenter is required/,
+      `adminProofString accepted presenter=${JSON.stringify(bad)}`);
+  }
 });
 
 test('§6b a proof by a second live member verifies — the NON-VACUITY half', async () => {
   const admin = await recoveryKeypair();
-  const terms = { act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 2 };
+  const terms = { act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 2, presenter: 'mem_eve' };
   const members = [memberRowOf('mem_admin', admin), memberRowOf('mem_eve', await recoveryKeypair())];
   const out = await verifyAdminProof(
     { by: 'mem_admin', sig: await signProof(admin, terms) },
@@ -785,7 +800,7 @@ test('§6b every single-actor and mix-and-match shape is refused, each for its o
   const admin = await recoveryKeypair();
   const eve = await recoveryKeypair();
   const gone = await recoveryKeypair();
-  const terms = { act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 2 };
+  const terms = { act: 'space.delete', spaceId: SP_A, target: SP_A, epoch: 2, presenter: 'mem_eve' };
   const members = [
     memberRowOf('mem_admin', admin),
     memberRowOf('mem_eve', eve),
@@ -827,6 +842,45 @@ test('§6b every single-actor and mix-and-match shape is refused, each for its o
   }
   // And an act outside the closed set is a BUG in the caller, not a client error.
   assert.equal((await run({ by: 'mem_admin', sig: good }, { act: 'space.rename' })).code, 'internal');
+});
+
+test('§6b T5-M4 · a proof is minted FOR one member and is bytes to everybody else', async () => {
+  // ROUND 3, the half that was open. `lzp/admin/1` named an act and no beneficiary, so Mama's
+  // co-signature "so that Papa may remove Oma" was spendable by whoever held the bytes — Eve
+  // included (`tests/fleet/e6-gate-removal.test.js` §3d, then SUCCEEDED). The presenter is now
+  // the sixth component, taken off the AUTHENTICATED device's member row.
+  const mama = await recoveryKeypair();
+  const act = { act: 'member.remove', spaceId: SP_A, target: 'mem_oma', epoch: 7 };
+  const members = [
+    memberRowOf('mem_mama', mama),
+    memberRowOf('mem_papa', await recoveryKeypair()),
+    memberRowOf('mem_eve', await recoveryKeypair()),
+  ];
+  const forPapa = { by: 'mem_mama', sig: await signProof(mama, { ...act, presenter: 'mem_papa' }) };
+
+  // The beneficiary spends it: 200-shaped, and it is the SAME co-signature both ways round.
+  assert.deepEqual(
+    await verifyAdminProof(forPapa, { ...act, members, callerMemberId: 'mem_papa' }),
+    { by: 'mem_mama' });
+
+  // Anybody else presenting the identical bytes is a wrong signature, not a special error: there
+  // is no new refusal code and therefore no new oracle — the same shape as the wrong act, the
+  // wrong epoch and the wrong space above.
+  let refused = null;
+  try {
+    await verifyAdminProof(forPapa, { ...act, members, callerMemberId: 'mem_eve' });
+  } catch (e) { refused = { status: e.status, code: e.code }; }
+  assert.deepEqual(refused, { status: 401, code: 'bad_signature' });
+
+  // And a caller the handler could not name is a HANDLER bug, never a 400 that tells the caller
+  // anything: the presenter is now load-bearing, so an absent one may not degrade to /1 bytes.
+  for (const caller of [undefined, null, '', 7]) {
+    let r = null;
+    try {
+      await verifyAdminProof(forPapa, { ...act, members, callerMemberId: caller });
+    } catch (e) { r = e.code; }
+    assert.equal(r, 'internal', `callerMemberId=${JSON.stringify(caller)}`);
+  }
 });
 
 test('§6b no refusal ever echoes a caller\'s bytes, and none is an enumeration oracle', async () => {

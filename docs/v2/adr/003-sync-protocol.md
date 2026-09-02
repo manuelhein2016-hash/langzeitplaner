@@ -168,6 +168,13 @@ most 8 rows of pseudonymous ids — cheaper than a second round trip. **Display 
 still travel encrypted, as `member.set` ops**; `colorRef` is the one deliberate plaintext leak
 (§5.1).
 
+**"At most 8 rows" is enforced since 2026-09-02** — `handlers/invites.js#MAX_LIVE_MEMBERS`,
+refused at redemption (and, as a courtesy, at invite creation) with `400 { reason: "space_full" }`.
+It counts LIVE rows only, so a seat freed by a removal or a leave is a seat. Before that it was a
+sentence in this paragraph and nothing else, and a member could mint identities into a circle
+without limit — see §3.7's T5-M2. A relay that promises eight rows on every pull and admits eighty
+is lying to its own client.
+
 ### 3.3 Ordering and cursors
 
 `seq` is a **per-space, gapless, monotone counter**, assigned inside the same transaction as the
@@ -320,32 +327,82 @@ member"* in the must-NOT-get column.
 ```
 adminProof = { by: "mem_…", sig: <b64u, 64 bytes, ECDSA P-256/SHA-256, P1363> }
 
-bytes      = "lzp/admin/1\n" + act + "\n" + spaceId + "\n" + target + "\n" + epoch
+bytes      = "lzp/admin/2\n" + act + "\n" + spaceId + "\n" + target + "\n" + epoch
+             + "\n" + presenter
 act        ∈ { "space.delete", "member.remove" }        — a closed set
 target     = the target `memberId` for member.remove; the `spaceId` for space.delete
 epoch      = the space's `currentEpoch` AT THE RELAY, decimal
+presenter  = the CALLING member id — `terms.callerMemberId`, off the authenticated device's
+             Member row, never off the body (T5-M4, round 3)
 ```
 
 Signed by **`by`'s `RK_sig`**, whose public half the relay already holds as
 `Member.recoveryPubSig` — the same column `POST /devices/adopt` (ADR 002 §7.3 step 5) and every
 device attestation (§2.3) verify under. **Nothing is stored and nothing is read**: the relay
-assembles the bytes itself from `act`, `spaceId`, `target` and `epoch` values it already holds,
-verifies, and drops the signature. The domain separator is not `lzp/v2\n`, so a request signature
+assembles the bytes itself from `act`, `spaceId`, `target`, `epoch` and `presenter` values it
+already holds, verifies, and drops the signature. The domain separator is not `lzp/v2\n`, so a request signature
 can never be replayed as an admin proof or the other way round.
 
 **No nonce, deliberately.** Binding the proof to the request's `Authorization` nonce would make it
 single-use and would also force `src/js/platform/net.js` to hand out a nonce it currently mints
-inside `buildRequest`. The weaker binding is safe because both acts are idempotent and terminal: a
-replayed `member.remove` hits the `alreadyRemoved: true` no-op, a replayed `space.delete` has no
-space to delete, and a removal forces `e+1` (ADR 002 §4.1) so the epoch in the payload bounds the
-proof to the epoch it was minted in.
+inside `buildRequest`. The argument for the weaker binding was that both acts are idempotent and
+terminal: a replayed `member.remove` hits the `alreadyRemoved: true` no-op, a replayed
+`space.delete` has no space to delete, and a removal forces `e+1` (ADR 002 §4.1) so the epoch in
+the payload bounds the proof to the epoch it was minted in.
+
+**Half of that argument was wrong, and the string had a second gap — finding T5-M4**
+*(2026-09-02; both halves closed by round 3)*:
+
+- **"a removal forces `e+1`" is something the relay SAYS, not something it DOES.** `removeMember`
+  answers `rotateRequired: true`; a *client* performs the rotation, and the adversary is the
+  client. So the epoch component bounded nothing on its own, and the same bytes re-authorized the
+  same act for as long as nobody rotated. **CLOSED**: a proof presented against an
+  already-removed target is refused `400 admin_proof_target_already_removed` — an act that has
+  already happened is not an act a proof can authorize. Row:
+  `tests/fleet/e6-gate-removal.test.js` §3e.
+
+  **The client contract that comes with it.** That 400 is a *success synonym* and must be
+  rendered as „ist bereits entfernt", never as a failed removal: it is what a proofed retry after
+  a lost response now gets, in place of the idempotent 200. An **unproofed** retry is unchanged —
+  still `200 { alreadyRemoved: true }`, still no second confirmation dialogue (§3e-ii).
+
+- **The signed string named no beneficiary, so a proof was a BEARER token.** Mama co-signed so
+  that *Papa* may remove Oma; nothing in the payload said who may present it, so *Eve* presented
+  it and got `200` (§3d). **CLOSED, round 3 — and it landed before any co-signature UI exists,
+  which was the condition**: a bearer token gets much worse once a screen starts minting them and
+  handing them between Macs. The prefix is `lzp/admin/2` and the string carries a sixth
+  component, `presenter` = `terms.callerMemberId`, which `verifyAdminProof` already receives and
+  already refuses to equal `by`.
+
+  What held it up was file ownership and nothing else — three fleet helpers
+  (`e6-gate-removal.test.js#mintProof`, `e6-attack-removed.test.js#adminProof`,
+  `e6-gate-privat.test.js#mintProof`) mint the bytes through the server's own `adminProofString`,
+  and the integrating pass owns all three. Each now names the Mac the proof is minted **for**, so
+  a call site cannot stay silent about who is going to spend it.
+
+  **The refusal is a `401 bad_signature`, not a new code.** From the relay's side a proof over
+  different bytes is simply a wrong signature — the same answer as the wrong act, the wrong epoch
+  and the wrong space — so the binding adds no enumeration oracle. Rows:
+  `tests/fleet/e6-gate-removal.test.js` §3d (INVERTED, and the same co-signature works for the
+  member it names), `tests/server/auth.test.js` §6b "a proof is minted FOR one member".
+
+  **The version moved with the arity on purpose.** A `lzp/admin/1` proof over four fields can
+  never verify here again, so an old bearer token stops being a token rather than becoming a
+  shorter one. `adminProofString` throws on a missing `presenter` rather than stringifying
+  `undefined` into the payload, which is the assertion that kills a "make it optional" regression.
+
+  **What it does not buy.** T5-M2's Eve holds two `Member` rows and mints her own second-row
+  proof naming *herself* as presenter. Binding the beneficiary stops a proof travelling between
+  two **people**; it cannot make two rows into two people.
 
 #### What it proves — and the half it does not
 
 | | |
 |---|---|
-| **proved** | a member of this space, **other than the caller**, put their recovery key behind this exact act at this exact epoch |
-| **NOT proved** | and that member is **the admin** |
+| **proved** | a `Member` **row** of this space, **other than the caller's**, put its recovery key behind this exact act at this exact epoch |
+| **NOT proved** | and that row is **the admin** |
+| **NOT proved** | and that row is a **second person** — *added 2026-09-02, finding T5-M2* |
+| **proved** | and the caller **is** who the signer meant to authorize — *added 2026-09-02, finding T5-M4 CLOSED: `presenter` is in the signed bytes* |
 
 The second **is not buildable at all**, and saying so is part of the decision — it is structural,
 not a schema oversight. The admin chain is an in-log `transferAdmin` op (ADR 001 §4.1) inside
@@ -369,10 +426,55 @@ certificates from that anchor — the cryptographic mirror of ADR 001 §4.1's in
 a protocol change and remains owed. Carried as **E2-L1b** in
 `server/core/auth.js#AUTH_INTERFACE_GAPS`.
 
-**So the rule the relay enforces is a TWO-KEY rule, not an admin rule.** That is weaker than "only
-the admin may" and strictly stronger than "any one member may" — and it is the right side of the
-line that matters, because the T5 adversary is *one* family member with *one* patched app and
-*one* Keychain. She cannot sign under a key she does not hold, and no client patch changes that.
+**So the rule the relay enforces is a TWO-ROW rule, not an admin rule and not a two-person rule.**
+
+#### What a `Member` row is not  *(added 2026-09-02, finding T5-M2 — READ BEFORE TRUSTING THE GATE)*
+
+The paragraph that used to stand here said the rule was "strictly stronger than *any one member
+may*", because the T5 adversary is *one* family member with *one* patched app and *one* Keychain.
+A second member-adversary attacked the gate from inside a real circle and found the premise
+missing. **It is not granted, and it is not grantable:**
+
+> `createInvite` states *"any member may issue an invite, not only the admin"*; `redeemInvite`
+> admits a fresh `memberId` + a caller-chosen `recoveryPubSig` + a self-attested device; and
+> **nothing anywhere compares two `Member` rows to one human — a blind relay cannot.**
+
+So Eve invites herself, redeems with a second identity, keeps both recovery keys in her own
+Keychain, and co-signs her own act: `POST /members/remove` with `adminProof = {by: eve2}` → `200`,
+the founder purged; `POST /spaces/:id/delete` → the circle deleted. One Keychain holds as many
+recovery keys as one person cares to generate. Rows: `tests/fleet/e6-gate-removal.test.js` §1d,
+§1e, §1f, §1g.
+
+**Two facts the relay would need are both outside it by construction**: *is this row a distinct
+human* and *which row is the admin*. Nothing in `server/core/` can be written to establish either.
+So what this ADR does about T5-M2 is refuse to overstate the gate, and bound what it cannot close:
+
+1. **The claim is demoted on the wire, not only in prose.** Every 200 from `/members/remove` and
+   `/spaces/:id/delete` carries `proves` and `provesNot`; every `403 admin_proof_required` carries
+   `checks` and `doesNotCheck`. The strings are `handlers/lifecycle.js#PROVES` / `#PROVES_NOT`,
+   pinned by `tests/server/lifecycle.test.js`. **No client may render a co-signed act as „von zwei
+   Personen bestätigt".** It was confirmed by two Member rows, and that is the sentence available.
+2. **The identity fleet is bounded.** §3.2's *"at most 8 rows of pseudonymous ids"* is now a check
+   — `handlers/invites.js#MAX_LIVE_MEMBERS`, refused at redemption and, as a courtesy, at
+   creation. Live rows only: a seat freed by a removal or a leave is a seat, because a family that
+   has said goodbye to somebody must still be able to invite. This bounds the sybil; it does not
+   close it, and the file says so at the point of the cap.
+3. **The two real closes are named, and neither is a gate on this relay.**
+   - **A founder- or admin-signed invite.** *Rejected as posed*: requiring the inviter to be the
+     founder (mutant **N-1**) reddens `tests/fleet/e6-attack-removed.test.js` §0e/§0f and
+     `tests/server/attack-client-lifecycle.test.js` §D ×2, contradicts 15.5's shipped design that
+     any member may invite, and would make the FOUNDER the admin — which `transferAdmin` exists
+     to stop being true. An **admin**-signed invite is buildable only on top of the
+     transfer-certificate chain this section already owes (E2-L1b).
+   - **Move the co-signature off the relay and into the log**, where ADR 001 §4's admin chain
+     already lives and where a client — unlike the relay — can see who a member is and can refuse
+     an op co-signed by a row nobody attested. That is an ADR 001 change.
+
+**Until one of those lands, `admin_proof` is a field, not a control**, and the honest reading of
+the gate is: *it stops a member who has one identity, and it counts to two.* That is still worth
+having — every refusal in the list below is real, and a shipped client cannot reach the second
+identity by accident — and it is not what the field name sounds like. **This is a PO ruling
+(D7), flagged rather than decided in a handler.**
 
 #### Where it is required, and where it is not
 
@@ -383,8 +485,34 @@ line that matters, because the T5 adversary is *one* family member with *one* pa
   person to censor. **The count includes tombstones**, which is what shuts the obvious bypass:
   a removal sets `Member.removedAt` and never deletes the row, so "remove everyone, then delete
   alone" does not reach the exemption.
-- **`POST /members/remove` — REQUIRED to remove THE FOUNDER; verified when present otherwise.**
-  *(the T5-M1a ruling, 2026-09-01)*
+- **`POST /members/remove` — REQUIRED to remove THE FOUNDER, and REQUIRED FOR EVERY REMOVAL once
+  the founder's row is no longer live; verified when present otherwise.**
+  *(the T5-M1a ruling, 2026-09-01; the liveness half added 2026-09-02, finding T5-M3)*
+
+  **The founder-liveness half, first, because it is the one that was missing.** `founderMemberId`
+  names a *member id*, and a member id stops being a member. Two SHIPPED paths reach that state
+  with nobody attacking anything: the founder **transfers admin and leaves** (`leavedelete.js`
+  does exactly this, and 20.1/20.3 tell it to), or she **leaves and rejoins by invite** under a
+  new `Member.id`. Either way the anchor names a tombstone, every live member is a non-founder,
+  the gate stops existing — and one member removes the rest and rides `leaveSpace`'s
+  last-member-out cascade to an empty circle. T5-M1c, reopened by the founder's own honest exit.
+  Rows: `tests/fleet/e6-gate-removal.test.js` §2a, §2b.
+
+  So the anchor is asked both questions. While the founder is live the rule is unchanged and
+  narrow. Once she is not, the relay has lost the one blind fact that told a survivable removal
+  from a space-destroying one, and it stops guessing: **every** removal in that space needs a
+  second member row.
+
+  **Two costs, both stated rather than hidden.**
+  1. In a founder-less circle down to **two** members the rule is **unsatisfiable** — the only
+     possible co-signer is the target. Those two cannot remove each other. Each can still
+     `/members/leave`, the last one out takes the space with her (20.3), and every device holds a
+     complete replica (§6.3), so nobody is trapped and no data is lost. The alternative is a
+     founder-less circle any single member can destroy, which is ADR 002 §0's T5 row.
+  2. **It makes the co-signature UI a shipping prerequisite, not merely an owed screen.**
+     `src/js/family/adminpanel.js` and `leavedelete.js` mint no `adminProof`, so in a circle whose
+     founder has left the shipped client can no longer remove anybody at all. That is the honest
+     price of closing T5-M3 and it is flagged here rather than discovered in the field.
 
   **Why not for every removal.** The rule would be **unsatisfiable in a two-member circle**: the
   only member who could co-sign is the target, and she will not co-sign her own removal. A rule
@@ -420,15 +548,23 @@ line that matters, because the T5 adversary is *one* family member with *one* pa
 
 **`403 admin_proof_required`** with `{ field: "adminProof", reason }` when a REQUIRED proof is
 absent — `second_member_signature_required` for `space.delete`,
-`founder_removal_needs_second_key` for `member.remove`. 403 and not 400: the request is well
-formed and the caller is authenticated, and what is missing is **authority**.
+`founder_removal_needs_second_key` for `member.remove` when the target is the founder, and
+`founder_gone_every_removal_needs_second_key` when the anchor no longer names a live member
+(T5-M3). 403 and not 400: the request is well formed and the caller is authenticated, and what is
+missing is **authority**.
 
 `400 bad_request` with `{ field: "adminProof", reason }` for a malformed proof
 (`admin_proof_shape`, `admin_proof_by`, `admin_proof_sig`), one the caller signed for herself
-(`admin_proof_self_signed`) and one naming a signer who is not a live member of this space
-(`admin_proof_signer_not_a_member`). `401 bad_signature` with `{ check: "admin_proof" }` when the
-signature does not verify. Nothing here is an enumeration oracle: `GET /spaces/:id/members`
-already serves the caller the same list.
+(`admin_proof_self_signed`), one naming a signer who is not a live member of this space
+(`admin_proof_signer_not_a_member`), and one presented for a removal that has already happened
+(`admin_proof_target_already_removed`, T5-M4 — a **success synonym**, see above). `401
+bad_signature` with `{ check: "admin_proof" }` when the signature does not verify. Nothing here is
+an enumeration oracle: `GET /spaces/:id/members` already serves the caller the same list.
+
+Every `admin_proof_required` body also carries **`checks`** and **`doesNotCheck`**, and every
+`200` from either route carries **`proves`** and **`provesNot`** (T5-M2). They are not decoration:
+they are the only thing standing between a relay that counted two rows and a screen that tells a
+family two people agreed.
 
 > **CLOSED during integration.** `ERROR_CODES` was a frozen table with no authorization code that
 > fit a missing proof — `not_a_member` would have been a lie and the very oracle §2 step 6/7
@@ -832,6 +968,54 @@ member. Acceptable, and it appears verbatim in the Datenschutz copy.
 | push / pull | 60 / min and 120 / min per device, sliding window in `RateBucket` |
 
 `429` responses carry `Retry-After`.
+
+#### Amended — the caps this table did not have  *(added 2026-09-02, rounds 2–3)*
+
+Five budgets were landed in `server/core/limits.js#LIMIT_EXTENSIONS` and carried there as
+**AMENDMENT OWED** against this section. They are the amendment. Each exists because a route this
+table left unlimited was declared unlimited for a *reason that turned out to be false*, and the
+reason is recorded beside the number rather than deleted — a refuted premise that is quietly
+removed is one the next reader re-adopts.
+
+| cap | value | tag | the premise it refutes |
+|---|---|---|---|
+| `POST /spaces` | 5 per IP / hour | E2-L3 | "reachable only after the full §2 chain" — true of every authenticated route and **false of this one**: `createSpace` registers the very device it is signed by, so §2 step 4 has no `Device` row to look up. Unlimited, it is an anonymous row generator. |
+| `POST /devices` | 10 per IP / hour | E2-L4 | an attestation stops **forgery, not volume** — and a free registration route would let a forged device row force the next honest rotation to wrap the family key to the attacker, turning coverage from a defence into an amplifier. |
+| `POST /devices/adopt` | 10 per IP / hour | E2-L5 | the same check, so the same budget — in a **separate bucket**, so a burst of recovery attempts after a lost Mac cannot exhaust the budget that admits a freshly paired one. |
+| `POST /members/remove` | 10 per member / hour | E2-L6 | "admin-only" — and *admin* is the one thing this relay structurally cannot check (§5.1 deleted the role column on purpose). Removal purges the target's ops, the single irreversible action in the API. |
+| `POST /spaces/:id/epoch` | 20 per member / hour | E2-L9 | "a flood costs the attacker their own space's epoch numbers **and nothing else**" — measured false (T2-E1). See below: it was a one-way ratchet into a wall. |
+
+**E2-L9 is the one worth reading twice, because the cap is not what closes the finding.**
+`assertCoverage` is a row count, `sync/keys.js#rotateTo` sends `recipients × 1..next` on every
+rotation, and `readWraps` refuses more than `MAX_WRAPS = 1024`. An unmetered counter that only
+goes up therefore walks the *shipped* client past a wall it cannot come back from: no route
+prunes an epoch, the cap is per request, and there is no second request — so past the wall ADR
+002 §4.1's "a removal forces `e+1`" is unperformable **by anybody, for ever**.
+
+Two things about the number, both deliberate:
+
+- **What is metered is the CLIMB, not the request.** `spaces.js#rotateEpoch` spends the budget
+  only where the request would actually take a rung (`epoch === currentEpoch + 1`); a rotation
+  that loses the race and `409`s costs nothing. Charging on entry would meter the *victim* of a
+  race at the rate of its winner, and two Macs delivering on their own timers is the ordinary
+  state of a family. Control row: `tests/fleet/e6-gate-keys.test.js` §2d.
+- **It is keyed on the MEMBER.** `ip` hands an attacker a fresh ladder for the price of moving
+  networks; a per-*space* budget would let one hostile member spend the circle's whole allowance
+  and `429` the honest admin trying to rotate her out — rebuilding the denial as the fix.
+
+**And it does not close the finding it was raised against.** `e6-gate-keys.test.js` §2a is still
+an adversary SUCCESS, and it is not a volume attack: **one** poisoned rung is enough, so no rung
+budget reaches it. A rotation to `e+1` carrying wraps nobody can open is accepted because
+`assertCoverage` counts rows, and from that instant every honest device is ringless at the current
+epoch. What closes it is ADR 002 §8.5a's owed "I cannot open epoch e" report path. `limits.js`
+pins that distinction in the `RATE_COVERAGE` reason so a limiter cannot be credited with a finding
+it does not close. §1c is likewise **priced, not closed**: past `MAX_WRAPS` the wall is still
+absorbing, and closing it needs a prune/compaction route or a `rotateTo` that sends only the
+missing rows.
+
+The membership ceiling is deliberately **not** in this table: a rate rule bounds a rate, and
+`MAX_LIVE_MEMBERS` is a cardinality refusal on the one route that admits a member. It lives at
+`server/core/handlers/invites.js` and is specified in §3.2.
 
 ### 6.2 Logging
 
