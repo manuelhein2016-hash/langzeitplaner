@@ -31,7 +31,9 @@
 //                               against the local device set").
 //   1   admin chain             `space.set{admin, adminPrev}` links only. Reads stage 0.
 //   2   membership              `member.set{displayName,colorRef,_alive,_born}`. Reads 0 and 1.
-//   3a  governing pub fields    `pub.level`, `pub.coEdit`, `pub.alive`, `_born`. Reads 0 and 1.
+//   3a  governing pub fields    `pub.level`, `pub.coEdit`, `pub.alive`, `_born`. Reads 0, 1 and
+//                               2 — the per-space membership gate (§4.2b) runs first, for owner
+//                               AND author, so a stranger's op is never a governance question.
 //   3b  content pub fields      Reads 0, 1, 2 and the FINAL 3a registers.
 //
 // A stage-3b op's admissibility therefore depends on the *final* `pub.coEdit` / `pub.level`,
@@ -49,6 +51,44 @@
 // one line of modified client emitting an owner write at `ms = 0` would have taken over any
 // entity in the family. Here there is nothing to backdate: no sequence of ops, at any stamp,
 // changes `ownerOfEntity(e)`, because no op can rewrite `e`.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// STORY 18.1 HAS THREE ENFORCEMENT LAYERS. HERE IS WHAT EACH ONE PROVES, AND WHAT IT DOES NOT.
+// (Decision D7, settled by the PO. LZP-901 asked for SERVER-SIDE validation that non-owners
+// cannot mutate; under story 21.1 the relay holds ciphertext and cannot know who owns what, so
+// the ticket is amended rather than the guarantee. This is that amendment, in the file a reader
+// looking for the enforcement will actually open. Do not re-litigate it — read what it claims.)
+//
+//   1. THE CLIENT UX REFUSES.  `layout.js:canEditEntry` is the ONE predicate; `board.js` withholds
+//      the grips from it and `interact.js` refuses to start the drag, the resize and the inline
+//      editor from the same function. PROVES: nothing about a peer. It is a promise about THIS
+//      Mac's own hands, so that a member never discovers at commit time that the gesture they
+//      just made was never allowed. A patched build deletes it in one line and it is worth
+//      exactly nothing against one.
+//
+//   2. THIS FOLD REFUSES — and this is where a patched client is actually stopped, because it is
+//      the RECEIVING side. Every honest device runs the same deterministic, order-independent
+//      fold over the same set, so a hostile op is refused identically on every Mac in the family
+//      without any of them consulting anything. PROVES: no op sequence, at any stamp, in any
+//      arrival order, moves an entity to another owner (property P9); no non-owner writes a
+//      governing register (stage 3a); no co-editor writes at all unless the OWNER's own
+//      `pub.coEdit` and `pub.level` say so on their final values (stage 3b); no content above the
+//      folded level survives, whoever sealed it (stage 3c); and — E9 — nobody outside the space
+//      writes into it at all (§4.2b). DOES NOT PROVE: that the hostile op was never SENT, never
+//      stored, or never seen by a device running modified code. Enforcement is by convergence,
+//      not by gatekeeper.
+//
+//   3. THE SERVER VALIDATES WHAT IT CAN LEGITIMATELY SEE — membership, device signatures, rate
+//      limits (`server/*`, not this file). PROVES: an envelope from a device that is not in the
+//      space, or not signed by a key the space knows, never reaches anybody's pull. DOES NOT
+//      PROVE: anything whatsoever about the plaintext, which it has never held and must never
+//      hold. A relay that could tell a `pub.text` from a `pub.date` would be a relay that could
+//      read the family's calendar (21.1).
+//
+// THE HONEST SUMMARY, which is D7's own last bullet and is quoted here so it travels with the
+// code: a member who patches their own client can still EMIT an op the others will reject — but
+// not one they will accept. At family scale (2–8 people who know each other) that is the right
+// trade, and under E2EE it is the only one available.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // WHERE `writeOnce` IS ENFORCED, AND WHY IT IS HERE
@@ -146,7 +186,12 @@ export const REJECT_REASONS = Object.freeze({
   NO_COEDIT: 'noCoEdit',
   /** `pub.level` is not 'geteilt' on that entity's FINAL registers. Co-editing needs Geteilt. */
   NOT_GETEILT: 'notGeteilt',
-  /** The author is not in `currentMembers`. */
+  /**
+   * The author — or the entity's structural OWNER — is not a current member OF THE SPACE THE OP
+   * WAS SEALED INTO (§4.2b). Membership is per space, not the union `currentMembers` publishes:
+   * a member of some other Familienkreis is a stranger here, and so is an attested device whose
+   * only member record lives in a circle of its own making. See `membersIn` at stage 2.
+   */
   NOT_MEMBER: 'notMember',
   /** A co-editor wrote a field whose `FIELDS[kind][f].coEdit` is not true. */
   NOT_COEDITABLE: 'notCoEditable',
@@ -1052,6 +1097,73 @@ export function foldAuthorized(ops, ctx) {
       .sort(),
   );
 
+  // ── MEMBERSHIP IS PER SPACE (§4.2b — E9 / LZP-901, story 18.1) ─────────────
+  //
+  // `currentMembers` above is the UNION over every space in the fold, and that is the right
+  // shape for what it is: `ops.contract.js` §4 publishes it, and `materialize.js` uses it to
+  // decide whether a member record has a display name to render. It is the wrong shape for an
+  // AUTHORITY question, and three attacks fell out of using it as one. All three are in
+  // `tests/tier1/coedit.test.js` §1; the third is the one that matters most, because the
+  // attacker is not in the family at all:
+  //
+  //   E9-1  EVE creates her OWN Familienkreis, makes herself its admin, and emits the §4.3
+  //         admin unshare on `fnote:MAMA/<uuid>` sealed into HER space. `adminAtKey` resolves
+  //         the admin of `op.space` — correctly, and that admin is Eve — and the register map is
+  //         keyed by ENTITY, not by (space, entity), so it folded onto Mama's real registers.
+  //         Mama's shared entry went `privat` on every board, from outside the circle.
+  //   E9-2  the same, with a co-edit write instead of an unshare: `pub.text: 'gekapert'` on a
+  //         Geteilt + co-editable entry, admitted because stage 3b asked the UNION whether Eve
+  //         was "a member".
+  //   E9-3  and the floor of it: Eve files a `dev.*` attestation in her own space — which is
+  //         self-authorizing by design (stage 0a, and it must be, or attestation is an infinite
+  //         regress) — and then writes `pub.text` on MY entity **into MY space**. Stage 0b's
+  //         `attested` table is global, so the device gate passed; the union said she was a
+  //         member; nothing else looked. She had never been invited to anything.
+  //
+  // THE RULE, AND WHY IT IS THE SAME ONE §4.4 ALREADY USES. Ownership is structural: the entity
+  // key carries the owner's memberId. So the space an entity belongs to is not a fourth thing to
+  // assert and forge — it is READ OFF THE KEY, through the owner:
+  //
+  //     A `pub.set` is admissible only in a space where BOTH the entity's structural OWNER and
+  //     the op's AUTHOR are current members.
+  //
+  // Neither half is redundant. The owner half kills E9-1 and E9-2 (Mama is not in Eve's space);
+  // the author half kills E9-3 (Eve is not in mine). And both are decided from the same admitted
+  // set every device holds, so the verdict is identical everywhere — this is a fold rule, not a
+  // gatekeeper (D7).
+  //
+  // WHY A REJECTION HERE IS NOT THE "WRONGLY-FINAL" HAZARD THIS FILE WARNS ABOUT ELSEWHERE. A
+  // rejection is permanent, so refusing an op whose authority merely has not ARRIVED yet would
+  // drop a legitimate entry for good. It cannot happen here, and the reason is stage 0b: a
+  // family op is already rejected `UNATTESTED_DEVICE` unless `op.act`'s own `dev.*` register is
+  // in the set — and that register IS a `member.set`, in a space. So by the time this gate is
+  // reached, the author's member entity exists, and `memberSpaces` knows where. The owner's does
+  // too, for the same reason applied to the op that published the entity in the first place.
+  // (`store.js:CURABLE_REFUSALS` already re-offers `UNATTESTED_DEVICE` on the next pull, which
+  // is the seam that makes partial delivery survivable — one seam, not two.)
+  //
+  // The reason code is `NOT_MEMBER` rather than a new one, because that is what it is: not a
+  // member — of the space this op was sealed into. See its doc above.
+  const memberSpaces = new Map();               // memberId -> Set<spaceId>
+  const noteMemberSpace = (op) => {
+    const id = parseEntityKey(op.e).id;
+    if (!memberSpaces.has(id)) memberSpaces.set(id, new Set());
+    memberSpaces.get(id).add(op.space);
+  };
+  // Only ADMITTED member ops confer membership: a rejected `member.set` must not buy a space.
+  for (const op of attestOps) noteMemberSpace(op);
+  for (const op of admittedMemberOps) noteMemberSpace(op);
+  const spaceMemberCache = new Map();
+  /** The current members OF ONE SPACE — alive, and recorded in that space. @returns {Set<string>} */
+  const membersIn = (spaceId) => {
+    let s = spaceMemberCache.get(spaceId);
+    if (s) return s;
+    s = new Set();
+    for (const m of currentMembers) if (memberSpaces.get(m)?.has(spaceId)) s.add(m);
+    spaceMemberCache.set(spaceId, s);
+    return s;
+  };
+
   // ── Stage 3. Content ──────────────────────────────────────────────────────
   //
   // Personal / local first: one writing human, nothing else to check (§4.3). The device gate
@@ -1071,6 +1183,13 @@ export function foldAuthorized(ops, ctx) {
     const parsed = parseEntityKey(op.e);
     const kind = parsed.kind;
     const owner = ownerOfEntity(op.e);           // ← the whole of ownership. Structural. §4.4.
+    // §4.2b — the entity belongs to the space its OWNER is a member of, and only a member of
+    // that same space may write it. Before the owner check, before the admin check, before
+    // anything: an op from outside the circle is not a governance question, it is a stranger.
+    // See the `membersIn` block above for the three attacks this closes.
+    const spaceMembers = membersIn(op.space);
+    if (!spaceMembers.has(owner)) { reject(op, STAGES[3], REJECT_REASONS.NOT_MEMBER); continue; }
+    if (!spaceMembers.has(op.act)) { reject(op, STAGES[3], REJECT_REASONS.NOT_MEMBER); continue; }
     const touchesGov = Object.keys(op.f).some((f) => {
       const s = fieldSpec(kind, f);
       return !!(s && s.gov === true);
@@ -1120,7 +1239,11 @@ export function foldAuthorized(ops, ctx) {
     const kind = parseEntityKey(op.e).kind;
     if (registerValue(govRegs, op.e, 'pub.coEdit') !== true) { reject(op, STAGES[3], REJECT_REASONS.NO_COEDIT); continue; }
     if (registerValue(govRegs, op.e, 'pub.level') !== 'geteilt') { reject(op, STAGES[3], REJECT_REASONS.NOT_GETEILT); continue; }
-    if (!currentMembers.has(op.act)) { reject(op, STAGES[3], REJECT_REASONS.NOT_MEMBER); continue; }
+    // The membership question is asked ONCE, at the top of 3a, and it is asked per space
+    // (`membersIn`). It used to be asked here, against the UNION `currentMembers` — which is how
+    // E9-2 and E9-3 got in. Two copies of an authority predicate is what this file spends its
+    // length refusing, so there is no second copy here: an op that reaches 3b has already been
+    // judged a member's op, in this space, by the gate that also judged the owner.
     const badField = Object.keys(op.f).some((f) => {
       const s = fieldSpec(kind, f);
       return !(s && s.coEdit === true);

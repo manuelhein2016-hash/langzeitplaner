@@ -73,6 +73,9 @@
 
 import { getLang } from '../i18n.js';
 import { VISIBILITY_LEVELS } from '../core/entities.js';
+// ADR 004 §8 — `pub.coEdit` exists only at Geteilt. ONE owner of that rule; `layout.js` reads the
+// same function, so the board's grips and this file's answer cannot drift. See `canEditEntry`.
+import { allowsCoEdit } from '../core/visibility.js';
 import { isStamp, msOf } from '../core/stamp.js';
 import { WD_DE, WD_EN } from '../dates.js';
 
@@ -127,6 +130,24 @@ export const TXT = Object.freeze({
   coEditOnlyGeteilt: {
     de: 'Nur bei „Geteilt“.',
     en: 'Only at “Shared”.',
+  },
+
+  // 18.2, THE VIEWER'S HALF — „so collaboration exists exactly where invited and nowhere else".
+  //
+  // The owner's half of the flag is a checkbox they tick. The other member has no checkbox and,
+  // until this line, no way to learn that the invitation exists at all: the entry simply became
+  // draggable, which is an affordance nobody announced and nobody can distinguish from a bug.
+  // So the grant is SAID, on exactly the entries it was made for, and nowhere else.
+  //
+  // ⚠ IT IS A STATEMENT ABOUT THE OWNER'S SETTING, NOT A PROMISE ABOUT THIS MAC. It says what
+  // was granted — an observable fact, folded from `pub.coEdit`, and true on every device — and
+  // says nothing about whether the write can be authored from here. That distinction is not
+  // pedantry while `store.familyLevelOf` still answers `null` for a foreign key (see the report):
+  // a line that promised „du kannst das jetzt ändern" would be a claim the product cannot keep,
+  // which is the ADR 002 §7.4 category error this file exists to avoid.
+  coEditForeign: {
+    de: 'Familie darf bearbeiten — von der Person freigegeben, der der Eintrag gehört.',
+    en: 'Family can edit — enabled by the person the entry belongs to.',
   },
 
   // 16.6 / ADR 004 §6 — a pending publication shows the OLD exposure plus this marker. It is a
@@ -213,12 +234,29 @@ export function clusterApplies(entry) {
  * key (`fnote:mem_…/uuid`, `materialize.js:foreignCandidate`), so `tx.note(entry.id).set(…)`
  * would mint `note:fnote:mem_…/uuid` in MY personal space — a register for an entity that cannot
  * exist. The guard is therefore load-bearing before it is a permission.
+ *
+ * ── E9 / LZP-902: `allowsCoEdit(level)` IS PART OF THE QUESTION ──────────────────────────────
+ *
+ * This read `entry.coEdit === true` and stopped, which made it the THIRD answer on a board that
+ * is only allowed one — `layout.js:canEditEntry` (the board's) already reads the level, and
+ * `interact.js` now reads `layout.js`'s. The three disagreed on exactly the rows that matter:
+ * `{isForeign: true, coEdit: true, level: 'belegt'}` and its `privat`/absent siblings.
+ *
+ * That combination is REACHABLE, not a lint. ADR 004 §8 says `pub.coEdit` exists only at Geteilt
+ * and §5's transition table nulls it on the way down — but `pub.coEdit` is a GOVERNING register
+ * and `authz.js` stage 3c never drops governing fields, so a register map legitimately holds
+ * `level: 'belegt'` next to a not-yet-arrived-null `coEdit: true` between two pulls. Reading the
+ * flag alone would offer an edit on somebody else's Belegt block for exactly that window — the
+ * one shape in the product where the text is deliberately not mine to see, let alone to write.
+ *
+ * The rule itself is not restated here: `core/visibility.js:allowsCoEdit` owns it, `layout.js`
+ * asks it, and now so does this. One rule, three readers, no fourth table.
  * @param {Object} entry @returns {boolean}
  */
 export function canEditEntry(entry) {
   if (!entry) return false;
   if (!entry.isForeign) return true;
-  return entry.coEdit === true;
+  return entry.coEdit === true && allowsCoEdit(entry.level);
 }
 
 /**
@@ -486,6 +524,10 @@ const SHARING_CSS = `
 .share-coedit.is-off { color: var(--ink-4); cursor: default; }
 .share-coedit.is-off input { cursor: default; }
 .share-coedit-hint { font: 400 8.5px var(--font); color: var(--ink-4); }
+/* 18.2's viewer half. Same 9 px as .share-what, one ink step quieter: it is a statement about
+   somebody else's setting, not a control, and it must not read as one. No icon — the badge
+   system (deliverable 17) is already at three entrants in the contested slot (ADR 004 §6). */
+.share-coedit-on { font: 400 9px var(--font); color: var(--ink-2); line-height: 1.35; }
 
 .share-attr { font: 400 8.5px var(--font); color: var(--ink-3); }
 .share-note { font: 400 8.5px var(--font); color: var(--ink-2); line-height: 1.35; }
@@ -552,6 +594,13 @@ export function sharingStrip(opts) {
     const lv = typeof entry.level === 'string' && TXT[entry.level] ? say(TXT[entry.level]) : null;
     if (lv) strip.appendChild(el('div', 'share-what', `${lv} — ${levelWhat(entry.level)}`));
     strip.appendChild(el('div', 'share-foreign', say(TXT.foreignNote)));
+    // 18.2's viewer half — on exactly the entries the owner invited, and nowhere else. The
+    // predicate is `canEditEntry`, which is `layout.js`'s and `interact.js`'s too, so the
+    // sentence and the grips appear and disappear together. Reading `entry.coEdit` here instead
+    // would put the line on a Belegt block during the downgrade window (see `canEditEntry`).
+    if (canEditEntry(entry)) {
+      strip.appendChild(el('div', 'share-coedit-on', say(TXT.coEditForeign)));
+    }
     const attr = attributionLine(entry, { nameOf: opts.nameOf });
     if (attr) strip.appendChild(el('div', 'share-attr', attr));
     return strip;

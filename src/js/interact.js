@@ -29,6 +29,10 @@ import { addDays, diffDays, parseISO, p2 } from './dates.js';
 // "<nonLeapYear>-02-29" quirk documented there).
 import { reanchorRepeat } from './core/entities.js';
 import { visibilityForNewEntry } from './core/visibility.js';
+// 18.1 / 18.2 — THE predicate, not a copy of it. `board.js` withholds the grips from the same
+// function (through the model row it builds in `layout.js:decorate`), so the pixels and the
+// pointer state machine can never disagree about who may edit what. See the guard below.
+import { canEditEntry } from './layout.js';
 import { renderBoard, currentModel } from './board.js';
 import { openDayPopover, closePopover, popoverOpen } from './popover.js';
 import { flashCategory } from './legend.js';
@@ -114,25 +118,117 @@ const cssEsc = (s) => (window.CSS?.escape ? CSS.escape(s) : String(s).replace(/"
 const noteById = (id) => store.state.notes.find((n) => n.id === id);
 const barById = (id) => store.state.bars.find((b) => b.id === id);
 
-// ── the edit guard (18.1, 18.2) ──────────────────────────────────────────────
+// ── the edit guard (18.1, 18.2) — E9 / LZP-901, LZP-902 ──────────────────────
 //
-// SEAM ONLY. This is the predicate ADR 004 §4.3 names for `interact.js:116-127` and
-// `board.js:141-142`, landed now so the pointer state machine has one place to ask the question
-// and WP-10 has nothing to retrofit into it. IT DOES NOT BUILD ANY FAMILY UI — that is WP-10's
-// (LZP-901/902).
+// THE SEAM IS NOW WIRED, AND THE FIRST THING IT DOES IS STOP CARRYING ITS OWN COPY OF THE RULE.
+// `layout.js:canEditEntry` is the ONE predicate. `board.js` reads it (through the model row's
+// `canEdit`) to decide the `readonly` class and to withhold the resize grips; this file reads the
+// same function to decide whether a press may become a gesture. Two answers to "may I edit this?"
+// on one board is not a style problem — it is the board telling the hand one thing and the eye
+// another, and it was measurably true here:
+//
+//     entry { isForeign: true, coEdit: true, level: 'belegt' }
+//       layout.js  → false   (no grips, `readonly` painted)
+//       this file  → true    (the drag started anyway)
+//
+// That window is not hypothetical. `pub.coEdit` is a GOVERNING register and `authz.js` stage 3c
+// never drops governing fields, so between the arrival of a Geteilt → Belegt downgrade and the
+// arrival of the `pub.coEdit: null` beside it, a register map really does hold `level: 'belegt'`
+// next to `coEdit: true` — `layout.js` says so in its own comment, and this file used to be the
+// place that ignored it.
 //
 // IT IS UNCONDITIONALLY TRUE IN SOLO MODE, BY CONSTRUCTION AND NOT BY LUCK. `store._project()`
 // runs the materialized board through `stripV2Fields` while there is no family space, and that
-// keeps exactly `V1_ENTRY_FIELDS` — `isForeign` and `coEdit` are not among them, so both reads
-// are `undefined` on every entry the solo board can produce and `canEdit` short-circuits true.
-// The moment a family space exists the full projection is used and the same line starts biting.
+// keeps exactly `V1_ENTRY_FIELDS` — `isForeign`, `coEdit` and `level` are not among them, so
+// every read is `undefined` on a solo board and `canEditEntry` short-circuits true. The moment a
+// family space exists the full projection is used and the same line starts biting. That is what
+// makes the v1 characterization suite the right oracle for this file: v1 has no foreign entries,
+// so not one of its rows may move.
 //
 // `canEdit(undefined)` is TRUE on purpose: this is a permission question, not an existence
 // question. Every caller does its own `if (!entry) return` — v1's decline — and conflating the
 // two would turn "the entry is gone" into "you may not edit it", which is a different bug.
-export const canEdit = (entry) => !entry || entry.isForeign !== true || entry.coEdit === true;
-const canEditNote = (id) => canEdit(noteById(id));
-const canEditBar = (id) => canEdit(barById(id));
+export const canEdit = (entry) => !entry || canEditEntry(entry);
+
+/**
+ * ⚠ PERMISSION IS NOT CAPABILITY, AND ON THIS BOARD THEY ARE NOT YET THE SAME SET.
+ *
+ * `canEdit` answers 18.1/18.2's question: MAY this entry be edited. `authorable` answers a
+ * different one that only this file has to care about: can this device AUTHOR that write at all.
+ *
+ * A foreign entry's `id` IS its entity key — `fbar:mem_…/uuid` (`materialize.js:foreignCandidate`,
+ * and it must be, because a bare uuid is forgeable while an owner-segmented key is not). Every
+ * commit below routes through `store.apply(<v1 mutation>)`, whose op constructors call
+ * `entities.js:noteKey(id)` / `barKey(id)` — and those **throw `EntityKeyError`** on anything that
+ * is not a bare uuid. So a gesture on a genuinely co-editable foreign entry did not "silently do
+ * nothing": it threw out of `onPointerUp`, ABOVE the lines that clear `drag`, drop the ghost and
+ * remove `is-dragging` from `<body>` — leaving the board wedged mid-drag with a floating ghost
+ * and a pointer machine that would never complete another gesture until reload. Proven, and
+ * killed by a mutant, in `tests/tier2/coedit.dom.js` §2.
+ *
+ * WHY THE ANSWER IS A GUARD AND NOT THE WRITE PATH. 18.2's co-editor write is a `pub.set` into
+ * the FAMILY space, built by `core/project.js:projectCoEditPatch` — which exists, is reviewed, and
+ * is narrower than the projection — and then sealed. Sealing is where it stops: ADR 004 §2.2
+ * barrier 4 makes `crypto/envelope.js:sealOp` re-derive the level from `store.familyLevelOf`, and
+ * that function answers `null` for a foreign key **on purpose** ("this device may not publish
+ * somebody else's entry"), which barrier 4 turns into a `RedactionError` — and a `RedactionError`
+ * on the publish path sets `store.redactionHalt`, stopping ALL family sync from this Mac. So the
+ * one thing this file must never do is let a gesture reach that seam. It is the same blocker that
+ * holds the admin unshare (18.3, E7 finding 4) and it is owed by `store.js` +
+ * `crypto/envelope.js`, not by this file. See the report.
+ *
+ * `authorable(undefined)` is TRUE for the same reason `canEdit(undefined)` is.
+ *
+ * ── E9 INTEGRATION · THE CAPABILITY LANDED, SO THE TWO SETS ARE NOW THE SAME SET ────────────
+ *
+ * The paragraph above described a real gap and it is closed. `store.applyCoEdit(entityKey,
+ * changes)` is the door a foreign write goes through: it reads the level from
+ * `store.familyCoEditLevelOf` — the AUTHENTICATED fold, not this file's opinion — mints the op
+ * through `core/project.js:coEditOp`, and never touches `barKey`/`noteKey`, so the
+ * `EntityKeyError` that wedged the board is not merely caught, it is unreachable. `sealOp`'s
+ * barrier 4 now has a level for a co-editable foreign entity and seals instead of halting.
+ *
+ * `authorable` stays, and stays a SEPARATE question, for the case it was always about: an entry
+ * this device may edit but whose write it cannot author. That set is now exactly "a foreign entry
+ * with no store door" — a store that predates `applyCoEdit`. Keeping the term is what makes the
+ * board decline instead of wedging if the two files are ever deployed a version apart.
+ */
+const authorable = (entry) => !entry
+  || entry.isForeign !== true
+  || typeof store.applyCoEdit === 'function';
+
+/** May this press become a gesture? Permission AND capability — see `authorable`. */
+const mayGesture = (entry) => canEdit(entry) && authorable(entry);
+
+/**
+ * ── THE ONE PLACE A GESTURE'S COMMIT CHOOSES ITS DOOR (18.1 / 18.2) ────────────────────────
+ *
+ * Every gesture below used to end in `store.apply(<v1 mutation>)`. On a foreign entry that is
+ * the wrong door twice over — it addresses a bare uuid (and throws), and it would write a TRUTH
+ * register for an entity whose truth lives on somebody else's Mac. A co-edit is a `pub.set` into
+ * the family space and nothing else.
+ *
+ * The split is on `entry.isForeign`, which `materialize.js` sets, and NOT on `coEdit`: whether
+ * the family will accept the write is `store.applyCoEdit`'s question, answered from the
+ * authenticated fold one layer down. This function decides only WHICH REGISTER SET the gesture
+ * is about, which is a structural fact about the entity (ADR 001 §4.4) and cannot be stale.
+ *
+ * ⚠ THE V1 PATH IS BYTE-FOR-BYTE UNCHANGED, and that is why the v1 suite is the oracle. On a
+ * solo board `stripV2Fields` removes `isForeign` entirely, so `entry.isForeign` is `undefined`,
+ * the first branch is taken, and this function is `store.apply` with extra steps.
+ *
+ * @param {Object} entry    the materialized entry the gesture is about
+ * @param {string} name     the v1 mutation name, for my own entry
+ * @param {Object} args     the v1 mutation args, for my own entry
+ * @param {Object} changes  the `pub.*` changes, for a co-editor's write
+ * @returns {boolean}
+ */
+function commitEntry(entry, name, args, changes) {
+  if (!entry || entry.isForeign !== true) return store.apply(name, args);
+  return store.applyCoEdit(entry.id, changes);
+}
+const canEditNote = (id) => mayGesture(noteById(id));
+const canEditBar = (id) => mayGesture(barById(id));
 
 /**
  * 16.4 / ADR 004 §3 — an entry's `visibility` is its category's default, read ONCE at creation
@@ -169,8 +265,25 @@ export function deleteSelected() {
   const kind = selection.type === 'note' ? 'note' : 'bar';
   const id = selection.id;
   const entry = kind === 'note' ? noteById(id) : barById(id);
-  // 18.1 — a foreign entry that was not opted into co-editing is not mine to delete.
-  if (!canEdit(entry)) return false;
+  // ── 18.1's SECOND VERB, AND THE ONE PLACE 18.2's GRANT DELIBERATELY DOES NOT REACH ────────
+  //
+  // A foreign entry that was not opted into co-editing is not mine to delete. AND A CO-EDITABLE
+  // ONE IS NOT MINE TO TOMBSTONE EITHER — which is why this gate is `isForeign`, not
+  // `mayGesture`: everywhere else in this file 18.2 widened what a gesture may do, and here it
+  // must not.
+  //
+  // `pub.alive` is a GOVERNING register (`ops.js:FIELDS`), and `authz.js` stage 3a folds every
+  // governing field from the entity's structural OWNER alone. A co-editor's `pub.alive: false` is
+  // therefore an op every honest device rejects: the entry would vanish from MY board and stay on
+  // everyone else's — a divergence, which is worse than a refusal. 18.2 grants the right to edit
+  // the family vacation bar, not the right to take it out of the family's year; 18.6's "deletions
+  // propagate" is the OWNER's deletion; and `projectCoEditPatch` has no field that could carry
+  // one, so this is a refusal the projection would make anyway, made early where it is cheap.
+  //
+  // IT DECLINES v1-STYLE — `false`, AND THE SELECTION SURVIVES. The entry is still on the board
+  // and still the thing the user is looking at, so clearing the selection would be a second
+  // consequence of a keystroke that was supposed to have none.
+  if (!mayGesture(entry) || (entry && entry.isForeign === true)) return false;
   // ATT-88 · THE STALE-SELECTION PHANTOM, CLOSED TWICE OVER.
   //
   // v1's delete was `s.notes.filter(…)`: on an id that is no longer on the board it changed
@@ -457,9 +570,8 @@ function finishDrag(e) {
     if (!n) return;                                   // v1's `return false`, verbatim
     // 9.3 — one object per series: keep the series' first year, move the month/day the whole
     // series lands on. The op carries the ABSOLUTE resulting date either way.
-    store.apply('moveNote', {
-      id, date: n.repeatsYearly ? reanchorRepeat(n.date, target) : target,
-    });
+    const moved = n.repeatsYearly ? reanchorRepeat(n.date, target) : target;
+    commitEntry(n, 'moveNote', { id, date: moved }, { 'pub.date': moved });
     return;
   }
   if (drag.kind === 'move-bar' && drag.delta) {
@@ -469,9 +581,10 @@ function finishDrag(e) {
     // NOT `{delta}`. The op carries both new endpoints (ADR 001 §3.2, §6): a relative op
     // delivered twice — a retry, a re-fold of the tail, a sibling replaying the log — would move
     // the bar twice, and nothing downstream could tell that apart from two drags.
-    store.apply('moveBar', {
-      id, startDate: addDays(b.startDate, delta), endDate: addDays(b.endDate, delta),
-    });
+    const s1 = addDays(b.startDate, delta);
+    const e1 = addDays(b.endDate, delta);
+    commitEntry(b, 'moveBar', { id, startDate: s1, endDate: e1 },
+      { 'pub.startDate': s1, 'pub.endDate': e1 });
     return;
   }
   if (drag.kind === 'resize' && drag.next) {
@@ -485,9 +598,10 @@ function finishDrag(e) {
     // stationary edge at a fresh stamp would let a resize beat a concurrent remote move of the
     // other end for no reason. Same argument `ops.js` makes for `toggleRepeat`'s `date`.
     const f = { id };
-    if (b.startDate !== s0) f.startDate = s0;
-    if (b.endDate !== e0) f.endDate = e0;
-    store.apply('resizeBar', f);
+    const pub = {};
+    if (b.startDate !== s0) { f.startDate = s0; pub['pub.startDate'] = s0; }
+    if (b.endDate !== e0) { f.endDate = e0; pub['pub.endDate'] = e0; }
+    commitEntry(b, 'resizeBar', f, pub);
   }
 }
 
@@ -691,7 +805,7 @@ function startNoteEdit(noteNode) {
   const id = noteNode.dataset.noteId;
   const n = noteById(id);
   if (!n) return;
-  if (!canEdit(n)) return;                              // 18.1 — no editor on someone else's note
+  if (!mayGesture(n)) return;                           // 18.1 — no editor on someone else's note
   const rows = noteNode.closest('.rows');
   const day = noteNode.closest('.day');
   const row = parseInt(day.dataset.row, 10);
@@ -701,19 +815,27 @@ function startNoteEdit(noteNode) {
     onCommit: (text, catId) => {
       const x = noteById(id);
       if (!x) return;                                   // v1's `return false`, verbatim
-      if (!canEdit(x)) return;                          // 18.1 — the guard is on the WRITE too
+      if (!mayGesture(x)) return;                       // 18.1 — the guard is on the WRITE too
       // 2.2 — clearing the text is how you delete without a dialog. `editNoteInline` reads
       // `text: ''` as exactly that, and takes the ATT-88 existence gate with it.
-      if (!text) { store.apply('editNoteInline', { id, text: '' }); return; }
+      if (!text) {
+        // A co-editor clearing the text writes `pub.text: ''`, NOT a deletion: 18.2 grants the
+        // right to edit the entry, and `pub.alive` is a governing field the owner alone folds
+        // (stage 3a). Emptying somebody else's note is an edit; removing it is not on offer.
+        commitEntry(x, 'editNoteInline', { id, text: '' }, { 'pub.text': '' });
+        return;
+      }
       if (x.text === text && x.categoryId === catId) return;   // v1's second decline
       // v1 wrote `lastCategoryId` only when the category actually moved (`:573-575`); `null`
       // is how the constructor is told to omit the `[L]` pref op entirely.
       const recat = x.categoryId !== catId;
-      store.apply('editNoteInline', {
+      // The category is MINE and local — categories are never synced (A3), so a co-edit carries
+      // the text and nothing else. `COEDIT_FIELDS.fnote` has no category field to carry it in.
+      commitEntry(x, 'editNoteInline', {
         id, text,
         categoryId: recat ? catId : null,
         lastCategoryId: recat ? catId : null,
-      });
+      }, { 'pub.text': text });
     },
   });
 }
@@ -722,7 +844,7 @@ function startBarLabelEdit(labNode) {
   const id = labNode.dataset.barId;
   const b = barById(id);
   if (!b) return;
-  if (!canEdit(b)) return;                              // 18.1 — no editor on someone else's bar
+  if (!mayGesture(b)) return;                           // 18.1 — no editor on someone else's bar
   const rows = labNode.closest('.rows');
   select('bar', id);
   const row = Number(labNode.dataset.row) || 0;
@@ -732,16 +854,16 @@ function startBarLabelEdit(labNode) {
     onCommit: (label, catId) => {
       const x = barById(id);
       if (!x) return;                                   // v1's `return false`, verbatim
-      if (!canEdit(x)) return;                          // 18.1 — the guard is on the WRITE too
+      if (!mayGesture(x)) return;                       // 18.1 — the guard is on the WRITE too
       if (x.label === label && x.categoryId === catId) return;
       // A bar label may legally be empty — `create-bar` writes `''` — so unlike a note there is
       // no empty-means-delete branch here. v1 has none either.
       const recat = x.categoryId !== catId;
-      store.apply('editBarLabel', {
+      commitEntry(x, 'editBarLabel', {
         id, label,
         categoryId: recat ? catId : null,
         lastCategoryId: recat ? catId : null,
-      });
+      }, { 'pub.label': label });
     },
   });
 }

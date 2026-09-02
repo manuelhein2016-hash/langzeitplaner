@@ -567,6 +567,166 @@ export const PROJECT_CONTRACT = Object.freeze({
   ]),
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 3b. BARRIER 4'S RETRACTION CLAUSE — story 18.3, the admin unshare (LZP-903)
+//
+// THE BLOCKER THIS CLOSES, IN THE WORDS THE E7 PASS LEFT IT IN:
+//
+//   "Barrier 4 reads `ctx.levelOf` from the entity's own `visibility` truth register, and an
+//    admin unsharing SOMEONE ELSE'S entry has no such register — `store.familyLevelOf` correctly
+//    answers `null`, and 'no authenticated level' is a refusal. `retractPatch(kind)` produces
+//    the right bytes and no `levelOf` can authorise them."   (FINDINGS.md §11c row 2)
+//
+// Both halves of that sentence are true and neither may be softened. `familyLevelOf` answering
+// `null` for a foreign key is CORRECT — the key names its owner (ADR 001 §4.4) and a viewer holds
+// `pub.*` for a peer's entry and no truth register at all — and "no authenticated level means you
+// cannot publish" is the rule that makes a fresh device mid-pull safe. So the clause below does
+// not weaken either. It adds a SECOND authenticated source for the one op that has no level to
+// re-derive and must exist anyway.
+//
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// WHY THIS IS STILL NOT A CALLER-DECLARED LEVEL — the question finding S5 makes mandatory
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+//  1. **`level` on this path is the STRING LITERAL `'privat'`.** It is the floor of the model and
+//     the most restrictive level there is. There is deliberately no expression anywhere in this
+//     clause in which `op.f`, `brand` or any argument appears on the right-hand side of the
+//     assignment — the same sentence clause (i) of the main path already carries. `pub.level` is
+//     then checked against that constant exactly as it is checked against the map's answer on the
+//     main path: a RESTATEMENT, refused when it disagrees.
+//
+//  2. **The second source is an authenticated IDENTITY, never a level.** `ctx.adminOf(space)` is
+//     the family space's `admin` register as resolved by `core/authz.js`'s admin chain (ADR 001
+//     §4.1) and folded by `foldAuthorized` — the same fold that authenticates `levelOf`'s truth
+//     register on the main path. A caller can no more fabricate it than it can fabricate a level,
+//     and it cannot RAISE a level with it: whatever it answers, the level stays `'privat'`.
+//
+//  3. **The codomain of this path is one content-free patch shape.** `pub.level: 'privat'` and
+//     every other field an explicit `null` — `retractPatch(kind)` exactly, which is also the
+//     owner's own „→ Privat". Nothing that carries a value can be sealed here at any level, so
+//     even a wholly forged clause-2 answer leaks NOTHING. It can only withdraw.
+//
+//  4. **Authority is settled by the fold, not by this gate — D7.** A member who patches their
+//     client past clause 2 emits an op every honest device REJECTS at `core/authz.js` stage 3a
+//     (`NOT_OWNER`: the actor is not the admin at `op.ts`), so the moderation never lands. This
+//     clause exists to stop an honest admin's legitimate op from being unsealable, not to be the
+//     place where admin authority is decided. Enforcement is by convergence, not by gatekeeper.
+//
+// AND THE BYTES ARE THE OWNER'S OWN. `retractPatch` takes the KIND AND NOTHING ELSE, so the
+// admin's unshare and the owner's „→ Privat" are byte-identical on the wire and a peer cannot
+// tell which happened — Principle 9 enforced by the absence of a distinguishing byte, not by a
+// policy (ADR 004 §7, `visibility.js:NO_SNITCH_CONTRACT.retractionIsAnonymous`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The one level this clause can ever apply. A LITERAL, never read from anything. */
+const RETRACTION_LEVEL = 'privat';
+
+/**
+ * The clause, as readable claims, so a test asserts the RULE rather than a message. Mirrors
+ * `PROJECT_CONTRACT`'s shape and is the seal-side half of `core/project.js`'s
+ * `ADMIN_UNSHARE_CONTRACT`.
+ */
+export const RETRACTION_CLAUSE = Object.freeze({
+  story: '18.3 — as admin I can unshare any entry; it reverts to owner-private, it is never deleted',
+  adr: 'ADR 004 §2.2 barrier 4 (amended) · §5 admin-unshare row · ADR 001 §4.1, §4.3 stage 3a',
+  port: 'ctx.adminOf(spaceId) -> MemberId|null',
+  clauses: Object.freeze([
+    'It applies ONLY when ctx.levelOf(op.e) has no answer in privat|belegt|geteilt. An entity '
+      + 'this device owns answers from its own `visibility` truth register and takes the main '
+      + 'path; there is no input on which this clause can override a level the map HAS.',
+    'The level it applies is the literal "privat" — the floor of the model. No argument, patch '
+      + 'field or brand value is ever assigned to it.',
+    'The patch must be a RETRACTION and nothing else: `pub.level` present and "privat", every '
+      + 'other field an explicit null. That is `core/project.js:retractPatch(kind)` and it is the '
+      + 'same predicate `core/authz.js:classifyUnsharePatch` admits at stage 3a — an op this '
+      + 'clause seals is one every honest peer can read as an unshare.',
+    'ctx.adminOf(op.space) must answer a MemberId equal to op.act. It is the family space\'s '
+      + '`admin` register, resolved by the admin chain and folded by foldAuthorized — the outbox '
+      + 'MUST wire it there (src/js/store.js:familyAdmin) and never to a caller-supplied role, a '
+      + 'UI flag or a server answer.',
+    'It is NOT where admin authority is decided. core/authz.js stage 3a decides that, on every '
+      + 'device, from op.ts against the accepted chain. This clause only refuses to make an '
+      + 'honest admin\'s op unsealable — D7: enforcement by convergence, not by gatekeeper.',
+    'It can never carry content. Because the level is "privat", barrier 4\'s privat clause, '
+      + 'ctx.assertFamilyPatch and assertNoContentAboveLevel all run at the STRICTEST level, so '
+      + 'the only bytes it can produce are withdrawals.',
+  ]),
+});
+
+/**
+ * Is this patch a retraction and nothing else? SHAPE ONLY — it decides no level and grants no
+ * permission; it is what makes clause 6 above true. Deliberately the same two questions
+ * `core/authz.js:classifyUnsharePatch` asks (`pub.level` present and `'privat'`; every other
+ * field null), because an op this file seals and that file cannot read as an unshare is an op the
+ * admin believes moderated an entry and no peer applied.
+ * @param {Object} f @returns {boolean}
+ */
+function isRetractionOnly(f) {
+  if (!Object.prototype.hasOwnProperty.call(f, 'pub.level')) return false;
+  if (f['pub.level'] !== RETRACTION_LEVEL) return false;
+  for (const k of Object.keys(f)) {
+    if (k === 'pub.level') continue;
+    if (f[k] !== null) return false;
+  }
+  return true;
+}
+
+/**
+ * The retraction clause's four refusals. Throws, or returns — it never answers a level, because
+ * the level on that path is `RETRACTION_LEVEL` and the caller writes it as a literal.
+ *
+ * ⚠ EVERY REFUSAL HERE IS THE ORIGINAL "no authenticated level" REFUSAL WITH ONE SENTENCE ADDED.
+ * The default outcome of an entity the map cannot answer for is UNCHANGED and stays a refusal;
+ * what changed is that one op shape, vouched for by one authenticated identity, is now sealable.
+ * A message that read as a new, softer failure would invite the next reader to reach for it.
+ *
+ * @param {Object} op @param {SealCtx} ctx @param {*} folded @param {*} declared
+ */
+function assertRetractionAuthority(op, ctx, folded, declared) {
+  const nothingToDeriveFrom =
+    `sealOp: the authenticated register map has no level for ${JSON.stringify(op.e)} — it answers ` +
+    `${JSON.stringify(folded)}. There is nothing to re-derive FROM, and a level the patch declares ` +
+    `(${JSON.stringify(declared)}) may not supply one (ADR 004 §2.2 barrier 4).`;
+
+  // (a) THE OP SHAPE. Only a withdrawal, and the SAME withdrawal `authz.js` stage 3a admits — an
+  //     op this file seals and that fold cannot read as an unshare is one the admin believes
+  //     moderated an entry and no peer applied.
+  if (!isRetractionOnly(op.f)) {
+    throw new RedactionError(
+      `${nothingToDeriveFrom} The one op that survives a levelOf with no answer is a RETRACTION — `
+      + '`pub.level: "privat"` with every other field an explicit null, which is exactly '
+      + '`core/project.js:retractPatch(kind)` (story 18.3, the admin unshare). This patch is not '
+      + 'one, so there is no level for it and nothing to authorise.', 'barrier4');
+  }
+
+  // (b) THE SECOND AUTHENTICATED SOURCE. An identity, from the folded admin chain — never a
+  //     level, never a role the caller states, never an answer from the relay.
+  if (typeof ctx.adminOf !== 'function') {
+    throw new RedactionError(
+      `${nothingToDeriveFrom} A retraction of an entity this device does not own is story 18.3's `
+      + 'admin unshare and needs `ctx.adminOf(spaceId)` — the family space\'s `admin` register as '
+      + 'resolved by the admin chain (ADR 001 §4.1) and folded by foldAuthorized. Injecting it is '
+      + 'the outbox\'s obligation, the same one it already discharges for `ctx.levelOf`; see '
+      + 'RETRACTION_CLAUSE.', 'barrier4');
+  }
+  const seat = ctx.adminOf(op.space);
+  if (!isMemberId(seat)) {
+    throw new RedactionError(
+      `${nothingToDeriveFrom} `
+      + `\`ctx.adminOf(${JSON.stringify(op.space)})\` answers ${JSON.stringify(seat)}, which is not `
+      + 'a MemberId. A circle whose admin chain this device cannot resolve has no seat to act '
+      + 'from, and guessing one is how a former admin unshares forever (ADR 001 §4.1).', 'barrier4');
+  }
+  if (seat !== op.act) {
+    throw new RedactionError(
+      `${nothingToDeriveFrom} `
+      + `The admin chain names ${JSON.stringify(seat)} and this op is authored by `
+      + `${JSON.stringify(op.act)}. Only the sitting admin's unshare is admitted — by every peer at `
+      + '`core/authz.js` stage 3a, and therefore here, where the author can still be told '
+      + '(story 18.3, D7: enforcement by convergence, refused early where it is cheap).', 'barrier4');
+  }
+}
+
 /** Field names that must never appear in a family patch under any level (A3). */
 const CATEGORY_SPELLINGS = Object.freeze(['categoryId', 'pub.categoryId', 'cat', 'pub.cat']);
 
@@ -627,6 +787,15 @@ function assertNoContentAboveLevel(patch, kind, level) {
  *           transition needs no exception. Whatever this returns GOVERNS: `op.f['pub.level']` is
  *           checked against it and can never replace it. An answer outside
  *           `privat|belegt|geteilt` is a refusal, never a fallback to the patch.
+ * @property {(spaceId:string) => (string|null)} [adminOf]
+ *           barrier 4's RETRACTION CLAUSE (§3b, story 18.3) — the family space's `admin` register
+ *           as resolved by the admin chain (ADR 001 §4.1) and folded by `foldAuthorized`. Consulted
+ *           ONLY when `levelOf` has no answer AND the patch is a pure retraction, and it answers an
+ *           IDENTITY, never a level: the level on that path is the literal `'privat'`. Wire it to
+ *           `store.familyAdmin().admin`; wiring it to a UI flag, a caller-supplied role or a server
+ *           answer is the mis-wiring this port exists to make impossible. Its absence is the
+ *           ordinary "no authenticated level" refusal, which is what an unshare must be on a device
+ *           that cannot resolve a seat.
  * @property {DeviceAttestation} [attestation]
  *           OPTIONAL, and the outbox SHOULD pass it: this device's own attestation. When present,
  *           `sealOp` mirrors the WHOLE far-side gate against the op it is about to seal — P2,
@@ -865,12 +1034,16 @@ function assertProjected(op, ctx) {
   const declared = Object.prototype.hasOwnProperty.call(op.f, 'pub.level') ? op.f['pub.level'] : undefined;
   const folded = ctx.levelOf(op.e);
   // (i) THE ONLY ASSIGNMENT. There is deliberately no expression here in which `declared` appears.
-  const level = folded;
+  // (i-b) …and the retraction clause's is the LITERAL `RETRACTION_LEVEL`, for the same reason.
+  let level = folded;
   if (!VISIBILITY_LEVELS.includes(level)) {
-    throw new RedactionError(
-      `sealOp: the authenticated register map has no level for ${JSON.stringify(op.e)} — it answers ` +
-      `${JSON.stringify(folded)}. There is nothing to re-derive FROM, and a level the patch declares ` +
-      `(${JSON.stringify(declared)}) may not supply one (ADR 004 §2.2 barrier 4).`, 'barrier4');
+    // ── BARRIER 4'S RETRACTION CLAUSE (§3b above, story 18.3) ────────────────────────────────
+    // The map has no level for this entity. On this device that means one of two things and both
+    // of them are true of an admin unshare: the entity belongs to somebody else, so there is no
+    // `visibility` truth register here to re-derive from, or it belongs to me and has none. The
+    // ONLY op that may still be sealed is a WITHDRAWAL — and its level is a literal, not a claim.
+    assertRetractionAuthority(op, ctx, folded, declared);
+    level = RETRACTION_LEVEL;
   }
   // (ii) THE DECLARED LEVEL AS A CLAIM. `undefined` (absent) and `null` are silence, not
   // disagreement — silence consults the map, which is what the map is for, and §5's withdrawal

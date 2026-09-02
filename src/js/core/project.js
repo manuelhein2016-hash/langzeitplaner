@@ -78,8 +78,8 @@
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-import { FIELDS, pubSet } from './ops.js';
-import { VISIBILITY_LEVELS, parseEntityKey, familyKey } from './entities.js';
+import { FIELDS, pubSet, noteSet, barSet } from './ops.js';
+import { VISIBILITY_LEVELS, parseEntityKey, familyKey, isMemberId } from './entities.js';
 import { isStamp } from './stamp.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -735,6 +735,201 @@ export function derivePublication(localOps, regs, ctx) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 5c. THE ADMIN UNSHARE — story 18.3, LZP-903 (ADR 004 §5's last transition row)
+//
+//   "As admin I can unshare any entry from the family space — it reverts to owner-private, it is
+//    never deleted — so moderation is possible but non-destructive, and I still can't read what
+//    was never shared."
+//
+// Three properties, and each one is a STRUCTURAL consequence of something in this file rather
+// than a rule the admin's code remembers:
+//
+//   IT REVERTS.       The op writes `pub.level: 'privat'` plus an explicit null to every other
+//                     withdrawable register (INV-R4). ADR 004 §4.2 drops a `privat` publication
+//                     before it ever consults the tombstone, so the entity leaves every peer's
+//                     board — and `retractPatch` is the SAME function the owner's own „→ Privat"
+//                     calls, so the two are byte-identical on the wire.
+//   IT NEVER DELETES. The patch is `pub.*` ONLY. There is no `_alive` in it (`retractPatch` walks
+//                     `GETEILT_FIELDS`, which has no `_alive` row, and `pub.alive` is nulled, not
+//                     set false), and this device cannot write the owner's personal space at all:
+//                     `core/ops.js:spaceFor` addresses a `note.set` to MY personal space and the
+//                     owner's truth registers do not exist here. The entry survives on the
+//                     owner's board, in full, in their category colour.
+//   IT NEVER READS.   The op is built from the KIND alone. `adminUnshareOp` is handed no `truth`
+//                     object, has no parameter that could carry one, and reads no register of the
+//                     entity. An admin CANNOT unshare what was never shared, because a Privat
+//                     entry has no family entity key on their device to name.
+//
+// AND IT IS NOT AUTHORISED HERE. `crypto/envelope.js`'s barrier-4 retraction clause refuses to
+// seal it unless the folded admin chain names this author, and `core/authz.js` stage 3a decides
+// it again, from `op.ts`, on every device including the admin's own. D7: ownership is structural
+// and enforcement is by convergence.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Story 18.3 as claims, so a test asserts the RULE and not a message. The client-side half of
+ * `crypto/envelope.js:RETRACTION_CLAUSE`.
+ */
+export const ADMIN_UNSHARE_CONTRACT = Object.freeze({
+  story: '18.3',
+  adr: 'ADR 004 §5 (admin unshare row), §5.1 · ADR 001 §4.1, §4.3 stage 3a · D7',
+  clauses: Object.freeze([
+    'It reverts: the patch is retractPatch(kind) — pub.level "privat" plus an explicit null in '
+      + 'every other withdrawable register. Omission is not withdrawal (INV-R4).',
+    'It never deletes: the patch carries no `_alive`, touches no personal-space register, and '
+      + '`pub.alive` is NULLED rather than set false. The owner keeps the entry.',
+    'It never reads: adminUnshareOp takes (ctx, {kind, owner, uuid}) and no truth object. There '
+      + 'is no parameter through which content could enter, and nothing that was never shared has '
+      + 'a family entity key on the admin\'s device to name.',
+    'It is byte-identical to the owner\'s own "→ Privat": one producer, retractPatch(kind), '
+      + 'which takes the kind and nothing else. A peer cannot tell which happened (Principle 9).',
+    'It is not authorised here. crypto/envelope.js barrier 4\'s retraction clause refuses to seal '
+      + 'it unless the folded admin chain names op.act; core/authz.js stage 3a decides it again '
+      + 'on every device from op.ts. Enforcement is by convergence, not by gatekeeper (D7).',
+    'The owner\'s device reconciles afterwards with adminUnshareFollowUp(regs, ctx) — one '
+      + 'personal-space `visibility: "privat"` write per moderated entity, and no notification '
+      + 'of any kind (Principle 9, NO_SNITCH_CONTRACT.noNotification).',
+  ]),
+});
+
+/**
+ * THE ADMIN'S RETRACTION OP. One `pub.set`, addressed to somebody else's family entity, carrying
+ * `retractPatch(kind)` and nothing else.
+ *
+ * ⚠ WHY IT LIVES IN THIS FILE AND NOT IN `family/unshare.js`. ADR 002 §0's axiom is that
+ * plaintext leaves a device through exactly one function. An unshare carries no plaintext — that
+ * is the whole of it — but the OP that carries it must be branded to be sealable (barrier 3), and
+ * a moderation driver that minted its own would have exactly one way forward: forge
+ * `Symbol.for('lzp/v2/family-patch')`. `projectCoEditPatch` is the precedent, and the reasoning
+ * there is the reasoning here: a narrow, reviewed door is strictly safer than the hand-rolled one
+ * its absence guarantees.
+ *
+ * IT IS DELIBERATELY ARITY-2 AND CONTENT-BLIND. There is no `truth` parameter, no `level`
+ * parameter and no patch parameter. The only thing a caller can vary is WHICH entity — which is
+ * all 18.3 gives an admin — and the bytes are a function of the KIND alone.
+ *
+ * @param {Object} ctx  an OpCtx with `familySpaceId` set (`store._ctx()`)
+ * @param {{kind:'fnote'|'fbar', owner:string, uuid:string}} spec  the entity to unshare
+ * @returns {Object} one frozen `pub.set` op, its patch branded at `privat`
+ * @throws {RedactionError}
+ */
+export function adminUnshareOp(ctx, spec) {
+  if (ctx === null || typeof ctx !== 'object') {
+    throw new RedactionError('adminUnshareOp: `ctx` must be an OpCtx', 'shape');
+  }
+  if (ctx.familySpaceId === null || ctx.familySpaceId === undefined) {
+    throw new RedactionError(
+      'adminUnshareOp: this device is in no Familienkreis. `core/ops.js:spaceFor` cannot address a '
+      + 'family op at any space, and there is nothing to unshare FROM (story 15.1).', 'shape');
+  }
+  if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new RedactionError(
+      'adminUnshareOp: `spec` must be {kind, owner, uuid} — the entity, and nothing about its '
+      + 'content. There is deliberately no parameter through which content could enter.', 'shape');
+  }
+  // AN UNKNOWN KEY IS A REFUSAL, NEVER AN IGNORED ARGUMENT. `{kind, owner, uuid}` is the whole of
+  // what an admin may say about an entry, and a caller that also passes `truth`, `level` or `f`
+  // has misunderstood this door badly enough that silently dropping it would hide the mistake —
+  // and "we simply never pass one" is a habit, where this is a property (18.3: it never reads).
+  for (const key of Object.keys(spec)) {
+    if (key === 'kind' || key === 'owner' || key === 'uuid') continue;
+    throw new RedactionError(
+      `adminUnshareOp: \`spec\` carries "${key}". An unshare names an ENTITY and says nothing `
+      + 'about its content — {kind, owner, uuid} is the whole vocabulary, and an extra key is a '
+      + 'caller that thinks this function can be told what to publish (story 18.3).', 'shape');
+  }
+  const kind = kindOf(spec.kind, 'adminUnshareOp');
+  if (!isMemberId(spec.owner)) {
+    throw new RedactionError(
+      `adminUnshareOp: \`owner\` must be the MemberId the entity key carries, not ${
+        JSON.stringify(spec.owner)}. Ownership is STRUCTURAL (ADR 001 §4.4) — an unshare names the `
+      + 'owner because the key does, never because a flag says so.', 'shape');
+  }
+  if (typeof spec.uuid !== 'string' || spec.uuid === '') {
+    throw new RedactionError(
+      `adminUnshareOp: \`uuid\` must be the entity's uuid, not ${JSON.stringify(spec.uuid)}.`, 'shape');
+  }
+  // BY REFERENCE to `pubSet`, exactly as `derivePublication` is: the brand is a non-enumerable
+  // symbol and a clone anywhere on this path drops it (PUBLISH_FAILURE_CONTRACT.byReference).
+  return pubSet(ctx, kind, spec.owner, spec.uuid, retractPatch(kind));
+}
+
+/**
+ * THE OWNER'S SIDE OF 18.3, and the half without which "it reverts" is only true until the owner
+ * next touches the entry.
+ *
+ * ADR 004 §5's admin-unshare row: *"On receipt, the owner's client also sets its local
+ * `visibility` to `'privat'` in a follow-up txn so the two agree."* Measured, and it is not
+ * cosmetic. `derivePublication` reads the level from the `visibility` TRUTH register and
+ * `lastPublished` from the folded `pub.level`. After a moderation those two disagree — truth
+ * still says `geteilt`, the family holds `privat` — so the owner's very next keystroke on that
+ * entry projects a full Geteilt patch again, `differs` is true, and **the moderation is silently
+ * undone by an edit that had nothing to do with it**. The admin sees the text come back and has
+ * no way to tell whether the owner re-shared on purpose.
+ *
+ * So the owner's device closes the disagreement the way the ADR says: ONE personal-space write.
+ * It is not a rejection of the admin's op and it does not delete anything — the entry stays on
+ * the owner's board, in full, exactly as 18.3 requires; only its exposure follows what the family
+ * actually holds. A later re-share is then a deliberate act with a visible control, which is what
+ * 16.1 means by "oversharing is structurally impossible".
+ *
+ * ⚠ IT NOTIFIES NOBODY. No warning, no marker, no „Papa hat deinen Eintrag entfernt". Principle 9
+ * and `visibility.js:NO_SNITCH_CONTRACT.noNotification`: there is no op kind that could carry
+ * one, and this function returns only `note.set`/`bar.set` ops carrying exactly `{visibility}`.
+ *
+ * ⚠ IT RECONCILES DEAD ENTITIES TOO, and that is deliberate. A tombstoned entry that keeps
+ * `visibility: 'geteilt'` in its truth register republishes in full the moment the owner's ⌘Z
+ * resurrects it (18.6) — which would resurrect moderated content through an undo of something
+ * else. `derivePublication` emits nothing for the write itself (privat + never-published → null),
+ * so the reconciliation costs zero family bytes.
+ *
+ * IDEMPOTENT BY CONSTRUCTION. It emits only where the two registers DISAGREE, so a second run
+ * over the same map emits nothing — the same "does the family still equal my projection?" shape
+ * `derivePublication` has, one register to the left.
+ *
+ * @param {Object} regs  the RegisterMap, POST-apply
+ * @param {Object} ctx   an OpCtx extended with `me` (this device's MemberId)
+ * @returns {Array<Object>} `note.set`/`bar.set` ops carrying exactly `{visibility:'privat'}`
+ */
+export function adminUnshareFollowUp(regs, ctx) {
+  if (ctx === null || typeof ctx !== 'object') {
+    throw new RedactionError('adminUnshareFollowUp: `ctx` must be an OpCtx', 'shape');
+  }
+  if (ctx.familySpaceId === null || ctx.familySpaceId === undefined) return [];
+  const me = ctx.me ?? ctx.act;
+  if (!isMemberId(me)) {
+    throw new RedactionError(
+      'adminUnshareFollowUp: `ctx.me` must be this device\'s MemberId. Ownership is read off the '
+      + 'entity key (ADR 001 §4.4) and there is nothing to compare it against.', 'shape');
+  }
+  if (!regs || typeof regs.keys !== 'function') return [];
+
+  const out = [];
+  // Sorted, so the ops are a function of the SET of registers and not of Map insertion order —
+  // two of my Macs folding the same log must produce the same follow-up.
+  for (const entityKey of [...regs.keys()].sort()) {
+    const parsed = parseEntityKey(entityKey);
+    if (!parsed) continue;
+    const kind = parsed.kind;
+    if (kind !== 'fnote' && kind !== 'fbar') continue;
+    if (parsed.owner !== me) continue;              // somebody else's entry: not mine to reconcile
+    if (foldedValue(regs, entityKey, 'pub.level') !== 'privat') continue;
+
+    const truthKind = kind === 'fnote' ? 'note' : 'bar';
+    const truthKey = `${truthKind}:${parsed.id}`;
+    const held = foldedValue(regs, truthKey, 'visibility');
+    // Silence agrees. An absent register is `DEFAULT_LEVEL` (16.1's floor for a v1 board), and a
+    // register holding something outside the enum is NOT rounded down to privat here: it is left
+    // for `assertTruthAgrees` on the publish path, which refuses rather than guesses.
+    if (held === undefined || held === null || held === DEFAULT_LEVEL) continue;
+    if (!VISIBILITY_LEVELS.includes(held)) continue;
+
+    out.push((truthKind === 'note' ? noteSet : barSet)(ctx, parsed.id, { visibility: DEFAULT_LEVEL }));
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 6. `projectCoEditPatch` — the co-editor's door (ADR 004 §8, LZP-902/904)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -986,3 +1181,93 @@ export const PUBLISH_FAILURE_CONTRACT = Object.freeze({
       + 'newer one.',
   ]),
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. `coEditOp` — the co-editor's OP door (ADR 004 §8, story 18.2 · E9 integration)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * ONE `pub.set`, addressed to SOMEBODY ELSE'S family entity, carrying a co-editor's changes.
+ *
+ * ⚠ WHY IT EXISTS, AND WHY HERE. `projectCoEditPatch` (§6) produced a branded PATCH and nothing
+ * that could carry it: `adminUnshareOp` is the precedent one section up, and its reasoning is the
+ * reasoning here. Without this door the agent wiring 18.2 holds a correct patch, no op, and
+ * exactly one way forward — mint the op by hand and forge `Symbol.for('lzp/v2/family-patch')`.
+ * The whole point of a branded patch is that the brand is unreachable outside this file, so the
+ * door has to be in this file too.
+ *
+ * ⚠ THE OWNER IS AN ARGUMENT AND THAT IS NOT A HOLE. `pubSet` builds the key from
+ * `(kind, owner, uuid)`, so a caller can address any entity it can name — and it may. Ownership
+ * is STRUCTURAL (ADR 001 §4.4): the key names the owner, so naming somebody else's entity is not
+ * a forgery, it is the only way to say "this entry, the one that is theirs". What a co-editor may
+ * then WRITE is decided three times over and never here: `projectCoEditPatch` refuses every
+ * governing field, `sealOp`'s barrier 4 refuses unless the AUTHENTICATED fold says this entity is
+ * `geteilt` with `pub.coEdit`, and `authz.js` stage 3b decides it again on every receiving device
+ * from `op.ts` alone. This function's whole contribution is that the bytes are branded and the
+ * patch is narrow. D7: enforcement is by convergence, not by gatekeeper.
+ *
+ * ⚠ IT TAKES `level` AND MUST NOT BE READ AS "THE CALLER DECLARES THE LEVEL". The caller passes
+ * what the authenticated fold answered (`store.familyCoEditLevelOf`, which reads the folded
+ * `pub.level`/`pub.coEdit` registers and nothing the caller controls); `projectCoEditPatch`
+ * refuses anything but `'geteilt'`; and `sealOp` RE-DERIVES it from the same fold and refuses if
+ * the two disagree. Three readings of one register — a lie here is caught one layer down, on the
+ * device that told it, before any byte is sealed.
+ *
+ * @param {Object} ctx  an OpCtx with `familySpaceId` set (`store._ctx()`)
+ * @param {{kind:'fnote'|'fbar', owner:string, uuid:string}} spec  whose entity, and which
+ * @param {'geteilt'} level   the level the AUTHENTICATED fold answered for that entity
+ * @param {Object} changes    `{'pub.text': '…'}` — only `FIELDS[kind]`'s `coEdit` fields
+ * @returns {Object|null} one frozen `pub.set` op, or `null` when `changes` is empty
+ * @throws {RedactionError}
+ */
+export function coEditOp(ctx, spec, level, changes) {
+  if (ctx === null || typeof ctx !== 'object') {
+    throw new RedactionError('coEditOp: `ctx` must be an OpCtx', 'shape');
+  }
+  if (ctx.familySpaceId === null || ctx.familySpaceId === undefined) {
+    throw new RedactionError(
+      'coEditOp: this device is in no Familienkreis. A co-edit is a write into the FAMILY space '
+      + 'and there is no family space to address (story 15.1).', 'shape');
+  }
+  if (spec === null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new RedactionError(
+      'coEditOp: `spec` must be {kind, owner, uuid} — the entity being edited.', 'shape');
+  }
+  // An unknown key is a refusal, for `adminUnshareOp`'s reason: a caller that also passes `f`,
+  // `patch` or `truth` has misunderstood this door badly enough that dropping it silently would
+  // hide the mistake. The content travels in `changes`, through the projection, or not at all.
+  for (const key of Object.keys(spec)) {
+    if (key === 'kind' || key === 'owner' || key === 'uuid') continue;
+    throw new RedactionError(
+      `coEditOp: \`spec\` carries "${key}". A co-edit names an ENTITY — {kind, owner, uuid} is the `
+      + 'whole vocabulary; the changes travel in `changes`, through `projectCoEditPatch`.', 'shape');
+  }
+  const kind = kindOf(spec.kind, 'coEditOp');
+  if (!isMemberId(spec.owner)) {
+    throw new RedactionError(
+      `coEditOp: \`owner\` must be the MemberId the entity key carries, not ${
+        JSON.stringify(spec.owner)}. Ownership is STRUCTURAL (ADR 001 §4.4) — a co-edit names the `
+      + 'owner because the KEY does, never because a flag says so.', 'shape');
+  }
+  if (typeof spec.uuid !== 'string' || spec.uuid === '') {
+    throw new RedactionError(
+      `coEditOp: \`uuid\` must be the entity's uuid, not ${JSON.stringify(spec.uuid)}.`, 'shape');
+  }
+  // A CO-EDITOR NEVER ADDRESSES THEIR OWN ENTITY THROUGH THIS DOOR. Their own entries publish
+  // through `derivePublication` from the TRUTH register (ADR 004 §4.1) — one producer per entity.
+  // Two producers for one entity is how a stale truth value gets re-published at a fresh stamp
+  // over a co-editor's newer one, which is the §5.1 failure this door must not reintroduce.
+  const me = ctx.act;
+  if (isMemberId(me) && spec.owner === me) {
+    throw new RedactionError(
+      'coEditOp: this entity is MINE. My own entries reach the family through '
+      + '`derivePublication` from their `visibility` truth register, never through the co-editor\'s '
+      + 'door — one entity, one producer (ADR 004 §4.1, §5.1).', 'shape');
+  }
+  const patch = projectCoEditPatch(kind, level, changes);
+  if (patch === null) return null;                 // nothing was actually edited
+  // BY REFERENCE to `pubSet`, exactly as `derivePublication` and `adminUnshareOp` are: the brand
+  // is a non-enumerable symbol and a clone anywhere on this path drops it
+  // (PUBLISH_FAILURE_CONTRACT.byReference).
+  return pubSet(ctx, kind, spec.owner, spec.uuid, patch);
+}

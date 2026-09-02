@@ -3846,3 +3846,124 @@ non-vacuity assertion that the needles really were on the Mac. 20 consecutive gr
 7. **`storage.js`** — the "three named slots" obligation is now **four** by name.
 8. **`store.js` / `sealedEnvelopeStore`** — `writeJSON` still swallows for `LS_SEALED`. Worth the
    same R8-5 question the parked slot just answered.
+
+---
+
+## 15. E9 — collaboration and conflicts. What INTEGRATING it found.
+
+Integration pass, 2026-09-02. Full record: `docs/v2/E9-VERIFICATION.md`. Five modules arrived from
+four parallel build workflows; the epic could not be demonstrated until three seams were built,
+and the seams are where the findings are.
+
+### 15a. E9-I1 — **LZP-902 shipped a grant nobody could exercise.** FIXED.
+
+„Familie darf bearbeiten" was written, folded, rendered and enforced, and **no co-editor's write
+could be authored on any Mac.** `store.familyLevelOf` answers `null` for a foreign key — correctly,
+it reads the entity's own `visibility` truth register and a viewer holds no truth for a peer's
+entry — and ADR 004 §2.2 barrier 4 turns that `null` into a `RedactionError`, which sets
+`store.redactionHalt` and stops **all** family sync from that Mac. `interact.js` was therefore
+right to refuse the gesture (`authorable`), and 18.2 rendered a checkbox that granted nothing.
+
+Three of the four build workflows closed with this item owed, each seeing one face of it.
+
+**Fix:** `store.familyCoEditLevelOf(entityKey)` — a *separate* reader, not a loosening of
+`familyLevelOf`. The distinction is the whole of it: `familyLevelOf`'s argument against reading
+`pub.level` is *"the level a transition is moving away from"*, and that is an argument about a
+**transition**, which only an owner has. A co-editor moves no level. So the new reader consults
+exactly the registers `authz.js` stage 3b consults — `pub.level === 'geteilt'`,
+`pub.coEdit === true`, `pub.alive !== false` — all folded, authenticated, and written by the owner
+alone under stage 3a. It answers `null` for my own key, which is what stops it becoming the S5
+second producer. Domain-tested over 72 cells with the oracle written from ADR 001 §4.3's prose;
+mutants M1–M3, M5.
+
+### 15b. E9-I2 — the retraction/co-edit split, and the way 18.3 would have broken silently. FIXED.
+
+An admin unshare (18.3) is **also** a `pub.set` on a foreign key. Had the new co-edit reader been
+wired into barrier 4 unconditionally, it would have answered `'geteilt'` for a moderation — and
+barrier 4 would then have refused the op **for declaring `privat` against a map that says
+`geteilt`**. Not a bypassed check: a hard refusal, and 18.3 stops working.
+
+**Fix:** `sync/family.js:sealLevelFor(entityKey, op)` — barrier 4's level is now a function of the
+**op**, split on `authz.js:classifyUnsharePatch`, the same predicate stage 3a admits an unshare by,
+so the seal seam and the fold that judges its result cannot drift. Fails safe both ways: a
+misclassified retraction is refused by barrier 4, a misclassified co-edit by the retraction clause.
+Neither error seals a byte and neither can raise a level.
+
+### 15c. E9-I3 — three modules that shipped with no caller. FIXED.
+
+| module | consequence |
+|---|---|
+| `family/conflict.js` (LZP-904) | 18.5 shipped as a module nothing called |
+| `core/project.js:adminUnshareFollowUp` (LZP-903) | 18.3's "it reverts" true only until the owner's next keystroke — measured |
+| `store.applyCoEdit` (did not exist) | the wedge, and 18.2 unexercisable |
+
+**`conflict.js`'s absence was measured by the suite, not spotted by a reader.**
+`sync-domains.test.js` S5b went red the moment `family/mount.js` imported it — an unmounted module
+is correctly invisible to the import-graph walk, so a module with no caller is not a shipped one.
+`family/unshare.js` is still invisible for the same reason (§15f item 2), and S5b is what will
+notice when it lands. S5 68 → 69.
+
+### 15d. E9-I4 — **a co-editor cannot ⌘Z their own co-edit.** OPEN, and deliberately not closed.
+
+Measured, not assumed: the row was written expecting an undo entry and went red.
+`core/undo.js:captureImages` filters every entity kind outside `UNDOABLE_KINDS`
+(note/bar/cat/pad) — rule U6, v1's `CONTENT_KEYS` snapshot in op terms — so a family `pub.set` is
+never on anybody's undo stack.
+
+For **my own** entry that is right, and the ADR says why: the publication is *derived*, so undoing
+the truth and letting the publisher re-derive is the only path that cannot leave the family space
+describing a state the owner's board no longer holds. **For a co-edit there is no truth to undo.**
+
+Not closed by widening `UNDOABLE_KINDS`, because an undo that minted a `pub.set` would re-write the
+pre-value **at a fresh stamp**, beating the owner's concurrent newer write and silently
+resurrecting a value they had already replaced — the §5.1 failure arriving through the undo stack.
+Failing closed costs a keystroke; failing open costs somebody else's edit. **Owner: `core/undo.js`
++ a PO call on whether 18.2 implies undoability at all.**
+
+### 15e. E9-I5 — **attack rows C2/C2b/C3 change priority because of this pass.** OPEN, WP-9.
+
+The co-editor × undo trio in `tests/attack/ownership-authz-undo.test.js` — *"my ⌘Z silently
+discards a co-editor's newer write to the same field"*: the owner's undo restores their own truth
+value at a fresh stamp, which then beats the co-editor's newer `pub.text` through promotion
+(ADR 004 §4.1).
+
+**Until this pass no co-editor write could be authored at all**, so the trio was reachable only by
+a hand-built op — which is why it sat in WP-9 with the forged-genesis rows. It is now reachable
+**through the product's own UI**, by two people using 18.2 exactly as designed. The rows are
+unchanged and still green (they pin the defect, not the fix); what changed is that this stopped
+being hypothetical. **Recommend promoting C2 out of WP-9 into the next work package.**
+
+### 15f. Owed after E9
+
+1. **The co-editor's ⌘Z** — §15d. `core/undo.js` + a PO call.
+2. **An admin-unshare button.** `family/unshare.js` is complete and tested and **no UI calls it**;
+   the demonstration drives `adminUnshareOp` directly. Still owes `family/createjoin.js`'s genesis
+   admin link (`UNSHARE_BLOCKERS.NO_ADMIN_CHAIN`) — the same dependency `removal.js` reports.
+   Owner: `family/adminpanel.js`, `family/createjoin.js`.
+3. **`REJECT_REASONS.NOT_MEMBER` is not in `store.js:CURABLE_REFUSALS`**, so such an op is dropped
+   rather than parked. Pre-existing for stage 3b; §4.2b widens the surface to the owner. Bounded in
+   practice (member records carry strictly lower `seq` than any content op referencing them, so the
+   outcome is "entity absent", never "entity corrupt"), and a genuine trade: `applyRemote`'s own
+   comment argues parking a stranger's write forever is worse. **PO / store owner's call.**
+4. **`A3b` / `A3c`** — one line closes them. §4.2b gates `pub.set` (stage 3a) because that is
+   18.1's surface; `member.set{_alive:false}` (20.2, stage 2) still asks
+   `adminAtKey(spaceKey(op.space))` with no check that the **subject** is a member of that space.
+   Mirror fix: `membersIn(op.space).has(subject)`. WP-9 — it interacts with join/leave/rotation.
+5. **`DESIGN-DECISIONS.md` D7 is stale in one number, and it is the PO's file.** The
+   `⚠ OPEN FOR THE PO` block says the `ownership-authz-*` files carry *"twelve `SUCCEEDED` rows"*.
+   The **admin** file now carries **10** (A3 and A4b closed at E9 §4.2b); across all three files
+   there are **20**. Two of the three examples the block quotes are unchanged; what moved is the
+   count, and the fact that the per-space membership gate has since closed two of them. **The PO's
+   wording question is materially smaller than it was.** Not edited here — it is a decision file.
+
+### 15g. E8-3 is answerable, and LZP-808 answers it
+
+FINDINGS §12b's E8-3 — *"the deliverable-17 sentence is true at 22 px and false at 18 px"* — is
+now **scoped to the density presets**, both ends measured. Komfort's `minRowHeight: 26` is the
+smallest row on which the five badges and two entries coexist with 16.7 % more type, and
+**capacity is 2 at both presets**, so Komfort buys type without costing an entry. `LINE_H = 10.5`
+is a fact about **9 px type**, not about the app: a naive Komfort — bigger type over the shipped
+capacity rule — would promise two lines to a 22 px row that can draw one and would make the
+crowded board **worse**. The floor is what forbids that, and it is enforced in `buildBoard` rather
+than only in the settings pane, so it holds for a `board.json` that arrived by import or by hand.
+**E8-3 can be closed as "scoped to the density presets, both ends measured".**

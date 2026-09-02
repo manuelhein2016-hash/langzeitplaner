@@ -1219,8 +1219,16 @@ describe('S5 · module reachability', () => {
     // the ORDER this row depends on. Adding it before the wiring landed would have failed S5b's
     // `ghosts` check instead (the walk is `reached ∪ nonDomModules()`, and `family/` is in
     // neither until it is reached) — one change, two orders, only one of them works.
-    assert.equal(enumerated.length, 68,
-      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 68. If a module `
+    // 68 → 69: `family/conflict.js` (E9, LZP-904, story 18.5) — the lost-edit notice. Same order
+    // dependency as the row above, and it is worth stating that this walk MEASURED the gap: the
+    // module shipped a whole round with no caller, and S5 was correctly silent about it because
+    // an unmounted module is not a shipped one. It became visible at the E9 integration, when
+    // `family/mount.js#mountCircleSurfaces` called `installConflictNotice`. `family/unshare.js`
+    // (LZP-903) is the same shape one round behind — on disk, invisible to this walk, and it will
+    // appear here the moment `family/adminpanel.js` grows the 18.3 control. That absence is
+    // recorded as OWED in `docs/v2/E9-VERIFICATION.md`, and this row is what will notice.
+    assert.equal(enumerated.length, 69,
+      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 69. If a module `
       + 'was added or deleted, add or delete its row rather than changing this number alone.');
   });
 

@@ -1,6 +1,74 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-02 · **Stopped at:** **ROUND 3 — the member adversary's SECOND pass,
+**Last session:** 2026-09-02 · **Stopped at:** **E9 — collaboration and conflicts, INTEGRATED AND
+DEMONSTRATED**, together with LZP-808 (E8's last ticket). Full record:
+`docs/v2/E9-VERIFICATION.md`; findings in `FINDINGS.md` §15.
+
+---
+
+## THE E9 HEADLINE: two people edit one bar, and it stays boring
+
+Mama drags Papa's „Familie darf bearbeiten" bar in a real browser. **One** `pub.set` leaves her
+Mac, addressed to Papa's entity key, authored by her, carrying `pub.startDate` and `pub.endDate`
+and nothing else. Papa writes the same field a moment later. **The later write takes that field,
+her untouched end date survives it, attribution moves to Papa, and she — the loser — gets one
+289 × 19 px line that names him, presses nothing, and fades. He gets nothing.** Every
+`#board .col` rect is byte-identical with the line on screen.
+
+Then: Papa deletes the bar and it leaves her board; his ⌘Z restores it as a new shared op; her ⌘Z
+never touches it; and the admin unshares one of *her* entries, which reverts to owner-private on
+her machine, is **not** deleted, and does not notify anybody. Grepped on a real relay's disk over
+real HTTP: **zero plaintext bytes** — not the Privat entry, not even the shared one, not an op
+kind or a field name. The relay holds `envelope/$b` and key wraps.
+
+### Suites — all six, at the close
+
+```
+npm test  2105/2105 · test:property 101/101 · test:attack 860/860
+test:server 903/903 · test:fleet 317/317 · test:dom 716 pass / 17 fail (45 files)
+```
+
+The 17 are the round-2 `e8-density-*` adversary findings, **landed red by design** and verified
+byte-identical on a pristine `git archive HEAD` tree before this pass began. The v1 suite is the
+oracle and **not one characterization row moved**.
+
+### The epic arrived as five modules that did not touch each other
+
+**LZP-902 shipped „Familie darf bearbeiten" as a grant nobody could exercise.** The flag was
+written, folded, rendered and enforced — and every path a co-editor's write could take ended in a
+`RedactionError` that halts *all* family sync from that Mac. Three of the four build workflows
+closed with the same item owed. Integrating E9 meant building the write: a fold-authenticated
+level reader, a branded-op door, a retraction/co-edit split at barrier 4, and **three modules that
+had shipped with no caller at all** (`family/conflict.js`, `adminUnshareFollowUp`,
+`store.applyCoEdit`). `conflict.js`'s absence was caught by the suite, not by a reader —
+`sync-domains.test.js` S5b, because an unmounted module is correctly invisible to the import walk.
+
+### LZP-808 — **ship it**
+
+Komfort is **+16.7 % type and +12.6 % of the user's own sentence for +240 px width, +124 px height
+and one month at 1280 px** — and **capacity is 2 at both presets**, so it costs no entries. The
+number that decides it is `minRowHeight: 26`: `LINE_H = 10.5` is a fact about 9 px type, and a
+naive Komfort would promise two lines to a row that can draw one, making the crowded board worse.
+Cut it only if the 124 px are needed elsewhere, not because it is a `[Could]`.
+
+### Owed after E9 (details in FINDINGS §15f)
+
+1. **A co-editor cannot ⌘Z their own co-edit** — rule U6 excludes family entities from undo, and
+   widening it would let an undo beat the owner's newer write at a fresh stamp. PO call.
+2. **There is no admin-unshare button.** `family/unshare.js` is complete, tested, and uncalled.
+3. **`NOT_MEMBER` is not in `CURABLE_REFUSALS`** — dropped, not parked. PO/store call.
+4. **`A3b`/`A3c`** — one mirror line closes them; WP-9 owns it.
+5. **⚠ Attack rows C2/C2b/C3 changed priority.** The co-editor × undo trio was reachable only by a
+   hand-built op until this pass; it is now reachable **through the product's own UI**.
+   Recommend promoting C2 out of WP-9.
+6. **`DESIGN-DECISIONS.md` D7 is stale in one number** — it says twelve open attack rows; the admin
+   file now has 10, all three have 20. The PO's file; not edited here.
+
+---
+
+# Previous session — 2026-09-02
+
+**Stopped at:** **ROUND 3 — the member adversary's SECOND pass,
 answered and integrated.** Three parallel fixes merged, one fix landed by the integration pass
 itself (the presenter binding), every fix mutation-tested, both red teams re-run, the honest
 circle re-driven, the redaction boundary re-attacked from the refusals this round invented.

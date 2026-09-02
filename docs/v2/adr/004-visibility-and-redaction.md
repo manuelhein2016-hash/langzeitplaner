@@ -214,6 +214,66 @@ The owner and the colour are **never fields on the entry**. One fewer thing that
    > function of the folded level, so anything that materializes a family entity WITHOUT running
    > `foldAuthorized` sees the unredacted patch. Nothing does today.
 
+### 2.2b Barrier 4's **retraction clause** — story 18.3, LZP-903 (added 2026-09-02)
+
+**The blocker it closes.** `ctx.levelOf` answers from the entity's own `visibility` truth register.
+An admin unsharing *somebody else's* entry **has no such register on their device** — the key names
+its owner (ADR 001 §4.4) and a viewer holds `pub.*` and nothing else — so `store.familyLevelOf`
+answers `null`, correctly, and "no authenticated level" is a refusal. `retractPatch(kind)` produces
+the right bytes and **no `levelOf` could authorise them**. 18.3 was therefore unsealable (E7,
+`FINDINGS.md` §11c row 2).
+
+**The clause, normative.** When `ctx.levelOf(op.e)` answers outside `privat|belegt|geteilt`,
+`sealOp` refuses — *unless all four of these hold*, in which case the applied level is the **string
+literal `'privat'`**:
+
+1. the patch is a **pure retraction**: `pub.level` present and `'privat'`, every other field an
+   explicit `null` — i.e. `retractPatch(kind)`, and the same predicate `core/authz.js:
+   classifyUnsharePatch` admits at stage 3a;
+2. `brand.level === 'privat'`;
+3. a **second authenticated source** — `ctx.adminOf(op.space)`, the family space's `admin` register
+   as resolved by the admin chain (ADR 001 §4.1) and folded by `foldAuthorized` — answers a
+   `MemberId` **equal to `op.act`**;
+4. and every refusal is the *original* "no authenticated level" refusal with one sentence added, so
+   the default outcome for an entity the map cannot answer for is **unchanged**.
+
+`ctx.adminOf` is wired in `src/js/family/unshare.js` to `store.familyAdmin().admin` and to nothing
+else. Wiring it to a UI flag, a caller-supplied role or the relay's opinion is the mis-wiring the
+port exists to make impossible.
+
+> **Why this is still NOT a caller-declared level** — the question finding S5 makes mandatory of
+> any change to this barrier.
+>
+> **(a) The level is a literal.** `'privat'` is the floor of the model. There is no expression in
+> the clause in which `op.f`, `brand` or any argument appears on the right-hand side of the
+> assignment — the same sentence clause (i) of the main path carries. `op.f['pub.level']` remains
+> a **restatement checked for agreement**, exactly as on the main path.
+>
+> **(b) The second source is an IDENTITY, never a level.** It cannot raise a level: whatever
+> `adminOf` answers, the applied level stays `'privat'`. S5's hole was that a caller-supplied
+> *level* won; nothing here supplies one.
+>
+> **(c) The codomain is one content-free patch shape.** Because the level is `'privat'`, barrier
+> 4's privat clause, `ctx.assertFamilyPatch` and `assertNoContentAboveLevel` all run at the
+> **strictest** level. So even a wholly forged answer to (3) leaks nothing: it can only *withdraw*.
+>
+> **(d) Authority is settled by the fold, not by this gate — D7.** An op that gets past (3) on a
+> patched build is REJECTED at `core/authz.js` stage 3a (`NOT_OWNER`) on every honest device,
+> including the author's own. This clause exists so an honest admin's op is not unsealable, not to
+> be where admin authority is decided. Enforcement is by convergence, not by gatekeeper.
+>
+> **(e) It cannot override a level the map HAS.** It is reached only when `levelOf` has no answer,
+> so no `adminOf` answer changes the outcome for an entity this device owns.
+>
+> Executable form: `crypto/envelope.js:RETRACTION_CLAUSE` (6 clauses) and
+> `core/project.js:ADMIN_UNSHARE_CONTRACT` (6 clauses). Asserted by
+> `tests/tier1/unshare.test.js` U1 — 105 cells of `levelOf × patch × adminOf` through the real
+> `sealOp`, against an oracle written from this section. Mutants **M-A** (drop the `seat ===
+> op.act` comparison) and **M-B** (drop the retraction-shape test) each kill U1; **M1** — applying
+> the *declared* level instead of the literal — is provably **equivalent**, because clause 1 admits
+> only patches whose declared level already IS the literal. That equivalence is the strongest form
+> of (a) available: on this path there is no caller value distinguishable from the constant.
+
 ### 2.3 The failure path is loud, never swallowed
 
 `RedactionError` is thrown on the publish path, which runs inside the `queueMicrotask` after
@@ -333,7 +393,7 @@ Every transition is **one transaction** carrying the truth write plus the public
 | **Geteilt → Belegt** | `note.set{visibility:'belegt'}` + `pub.set{'pub.level':'belegt', **'pub.text':null**, 'pub.coEdit':null}` |
 | **→ Privat** (from either) | `note.set{visibility:'privat'}` + `pub.set{'pub.level':'privat','pub.alive':false,'pub.date':null,'pub.text':null,'pub.repeatsYearly':null,'pub.coEdit':null}` |
 | delete while published | `note.set{_alive:false}` + `pub.set{'pub.alive':false, …all content fields → null}` |
-| **admin unshare (18.3)** | `pub.set{'pub.level':'privat', …all content → null}` **only**. The owner's truth is untouched — the entry reverts to owner-private and is **never deleted**. On receipt, the owner's client also sets its local `visibility` to `'privat'` in a follow-up txn so the two agree. |
+| **admin unshare (18.3)** | `pub.set{'pub.level':'privat', …all content → null}` **only** — `core/project.js:adminUnshareOp`, whose patch IS `retractPatch(kind)`, so it is byte-identical to the row above. The owner's truth is untouched — the entry reverts to owner-private and is **never deleted**. Sealable since 2026-09-02 via §2.2b. On receipt, the owner's client also sets its local `visibility` to `'privat'` in a follow-up txn so the two agree — `core/project.js:adminUnshareFollowUp`, and it is **not optional**: without it `derivePublication` re-publishes the whole Geteilt patch on the owner's very next keystroke and silently undoes the moderation (measured, `tests/tier1/unshare.test.js` U3-b). |
 
 ### 5.1 ⚠ A downgrade MUST write explicit `null`s. Omission is not withdrawal.
 
@@ -349,19 +409,40 @@ text**. The entry would look correctly downgraded on my board and be fully reada
 what makes it dangerous.
 
 > **Rule (normative).** A downgrade writes a `null` to **every content register it withdraws**,
-> stamped at the downgrade's HLC. `→ Privat` additionally writes `pub.alive: false` **and** nulls
-> every content register, so a later re-share cannot resurrect stale text through registers that
+> stamped at the downgrade's HLC. `→ Privat` additionally nulls **every** content register —
+> `pub.alive` included — so a later re-share cannot resurrect stale text through registers that
 > were never overwritten.
 
 ```js
-// src/js/core/project.js
+// src/js/core/project.js — CORRECTED 2026-09-02 (finding E7-6, LZP-903)
 export function retractPatch(kind) {
-  const out = { 'pub.level': 'privat', 'pub.alive': false };
+  const out = { 'pub.level': 'privat' };
   for (const f of GETEILT_FIELDS[kind])
-    if (f !== 'pub.level' && f !== 'pub.alive') out[f] = null;
-  return out;                       // every withdrawable field, explicitly null
+    if (f !== 'pub.level') out[f] = null;   // pub.alive INCLUDED — see below
+  return out;                               // every withdrawable field, explicitly null
 }
 ```
+
+> **AMENDED 2026-09-02 — this block used to seed `'pub.alive': false`, and that patch cannot be
+> sealed by the code this ADR governs.** Three shipped gates say so, and §5's own transition table
+> above says so too (its admin-unshare row is "`pub.level:'privat'`, all content → null", with no
+> `pub.alive: false` in it):
+>
+> 1. `crypto/envelope.js` barrier 4's privat clause refuses any family patch at `privat` carrying
+>    a non-null value in any field but `pub.level`. A `false` **is** such a value.
+> 2. `core/authz.js:classifyUnsharePatch` reads a non-null value beside `pub.level: 'privat'` as
+>    version **skew** and PARKS the op — so a retraction shaped like the old block would arrive at
+>    every peer unapplied.
+> 3. `core/authz.js:unsharePatch` — the admin's retraction, shipped since E3 — already writes
+>    `'pub.alive': null`.
+>
+> **And `null` is the better answer, not merely the compatible one.** One retraction shape means
+> the owner's own „→ Privat" and the admin's unshare (18.3) are **byte-identical on the wire**, so
+> a peer cannot tell which happened — Principle 9 enforced by the absence of a distinguishing
+> byte rather than by a policy. Nothing is lost: §4.2 drops an entity on `pub.level === 'privat'`
+> before it ever consults the tombstone. Asserted by `tests/tier1/unshare.test.js` §3 (byte
+> equality across all three producers) and U2-b; mutant **M-C** — restoring `false` — makes
+> `retractPatch` throw `INV-R4` at module load.
 
 **Property test P7d (mandatory, LZP-704's AC):** *for any random sequence of visibility
 transitions ending in `privat`, a peer's family materialization contains no field of that entity
@@ -518,6 +599,8 @@ its row here green.**
 | **P7g** | `categoryId` appears in no family op, at any level, ever | the emitted ops + the sealed bytes |
 | **P7h** | co-edit: a non-owner cannot write `pub.level`, `pub.coEdit` or `pub.alive`; shuffling ops never changes which ops are admitted | authz fold |
 | **P7i** | a Belegt op and a Geteilt op of the same entity are **the same ciphertext length** (padding, ADR 002 §5.3) | sealed bytes |
+| **P7j** | *(18.3, LZP-903)* the admin unshare **reverts** (a peer holds `pub.level: 'privat'` and an explicit null in every other register), **never deletes** (the owner's board and personal-space registers are untouched, same value, same stamp, same op) and **never reads** (`adminUnshareOp` is arity 2, refuses an unknown `spec` key, and produces bytes that are a function of the KIND alone) | peer registers + owner board + the emitted op |
+| **P7k** | *(18.3, §2.2b)* barrier 4 seals a retraction for an entity this device does not own **iff** the patch is a pure withdrawal and `ctx.adminOf(op.space) === op.act`; the applied level is the literal `'privat'` on every such cell, and an entity the map CAN answer for is unaffected by any `adminOf` answer | `sealOp`, 105-cell domain |
 
 ### 10.1 `assertNeverTransmitted` — the end-to-end leak test
 

@@ -610,6 +610,95 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 .pad textarea::placeholder { color: #CFC7E6; }
 .pad:focus-within { background: var(--hover); border-radius: 0 0 4px 4px; }
 
+/* ── 17.7 · KOMFORT — the type half of the density preset (LZP-808) ───────────
+
+   „A per-device density setting (Kompakt / Komfort) slightly increases row
+    height and font size on that machine only — Mom's display and eyes are not
+    mine — accepting horizontal scroll as the trade."
+
+   The row-height half is a number in `settings` and needs no CSS. THIS is the
+   half v1 did not have: v1 §2's density targets say entry text „will sit around
+   10–11 px" and the app shipped 9 px on every machine. Komfort is the top of
+   that band; Kompakt is the bottom, i.e. exactly what shipped.
+
+   THREE RULES THIS BLOCK OBEYS.
+
+   1. KOMPAKT IS THE ABSENCE OF THIS BLOCK. There is no `.density-kompakt`
+      anywhere. A board that never touches the setting is the pre-LZP-808 board
+      to the pixel, and `density-808.dom.js` §2 proves it by measuring both.
+
+   2. ONE SCALE, 7/6, APPLIED TO TYPE AND TO THE MARKS THAT MUST STAY BESIDE IT.
+      9 → 10.5 · 8.5 → 10 · 8 → 9.5 · 6.5 → 7.5. The badge family (17.2 chip,
+      17.5 „neu" dot, 16.6 exposure badge, 9.2 ↻) scales WITH the text, because
+      ADR 004 §6 treats those five marks and the sentence as one contested slot:
+      grow the sentence alone and the marks become specks beside it; grow the
+      marks alone and they eat the sentence. The two fixed boxes in front of the
+      text (`.d-num`, `.d-wd`) scale too, or an 11 px day number clips its own
+      „30" inside a 17 px box.
+
+   3. LANES DO NOT MOVE. `--lane-w`, `--lane-gap` and the 27 px `--gutter` are
+      NOT redefined here. A lane is a colour stripe, not type, and
+      `family-render.dom.js` §7's „a family board is exactly as wide as a solo
+      one" is measured against those three numbers. Density moves text.
+
+   AND ONE IT IS SCOPED BY: `@media screen`. `print.css` fixes its own geometry
+   (23 px rows, ~6 pt type) and ignores the row-height slider already, because a
+   poster is a poster on any Mac. A per-DEVICE eyesight preference has no
+   business on paper, and without this wrapper `body.density-komfort .note`
+   would out-specify every `@media print` rule that sets a font on `.note`.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+@media screen {
+  body.density-komfort {
+    /* Type, in one place, so the scale can be checked by reading. */
+    --dens-note: 10.5px;   /* 9    → the entry sentence */
+    --dens-small: 10px;    /* 8.5  → holiday name, weekday, bar label */
+    --dens-micro: 9.5px;   /* 8    → ↻, „+n", scratchpad label */
+    --dens-num: 11px;      /* 9.5  → the day number */
+    --dens-chip: 9.5px;    /* 8    → the initial chip / exposure badge box */
+    --dens-chip-type: 7.5px; /* 6.5 → the letter inside the chip */
+  }
+
+  /* the two fixed boxes ahead of the text */
+  body.density-komfort .d-num { width: 20px; font-size: var(--dens-num); }
+  body.density-komfort .d-wd  { width: 15px; font-size: var(--dens-small); }
+
+  /* the sentence, and the ambient line it shares the row with */
+  body.density-komfort .note   { font-size: var(--dens-note); line-height: 1.2; }
+  body.density-komfort .d-hol  { font-size: var(--dens-small); }
+  body.density-komfort .note .rep { font-size: var(--dens-micro); }
+  body.density-komfort .d-more { font-size: var(--dens-micro); }
+  body.density-komfort .inline-edit { font-size: var(--dens-note); }
+
+  /* the badge family — grown by the same 7/6, so the contested slot keeps its
+     proportions instead of one entrant winning by standing still */
+  body.density-komfort .note .chip,
+  body.density-komfort .bar-label .chip {
+    width: var(--dens-chip); height: var(--dens-chip);
+    font-size: var(--dens-chip-type); line-height: var(--dens-chip);
+  }
+  body.density-komfort .note .neu-dot,
+  body.density-komfort .bar-label .neu-dot { width: 3.5px; height: 3.5px; }
+  body.density-komfort .note .exp,
+  body.density-komfort .bar-label .exp { width: 8px; height: 8px; }
+  /* the COVERAGE channel keeps its ratio: 3/7 of the box was Belegt, so 3.5/8 is */
+  body.density-komfort .note .exp.belegt,
+  body.density-komfort .bar-label .exp.belegt { background-size: 3.5px 100%; }
+
+  /* bars: the stripe is untouched (rule 3), the LABEL is type */
+  body.density-komfort .bar-label { font-size: var(--dens-small); line-height: 13px; max-width: 77px; }
+  body.density-komfort .bar-cont-down,
+  body.density-komfort .bar-cont-up { font-size: var(--dens-note); }
+  body.density-komfort .horizon-cue { font-size: var(--dens-small); }
+
+  /* scratchpad. `--pad-h` deliberately does NOT grow: the pad is a textarea and
+     scrolls, so the cost of Komfort there is one visible line, not a lost note,
+     and 10 more px of board height on a preset that already asks for 124 is a
+     worse trade than that line. Measured in `density-808.dom.js` §4. */
+  body.density-komfort .pad-label { font-size: var(--dens-micro); }
+  body.density-komfort .pad textarea { font-size: var(--dens-note); }
+}
+
 /* ── day popover (option 1m) ──────────────────────────────────────────────── */
 
 .popover {

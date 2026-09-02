@@ -17,6 +17,106 @@ export const MONTHS_VISIBLE = 12;  // spec 1.1
 const LINE_H = 10.5;               // one line of 9px entry text incl. leading
 
 // ─────────────────────────────────────────────────────────────────────────────
+// THE DENSITY SEAM — story 17.7 / LZP-808, „Kompakt / Komfort"
+//
+// „A per-device density setting slightly increases row height and font size on
+//  that machine only — Mom's display and eyes are not mine — accepting
+//  horizontal scroll as the trade."
+//
+// THE TWO PRESETS ARE NOT INVENTED. v1 §2's own density targets name two display
+// classes and give each a row band and a type size:
+//
+//   „~1000 px usable height … ≈ 24–28 px per row; on a 13" MacBook closer to
+//    20–22 px. Column width at 1440 px window ≈ 110–120 px. Entry text will sit
+//    around 10–11 px."
+//
+// v1 shipped ONE of those two rows (22 px) and the smaller of the two type sizes
+// (9 px), for every machine. 17.7 is v1's *other* display class, made
+// selectable — and it is v1 open question 4 („exact row metrics per display
+// class, 13" / 14" / 27"") answered with a control instead of a constant.
+//
+// ── WHY `lineH` IS PART OF A PRESET AND NOT A CONSTANT ───────────────────────
+// DESIGN-DECISIONS §B derives the number of text lines a row can host:
+//
+//     capacity = clamp(floor((rowHeight - 1) / LINE_H), 1, 3)
+//
+// `LINE_H` is „one line of 9 px entry text incl. leading" — it is a fact about
+// the TYPE SIZE, not about the app. Raise the type to 10.5 px and the rendered
+// line box goes 10 px → 12 px (measured in WebKit, `density-808.dom.js` §1), so
+// a `LINE_H` left at 10.5 would promise two lines to a row that can draw one and
+// the second note would be painted into the row below it.
+//
+// THIS IS THE WHOLE HAZARD OF 17.7 AND IT POINTS THE WRONG WAY. A naive Komfort
+// — bigger type over the shipped capacity rule — makes the CROWDED board WORSE,
+// not better: at 22 px, one line box of 12 px fits where two of 10 px did, so
+// Komfort would silently halve what a busy day shows. `minRowHeight` is what
+// forbids it: Komfort's floor is the smallest row that still hosts TWO Komfort
+// lines, so no reachable Komfort setting draws fewer entries than Kompakt does.
+//
+// ── WHAT IS *NOT* HERE, AND WHY ──────────────────────────────────────────────
+// Nothing about lanes. `--lane-w`, `--lane-gap` and the 27 px `--gutter` are
+// identical in both presets: a lane is a 6 px colour stripe, not type, and
+// `family-render.dom.js` §7's „a family board is exactly as wide as a solo one"
+// measurement is taken against those three numbers. Density moves TEXT.
+//
+// ── PER DEVICE, AND IT IS FREE ───────────────────────────────────────────────
+// `density` is a `settings` key, and `settings` is written through `tx.pref()` —
+// a `local`-space op that `store.js:outbox()` filters out by construction (rule
+// U6; the comment there cites *this story* by number). So „it must never sync"
+// needed no new machinery: it is the same local space that already holds the
+// Bundesland and the window frame. `density-808.dom.js` §5 asserts it rather
+// than trusting this paragraph.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The two presets. `lineH`, `rowHeight`, `colWidth` and `minRowHeight` are the
+ * geometry; `typePx` is published so a reviewer can check the CSS against the
+ * `lineH` that was derived from it without opening a browser.
+ *
+ * KOMPAKT IS TODAY, TO THE PIXEL. Its four numbers are v1's shipped defaults and
+ * its `lineH` is v1's `LINE_H`, so a board that never touches this setting is
+ * byte-identical to the one before LZP-808 — which is why every v1
+ * characterization row for `rowCapacity` still reads the same answer.
+ */
+export const DENSITY = Object.freeze({
+  kompakt: Object.freeze({
+    lineH: LINE_H,      // 9 px text → 10 px line box (measured) + .5 slack
+    typePx: 9,
+    rowHeight: 22,      // v1 default
+    colWidth: 118,      // v1 default
+    minRowHeight: 18,   // v1 slider floor
+    maxRowHeight: 32,   // v1 slider ceiling
+  }),
+  komfort: Object.freeze({
+    lineH: 12.5,        // 10.5 px text → 12 px line box (measured) + .5 slack
+    typePx: 10.5,       // v1 §2: „entry text will sit around 10–11 px"
+    rowHeight: 26,      // v1 §2's other band: „≈ 24–28 px per row"
+    colWidth: 138,
+    // floor(( 26 - 1) / 12.5) === 2 · floor((25 - 1) / 12.5) === 1.
+    // 26 is therefore the smallest Komfort row that still shows what a Kompakt
+    // row shows, and the slider may not go below it. See the hazard above.
+    minRowHeight: 26,
+    maxRowHeight: 32,
+  }),
+});
+
+/** The names, in the order the settings pane offers them. */
+export const DENSITIES = Object.freeze(['kompakt', 'komfort']);
+
+/**
+ * Which preset a settings object selects — Kompakt for anything unrecognised.
+ *
+ * An UNKNOWN value answers `kompakt` rather than throwing, for the same reason
+ * `migrate()` keeps unknown settings keys: a board written by a future build
+ * that grows a third preset must still open here, and the safe fallback is the
+ * one that fits every display.
+ */
+export function densityOf(settings) {
+  const d = settings && settings.density;
+  return d === 'komfort' ? 'komfort' : 'kompakt';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The family decorations (ADR 004 §4.2, §4.3, §6 — LZP-705, LZP-706)
 //
 // EVERY ONE OF THEM IS A HORIZONTAL COST AND NONE OF THEM IS A VERTICAL ONE.
@@ -200,9 +300,22 @@ function decorate(entry, catOf) {
   };
 }
 
-/** How many text lines a day row can host at the current density. */
-export function rowCapacity(rowH) {
-  return Math.max(1, Math.min(3, Math.floor((rowH - 1) / LINE_H)));
+/**
+ * How many text lines a day row can host at the current density.
+ *
+ * DESIGN-DECISIONS §B, generalised over the type size instead of over one
+ * hard-coded line box. `density` is OPTIONAL and defaults to `kompakt`, whose
+ * `lineH` IS v1's `LINE_H` — so every existing caller, and every v1
+ * characterization row (`rowCapacity(18) === 1`, `(22) === 2`, `(32) === 2`,
+ * `(33) === 3`), gets the identical answer it got before this seam existed.
+ *
+ * The clamp to 3 is 3.8's, not arithmetic: neither preset can reach it inside
+ * the 18–32 px slider (Kompakt needs 33 px, Komfort 39), which is the same
+ * ceiling `tests/COVERAGE.md` records as „rowCapacity(32) is 2, not 3".
+ */
+export function rowCapacity(rowH, density = 'kompakt') {
+  const lineH = (DENSITY[density] || DENSITY.kompakt).lineH;
+  return Math.max(1, Math.min(3, Math.floor((rowH - 1) / lineH)));
 }
 
 /** First visible month, honouring rolling vs. pinned + paging (1.3, 1.5). */
@@ -281,8 +394,16 @@ export function buildBoard(state, opts = {}) {
   const lang = s.language === 'en' ? 'en' : 'de';
   const WD = lang === 'en' ? WD_EN : WD_DE;
   const MN = lang === 'en' ? MONTH_EN : MONTH_DE;
-  const rowH = s.rowHeight || 22;
-  const capacity = rowCapacity(rowH);
+  // 17.7 — the one place the density seam is consumed. Everything else it
+  // changes is type, and type is `app.css`'s half.
+  const density = densityOf(s);
+  // The floor is enforced HERE and not only in the settings pane, so it holds
+  // for a `board.json` that arrived by import, by migration or by hand. Every
+  // other geometry in the app (`--row-h`, `rowAt`, the drag preview, print)
+  // derives from `model.rowH`, so clamping once here clamps all of them.
+  const dp = DENSITY[density];
+  const rowH = Math.max(dp.minRowHeight, s.rowHeight || dp.rowHeight);
+  const capacity = rowCapacity(rowH, density);
 
   const start = visibleStart(s, today);
   const months = [];
@@ -559,8 +680,9 @@ export function buildBoard(state, opts = {}) {
 
   return {
     cols, today, rowH, capacity,
+    density,                       // 17.7 — so a reader of the model can see which rule ran
     firstISO, lastISO,
-    colW: s.colWidth || 118,
+    colW: s.colWidth || DENSITY[density].colWidth,
     laneCount: MAX_LANES,
   };
 }

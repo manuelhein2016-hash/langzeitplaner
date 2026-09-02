@@ -49,7 +49,8 @@ import { initAdminPanel } from './adminpanel.js';
 // behind the one dynamic door, solo mode cannot render the cluster for two independent structural
 // reasons: `stripV2Fields` leaves no `visibility` field on any entry for it to change, AND not one
 // byte of the module is evaluated.
-import { useSharing } from '../popover.js';
+import { useSharing, memberNameOf } from '../popover.js';
+import { installConflictNotice } from './conflict.js';
 import * as sharing from './sharing.js';
 import { createFetchTransport } from '../platform/net.js';
 import { exportRawPublic, signBytes } from '../crypto/identity.js';
@@ -350,7 +351,27 @@ export function mountCircleSurfaces(hooks) {
   syncCircleMounts(hooks);
   renderFamilyLegend();
   refreshRoster().then(() => renderFamilyLegend());
+  // 18.5 — THE LOST-EDIT NOTICE, and it is installed HERE for the same reason the legend is:
+  // this is the circle-only board path, so a solo Mac reaches no part of it (Principle 7) and a
+  // Mac in a circle gets it whether or not it ever opts into 19.4's own-device sync.
+  //
+  // `nameOf` is `memberNameOf` — the SAME 17.6 roster port `popover.js` installs — so the notice
+  // and the attribution line name the same person the same way, rather than two modules each
+  // resolving a member id and disagreeing about Mama.
+  //
+  // It reads `me` through `store.diagnostics()`, not by importing `family/engine.js`: a UI module
+  // must not pull the sync engine into its import graph (ADR 005 §2, Principle 7).
+  conflictNotice = installConflictNotice({ store, nameOf: memberNameOf });
   startCircleEngine(hooks, null);
+}
+
+/** The 18.5 notice's handle, so `leave`/`delete` can stop it. One per launch, like the engine. */
+let conflictNotice = null;
+
+/** Tear the 18.5 notice down — the leave/delete path (20.3), where there is no circle left. */
+export function stopConflictNotice() {
+  if (conflictNotice && typeof conflictNotice.stop === 'function') conflictNotice.stop();
+  conflictNotice = null;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════

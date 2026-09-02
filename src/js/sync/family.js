@@ -84,6 +84,9 @@ import { sealOp, openOp } from '../crypto/envelope.js';
 // security check". It is imported rather than injected because there is exactly one allowlist in
 // this product and a port would be a place to hand it a second one.
 import { assertFamilyPatch } from '../core/project.js';
+// `sealLevelFor`'s retraction split reads the SAME predicate `authz.js` stage 3a admits an
+// unshare by, so the seal seam and the fold that judges its result cannot drift apart.
+import { classifyUnsharePatch } from '../core/authz.js';
 import { spaceKindOf, isSpaceId } from '../crypto/spacekeys.js';
 import { createParkingLot } from './outbox.js';
 import { ENVELOPE_KEYS } from './protocol.js';
@@ -399,7 +402,7 @@ export function createFamilySync(deps) {
       // the outbox was real, and 18.1 still shared nothing. The two together are the whole of
       // "plaintext leaves a device through exactly one function".
       assertFamilyPatch,
-      levelOf,
+      levelOf: (entityKey) => sealLevelFor(entityKey, op),
     });
     sealed.set(op.id, env);
     return env;
@@ -421,6 +424,42 @@ export function createFamilySync(deps) {
         + '`src/js/store.js` owns that reader. Nothing is sealed from a guess.', 'config');
     }
     return store.familyLevelOf(entityKey);
+  }
+
+  /**
+   * ── BARRIER 4's LEVEL, RESOLVED PER OP · the three-way split, in one place ─────────────────
+   *
+   * `levelOf` above answers for MY entity, from its `visibility` truth register. Two other things
+   * legitimately reach this seam addressed to SOMEBODY ELSE's entity, and they need opposite
+   * answers — which is why this is a function of the OP and not only of the key:
+   *
+   *   my entity            → `familyLevelOf`      the truth register. Unchanged, and first.
+   *   a CO-EDIT (18.2)     → `familyCoEditLevelOf` the authenticated fold: `geteilt` only while
+   *                          the owner's folded `pub.coEdit` is true. Barrier 4 then takes its
+   *                          normal path and the `geteiltOnly` backstop still applies.
+   *   a RETRACTION (18.3)  → `null`, ON PURPOSE. Barrier 4's retraction clause fires only while
+   *                          `levelOf` has NO answer, and it is the clause that demands the
+   *                          folded admin chain name `op.act`. Answering `geteilt` for an admin
+   *                          unshare would not merely skip that check — the patch declares
+   *                          `pub.level: 'privat'`, so barrier 4 would refuse the op outright for
+   *                          disagreeing with the map, and 18.3 would stop working.
+   *
+   * THE SPLIT IS ON THE PATCH SHAPE, not on who the caller thinks they are: a pure retraction is
+   * `authz.js:classifyUnsharePatch`'s own predicate, the same one stage 3a admits by, so this
+   * cannot drift from the fold that judges the result. Anything else is a content write.
+   *
+   * FAIL-SAFE IN BOTH DIRECTIONS. If the classification were wrong about a retraction, barrier 4
+   * refuses (the declared `privat` disagrees with `geteilt`); if it were wrong about a co-edit,
+   * the retraction clause refuses (the patch is not retraction-shaped). Neither error seals a
+   * byte, and neither can raise a level.
+   */
+  function sealLevelFor(entityKey, op) {
+    const own = levelOf(entityKey);
+    if (own !== null && own !== undefined) return own;
+    const kind = typeof entityKey === 'string' && entityKey.startsWith('fbar:') ? 'fbar' : 'fnote';
+    if (op && op.k === 'pub.set' && classifyUnsharePatch(kind, op.f) === 'unshare') return null;
+    if (typeof store.familyCoEditLevelOf !== 'function') return null;
+    return store.familyCoEditLevelOf(entityKey);
   }
 
   // ── push ────────────────────────────────────────────────────────────────────────────────────

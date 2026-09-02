@@ -587,6 +587,145 @@ export function promoteEntity(regs, truthKey, me) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 4.1 THE LWW SEAM — which write is standing, and whether mine is one of them
+//     (story 18.5 · deliverable 23 · LZP-904 · ADR 004 §8 · ADR 001 §5 step 2, §6)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// ═══ WHY THIS LIVES HERE AND NOT IN THE UI ═══════════════════════════════════════════════════
+//
+// 18.5 is FOUR requirements, and only the first is a merge rule: "the later change wins per
+// field". That rule is already the whole of this module — `cmpWrites`, `applyOp`, and (for the
+// owner) `promoteRegister`. It is property-tested for commutativity, associativity, idempotence
+// and totality, and ADR 004 §8 is explicit that the notice which follows is "a UI observation of
+// the fold, NEVER a merge rule".
+//
+// The failure mode this seam exists to prevent is therefore not a bug in the notice. It is a
+// SECOND RESOLUTION RULE: a UI module that, in order to say "your edit lost", re-derives who won
+// by comparing timestamps — or worse, by comparing values — and drifts from the fold. The
+// notice would then be right about a board state that does not exist. So the question
+//
+//     "is the write I made still the one standing in this cell?"
+//
+// is answered HERE, by the same three-key `≺` and the same promotion asymmetry that decided the
+// board, and `family/conflict.js` is left with no arithmetic to get wrong. It gets a boolean.
+//
+// ═══ WHAT IS DELIBERATELY NOT HERE ═══════════════════════════════════════════════════════════
+//
+// No 30-second window (that is a *policy* about in-flightness, ADR 004 §8, and it belongs with
+// the clock, in `family/conflict.js`). No copy. No DOM. No notion of "recent". This function
+// would give the same answer about a write from 1998, and the caller is what decides that
+// nobody wants to hear about it.
+
+/**
+ * @typedef {Object} Displacement
+ * @property {string} entity  the entity key that was asked about
+ * @property {string} field   the field that was asked about
+ * @property {string} by      the MEMBER who now holds the cell (`Register.author`) — 17.6's
+ *                            "von Mama". Never a device: see the `Register` typedef.
+ * @property {string} stamp   the winning write's stamp
+ * @property {string|null} op the winning write's OpId, or null for a repaired register (REG-26)
+ */
+
+/**
+ * The write that is STANDING in one cell — i.e. the one the board is currently drawn from.
+ *
+ * For a family key (`fnote:`/`fbar:`) that is simply the folded cell: a viewer reads `pub.*` and
+ * has no promotion at all, because a foreign entity's truth fields were never transmitted
+ * (ADR 004 §4.2).
+ *
+ * For a truth key (`note:`/`bar:`) it is the cell AFTER promotion, because promotion is what
+ * `materialize.js` renders and therefore what the human sees. This function calls
+ * `promoteEntity()` rather than reproducing its four lines, for the reason `promoteRegister`
+ * already gives at length: two implementations of a correctness heart is one too many, and only
+ * one of them has P7c pointed at it. The cost is one small `Map` per call, over a set of cells
+ * bounded by what one human touched in the last half-minute.
+ *
+ * @param {RegisterMap} regs
+ * @param {string} key    an entity key, truth or family
+ * @param {string} field  the field name AS THE OP WROTE IT — `text` on a truth key, `pub.text`
+ *                        on a family key. There is no translation here; the two namespaces stay
+ *                        apart exactly as the module header says.
+ * @param {string} me     MemberId. Required on BOTH branches, and that is not symmetry for its
+ *                        own sake: the family branch does not promote, but `displacedBy` below
+ *                        has to be able to ask "is the standing author me", and a caller with no
+ *                        member id has no family, hence no co-editor, hence no question. Making
+ *                        it required is what stops a solo board from ever reaching this code with
+ *                        `me === undefined` and reading its OWN later write as somebody else's.
+ * @returns {Register|undefined} `undefined` iff nothing was ever written to that cell
+ */
+export function standingWrite(regs, key, field, me) {
+  if (!(regs instanceof Map)) throw new RegisterError('standingWrite: regs must be a RegisterMap');
+  if (!isMemberId(me)) {
+    throw new RegisterError(`standingWrite: \`me\` must be a MemberId, got ${JSON.stringify(me)}`);
+  }
+  const parsed = parseEntityKey(key);
+  if (!parsed) throw new RegisterError(`standingWrite: not an entity key: ${JSON.stringify(key)}`);
+  if (isFamilyKind(parsed.kind)) return regs.get(key)?.get(field);
+  return promoteEntity(regs, key, me).get(field);
+}
+
+/**
+ * 18.5's question, and the ONLY question this seam answers: **has the write I made been
+ * displaced by somebody else's?**
+ *
+ * ┌───────────────────────────────────────────────────────────────────────────────────────────┐
+ * │ THREE REFUSALS, IN THIS ORDER, AND EACH ONE IS A PRODUCT RULE RATHER THAN A GUARD.        │
+ * └───────────────────────────────────────────────────────────────────────────────────────────┘
+ *
+ *  1. **Nothing standing → not displaced.** An unwritten cell is not a conflict; it is a cell.
+ *
+ *  2. **`standing.author === me` → not displaced.** This is the one that makes 18.5 mean
+ *     "two PEOPLE" instead of "two writes". `author` is the acting MEMBER (see the `Register`
+ *     typedef), so it covers my own second Mac: my laptop's newer write beating my desktop's is
+ *     19.4 working, not a conflict, and it must never produce a notice. Were `author` the
+ *     device, every two-Mac household would be told it was fighting with itself.
+ *
+ *     It also, structurally, keeps the OWNER's own publication out of the picture: my `pub.text`
+ *     is a projection *of* my truth (ADR 004 §4.1), so it carries `author === me` and is
+ *     declined here for the same reason `promoteRegister` declines to promote it.
+ *
+ *  3. **`cmpWrites(standing, mine) <= 0` → not displaced.** My write is the one standing (or an
+ *     equal one is), so there is nothing to say. Note that this compares by the SAME `≺` the
+ *     fold used — stamp, then opId, then value — so a caller can never be told it lost a
+ *     comparison the board resolved the other way.
+ *
+ * **`mine` need not still be in the map**, and usually is not: a displaced write leaves no trace
+ * in the cell that displaced it. That is why the caller passes the write itself rather than a
+ * cell reference, and it is why a displacement can be reported for an op that was never folded
+ * here at all (an outbox line that lost before it was pushed).
+ *
+ * **This function is silent about GOVERNING fields, because it is never asked about them.** It
+ * has no field table of its own and applies no filter; the caller's ledger admits only
+ * `coEdit: true` fields (`ops.js` `FIELDS`), which is what keeps an admin unshare (18.3) and a
+ * remote deletion (18.6) from being reported as a lost edit. ADR 004 §7 forbids an
+ * "X made an entry private" notification outright, and the enforcement is the absence of those
+ * fields from the ledger — one table, read by `promoteEntity` and by the caller alike.
+ *
+ * @param {RegisterMap} regs
+ * @param {string} key    the entity key my write named
+ * @param {string} field  the field my write named
+ * @param {{stamp: string, op?: string|null, value?: any}} mine  MY write, as the op carried it
+ * @param {string} me     MemberId
+ * @returns {Displacement|null}
+ */
+export function displacedBy(regs, key, field, mine, me) {
+  if (!mine || typeof mine !== 'object' || !isStamp(mine.stamp)) {
+    throw new RegisterError(`displacedBy: \`mine\` must carry a stamp, got ${JSON.stringify(mine)}`);
+  }
+  const standing = standingWrite(regs, key, field, me);
+  if (standing === undefined) return null;                        // 1
+  if (standing.author === me) return null;                        // 2
+  if (cmpWrites(standing, mine) <= 0) return null;                // 3
+  return Object.freeze({
+    entity: key,
+    field,
+    by: standing.author,
+    stamp: standing.stamp,
+    op: typeof standing.op === 'string' && standing.op !== '' ? standing.op : null,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 5. Serialization — the checkpoint payload (ADR 001 §7.2, §9)
 // ─────────────────────────────────────────────────────────────────────────────
 

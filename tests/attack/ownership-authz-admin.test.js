@@ -49,21 +49,43 @@
 // solo mode does before any genesis exists) rather than a core algorithm change.
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// OPEN in this file (12 rows, all WP-9):
+// ── CLOSED (2026-09-02, E9 / LZP-901 — `authz.js` §4.2b, per-space membership) ───────────────
+//   A3    CLOSED. A `pub.set` is now admissible only in a space where BOTH the entity's
+//         structural OWNER and the op's AUTHOR are current members, so admin of a circle I
+//         invented authorises nothing over an entity whose key names a member of yours. The
+//         register key still carries no space — that was one of the two fixes this row asked for
+//         — but it no longer has to: ownership is structural (§4.4), so the SPACE an entity
+//         belongs to is read off the key, through the owner, and there is nothing extra to forge.
+//   A4b   CLOSED by the same gate, from the other side: §4.2b reads the FINAL `_alive`, not
+//         "was he a member at `op.ts`", so an EVICTED ex-admin's backdated unshare is refused
+//         before the chain is consulted. `A4` — an ex-admin who is still a member — is untouched
+//         and stays OPEN: that one is about the chain query being unbounded in TIME.
+//
+//   STILL OPEN, and the same one-line shape would close them: **A3b / A3c**. The §4.2b gate is on
+//   `pub.set` (stage 3a) only, because that is story 18.1's surface — "only the owner can edit or
+//   delete an ENTRY". `member.set{_alive:false}` is 20.2's removal, in stage 2, and it still asks
+//   `adminAtKey(spaceKey(op.space))` with no check that the SUBJECT is a member of that space —
+//   so the admin of a circle I invented can still evict MAMA from yours. The fix is the mirror of
+//   §4.2b: require `membersIn(op.space).has(subject)` on the removal path. It is left to WP-9
+//   deliberately rather than by omission — removal interacts with the join/leave/rotation flows
+//   this file's header says are WP-9's, and E9 owns the editing rights, not the lifecycle.
+//
+// OPEN in this file (10 rows, all WP-9):
 //   A2, A2b, A2c       — ANY member can mint a genesis link (`adminPrev: null`, `act === f.admin`
 //                        is the whole predicate), and chain LENGTH is compared before `ts`
 //                        (`betterChain`), so one forged root plus one self-transfer outranks the
 //                        real root. Defeated today only by `ctx.genesisOpId` (A2e). `A2d` is the
 //                        companion CONTROL — it is green either way — showing the takeover is a
 //                        property of the op SET, so every device is taken over identically.
-//   A3, A3b, A3c       — register keys carry no space, so admin of a space I invented applies to
-//                        yours. Needs the space id to bind the register, or the admin query to be
-//                        scoped to `ctx.familySpaceId`.
+//   A3b, A3c           — register keys carry no space, so admin of a space I invented applies to
+//                        yours. CLOSED for `pub.set` (A3, above); still open for the `member.set`
+//                        removal path, which is 20.2's and WP-9's. See the CLOSED block.
 //   A3d                — collateral: `AuthzResult.admin` silently goes null as soon as a second
 //                        space exists (`soleSpace`), so minting one is a denial of service against
 //                        every admin-gated affordance. The per-space accessors stay correct.
-//   A4, A4b            — the chain query is unbounded in time and in membership, so a FORMER or
-//                        REMOVED admin still authorises by backdating below the transfer.
+//   A4                 — the chain query is unbounded in TIME, so a former admin who is still a
+//                        member authorises by backdating below the transfer. (Unbounded in
+//                        MEMBERSHIP was A4b, and §4.2b closed it.)
 //   A5, A5b, A5c       — membership is self-asserting: `member.set{_alive:true}` re-admits you and
 //                        a self-attestation makes an outsider a member. This is the one that most
 //                        obviously needs WP-9's invite/redeem flow rather than a core patch.
@@ -218,23 +240,29 @@ test('A2e FAILED (defence holds): ctx.genesisOpId pins the root and defeats A2 e
 // exactly the member the attacker recruits.
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-test('A3 SUCCEEDED: admin of a space I invented can unshare an entry in a space I do not run', () => {
+test('A3 FAILED (CLOSED by E9 §4.2b): admin of a space I invented reaches nothing in yours', () => {
   const w = preamble();
-  // I create my own circle. Genesis is self-authorising, so nobody had to let me.
+  // I create my own circle. Genesis is still self-authorising, so nobody had to let me — that
+  // half of the attack is untouched, and A2/A5 remain open. What is closed is what the role BUYS.
   const mine = w.A.zorro.op('space.set', spaceKey(FSP_EVIL), { admin: ZORRO, adminPrev: null },
     { space: FSP_EVIL, familySpaceId: FSP_EVIL, ms: T.genesis });
-  // …and use it to unshare PAPA's entry, which lives in FSP.
+  // …and try to use it to unshare PAPA's entry, which lives in FSP.
   const kill = w.A.zorro.op('pub.set', familyKey('fnote', PAPA, U_PAPA), unsharePatch('fnote'),
     { space: FSP_EVIL, familySpaceId: FSP_EVIL, ms: T.now });
 
   const r = foldAuthorized([...w.ops, mine, kill], authzCtx());
 
   assert.equal(r.adminOfSpace(FSP), PAPA, 'PAPA is still admin of the real space…');
-  assert.equal(r.adminOfSpace(FSP_EVIL), ZORRO, '…and I am admin of mine');
-  assert.equal(wasAdmitted(r, kill), true,
-    'EXPECTED FAILURE: an unshare authorised by the WRONG space was admitted');
-  assert.equal(mat(r).notes.some((n) => n.ownerId === PAPA), false,
-    "EXPECTED FAILURE: PAPA's entry was unshared by the admin of an unrelated circle");
+  assert.equal(r.adminOfSpace(FSP_EVIL), ZORRO, '…and I am still admin of mine');
+  // §4.2b: a `pub.set` is admissible only in a space where BOTH the entity's structural owner and
+  // the author are current members. PAPA is a member of FSP and of nothing else, so my own circle
+  // is not a jurisdiction over his entity — the register key names him, and that is what binds.
+  assert.equal(wasAdmitted(r, kill), false, 'the unshare is refused');
+  assert.equal(reasonOf(r, kill), 'notMember',
+    'refused BEFORE the admin question is asked: an op from outside the circle is not a '
+    + 'governance question, it is a stranger');
+  assert.equal(mat(r).notes.some((n) => n.ownerId === PAPA), true,
+    "PAPA's entry is still shared — the admin of an unrelated circle moved nothing");
 });
 
 test('A3b SUCCEEDED: the same trick removes a member of a circle I am not the admin of', () => {
@@ -313,7 +341,7 @@ test('A4 SUCCEEDED: a former admin unshares an entry forever, by backdating belo
   assert.equal(r.regs.get(familyKey('fnote', ME, U1)).get('pub.level').author, PAPA);
 });
 
-test('A4b SUCCEEDED: a REMOVED member keeps that power — removal does not bound the chain query', () => {
+test('A4b FAILED (CLOSED by E9 §4.2b): removal DOES bound it — an evicted ex-admin reaches nothing', () => {
   const w = newWorld();
   const base = preamble(w);
   const handover = w.A.papa.op('space.set', spaceKey(FSP),
@@ -326,8 +354,17 @@ test('A4b SUCCEEDED: a REMOVED member keeps that power — removal does not boun
 
   const r = foldAuthorized([...base.ops, handover, evict, kill], authzCtx());
   assert.equal(r.currentMembers.has(PAPA), false, 'PAPA is out of the Kreis');
-  assert.equal(wasAdmitted(r, kill), true,
-    'EXPECTED FAILURE: an evicted ex-admin can still unshare my entries at will');
+  // §4.2b asks membership of the SPACE, on the FINAL `_alive` — not "was he a member at
+  // `op.ts`" — so the backdating that still defeats A4 (a former-but-present admin) buys an
+  // EVICTED one nothing at all. He is no longer a member of FSP in the folded set, at any stamp,
+  // in any arrival order, so the unshare never reaches the admin question.
+  assert.equal(wasAdmitted(r, kill), false, 'the evicted ex-admin\'s unshare is refused');
+  assert.equal(reasonOf(r, kill), 'notMember');
+  assert.equal(r.regs.get(familyKey('fnote', ME, U1)).get('pub.level').value, 'geteilt',
+    'my entry is still shared');
+  // A4 (an ex-admin who is STILL A MEMBER, backdating below the transfer) is a different defect
+  // and is deliberately still OPEN above: the chain query is unbounded in TIME, which is what A4
+  // is about, and §4.2b bounds MEMBERSHIP, which is what A4b was about.
 });
 
 test('A4c FAILED (defence holds): backdating BELOW the genesis buys nothing', () => {

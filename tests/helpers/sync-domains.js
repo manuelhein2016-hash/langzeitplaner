@@ -825,6 +825,21 @@ export const S5 = deep([
   MOD('src/js/crypto/suite.js', 'live'),
   MOD('src/js/dates.js', 'live'),
   MOD('src/js/family/adminpanel.js', 'live'),
+  MOD('src/js/family/conflict.js', 'live',
+    'Story 18.5 / ADR 004 §8 — the LOST-EDIT NOTICE (E9, LZP-904), and the only conflict UI in '
+    + 'the product. It resolves nothing: `core/registers.js#displacedBy` answers "was my write '
+    + 'displaced?" using the SAME per-field LWW (`≺`: stamp → opId → value) and the same '
+    + '`promoteEntity` that drew the board, so a UI module cannot grow a second resolution rule '
+    + 'and then be right about a board state that does not exist. Its single input is this '
+    + 'device\'s own outbox (`op.dev === store._device`), so a device that authored no write has '
+    + 'no ledger row and there is no branch that decides NOT to show a line — "only the loser '
+    + 'sees it" is structural. It refuses governing fields outright, which is what makes an admin '
+    + 'unshare (18.3) and a remote delete (18.6) UNCONSTRUCTIBLE as notices — Principle 9 forbids '
+    + '„X made an entry private" and this is where that is enforced rather than remembered. '
+    + '`live` since the E9 integration: `family/mount.js#mountCircleSurfaces` calls '
+    + '`installConflictNotice({store, nameOf: memberNameOf})` on the circle-only board path, so '
+    + 'solo mode reaches none of it (Principle 7) and the notice names members through the same '
+    + '17.6 roster port the attribution line uses.'),
   MOD('src/js/family/createjoin.js', 'live'),
   MOD('src/js/family/engine.js', 'live'),
   MOD('src/js/family/familysettings.js', 'live'),
@@ -939,5 +954,5 @@ export const DOMAINS = deep({
 
 /** Counts, so a truncated file is a loud failure rather than a quiet one. */
 export const DOMAIN_SIZES = deep({
-  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 68,
+  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 69,
 });

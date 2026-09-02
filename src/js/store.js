@@ -110,7 +110,9 @@ import { foldAuthorized, REJECT_REASONS } from './core/authz.js';
 // device, and `ops.contract.js` §6's derivation that calls it. The store owns §2.3's LOUD failure
 // path; `PUBLISH_FAILURE_CONTRACT` in that module is the specification `_publishAndEnqueue` below
 // satisfies, clause by clause.
-import { derivePublication, PUBLISH_FAILURE_CONTRACT } from './core/project.js';
+import {
+  derivePublication, PUBLISH_FAILURE_CONTRACT, adminUnshareFollowUp, coEditOp,
+} from './core/project.js';
 
 /**
  * THE TWO REFUSALS A LATER OP CAN CURE — finding F-6, and the reason `applyRemote` parks.
@@ -1898,6 +1900,129 @@ class Store {
     const cell = cells && typeof cells.get === 'function' ? cells.get('visibility') : undefined;
     const v = cell === undefined ? undefined : cell.value;
     return v === 'privat' || v === 'belegt' || v === 'geteilt' ? v : null;
+  }
+
+  /**
+   * ── BARRIER 4's LEVEL FOR SOMEBODY ELSE'S ENTRY — story 18.2, and ONLY 18.2 ────────────────
+   *
+   * `familyLevelOf` above answers `null` for a foreign key and that stays exactly right: it reads
+   * the entity's own `visibility` TRUTH register, and a viewer holds no truth for a peer's entry.
+   * But "there is no truth here" was being read as "nothing may be sealed here", and that made
+   * 18.2 a permission nobody could exercise: `pub.coEdit` granted the co-editor the right to edit,
+   * `interact.js` let the gesture start, and `sealOp` then refused the write with a
+   * `RedactionError` — which sets `redactionHalt` and stops ALL family sync from this Mac. The
+   * flag was worse than absent.
+   *
+   * **THE LEVEL OF A CO-EDIT IS NOT A TRUTH QUESTION, AND THAT IS WHY THIS IS A DIFFERENT
+   * FUNCTION AND NOT A LOOSENING OF THAT ONE.** `familyLevelOf`'s argument against reading
+   * `pub.level` — "the level a transition is moving AWAY from" — is an argument about a
+   * TRANSITION, and only an owner has one. A co-editor moves no level: they write `pub.text` at
+   * whatever level the owner has already published and the fold has already authenticated. So the
+   * right source here is the one `authz.js` stage 3b itself consults, and this reads exactly the
+   * registers that predicate reads:
+   *
+   *     pub.level === 'geteilt'   AND   pub.coEdit === true   AND   pub.alive !== false
+   *
+   * — three folded, authenticated governing registers, written by the OWNER alone (stage 3a), on
+   * a key whose owner segment is somebody else. Nothing the caller supplies appears in the
+   * answer. A co-editor still cannot grant themselves co-edit, because writing `pub.coEdit` is a
+   * governing write and stage 3a folds those from the owner; forging one locally changes this
+   * Mac's answer and no other device's, and the op it produces is rejected by every peer. D7:
+   * enforcement is by convergence, and this function is a CAPABILITY check — "would the family
+   * accept this write?" — asked before the bytes exist, so an honest client refuses early instead
+   * of halting itself.
+   *
+   * **IT ANSWERS `null` FOR MY OWN KEY, DELIBERATELY.** My entries publish through
+   * `derivePublication` from their truth register — one entity, one producer (ADR 004 §5.1). If
+   * this answered for my own keys it would become a second producer reading the level I last
+   * PUBLISHED, and a downgrade would re-publish at the level it was moving away from. That is
+   * finding S5, and it is the exact bug `familyLevelOf`'s comment exists to prevent.
+   *
+   * **IT IS NEVER CONSULTED FOR A RETRACTION**, and `sync/family.js` is where that is enforced:
+   * an admin unshare (18.3) is a `pub.set` on a foreign key too, and barrier 4's retraction
+   * clause fires only while `levelOf` has NO answer. See `sync/family.js:sealLevelFor`.
+   *
+   * @param {string} entityKey an `fnote:`/`fbar:` family key naming SOMEBODY ELSE as owner
+   * @returns {'geteilt'|null}
+   */
+  familyCoEditLevelOf(entityKey) {
+    if (typeof entityKey !== 'string') return null;
+    const colon = entityKey.indexOf(':');
+    const slash = entityKey.indexOf('/');
+    if (colon < 0 || slash < 0 || slash < colon) return null;
+    const kind = entityKey.slice(0, colon);
+    const owner = entityKey.slice(colon + 1, slash);
+    if (kind !== 'fnote' && kind !== 'fbar') return null;
+    if (owner === this._me) return null;          // mine: `derivePublication` owns it, not this
+    if (this._familySpaceId === null) return null;
+    let cells;
+    try { cells = this._log.registers().get(entityKey); } catch { return null; }
+    if (!cells || typeof cells.get !== 'function') return null;
+    const read = (field) => {
+      const cell = cells.get(field);
+      return cell === undefined || cell === null ? undefined : cell.value;
+    };
+    if (read('pub.alive') === false) return null;             // withdrawn or deleted
+    if (read('pub.coEdit') !== true) return null;             // 18.1 — the default is no
+    if (read('pub.level') !== 'geteilt') return null;         // co-edit exists at no other level
+    return 'geteilt';
+  }
+
+  /**
+   * ── 18.2's WRITE · the co-editor's commit, and the ONE door `interact.js` may use ──────────
+   *
+   * A foreign entry's `id` IS its entity key (`fbar:mem_mama…/uuid`), and every v1 mutation
+   * routes through `entities.js:barKey/noteKey`, which THROW on anything that is not a bare uuid.
+   * So `store.apply('moveBar', …)` is not merely wrong for a co-edit, it wedges the board — the
+   * throw escapes `onPointerUp` above the lines that clear the drag. This is the door that exists
+   * so that gesture has somewhere to go.
+   *
+   * ⚠ IT IS A FAMILY-SPACE WRITE AND NOTHING ELSE. There is no truth register to move: the entry
+   * is not mine, it lives on my board only as a projection of the family's `pub.*` registers, and
+   * a co-edit writes those registers directly. `_publishAndEnqueue` is deliberately NOT called —
+   * it derives publications from MY truth ops, and there is no truth op here.
+   *
+   * ⚠ IT IS ONE TRANSACTION, so 18.4 holds. The op goes through `_commit`, which is what puts it
+   * on the undo stack: my ⌘Z undoes MY co-edit, and a peer's co-edit of the same entry arrives
+   * through `applyRemote`, which touches neither stack. The two never mix.
+   *
+   * The level is not an argument. It is read from `familyCoEditLevelOf` — the authenticated fold
+   * — immediately above the call, and `coEditOp` → `projectCoEditPatch` → `sealOp` each re-check
+   * it. A `null` here is the honest "the family has not granted this", and the answer is `false`
+   * rather than a throw: 18.2's grant can be withdrawn by the owner between the pointer going
+   * down and coming up, and a withdrawn permission is a declined gesture, not a crash.
+   *
+   * @param {string} entityKey an `fnote:`/`fbar:` key naming somebody else
+   * @param {Object} changes   `{'pub.text': '…'}` / `{'pub.date': 'YYYY-MM-DD'}`
+   * @param {string} [label]   the undo label
+   * @returns {boolean} whether an op was appended
+   */
+  applyCoEdit(entityKey, changes, label) {
+    const level = this.familyCoEditLevelOf(entityKey);
+    if (level === null) return false;                    // not granted, or not foreign, or gone
+    const colon = entityKey.indexOf(':');
+    const slash = entityKey.indexOf('/');
+    const kind = entityKey.slice(0, colon);
+    const owner = entityKey.slice(colon + 1, slash);
+    const uuid = entityKey.slice(slash + 1);
+    const shadow = this._shadow();
+    const ctx = this._ctx();
+    let op;
+    try {
+      op = coEditOp(ctx, { kind, owner, uuid }, level, changes);
+    } catch (err) {
+      // The projection refused — a governing field, a non-scalar, an unknown field. That is a
+      // programmer error at this call site rather than externally-sourced input, but it must not
+      // reach `onPointerUp`: see the wedge above. Reported, and declined.
+      if (err && err.name === 'RedactionError') {
+        this._warn(`co-edit refused by the projection (${err.barrier ?? 'barrier1'}): ${err.message}`);
+        return false;
+      }
+      throw err;
+    }
+    if (op === null) return false;                       // nothing actually changed
+    this._commit(label ?? 'Familieneintrag bearbeitet', [op], shadow);
+    return true;
   }
 
   /**
@@ -3959,6 +4084,38 @@ class Store {
         this._warn(
           `${promoted.length} op(s) held for a missing device attestation are now authorised and `
           + 'have been applied.');
+      }
+    }
+
+    // ── 18.3's OWNER-SIDE HALF · the moderation is reconciled, not merely received ──────────
+    //
+    // ADR 004 §5's admin-unshare row: "the owner's client also sets its local `visibility` to
+    // `'privat'` in a follow-up txn so the two agree." Without it, 18.3's "it reverts" is true
+    // only until the owner next touches the entry — `derivePublication` reads the level from the
+    // `visibility` TRUTH register and `lastPublished` from the folded `pub.level`, and after a
+    // moderation those disagree, so the owner's very next keystroke re-publishes the whole
+    // Geteilt patch and SILENTLY UNDOES THE MODERATION. Measured as row U3-b.
+    //
+    // It runs HERE, after the fold and before `_project()`, because the disagreement it closes is
+    // created by the batch that just landed and the projection below is the first thing that
+    // would read it.
+    //
+    // ⚠ IT IS APPENDED, NOT COMMITTED, AND THAT IS 18.4. `_commit` would push an undo entry, so
+    // Mama's ⌘Z would "undo" Papa's moderation of her entry — an undo of something she never did.
+    // `adminUnshareFollowUp` is idempotent and sorted, so re-running it after a resurrect or a
+    // second pull emits nothing new.
+    //
+    // ⚠ IT NOTIFIES NOBODY. No marker, no warning, no „Papa hat deinen Eintrag entfernt" —
+    // Principle 9, and `visibility.js:NO_SNITCH_CONTRACT.noNotification`. The ops it returns carry
+    // exactly `{visibility:'privat'}` and there is no op kind that could carry a notice.
+    if (this._familySpaceId !== null && result.applied.length) {
+      try {
+        const follow = adminUnshareFollowUp(this._log.registers(), { ...this._ctx(), me: this._me });
+        for (const op of follow) this._log.append(op);
+      } catch (e) {
+        // Never let the reconciliation cost the batch that arrived. The disagreement it closes is
+        // cosmetic until the owner edits; a throw here would discard ops already admitted.
+        this._warn(`the admin-unshare reconciliation could not run (${e.name}: ${e.message})`);
       }
     }
 
