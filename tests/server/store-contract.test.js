@@ -14,12 +14,21 @@
 //     justification. There is no column a well-meaning future handler could put a note's text
 //     into, and adding one fails here rather than in a review nobody runs.
 //
-//  3. `prisma.js` IS SPECIFIED, NOT VERIFIED, AND SAYS SO. It cannot be executed on this
-//     machine. What is checked is that it implements the full interface surface, that it does
-//     not statically import a client that is not installed, and that every `U-` claim marked
-//     UNVERIFIED in its source is enumerated in its `UNVERIFIED_CLAIMS` export. The day a
-//     machine with Postgres exists, running STORE_CONTRACT_CASES against `prismaStore` settles
-//     every one of those rows at once — which is the whole reason the cases are data.
+//  3. `prisma.js` IS NOW EXECUTED — AGAINST A REAL POSTGRES, WHEN ONE IS NAMED. R-8.
+//     Set `LZP_CONTRACT_DATABASE_URL` to an EXPENDABLE, migrated database and §1b below runs
+//     the same STORE_CONTRACT_CASES against `prismaStore`, as a third witness. Without that
+//     variable the rows are a STATED SKIP and never a pass — the same discipline
+//     `.github/scripts/check-server-config.mjs` uses for L1/L2, and for the same reason: a
+//     suite that goes quiet when it cannot check something is how "verified" stops meaning
+//     anything. What runs unconditionally is still the shape check, the no-static-import check
+//     and the claim-ledger check.
+//
+//     MEASURED, 2026-09-03, against PostgreSQL 17.10 (Homebrew, aarch64-apple-darwin25.4.0),
+//     prisma + @prisma/client 6.19.3, on `connection_limit=1` — the string risk R3 mandates:
+//     **65 of 66 cases pass.** The first run was 31 of 66, and the three defects that run found
+//     are fixed in `prisma.js` (R8-TXCLIENT, R8-DEVSPACE, R8-BUMPREAD/R8-TZ). The one case that
+//     still cannot pass is C40, and it is a FIXTURE defect in a file this owner may not edit —
+//     see PRISMA_BLOCKED below, which states it rather than hiding it.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,7 +44,10 @@ import {
 } from '../../server/core/store-interface.js';
 import { memoryStore } from '../../server/adapters/memory.js';
 import { fileStore } from '../../server/adapters/file.js';
-import { prismaStore, UNVERIFIED_CLAIMS } from '../../server/adapters/prisma.js';
+import {
+  prismaStore, createPrismaClient, isSerializationFailure,
+  UNVERIFIED_CLAIMS, CLAIMS_STILL_UNVERIFIED, RESIDUAL_RISKS,
+} from '../../server/adapters/prisma.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..', '..');
@@ -76,6 +88,123 @@ for (const adapter of ADAPTERS) {
       await c.run({ makeStore: async () => adapter.make(clock), assert, clock });
     });
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1b. THE SAME CONTRACT, AGAINST A REAL POSTGRES — R-8
+//
+// WHY A SEPARATE VARIABLE AND NOT `DATABASE_URL`. This harness TRUNCATEs all ten tables before
+// every case. `DATABASE_URL` is the name the deployed relay reads, and `server/dev-server.mjs`,
+// the runbook and every deploy note use it — so honouring it here would mean that exporting the
+// production string and running `npm run test:server` erases a family's board. The variable is
+// therefore `LZP_CONTRACT_DATABASE_URL`, it must differ from `DATABASE_URL` if both are set, and
+// the preflight below refuses a database whose migration row is missing rather than creating
+// tables in whatever it was pointed at.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Cases that cannot pass against a real Postgres for a reason that is NOT a defect of the
+ * adapter, each with the exact remedy and the file that owns it. This map is the only permitted
+ * form of "expected failure" here, it is printed as a skip reason rather than swallowed, and a
+ * case listed in it that starts PASSING is itself a failure (see the guard test below) — so it
+ * cannot quietly outlive the defect it names.
+ */
+const PRISMA_BLOCKED = Object.freeze({
+  // EMPTY, and that is the measured state, not a default. C40 was the one entry: its
+  // `putInvite({ id: 'inv_other', spaceId: SP2 })` named a space nothing had created, `memory`
+  // and `file` accepted the orphan because they have no referential integrity, and PostgreSQL
+  // 17.10 raised `Invite_spaceId_fkey` and was right to. `server/core/store-interface.js` now
+  // creates SP2 first — the same two lines C11 and C22 already write — and the case is green on
+  // all three adapters. The guard below is what made this an event rather than a skip that
+  // outlived its reason: it went RED the moment the fixture was fixed.
+});
+
+const PG_URL = (process.env.LZP_CONTRACT_DATABASE_URL || '').trim();
+
+/** @returns {Promise<{ok:true, client:Object, truncate:() => Promise<void>} | {ok:false, why:string}>} */
+async function openContractDatabase() {
+  if (!PG_URL) {
+    return { ok: false, why:
+      'LZP_CONTRACT_DATABASE_URL is unset, so prisma.js is NOT executed by this run and none of '
+      + 'its behavioural claims are settled here. To settle them: create an expendable database, '
+      + '`cd server && npm ci && DATABASE_URL=<url> npx prisma migrate deploy && npx prisma generate`, '
+      + 'then re-run with LZP_CONTRACT_DATABASE_URL=<url>?connection_limit=1' };
+  }
+  if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim() === PG_URL) {
+    return { ok: false, why:
+      'LZP_CONTRACT_DATABASE_URL is the same string as DATABASE_URL. This harness TRUNCATEs every '
+      + 'table before every case; it will not do that to the database the relay is configured to '
+      + 'serve from. Point it at a separate, expendable database.' };
+  }
+  let client;
+  try {
+    client = await createPrismaClient({ url: PG_URL });
+  } catch (err) {
+    return { ok: false, why: `the Prisma client could not be built: ${err && err.message}` };
+  }
+  const TABLES = ['Space', 'Member', 'Device', 'Op', 'Epoch', 'KeyWrap', 'Invite', 'PairSession', 'Nonce', 'RateBucket'];
+  try {
+    // PREFLIGHT: the migration must already be applied. Refusing here rather than letting 66
+    // cases fail on "relation does not exist" is the difference between a diagnosis and a wall.
+    const applied = await client.$queryRawUnsafe(
+      'SELECT "migration_name" FROM "_prisma_migrations" WHERE "finished_at" IS NOT NULL');
+    if (!applied || applied.length === 0) throw new Error('no migration is recorded as applied');
+    await client.$executeRawUnsafe(`TRUNCATE ${TABLES.map((t) => `"${t}"`).join(', ')} CASCADE`);
+  } catch (err) {
+    return { ok: false, why:
+      `the database at LZP_CONTRACT_DATABASE_URL is not usable as a contract target: ${err && err.message}. `
+      + 'Run `DATABASE_URL=<url> npx prisma migrate deploy` from server/ first.' };
+  }
+  return {
+    ok: true,
+    client,
+    truncate: () => client.$executeRawUnsafe(`TRUNCATE ${TABLES.map((t) => `"${t}"`).join(', ')} CASCADE`),
+  };
+}
+
+const PG = await openContractDatabase();
+if (PG.ok) process.on('exit', () => { try { PG.client.$disconnect(); } catch { /* best effort */ } });
+
+if (PG.ok) {
+  for (const c of STORE_CONTRACT_CASES) {
+    const blocked = PRISMA_BLOCKED[c.id];
+    test(`prisma :: ${c.id} — ${c.title}`, { skip: blocked || false }, async () => {
+      const clock = fakeClock(0);
+      await PG.truncate();
+      await c.run({
+        // Every `makeStore` is a FRESH, EMPTY store, which for one shared database means an
+        // empty database — the same guarantee `file` gets from a fresh temp dir.
+        makeStore: async () => { await PG.truncate(); return prismaStore(PG.client, { now: clock.now }); },
+        assert,
+        clock,
+      });
+    });
+  }
+
+  test('prisma :: a case listed as BLOCKED must still be blocked', async () => {
+    // Otherwise the map outlives the defect and starts hiding a real regression behind a skip.
+    // The map is EMPTY today, so this row asserts the whole contract ran: 66 of 66 cases against
+    // a real cluster, none excused. A future entry re-arms the loop below automatically.
+    const ids = Object.keys(PRISMA_BLOCKED);
+    assert.equal(STORE_CONTRACT_CASES.filter((c) => !PRISMA_BLOCKED[c.id]).length,
+      STORE_CONTRACT_CASES.length - ids.length,
+      'the blocked map and the case list disagree about how many cases actually ran');
+    for (const id of ids) {
+      const c = STORE_CONTRACT_CASES.find((x) => x.id === id);
+      assert.ok(c, `${id} is listed as blocked but is not a contract case any more — delete the entry`);
+      const clock = fakeClock(0);
+      await PG.truncate();
+      let threw = false;
+      try {
+        await c.run({ makeStore: async () => { await PG.truncate(); return prismaStore(PG.client, { now: clock.now }); }, assert, clock });
+      } catch { threw = true; }
+      assert.ok(threw,
+        `${id} now PASSES against Postgres. The reason it was skipped has been fixed — delete it `
+        + `from PRISMA_BLOCKED so the row counts as the pass it is.`);
+    }
+  });
+} else {
+  test('prisma :: the contract against a real PostgreSQL', { skip: PG.why }, () => {});
 }
 
 test('the contract suite is not vacuous and covers the properties LZP-201 is gated on', () => {
@@ -252,7 +381,12 @@ test('schema: the cascade story 20.4 promises is declared on every relation into
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. prisma.js — SPECIFIED, NOT VERIFIED, AND HONEST ABOUT IT
+// 3. prisma.js — THE CLAIM LEDGER, AND THE PROPERTIES THAT HOLD WITH NO DATABASE
+//
+// These rows run on every machine, database or not. What changed with R-8 is that a ledger row
+// must now carry a WITNESS as well as a consequence: an entry with no `verifiedOn` is a claim
+// nobody has ever checked, and the suite says which ones those are instead of averaging them in
+// with the twenty-two that were.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const PRISMA_SRC = fs.readFileSync(path.join(REPO, 'server', 'adapters', 'prisma.js'), 'utf8');
@@ -294,6 +428,100 @@ test('prisma.js enumerates every claim this machine cannot check', () => {
   }
   const tags = UNVERIFIED_CLAIMS.map((c) => c.tag);
   assert.equal(new Set(tags).size, tags.length, 'duplicate claim tags');
+});
+
+test('prisma.js — every claim in the ledger names what settled it, or is listed as unsettled', () => {
+  // R-8. Before this pass every row was a promise; now every row is a promise plus a witness,
+  // and the two exports must agree about which is which. `verifiedOn` naming a contract case is
+  // the point: it means a reader can re-run the exact thing that settled the row rather than
+  // trusting the sentence.
+  for (const c of UNVERIFIED_CLAIMS) {
+    if (!c.verifiedOn) continue;
+    assert.ok(c.verifiedOn.length > 30,
+      `${c.tag} says it is verified without saying by what. A witness that cannot be re-run is ` +
+      `the same decoration "UNVERIFIED" without a consequence was.`);
+    assert.match(c.verifiedOn, /C\d|EXPLAIN|two[- ]client|static/i,
+      `${c.tag}'s witness must name the contract case, the query plan or the static read that ` +
+      `settled it, so the next reader can repeat it`);
+  }
+  assert.deepEqual(
+    CLAIMS_STILL_UNVERIFIED.map((c) => c.tag),
+    UNVERIFIED_CLAIMS.filter((c) => !c.verifiedOn).map((c) => c.tag),
+    'CLAIMS_STILL_UNVERIFIED must be exactly the rows with no witness');
+
+  // AND THE MEASURED STATE ITSELF, pinned. The deepEqual above is derived from the same array on
+  // both sides, so on its own it is nearly vacuous — a row that quietly loses its witness keeps
+  // it green. This is the row that goes red: as of 2026-09-03 every one of the twenty-two is
+  // settled, and a ledger entry that arrives or reverts without one has to say so out loud.
+  assert.deepEqual(UNVERIFIED_CLAIMS.filter((c) => !c.verifiedOn).map((c) => c.tag), [],
+    'a ledger row with no witness. Either run §1b against a real Postgres and record what settled '
+    + 'it, or — if a local cluster cannot settle it — move it to RESIDUAL_RISKS with a remedy and '
+    + 'an owner. What it may not be is a row nobody has to look at.');
+  assert.equal(UNVERIFIED_CLAIMS.length, 22,
+    'the ledger changed size. A new claim needs a witness (or a residual); a deleted one needs a '
+    + 'reason, because deleting a claim is how an unverified property becomes a believed one.');
+});
+
+test('prisma.js states what a local Postgres could NOT settle, and who owns each remainder', () => {
+  // The failure this guards is the one R-8 exists to prevent in the other direction: a suite
+  // that turns green and is then read as "the deploy works". Frankfurt is Prisma Postgres behind
+  // a pooler; the run was a local cluster. Saying so is part of the result.
+  assert.ok(RESIDUAL_RISKS.length >= 3, 'a clean run with no stated remainder is the claim R-8 refused to make');
+  for (const r of RESIDUAL_RISKS) {
+    assert.match(r.id, /^R8-R\d+$/, `bad residual id ${r.id}`);
+    assert.ok(r.subject && r.subject.length > 10, `${r.id} has no subject`);
+    assert.ok(r.risk && r.risk.length > 60, `${r.id} does not say what is unknown`);
+    assert.ok(r.breaks && r.breaks.length > 40, `${r.id} does not say what it costs`);
+    assert.ok(r.closedBy && r.closedBy.length > 40,
+      `${r.id} does not say what would close it. A residual with no remedy is a shrug.`);
+  }
+  const ids = RESIDUAL_RISKS.map((r) => r.id);
+  assert.equal(new Set(ids).size, ids.length, 'duplicate residual ids');
+});
+
+test('prisma.js classifies BOTH codes a lost Serializable transaction arrives as (R8-RETRY)', () => {
+  // The retry itself cannot be reached in one process — at connection_limit=1 a single client
+  // serialises against itself and never conflicts — so what is pinned here is the CLASSIFIER,
+  // against the exact error objects PostgreSQL 17.10 / Prisma 6.19.3 were measured producing.
+  // A grep of the source would not do: the strings also appear in the comment above it, so a
+  // mutant that changed the code and left the prose survived. These are the real shapes.
+  const p2034 = Object.assign(new Error('write conflict'), { code: 'P2034' });
+  const rawConflict = Object.assign(new Error('Raw query failed. Code: `40001`'),
+    { code: 'P2010', meta: { code: '40001', message: 'could not serialize access due to concurrent update' } });
+  const rawDeadlock = Object.assign(new Error('Raw query failed. Code: `40P01`'),
+    { code: 'P2010', meta: { code: '40P01', message: 'deadlock detected' } });
+
+  assert.equal(isSerializationFailure(p2034), true,
+    'an ORM call that loses a Serializable race surfaces as P2034 and must be retried, not thrown');
+  assert.equal(isSerializationFailure(rawConflict), true,
+    'a RAW query does NOT get P2034: it surfaces as P2010 with the SQLSTATE in meta.code. '
+    + '`reserveSeq` is the only raw write in the file and the one statement RULE 2 rests on, so a '
+    + 'classifier that knew only P2034 would retry everything except the place where a lost '
+    + "transaction costs a family its afternoon of edits — measured: it lost one instance's ops.");
+  assert.equal(isSerializationFailure(rawDeadlock), true, 'a detected deadlock is the same verdict: roll back and run it again');
+
+  // And it must NOT swallow a refusal as something to retry, or a 400 becomes six 400s.
+  assert.equal(isSerializationFailure(Object.assign(new Error('dup'), { code: 'P2002' })), false, 'a unique violation is an answer, not a retry');
+  assert.equal(isSerializationFailure(Object.assign(new Error('fk'), { code: 'P2003' })), false);
+  assert.equal(isSerializationFailure(Object.assign(new Error('raw'), { code: 'P2010', meta: { code: '23505' } })), false,
+    'a raw statement can fail for reasons that will fail again; only 40001 and 40P01 mean "run it again"');
+  assert.equal(isSerializationFailure(new Error('invite_used')), false, "a handler's own throw must pass straight through");
+  assert.equal(isSerializationFailure(null), false);
+});
+
+test('prisma.js never hands a JS Date to a raw query (R8-TZ)', () => {
+  // Prisma's query builder binds a Date correctly against a TIMESTAMP(3) column; `$queryRaw`
+  // binds it as timestamptz, which a Europe/Berlin session — the deploy's own region, decision
+  // D2 — shifts by an hour. Measured: `"expiresAt" > $1` answered false for a row three minutes
+  // in the future. This greps the raw templates only; ORM calls are unaffected and untouched.
+  const rawTemplates = [...PRISMA_SRC.matchAll(/\$queryRaw`([\s\S]*?)`/g)].map((m) => m[1]);
+  assert.ok(rawTemplates.length >= 2, `expected the raw statements to be found; saw ${rawTemplates.length}`);
+  for (const t of rawTemplates) {
+    assert.equal(/\$\{[^}]*new Date|\$\{\s*\w*[Dd]ate\s*\}/.test(t), false,
+      `a raw statement interpolates a Date:\n${t}\nUse naiveUtc(ms) and cast, or the comparison ` +
+      `is silently an hour out in Frankfurt.`);
+  }
+  assert.match(PRISMA_SRC, /naiveUtc/, 'the helper that spells a moment the way this schema stores one must exist');
 });
 
 test('prisma.js has no UNVERIFIED tag in its source that the claim list omits', () => {

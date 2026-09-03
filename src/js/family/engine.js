@@ -485,6 +485,22 @@ export async function armCircleIdentity(ports) {
  * So: a register that already holds ANY blob for my short is the write-once rule being satisfied,
  * and there is nothing to do. Only a genuinely absent claim is published, and only that path can
  * still fail loudly.
+ *
+ * ── F-SHELL-4 · WHY A GUARD OVER THE REGISTER IS NOT ENOUGH ON ITS OWN ───────────────────────
+ *
+ * The register is the right question and it is the whole of the answer only while the log can be
+ * remembered. A Mac whose log has been QUARANTINED writes no history at all (ADR 006 §9.5), so
+ * `registers()` cannot carry `dev.<short>` however many times this device has published it — and
+ * this guard therefore mints a fresh op, with the same blob, on every launch, each of which
+ * every peer refuses `writeOnce` for ever. That is F-SHELL-4, and its cause was
+ * `store.js#_persistOps` creating `ops.jsonl` before `checkpoint.json` existed; step ⓪b closes
+ * it, so the state below is now reachable only by a log that is genuinely refused.
+ *
+ * **IT STILL PUBLISHES, AND THAT IS DELIBERATE.** Skipping the claim here would be E6-1 from the
+ * far side — a Mac that never attests is a Mac whose every op every peer parks, permanently —
+ * and the one launch on which a quarantined Mac has genuinely never published is exactly the
+ * launch that must. So it publishes and SAYS what it has done, once, naming the cause: the next
+ * person to read a peer's `writeOnce` ledger is told a re-mint happened, not a forgery.
  */
 function publishMyAttestation(store, armed) {
   const short = armed.forStore.deviceShort;
@@ -492,8 +508,20 @@ function publishMyAttestation(store, armed) {
     const held = store.registers().get(`member:${armed.forStore.memberId}`)?.get(`dev.${short}`);
     if (held !== undefined && typeof held.value === 'string' && held.value !== '') return;
   } catch { /* no register view yet — fall through and let the constructor decide */ }
+  // Asked BEFORE the op is authored, because afterwards the answer is the same and the sentence
+  // would be about a fact the reader can no longer act on. `logIsWritable` is ADR 006 §9.5's own
+  // verdict, not a second copy of it.
+  const durable = typeof store.logIsWritable !== 'function' || store.logIsWritable();
   try {
-    store.apply('attestMyDevice', { deviceShort: short, blob: armed.myBlob });
+    const authored = store.apply('attestMyDevice', { deviceShort: short, blob: armed.myBlob });
+    if (authored && !durable) {
+      console.warn('[family] this Mac published its device attestation (ADR 001 §4.0) into a log '
+        + 'it cannot write — its history is quarantined or the session is read-only, so nothing '
+        + 'here will remember the claim and the next launch will publish it again. The blob is '
+        + 'unchanged and the device stays attested; what your family\'s Macs will report is a '
+        + '`writeOnce` refusal per extra copy (ADR 001 §4.0 admits only the first). This is a '
+        + 're-publication, not a forgery. Fix the quarantined log and it stops.');
+    }
   } catch (e) {
     console.warn('[family] this Mac could not publish its own device attestation (ADR 001 §4.0). '
       + 'Peers will park its ops as `unattestedDevice` until this is resolved:', e.message);

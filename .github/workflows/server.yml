@@ -20,18 +20,49 @@ name: Sync server
 # The `smoke` job listens for the deployment_status event that the Vercel
 # integration emits. It costs nothing until the integration is connected.
 
+# ── WHAT HAS TO BE IN THIS FILTER, AND WHY (R-9.1) ───────────────────────────
+#
+# A path filter is a statement about what the job READS. Anything the job reads
+# and the filter does not name is a file that can be changed without the job
+# that depends on it ever running — and the classic instance of that is the
+# guard's own test, which is exactly what was missing here: `tests/server/**`
+# was not in the list, so `npm run test:server` — 998 rows, the only thing
+# standing between a schema change and the database in Frankfurt — did not run
+# when the only thing that changed was the test itself. A weakened assertion, a
+# deleted file, a `t.skip` added to the readiness row: none of them triggered
+# anything. A schema change DID trigger it, so the recurrence guard worked while
+# its own guard had a blind spot.
+#
+# The list below is the whole read set of the `checks` job:
+#   server/**                            what is being guarded
+#   tests/server/**                      the guard itself
+#   tests/helpers/**                     `--import ./tests/helpers/dev-flag.mjs`
+#   package.json                         the `test:server` script and its glob
+#   .github/workflows/server.yml         this file
+#   .github/scripts/check-server-*.mjs   the pre-flight and the deploy window
+#
+# `.github/scripts/check-ci-triggers.mjs` derives that read set from the file
+# and fails if the filter stops covering it, on every push, in ci.yml.
 on:
   push:
     branches: [main]
     paths:
       - 'server/**'
+      - 'tests/server/**'
+      - 'tests/helpers/**'
+      - 'package.json'
       - '.github/workflows/server.yml'
       - '.github/scripts/check-server-config.mjs'
+      - '.github/scripts/check-deploy-window.mjs'
   pull_request:
     paths:
       - 'server/**'
+      - 'tests/server/**'
+      - 'tests/helpers/**'
+      - 'package.json'
       - '.github/workflows/server.yml'
       - '.github/scripts/check-server-config.mjs'
+      - '.github/scripts/check-deploy-window.mjs'
   deployment_status:
   workflow_dispatch:
 
@@ -78,15 +109,61 @@ jobs:
           fi
           echo "migrations are append-only in this change"
 
-      # E2/WP-7 owes tests/server. Until it exists this is a no-op that says so
-      # rather than a green check that means nothing.
+      # This was written while E2/WP-7 still owed `tests/server`, as
+      #
+      #     if [ -d tests/server ]; then
+      #       npm run test:server --if-present || node --test "tests/server/*.test.js"
+      #     else
+      #       echo "::notice title=No server suite yet::..."
+      #     fi
+      #
+      # Both halves are now wrong, and the second one is dangerous. The
+      # directory exists (998 rows), so the `else` is dead. And `A || B` runs B
+      # when A FAILS: a red `npm run test:server` fell through to a second run
+      # of the same files WITHOUT `--import ./tests/helpers/dev-flag.mjs`, and
+      # if that one passed, the step went green on a red suite. The flag arms
+      # the shadow-undo assertion (see the helper's own header, and attack
+      # ATT-96), so the tests it rescues are precisely the ones that only fail
+      # with the guard on. One command, no fallback, no `--if-present`.
       - name: Server suite
-        run: |
-          if [ -d tests/server ]; then
-            npm run test:server --if-present || node --test "tests/server/*.test.js"
-          else
-            echo "::notice title=No server suite yet::tests/server/ does not exist. WP-7 (LZP-201..207) owes it; this gate turns binding the moment the directory appears."
-          fi
+        run: npm run test:server
+
+  # ── Between the push and the deploy (R-9.2) ───────────────────────────────
+  #
+  # `server/vercel.json`'s `ignoreCommand` is
+  #
+  #     git diff --quiet HEAD^ HEAD -- .
+  #
+  # — ONE commit. GitHub triggers this workflow on the whole PUSH, so a push of
+  # three commits whose FIRST one changes `server/` and whose last one does not
+  # runs everything below and deploys nothing: Vercel looks at `HEAD^..HEAD`,
+  # sees no change under the root directory, and skips the build. The migration
+  # is merged, every check is green, and Frankfurt is still running the old
+  # schema. Nothing in this repository noticed.
+  #
+  # The one-line repair belongs in `server/vercel.json` and is NOT made here —
+  # that file has another owner (residual R-9.2 names it). What this job does is
+  # make the silent skip loud: it compares the push range with the single commit
+  # the ignoreCommand will look at, and goes red when they disagree. That is the
+  # difference between a deploy that did not happen and a deploy that nobody
+  # knows did not happen.
+  deploy-window:
+    name: Vercel will see this push
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: The last commit of the push carries the server change
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+        run: node .github/scripts/check-deploy-window.mjs
 
   # ── After the deploy ──────────────────────────────────────────────────────
   # Vercel's GitHub integration posts a deployment_status when a deployment

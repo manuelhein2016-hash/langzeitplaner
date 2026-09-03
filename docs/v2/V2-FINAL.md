@@ -1,65 +1,117 @@
 # LangzeitPlaner v2 — the final integration record
 
-**Date:** 2026-09-03 · **Tree:** `v1-characterization-suite`, integrating four parallel fix passes
-(`fix:attestation`, `fix:render-1007`, `fix:loose-ends`, `fix:readiness`) on top of `6268cbe`.
+**Date:** 2026-09-03 · **Tree:** `v1-characterization-suite`. Two passes are recorded here: the
+four-way integration onto `6268cbe` (§3 onward, kept as written), and **the closing pass onto
+`78016e8`**, which is §0, §1, §2 and the re-issued §8.
 
-This file answers one question the project had never answered with a yes:
+This file answers the question the whole product is for:
 
-> **Does a family work, in the app we ship, repeatedly?**
+> **Can a stranger get from an e-mail to a shared family board — and does nobody lose anything on
+> the way?**
 
-**Yes — 5 of 5.** The refusal ledger is not flat, and §8 says exactly why and what is left.
+**Yes, and nobody does.** The refusal ledger, which had never once been flat, is **0**.
+
+---
+
+## 0. What the closing pass changed, in four lines
+
+1. **R-1 is closed for every circle that exists today.** `unshare-owner (B)` was **BLOCKED 10 of
+   10**; it is now **completed 10 of 10** on the shipped binary. It was three defects wearing one
+   label, and the „DATA LOSS" headline on it was wrong — nothing was ever deleted. `FINDINGS.md`
+   §22a.
+2. **The refusal ledger is 0, in 10 consecutive runs.** It was 2 · 2 · 2 · 34 · 2.
+3. **„Rückmeldung senden" is wired**, end to end, on the real relay — bound by
+   `family/mount.js#bindFeedback`, a real 202 with a verified device signature, and the payload
+   searched for a Privat entry before it left.
+4. **The residual list is shorter and one entry is new**: `_absorbedChainOps` rebuilds only a
+   GENESIS-shaped admin link, and `transferAdmin` **is** shipped, so a circle whose seat has moved
+   is still exposed (R-1b). The previous issue said no circle transfers the seat. It was wrong.
 
 ---
 
 ## 1. The headline
 
-Five consecutive runs of `node scripts/shell-family-e2e.mjs`. Each run is **26 launches of the
+Ten consecutive runs of `node scripts/shell-family-e2e.mjs`. Each run is **27 launches of the
 shipped macOS binary** — five instances, each with its own bundle identifier, its own
 `~/Library/WebKit` store, its own WebCrypto master-key item and its own scratch disk — against a
-real relay (`server/dev-server.mjs`, the same `server/core/router.js` and the same 23 handlers
+real relay (`server/dev-server.mjs`, the same `server/core/router.js` and the same 24 handlers
 that would run in Frankfurt). Papa creates a Kreis, Mama, Oma and Opa join, entries cross both
-ways, the founder leaves, a co-signed removal rotates the epoch.
+ways, the admin unshares one of Mama's, a report goes to the relay, the founder leaves, a
+co-signed removal rotates the epoch.
 
-| Run | Phases failed | Founder received a joiner's entry | The Geteilt entry crossed to | Refusal ledger |
-|---|---|---|---|---|
-| 1 | **0 of 26** | **YES** | B **and** C | 2 |
-| 2 | **0 of 26** | **YES** | B **and** C | 2 |
-| 3 | **0 of 26** | **YES** | B **and** C | 2 |
-| 4 | **0 of 26** | **YES** | B **and** C | 34 |
-| 5 | **0 of 26** | **YES** | B **and** C | 2 |
+| Run | Phases failed | Founder received a joiner's entry | Crossed to | `unshare-owner (B)` | Refusal ledger |
+|---|---|---|---|---|---|
+| 1 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 2 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 3 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 4 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 5 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 6 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 7 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 8 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 9 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
+| 10 | **0 of 27** | **YES** | B **and** C | **completed** | **0** |
 
-**Before this pass** (`docs/v2/SHELL-VERIFICATION.md` §9): the founder received a joiner's entry
-in **0 of 5**, the Geteilt entry crossed in 4 of 5 *to one peer*, and the ledger read
-**0 → 6 → 13 → 25** as the founder relaunched.
+80 rows per run, 800 in the battery, none red.
 
-**The bar was "5 of 5 with the ledger flat at zero". The first half is met outright. The second
-is not**, and §8's F-SHELL-3 and F-SHELL-4 are the whole of the difference — neither is an
-attestation defect and neither blocks a single phase. See §3.
+**Before this pass** (this file's previous issue): 26 launches, `unshare-owner (B)` **BLOCKED in
+every run, 10 of 10**, and the ledger **2 · 2 · 2 · 34 · 2**. **Before *that***
+(`SHELL-VERIFICATION.md` §9): the founder received a joiner's entry in **0 of 5** and the ledger
+read 0 → 6 → 13 → 25 as the founder relaunched.
+
+**The bar was „5 of 5 with the ledger flat at zero". Both halves are now met, twice over.**
+
+The 27th launch is new: a `feedback` phase on Mama's Mac. It asserts that the shipped app — not
+the test — bound the „Rückmeldung senden" sender, builds a report off the live board, searches
+the wire body for the Privat entry that is on that board, and posts it over the bridge. The relay
+answers **202** with `proves: „two reports carrying this same self-minted public key were signed
+by the same private key"`. 10 of 10.
+
+**And one number that decides a finding.** The driver now prints, from the stranded phase:
+
+```
+#    eligibleCosigners=0 · rosterCache=4 · alive on the relay=2
+```
+
+identically in all ten runs. `SHELL-VERIFICATION.md` §5 recorded `eligibleCosigners → 2`, which no
+log state can produce with a roster present — so **F-SHELL-2 was a stale roster, not a missing
+intersection**, and it does not reproduce. `FINDINGS.md` §22c.
 
 ---
 
 ## 2. Suites — measured, against the baselines
 
-| Suite | Baseline (`6268cbe`) | Now | Δ |
+| Suite | Baseline (`78016e8`) | Now | Δ |
 |---|---|---|---|
-| `npm test` (tier 1) | 2185 | **2216 / 0** | +31 `createjoin.test.js` |
+| `npm test` (tier 1) | 2216 | **2229 / 0** | +12 `cosigners.test.js`, +1 `headless-shell.test.js` |
 | `test:property` | 101 | **101 / 0** | — |
-| `test:attack` | 970 | **970 / 0** | — |
-| `test:server` | 944 | **998 / 0** | +54 `deploy-readiness.test.js` |
-| `test:fleet` | 398 | **423 / 0** | +20 `e11-attest §1–§4`, +5 `§5` |
-| `test:dom` (54 files) | 850 pass / 3 fail | **902 pass / 3 fail** | +52 |
+| `test:attack` | 970 | **970 / 0** | — (two rows inverted, none added) |
+| `test:server` | 998 | **1002 / 0** | +4 static rows; **1069 / 0 / 0 skip** with `LZP_CONTRACT_DATABASE_URL` set |
+| `test:fleet` | 423 | **435 / 0** | +11 `e11-attest §5f–§5i`, +8 `e12-unshare.test.js` |
+| `test:dom` | 867 pass / 3 fail (54 files) | **875 pass / 3 fail** (55 files) | +`unshare-owner.dom.js`, +§E1c |
 
-**5 610 green rows, 3 red.** The three reds are the three named residuals and nothing else:
-`§A4` (the 9 px ink floor — a PO ruling), `§E1` (the 60 fps frame) and `§E3` (the saturated
-poster — a spec threshold error). The tier-2 run's own isolation guard is green: the user's real
-board at `~/Library/Application Support/LangzeitPlaner` was untouched by all 54 files.
+**The three reds are the three named residuals and nothing else:** `§A4` (the 9 px ink floor — a
+PO ruling), `§E1` (`findWorst` straddling the 60 fps frame) and `§E3` (the saturated poster — a
+spec threshold error). The tier-2 run's own isolation guard is green: the user's real board at
+`~/Library/Application Support/LangzeitPlaner` was untouched.
+
+**A correction to this file's own previous issue.** §2 claimed `test:dom` **902 pass / 3 fail over
+54 files** at `78016e8`. The `# pass` lines in that run sum to **867**; 902 is the count of
+top-level `ok` lines, which double-counts a suite and its rows in the files that use `describe`.
+Both numbers are quoted above from the same convention (`# pass`), so the delta is a delta.
 
 Beyond the six suites, run in this pass:
 
-- `node scripts/shell-ssrf.mjs` — **29 launches of the shipped `.app`, 38 rows, 0 failed**,
-  0 requests carrying a cookie.
-- `node .github/scripts/check-server-config.mjs` — **39 passed · 0 failed · 2 stated skips.**
-- `node scripts/mom-test-probe.mjs` — **35 rows · 29 pass · 2 note · 4 FAIL** (§8, R-7).
+- `node scripts/mom-test-probe.mjs` — **35 rows · 33 pass · 2 note · 0 FAIL**, exit 0. It was
+  29 · 2 · 4.
+- `node .github/scripts/check-server-config.mjs --deep` (with `DATABASE_URL` and
+  `SHADOW_DATABASE_URL` against a live cluster) — **41 passed · 0 failed · 0 not checked.** L1 and
+  L2 pass for the first time; L2 reports *no drift, the migration set reproduces `schema.prisma`
+  exactly*. The shallow run is **39 · 0 · 2 stated skips**, unchanged.
+- `node .github/scripts/check-deploy-window.mjs` — exit 0, and it now reads the window out of
+  `server/vercel.json` rather than assuming it.
+- `check-ci-triggers`, `check-email-copy`, `check-release-config`, `check-dmg-geometry` — all
+  exit 0.
 
 ---
 
@@ -150,6 +202,21 @@ explicitly not withdrawals — so the cell is visible with or without a verifier
 reduced the new accessor to the old lookup **killed no row**. The change was reverted rather than
 shipped, and §5e is a characterization row that says so in the file.
 
+**And the thread this section told the next reader to pull was itself wrong** — corrected here
+rather than left to cost them a day. It said the failing run's first attestation *"carried `seq:
+null` and never reached the relay at all"*. A line's `seq` is written once at append time; the
+relay's ack rides in `checkpoint().seqs` and is re-attached by `load()`. Measured on a kept
+scratch dir from a **healthy** run: the line on disk read `seq: null` and the loaded log read
+`seq: 4`. **`seq` in `ops.jsonl` is evidence of nothing.**
+
+The real cause was found and F-SHELL-4 is closed: `_persistOps` appended before it checkpointed,
+so a launch that ended between the two left a bare `ops.jsonl` with no `checkpoint.json`;
+`adoptable()` refuses exactly that (`no-checkpoint`) and — because `storage.js#quarantineLogAside`
+has no native command — the refusal is **permanent** on a Mac. From then on that Mac writes no
+history, `registers()` can never carry `member:<me> → dev.<short>`, and `publishMyAttestation`
+mints a fresh op for the same device on every launch. Step ⓪b writes the header before the first
+line can exist. See `FINDINGS.md` and `tests/fleet/e11-attest.test.js` §5f–§5i.
+
 ---
 
 ## 4. LZP-1007 — the incremental render
@@ -205,12 +272,21 @@ family**, and is included in every cell above rather than subtracted.
 window (`--test` is `isHeadless` by design; the browser pane reports `document.hidden`), so rAF
 is throttled in both. Every number above is main-thread work.
 
+**⚠ THE `find` ROW OF THAT TABLE IS SUPERSEDED.** `find.js` was rewritten in the closing pass
+against a phase-by-phase measurement — of 21.4 ms, 16.5 ms was one line, the first geometry read
+after the marking, paying the style recalculation the marking had made necessary — and the marking
+was doing roughly twice the work it needed to. Class writes per worst-case keystroke are **840 →
+516**. Measured now, same rig, seven isolated runs: **`findWorst` 15.4 – 17.0 ms** (was 22.3 –
+23.4) and **`findKeystroke` 5.9 – 6.5 ms** (was 9.5 – 9.8). It straddles the frame and the row was
+not inverted; §8's **R-5b** carries where the last ~6 ms is and why moving it is a PO call.
+`memberToggle` is unchanged.
+
 ---
 
 ## 5. The v1 oracle did not move — checked per file
 
 Not a total. Every row of the v1 characterization suite (the 11 files added at `328c683`) was run
-at `6268cbe` in a clean `git archive` tree and in the working tree, and the ordered lists of
+at **`78016e8`** in a clean `git archive` tree and in the working tree, and the ordered lists of
 `ok` / `not ok` lines were compared **file by file, including nested rows**.
 
 | File | Rows | Red | Verdict |
@@ -227,32 +303,65 @@ at `6268cbe` in a clean `git archive` tree and in the working tree, and the orde
 | `tier2/interaction.dom.js` | 32 | 0 | **identical** |
 | `tier2/shell-bridge.dom.js` | 16 | 0 | **identical** |
 
-**626 rows. Not one changed.** The tier-2 half was re-checked from the full 54-file run after
-`store.js` changed, and `store-persistence.test.js` — the oracle file that exercises the code
-this pass edited — was re-run after every edit. `_absorbedAttestOps` returns `[]` before looking
-at anything when there is no family space, which is what keeps a v1 board out of it entirely.
+**626 rows (515 tier-1 + 111 tier-2). Not one changed.**
+
+This pass edited `store.js` twice — `_absorbedChainOps()` and `withoutForeignEntries()` — and
+`store-persistence.test.js` is the oracle file that exercises exactly that code. Both new
+functions return before looking at anything when there is no family space (`_familySpaceId ===
+null` for the first, nothing carrying `isForeign` or an `f…:` entity key for the second), which is
+what keeps a v1 board out of them entirely. `shell-macos/main.swift` was edited too, and
+`shell-bridge.dom.js` — the oracle file that runs inside it — is byte-identical.
 
 ---
 
-## 6. The standing bar — the redaction boundary, a seventh round
+## 6. The standing bar — the redaction boundary, an eighth round
 
-Zero bytes of a Privat entry has now held seven rounds.
+Zero bytes of a Privat entry has now held eight rounds — and this pass moved code that is
+**inside** that boundary twice, which is exactly where it could have broken.
 
 | Suite | Rows |
 |---|--:|
-| `attack/e7-leak-downgrade` · `e7-leak-observer` · `e7-leak-routes` · `redaction-invariants` | — |
-| `fleet/e6-attack-privat` · `e6-gate-privat` · `round10-e6-gate` | — |
-| `tier1/feedback` · `headless-shell` · `no-reconstruction` · `visibility` · `network-scope` | — |
-| **combined** | **302 / 302, 0 failed, 0 skipped** |
-| `tier2/feedback.dom.js` + `tier2/shell-family-e2e.dom.js` | **37 / 37** |
-| `scripts/shell-ssrf.mjs` — the shipped `.app`, 29 hostile origins | **38 / 38**, 0 cookies |
+| `attack/e7-leak-downgrade` · `e7-leak-observer` · `e7-leak-routes` · `redaction-invariants` + `fleet/e6-attack-privat` · `e6-gate-privat` · `round10-e6-gate` + `tier1/feedback` · `headless-shell` · `no-reconstruction` · `visibility` · `network-scope` | **303 / 303**, 0 failed, 0 skipped |
+| `tier2/feedback.dom.js` 20 · `tier2/datenschutz.dom.js` 19 · `tier2/unshare-owner.dom.js` 7 | **46 / 46** |
+| `scripts/shell-ssrf.mjs` — the shipped `.app`, 29 hostile origins | **29 launches, 38 rows, 0 failed**, 0 requests carrying a cookie |
 
-An attestation change moves *who is admitted*, which is exactly where this could break. It did
-not.
+**Why it was at risk twice this time, not once:**
+
+1. **The unshare path is inside the boundary.** `_absorbedChainOps` changes *who is admitted* —
+   an admin's `pub.set` on somebody else's entity now lands where it used to be refused. The two
+   rows that matter are in `tests/fleet/e12-unshare.test.js` §4: the same reconstruction does
+   **not** let a non-admin retract, and an **empty** chain refuses everybody, including a
+   non-admin. That second one is a security property of `adminAtKey`'s `null`, and the mutant
+   that reads it as „whoever asked" kills three rows in each of the two new files.
+2. **`withoutForeignEntries` removes another member's entry from the spine.** The direction of
+   that change matters: it *stops* a foreign entry being re-authored into the viewer's own log at
+   `visibility: 'privat'`, which is content flowing the wrong way across the boundary. It never
+   adds anything to a projection.
+3. **LZP-1009 gives a solo Mac an outbound path.** The one payload that leaves a Mac which is not
+   syncing anything is now searched, in the shell, on a board that carries the needle: the phase
+   seeds „Scheidungsanwältin Dr. Kübler 14:30" onto Mama's real board, renders it, and asserts
+   the wire body contains neither that string, nor its surname, nor even the date it sits on —
+   **before** the report is sent. 10 of 10 runs.
 
 ---
 
 ## 7. The join path, and the readiness check
+
+**The Mom test is green.** `node scripts/mom-test-probe.mjs` reads **35 rows · 33 pass · 2 note ·
+0 FAIL**, exit 0; it was 29 · 2 · 4, and all four FAILs were one thing — the shipped invitation
+carried no relay address at all, so `createjoin.js#readPastedOrigin` had nothing to find (it
+rejects any URL with a path, and the only URL in the mail was the Releases fallback) and
+`submitJoin` dead-ended. The four files now carry a `SERVERADRESSE` / `SERVER ADDRESS` heading
+with the origin **alone on its own line or cell**, unpunctuated, exactly as the probe's own §M6
+rule publishes it. The two remaining `note` rows are H13 and H14 — a code one character short, and
+a `U` typed for a `V` — and both are honest refusals that name the shortfall rather than guessing
+which character was spurious.
+
+**The readiness check now passes L1 and L2 for the first time.** `check-server-config.mjs --deep`,
+with `DATABASE_URL` and `SHADOW_DATABASE_URL` against a live cluster: **41 passed · 0 failed · 0
+not checked**, and L2 reports *no drift — the migration set reproduces `schema.prisma` exactly*.
+The shallow run is unchanged at 39 · 0 · 2 stated skips, and the skips still say what they are.
+
 
 **„Mail-Anbieter" is no longer a valid code.** Measured against the shipped parser in this tree:
 
@@ -282,62 +391,29 @@ indexes, 6 FKs, verified against a live PostgreSQL 17.10 cluster).
 
 ## 8. THE RESIDUAL LIST — what a person would be shipping
 
-Ordered by what it costs the human, not by how hard it is.
+Ordered by what it costs the human, not by how hard it is. **Re-issued 2026-09-03** after the
+closing pass: R-1 through R-5, R-7's readiness half, R-8, R-9 and R-10 are closed and the
+paragraphs that carried them are replaced by what is actually left. Nothing here is a plan; every
+line is a measurement or a decision.
 
-### R-1 · F-SHELL-3 — the owner loses her own entry on „→ Privat" ⛔ DATA LOSS
-`unshare-owner (B)` is **BLOCKED in every run, before and after this pass** — 10 of 10 measured.
-The admin takes a shared entry out of the circle; on the *owner's* Mac it arrives as a **deletion**
-instead of a reversion to Privat, and her entry is gone. Tier-2 row §10. The single `notOwner` in
-the residual refusal ledger is this op, refused on her Mac and then remembered by L-1 on every
-later launch — which is the whole of the "2" in four of five acceptance runs.
-**Owner: `src/js/family/sharing.js`, the unshare path.** This is the one residual that loses data.
+### R-1b · A TRANSFERRED admin seat is still not rebuilt after compaction ⚠ OPEN
+`store.js#_absorbedChainOps` closed R-1 for a circle whose admin seat has never moved: it rebuilds
+ONE **genesis-shaped** `space.set{admin, adminPrev:null}` link (`cell.author === cell.value`, ADR
+001 §4.1's own root test) out of the register cell the checkpoint kept. After `transferAdmin` the
+head link carries `adminPrev: <opId>` and `act !== admin`, and `resolveChain` needs the
+predecessor links to accept it — which one register cell does not retain. So a circle whose seat
+has moved still loses the admin's retraction once the owner's Mac has compacted.
 
-### R-2 · F-SHELL-4 — a second, identical self-attestation, and a permanent refusal ⚠ NEW, OPEN
-Measured in the shipped app: Mama published her own device attestation **twice**, in two
-consecutive launches, for a register ADR 001 §4.0 makes write-once — same device, same 545-byte
-blob, 3.8 s apart (`KHtu…` during her join, `luxB…` on her next launch). Both are admissible on
-their face, so §4.0 does what it must: every Mac keeps the minimal claim under `≺` and refuses the
-other `writeOnce`, **terminally**. The circle then splits on the record — Mama's log names `KHtu…`
-as the writer of her register, Papa's, Oma's and Opa's name `luxB…`.
+**The previous issue of this list said „no shipped circle transfers the seat yet". That was
+wrong:** `family/adminpanel.js:654` ships `transferAdmin` and `family/leavedelete.js:1433` calls
+it on the path where a founder hands the seat over before leaving.
 
-**Nothing breaks.** The two blobs are byte-identical, the device stays attested either way, and
-all 26 phases pass. What remains is a permanent, misleading refusal on every peer, on every
-launch. It is the whole of the difference between the measured ledger and zero: 2 · 2 · 2 · **34**
-· 2 over five runs.
-
-**The cause is not yet named.** The `store.registers()` hypothesis was tested and disproven (§3).
-The thread to pull next: in the failing run Mama's `KHtu…` carried `seq: null` and **never
-reached the relay at all**, and her final `ops.jsonl` held only two of her own ops. Characterized
-by `e11-attest.test.js` §5e, which pins the guard so the next owner starts from a tested one.
-**Owner: `src/js/family/engine.js#publishMyAttestation` + `store.js#_persistOps`.**
-
-### R-3 · The Mom test is blocked by a missing line in an e-mail ⛔ SHE CANNOT JOIN
-`node scripts/mom-test-probe.mjs` reads **35 rows · 29 pass · 2 note · 4 FAIL**, and all four
-FAILs are one thing: **the shipped invitation carries no relay address at all.** Its only URL is
-the Releases fallback. The parser now correctly refuses to scavenge it (R-7 below) and
-`pasteOriginSentence` says so truthfully — but `submitJoin` dead-ends and she cannot join.
-The fix is a `Server: <origin>` line in `docs/v2/email/invitation.{de,en}.{txt,html}`; the probe's
-§M6 already publishes the rule for how to write it (own line, or `<angle brackets>`, never ending
-a German sentence). **Owner: LZP-108.** The probe goes green the moment that line lands.
-
-*(Deliberate baseline change, do not revert: H13 „one character too many" moved `ok` → `note`. It
-was green only by truncating 13 characters to 12 — a guess about which one was spurious. It is now
-an honest refusal naming the line to copy, at zero relay round trips.)*
-
-### R-4 · F-SHELL-2 — a founder-less circle offers a removed member as a co-signer
-`eligibleCosigners` reads the folded member list and returned **2** in a two-member circle where
-one had been removed. The assigned fix (publishing `member.set{me}{_alive:false}` before
-`port.leaveSpace()`) was **refuted by measurement**: `server/core/handlers/lifecycle.js:229`
-deletes every op authored by the leaver's devices in the same transaction, so that op is doomed —
-already pinned by `tests/server/lifecycle.test.js` on both adapters. The real fix is two lines:
-give `adminpanel.js` the roster port `mount.js#refreshRoster` already builds, and intersect the
-log's member list with the roster's `removedAt`. **Owner: `family/adminpanel.js` + `family/mount.js`.**
-
-### R-5 · §E1 — two operations are over the 60 fps frame
-`memberToggle` **19.4 – 20.5 ms** (1.2 frames) and `findWorst` **22.3 – 23.4 ms** (1.3 – 1.4
-frames), five isolated runs. `renderBoard` is closed at 3.3 – 3.5 ms. The toggle cannot reach
-16.7 ms without changing what the board shows (§4); `findWorst` is `find.js` and was already red
-before LZP-1007. **Owners: `find.js`, and a product decision on the toggle.**
+Rebuilding it anyway with `adminPrev: null` would present a transferred seat as a genesis root —
+the rootless assertion `core/ops.js#transferAdmin` refuses to mint. `tests/fleet/e12-unshare.test.js`
+**§8** performs a real transfer through the shipped mutation and then asserts the reconstruction
+stays **silent**, so the wrong repair cannot land quietly. **The right one:** keep `space.set`
+chain links (and `member.set{dev.*}`) out of compaction in `store.js#_persistOps` — bounded at one
+op per transfer and per (member, device). **Owner: `src/js/store.js#_persistOps`.**
 
 ### R-6 · §A4 and §E3 — the two reds that are not code defects
 - **§A4** — the 9 px ink floor. A **PO ruling**: it may not be closed by editing `palette.js`,
@@ -345,53 +421,96 @@ before LZP-1007. **Owners: `find.js`, and a product decision on the toggle.**
 - **§E3** — the row asks for 75 % where **48 % is the mathematical ceiling for any ordering**. A
   spec threshold error, not a code defect. Do not silently change the number.
 
-### R-7 · The join path is fixed but has never crossed the real bridge
-The four paste defects are closed and pinned by 42 rows (`tier1/createjoin.test.js` 31 incl. a
-20 000-paste generator that found E-1d, `tier2/join-paste.dom.js` 11 in the real WKWebView). But
-**no join has ever run over the `sync_request` bridge**: the tier-2 relay verifies
-`SHA-256(proof) === verifier` over real WebCrypto and is in-process.
-`SHELL-VERIFICATION.md` §10's conditional-story list is unchanged.
+### R-5b · §E1 — `findWorst` straddles the 60 fps frame, and the last 6 ms is a look
+`find.js` was rewritten against a measurement: of 21.4 ms, 16.5 ms was one line — the first
+geometry read after the marking, paying the style recalculation the marking had made necessary.
+Class writes per worst-case keystroke are **840 → 516**; `findWorst` is now **15.4–17.0 ms**
+(from 22.3–23.4) and `findKeystroke` **5.9–6.5** (from 8.8–9.8). It straddles 16.7 ms: green in
+most isolated runs, red in some, and **the row was not inverted**.
 
-### R-8 · The database is verified; the adapter over it is not
-The migration was applied to a real PostgreSQL 17.10 cluster and every constraint the ADRs lean on
-was exercised with live SQL. **`server/adapters/prisma.js` has never run against it** — that needs
-the generated client and §2.5's `store-contract.test.js`. The check reports L1 and L2 as **stated
-skips**, never as passes. **Owed.**
+The remaining ~13 ms is the browser recalculating style for the ~516 board nodes whose appearance
+genuinely changes when the hit set moves, and the marking is already down to the difference
+between two hit sets. Measured hand-off: neutralising the three rules find writes — `app.css:948`
+`.note.hit`'s `border-bottom`, `app.css:942-945` `body.finding … :not(.hit){opacity:.3}`,
+`app.css:949-950` `.bar/.bar-label.hit`'s box-shadow — **together** takes the same measurement
+from 14.8 to **8.6 ms**, while removing any one of them buys ~0.4 ms. That is a change to what
+find looks like, in a file the tier-1 oracle pins. **A PO call, not a code fix.**
 
-### R-9 · Three CI and deploy gaps, each in someone else's file
-1. `server.yml`'s path filter does not include `tests/server/**`, so the test that guards the
-   readiness check is not triggered by edits to itself. A schema change *does* trigger it, so the
-   recurrence guard works; its own guard has a blind spot.
-2. `vercel.json`'s `ignoreCommand` is `git diff --quiet HEAD^ HEAD -- .` — single-commit. A push
-   whose *last* commit misses `server/` skips the deploy even when an earlier commit in the same
-   push changed it. No row checks this.
-3. `scripts/shell-family-e2e.mjs` still prints `BLOCKED (finding F-SHELL-1)` for any attempted
-   phase that fails. With F-SHELL-1 closed the label is stale; the only attempted phase left is
-   F-SHELL-3.
+### R-7b · The join path has still never crossed the real bridge
+Unchanged and still true. The four paste defects are closed and pinned by 42 rows, the Mom-test
+probe is green, and the e-mail now carries a relay address — but **no join has ever run over the
+`sync_request` bridge**: the tier-2 relay verifies `SHA-256(proof) === verifier` over real
+WebCrypto and is in-process. `SHELL-VERIFICATION.md` §10's conditional-story list is unchanged.
 
-### R-10 · Two tickets built but not wired, and one never built
-- **LZP-1009 „Rückmeldung senden"** — the eight `src/js/feedback/` modules exist, but
-  `family/mount.js` never calls `setFeedbackPort(...)`, so `canSend()` is false and „Senden" is
-  disabled with the reason on screen. And there is **no production sink**: Vercel answers 501,
-  honestly.
-- **`docs/v2/traceability.json`'s E10 verdicts are stale** — LZP-1001 and LZP-1009 are recorded
-  `OWED`, but `settings.js:534 DATENSCHUTZ` and `src/js/feedback/` are both in the tree. Corrected
-  in this pass's `verification.final` block.
+### R-8b · The adapter has met a local cluster, not Frankfurt's pooler ⚠ THE ONE THAT MATTERS
+`server/adapters/prisma.js` now runs against a real PostgreSQL 17.10 — **66 of 66 contract cases,
+1069 rows, 0 fail, 0 skip** — and four defects were found by doing it, one of which (no retry for
+a `Serializable` abort) no single-process test could ever have found. But Frankfurt is Prisma
+Postgres **behind the platform pooler**, and a transaction-mode pooler can refuse an interactive
+`$transaction` or silently downgrade `Serializable`. Every atomicity guarantee rests on getting
+one. **Run `RUNBOOK.md` §2.5.1 against the deployed database before it holds a family.**
 
-### R-11 · Three diagnostic bugs that will mislead the next reader
-1. `tests/tier2/shell-family-e2e.dom.js:466-471` calls `Object.keys()` on
-   `membersui.membersRegisters()`, which returns a **Map**, so `REGKEYS`/`DEVREGS`/`MEMREGS` print
-   `[]` unconditionally. They are **not** evidence of an empty register map.
-2. The same file's line 459 reads `m.attestation` on the member row, but ADR 003 §3.6 puts the
-   blob on `m.devices[].attestation` — so `att=` is always `false`.
-3. `assert.doesNotThrow(() => validateOp(op))` is **vacuous**: `core/ops.js#validateOp` returns
-   its verdict as `{ok:true}` or a rejection object and never throws. The first cut of §5b made
-   exactly that mistake and survived the mutant that should have killed it.
+Beside it: after 5 retries the adapter re-throws and nothing above maps `P2034`/`P2010` to a
+status code, so a still-conflicting transaction becomes an undefined 500 (**R8-R2**, one line in
+`server/core/router.js` + `errors.js`: answer 503 with `retryAfter`). And
+`server/adapters/vercel.js` is still unexecuted (**R8-R4**).
+
+### R-9b · Two deployment lines nobody can write from here
+1. **A production `feedbackSink`.** „Rückmeldung senden" is bound in the app
+   (`family/mount.js#bindFeedback`) and works end to end against `server/dev-server.mjs` — a real
+   202, a verified device signature, the payload searched for a Privat entry first. But
+   `server/adapters/vercel.js#buildCtx` binds no sink, so the **deployed** relay answers **501
+   not_implemented** — honestly, rather than accepting a report and dropping it. It needs a
+   destination, which is a PO decision.
+2. **The real relay origin, substituted into the four invitation files.** They carry the literal
+   `https://lzp-sync-po.vercel.app` — the project's own placeholder name, and **no such app
+   exists**; a `*.vercel.app` name is claimable by anyone until the PO claims it. It is a literal
+   and not a `{{…}}` placeholder because the probe's `FILL` substitutes only four keys and row
+   `M2` asserts the parsed origin equals that exact string. Both are now lines in
+   `RELEASE-CHECKLIST.md` §A, with the `sed`.
+
+**And one thing that address changed, which the PO should be told rather than discover:** before
+it, the e-mail alone was not enough to join — the reader had to learn the relay address elsewhere.
+Now it is. That is inside the accepted model (ADR 002 §8.4 and §5's residual-risk paragraph
+already say whoever reads the mail within 7 days can consume the invite and become a member, with
+the member list 15.4 and epoch-rotating removal 20.2 as the controls), and „what they cannot do is
+read anything from the email alone" is unchanged.
+
+### R-10b · `storage.js#quarantineLogAside` still has no native command
+`_persistOps` step ⓪b stops a Mac **manufacturing** a permanent quarantine — the F-SHELL-4 cause —
+but it does not make a genuine one recoverable. `quarantine_logs` is named in the warning and
+implemented in neither `src-tauri/src/lib.rs` nor `shell-macos/main.swift`. A Mac that acquires a
+refused log still writes no history for ever, and `tests/fleet/e11-attest.test.js` §5i pins that
+state and what it costs.
+
+### R-11b · Two diagnostics that are still wrong, in a file nobody owned this round
+`tests/tier2/shell-family-e2e.dom.js:466-471` calls `Object.keys()` on a **Map**, so
+`REGKEYS`/`DEVREGS`/`MEMREGS` print `[]` unconditionally and are not evidence of an empty register
+map; and line 459 reads `m.attestation` where ADR 003 §3.6 puts the blob on
+`m.devices[].attestation`, so `att=` is always `false`. Neither is load-bearing and both will cost
+the next reader an hour.
+
+Also in that file: **§3 does not await the join it starts.** `waitFor(() => cj.familyCircle())`
+returns after `rememberCircle`, i.e. *before* `adoptCircleIntoLog`, so the phase can exit
+mid-persist. That timing is what made F-SHELL-4 reproducible; step ⓪b makes it harmless, but the
+row measures less than it reads as.
 
 ### R-12 · One flake seen twice and not reproduced since
 `tests/tier1/createjoin.test.js` §2d failed twice in an unmodified copy of this tree earlier in
 the session — `i=18397 "join\tdein\tcode" → J01N-DE1N-C0DE` — and has passed on every run since,
-including all of this pass's. Not reachable from anything edited here. Its owner should look.
+including all of this pass's. Not reachable from anything edited here.
+
+### What is NOT on this list, and why
+
+- **`publishMyAttestation` is module-private**, so `e11-attest.test.js` §5f–§5i's `shippedGuard()`
+  is a replica and the console sentence it added is prose no row pins. What *is* pinned is the
+  fact it branches on (`logIsWritable()`, §5i, mutant-killed). §4c already carried the same debt.
+- **`tests/attack/attack-relay-ordering.test.js` §6** is stale: its title („What is NOT settled")
+  and its comment „nothing in this repository can execute it" are both false now. It asserts
+  `U-SEQ`/`U-TX` are still in `UNVERIFIED_CLAIMS`, which is why that export name was kept even
+  though every row now carries a `verifiedOn` witness. Renaming it is a two-file change.
+- **No wall-clock fps has ever been measured.** Both harnesses are headless, so rAF is throttled.
+  Every millisecond in this document is main-thread work, harness flush included, never subtracted.
 
 ---
 
@@ -619,16 +738,24 @@ including all of this pass's. Not reachable from anything edited here. Its owner
 ## 10. How to reproduce every number in this file
 
 ```bash
-npm test                    # 2216 / 0
+npm test                    # 2229 / 0
 npm run test:property       #  101 / 0
 npm run test:attack         #  970 / 0
-npm run test:server         #  998 / 0
-npm run test:fleet          #  423 / 0
-npm run test:dom            #  902 pass / 3 fail, 54 files
+npm run test:server         # 1003 tests, 1002 pass, 0 fail, 1 stated skip
+npm run test:fleet          #  435 / 0
+npm run test:dom            #  875 pass / 3 fail, 55 files
 
-# the acceptance run — 26 launches of the shipped binary, ~4.5 min each
-node scripts/shell-family-e2e.mjs --port 8801
-#   → "THE FOUNDER RECEIVED A JOINER'S ENTRY: YES" and "0 phase(s) failed"
+# the server suite against a REAL PostgreSQL — 66 of 66 contract cases
+cd server && npm ci && DATABASE_URL="postgresql://…/lzp_contract" npx prisma migrate deploy \
+  && DATABASE_URL="postgresql://…/lzp_contract" npx prisma generate && cd ..
+LZP_CONTRACT_DATABASE_URL="postgresql://…/lzp_contract?connection_limit=1" npm run test:server
+#   → 1069 tests, 1069 pass, 0 fail, 0 skip
+
+# THE ACCEPTANCE RUN — 27 launches of the shipped binary, ~4 min each. Run it ten times.
+for i in $(seq 1 10); do node scripts/shell-family-e2e.mjs --port $((8850+i)); done
+#   → "0 phase(s) failed", "unshare-owner (B) — completed",
+#     "THE REFUSAL LEDGER: 0", "THE FOUNDER RECEIVED A JOINER'S ENTRY: YES"
+#     and, from the stranded phase, "eligibleCosigners=0 · rosterCache=4"
 
 # §E1 in isolation — run the file ALONE or the numbers are contention
 ./tests/run-dom-tests.sh tests/tier2/e8-density-perf.dom.js
@@ -642,15 +769,17 @@ node --test --import ./tests/helpers/dev-flag.mjs \
   tests/fleet/e6-attack-privat.test.js tests/fleet/e6-gate-privat.test.js
 node scripts/shell-ssrf.mjs
 
-# deployability, and the Mom test
+# deployability, the deploy window, and the Mom test
 node .github/scripts/check-server-config.mjs
-node scripts/mom-test-probe.mjs
+DATABASE_URL=… SHADOW_DATABASE_URL=… node .github/scripts/check-server-config.mjs --deep
+node .github/scripts/check-deploy-window.mjs
+node scripts/mom-test-probe.mjs          # 35 rows · 33 pass · 2 note · 0 FAIL, exit 0
 ```
 
 **The v1 oracle, per file** — a total is not evidence:
 
 ```bash
-git archive 6268cbe | tar -x -C /tmp/base
+git archive 78016e8 | tar -x -C /tmp/base
 for f in dates-holidays layout palette repeats-find-i18n storage store-persistence suite-integrity; do
   diff <(cd /tmp/base && node --test --import ./tests/helpers/dev-flag.mjs "tests/tier1/$f.test.js" \
           | grep -E '^[[:space:]]*(not )?ok [0-9]+ - ' | sed 's/ # [0-9.]*ms$//') \
@@ -658,13 +787,25 @@ for f in dates-holidays layout palette repeats-find-i18n storage store-persisten
           | grep -E '^[[:space:]]*(not )?ok [0-9]+ - ' | sed 's/ # [0-9.]*ms$//') \
     && echo "IDENTICAL $f"
 done
+# the tier-2 half needs a shell build in each tree:
+(cd /tmp/base && ./tests/run-dom-tests.sh tests/tier2/board-render.dom.js \
+   tests/tier2/dom-rendering.dom.js tests/tier2/interaction.dom.js tests/tier2/shell-bridge.dom.js)
 ```
+
+**Counting convention.** Every suite number above is the sum of the runner's own `# pass` /
+`# fail` lines. Counting top-level `ok` lines instead gives a larger `test:dom` number (902 at
+`78016e8`, where `# pass` sums to 867), because a `describe` suite and its rows are both `ok`
+lines. This file's previous issue quoted 902 against baselines gathered the other way.
 
 ---
 
 ## 11. The one-line verdict
 
-**A family works in the app we ship, five times out of five.** What is left is one data-loss bug
-in the unshare path (R-1), one cosmetic-but-permanent refusal nobody has yet explained (R-2), and
-a missing line in an e-mail that stops the only test that matters — a person who has never seen
-the app (R-3).
+**A stranger can get from an e-mail to a shared family board, and nobody loses anything on the
+way** — 10 of 10 runs of the shipped binary, 27 launches each, every phase, the admin's „→ Privat"
+landing on the owner's Mac with her text intact, and a refusal ledger of **0**.
+
+What is left is not a defect anybody has reproduced. It is: one circle shape nobody has built yet
+(an admin seat that has been handed over, R-1b), a database this code has met on a laptop and not
+in Frankfurt (R-8b), a millisecond that is a decision about what find looks like (R-5b), and two
+lines only the PO can write — where feedback reports go, and what the relay is actually called.

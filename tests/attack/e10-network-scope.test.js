@@ -286,7 +286,7 @@ describe('§1 · 21.5 — every socket in the product, and who is allowed to ope
 // sites — rather than by a word that a future author's naming may or may not contain.
 
 describe('§2 · the outbound path LZP-1009 adds — bounded, not absent', () => {
-  test('§2a · the feedback sender is CONFINED to src/js/feedback/ plus one seam line', () => {
+  test('§2a · the feedback sender is CONFINED to src/js/feedback/ plus TWO named seams', () => {
     // INVERTED. The old row said "no shipped module is a feedback sender" and it could not see
     // the one that landed (see this section's header). The property that replaces it is one a
     // regex cannot miss: **which FILES may participate at all**.
@@ -295,8 +295,19 @@ describe('§2 · the outbound path LZP-1009 adds — bounded, not absent', () =>
     // mention it, and only to draw the Hilfe section — Principle 10's "it is never a floating
     // button on the board" is exactly a claim about the set of files that may open this screen,
     // so a set is what is asserted. A mention in `board.js`, `main.js` or `boot.js` reddens here.
+    //
+    // ██ THE SET GREW BY EXACTLY ONE FILE THIS PASS, AND THE ROW SAYS WHICH AND WHY. ██
+    //
+    // `family/mount.js` is the BINDER (LZP-1009 / E10-1009-A). It had to be that file and no
+    // other: `feedback/port.js` holds a port precisely so nothing in the feedback tree imports a
+    // transport, and the module that already owns one is the single dynamic door ADR 003 §7 gate
+    // 2 allows. So the allowlist is now TWO seams with two different jobs, and each is asserted
+    // to do only its own below — the drawer may not bind, and the binder may not open the screen.
+    // A third file, or either seam taking the other's job, still reddens here.
     const ALLOWED_DIR = 'src/js/feedback/';
-    const SEAM = 'src/js/settings.js';
+    const DRAWS = 'src/js/settings.js';        // opens the screen; holds no transport, ever
+    const BINDS = 'src/js/family/mount.js';    // holds the transport; never opens the screen
+    const SEAMS = [BINDS, DRAWS].sort();
     const mentions = /feedback/i;
     const outside = [];
     for (const f of shippedFiles()) {
@@ -308,14 +319,22 @@ describe('§2 · the outbound path LZP-1009 adds — bounded, not absent', () =>
         if (mentions.test(line)) outside.push(`${f.rel}:${i + 1} ${line.trim().slice(0, 90)}`);
       });
     }
-    const files = [...new Set(outside.map((h) => h.split(':')[0]))];
-    assert.deepEqual(files, [SEAM],
-      'the feedback path is referenced outside its own directory and the one settings seam.\n'
+    const files = [...new Set(outside.map((h) => h.split(':')[0]))].sort();
+    assert.deepEqual(files, SEAMS,
+      'the feedback path is referenced outside its own directory and the two named seams.\n'
       + 'Principle 10: it lives in Einstellungen/Hilfe and is NEVER a button on the board:\n'
       + outside.join('\n'));
+
+    // THE BINDER MAY NOT OPEN THE SCREEN. `openFeedback` is `ui.js`'s only exported way in, and
+    // Principle 10 is a claim about who may call it: Einstellungen/Hilfe, and nothing else. A
+    // `mount.js` that could open it would be a floating button one refactor away.
+    const bindCode = stripCommentsAndStrings(shippedFiles().find((f) => f.rel === BINDS).src);
+    assert.equal(/openFeedback|buildHelpSection|initFeedback/.test(bindCode), false,
+      'family/mount.js reaches the feedback SCREEN — it may bind the sender and nothing else');
+    assert.match(bindCode, /setFeedbackPort\s*\(/, 'family/mount.js no longer binds the sender at all');
     // and the seam really is a seam: it draws a section and binds an environment, and it does
     // not send anything, because settings.js has no transport and must never acquire one.
-    const seamSrc = shippedFiles().find((f) => f.rel === SEAM).src;
+    const seamSrc = shippedFiles().find((f) => f.rel === DRAWS).src;
     assert.match(seamSrc, /buildHelpSection\(body, api\)/, 'the seam does not draw the Hilfe section');
     // CODE ONLY for this half. The seam's own comment EXPLAINS that the sender is a port bound by
     // whoever holds a transport, and a scanner that counted that sentence would be a scanner

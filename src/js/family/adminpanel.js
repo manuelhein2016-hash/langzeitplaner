@@ -321,6 +321,24 @@ const DEFAULT_PORTS = Object.freeze({
   /** The circle, and the members, from the two modules that own them. */
   circle: () => familyCircle(),
   members: () => membersUIState(),
+  /**
+   * **THE RELAY'S OWN ROSTER — `eligibleCosigners`'s second list.**
+   *
+   * `family/mount.js#refreshRoster` already builds exactly this array off
+   * `GET /spaces/:id/members` and already hands it to `membersui.js`; this port is the SAME
+   * array, given to this file as well. Nothing about its shape is widened for it — `memberId` is
+   * the only field read here, and it was on every row already. Nor may it be NARROWED on the way
+   * in: `devices` is ADR 002 §8.5's device-count mitigation, it was dropped once and rendered as
+   * nothing until the E10 pass put it back, and `membersui.js` reads it off these same rows.
+   *
+   * The default is `[]`, and `eligibleCosigners` reads that emptiness as "this Mac holds no
+   * roster" rather than as "nobody has left" — see its docblock, where the difference is the
+   * whole of what this port buys. A relay we could not reach may never make the sheet refuse
+   * people (19.3); it may only ever take a co-signer away, or make the count admit it is unknown.
+   *
+   * @returns {{memberId:string, removedAt:*}[]}
+   */
+  roster: () => [],
   /** The two local writes. `pref.set` is a local-space op; settings are never synced (rule U6). */
   setSettings: (patch) => store.setSettings(patch),
   persist: () => (typeof store.persistNow === 'function' ? store.persistNow() : Promise.resolve()),
@@ -460,14 +478,83 @@ export function createAdminPort(circle) {
      * „hier lässt sich niemand mehr entfernen". Reporting an unknown count as zero would tell a
      * five-person family it was stuck, so it is `null` and the sheet offers the request anyway.
      *
+     * ── FINDING F-SHELL-2 — AND WHAT IT TURNED OUT TO BE, WHICH IS NOT WHAT IT SAYS ─────────
+     *
+     * The residual (`V2-FINAL.md` §8 R-4, `SHELL-VERIFICATION.md` §5) states the cause as "this
+     * function reads the folded member log, and a LEAVE writes nothing into the log", and
+     * prescribes "intersect the log's member list with the roster's `removedAt`".
+     *
+     * **The first half is true about the log and false about this function, and the second half
+     * was already built — one module over.** `ports.members()` is `membersui.js#membersUIState`,
+     * and `membersui.js#readMembers` has carried
+     *
+     *     if (r.removedAt) existing.alive = false;
+     *
+     * since `101073b`, over the same `rosterCache` that `family/mount.js` hands it. So the view
+     * this function counts is ALREADY log ∩ roster, and the prescribed intersection, applied to
+     * that same view and that same roster, cannot change any answer. Measured both ways, on the
+     * real modules: with the roster present the answer was **0 before the change and 0 after**.
+     *
+     * What the shell actually measured is arithmetic, and it names its own cause. Four roster
+     * rows, two stamped: with the roster present `readMembers` leaves **2** alive and this
+     * function answers **0**; with the roster absent it leaves 4 alive and this function answers
+     * **2**. The shell recorded **2**. So on that Mac, at that moment, `rosterCache` was EMPTY —
+     * `family/mount.js#refreshRoster` had not returned, or had failed silently (19.3), and §7
+     * never opens the settings sheet that calls it. **F-SHELL-2 is a freshness defect, not a
+     * missing-intersection defect**, and closing it means guaranteeing the roster is on the Mac
+     * before the count is taken — which is `refreshRoster`'s scheduling and not this function's.
+     *
+     * (For the record, the OTHER repair the residual mentions — publish
+     * `member.set{me}{_alive:false}` just before `port.leaveSpace()` — is separately doomed:
+     * `purgeMember` deletes every op authored by the leaver's devices in the same transaction as
+     * the leave, `server/core/handlers/lifecycle.js:229` on both adapters, pinned by
+     * `tests/server/lifecycle.test.js`.)
+     *
+     * ── SO WHAT THIS FUNCTION DOES DO, AND WHY IT IS NOT DECORATION ─────────────────────────
+     *
+     * Two things the member view structurally cannot do for it:
+     *
+     *  1. ~~It intersects with the roster itself.~~ **It does not, and that is deliberate.** The
+     *     intersection was written, and then a scratch-copy mutant that deleted it again killed
+     *     **no row in `tests/tier1/cosigners.test.js`** — because `readMembers` had already done
+     *     it over the same array. Unfalsifiable code is what this project refuses, and a second
+     *     spelling of "who is alive" inside the admin panel is the exact failure `membersui.js`'s
+     *     own header opens by refusing ("two modules would be two readers"). So the count still
+     *     comes from the member view, and this docblock is what stops the finding regenerating.
+     *
+     *  2. **It can tell "no roster" from "everyone is alive", which the view cannot.** Both
+     *     produce an all-alive member list. A count taken with no roster is the LOG's count, and
+     *     the log can only ever over-count (it never invents a departure), so:
+     *
+     *       · a log-only count of **0 is certain** — nobody is alive to co-sign, roster or no
+     *         roster — and is still reported as 0, because a genuinely stranded two-member circle
+     *         must still get its sentence when the relay is unreachable;
+     *       · a log-only count **above 0 is a ceiling, not a count**, and is reported as `null`
+     *         — UNKNOWN — which is what it has always been and was being spelled as a number.
+     *
+     *     `null` and a positive number render identically today (`leavedelete.js`'s `stranded`
+     *     asks only `=== 0`), so this changes no pixel. It stops the ONE value the copy turns on
+     *     from being reachable by luck, and it makes the sentence above this one true.
+     *
      * @param {string|null} targetId the member being removed, or null for `space.delete`
      */
     eligibleCosigners: (targetId) => {
       const view = ports.members();
       if (!view || !view.supported) return null;
       const me = circle.memberId || '';
-      return (view.members || []).filter((m) => m.alive !== false
+      const n = (view.members || []).filter((m) => m.alive !== false
         && m.memberId !== me && m.memberId !== targetId).length;
+      // Does this Mac hold a roster AT ALL? Only a row that names a member counts: a row without
+      // a `memberId` says nothing about anybody, and a list of those is not a roster. Note this
+      // asks nothing about `removedAt` — a roster in which NOBODY has left is still a roster, and
+      // its silence about departures is an answer, not an absence.
+      const haveRoster = (ports.roster() || [])
+        .some((r) => r && typeof r.memberId === 'string' && r.memberId !== '');
+      // A positive count with no roster is a ceiling, not a count. A ZERO is certain either way —
+      // the log never invents a departure — and must stay zero, or a stranded two-member circle
+      // would lose its sentence the moment the relay went quiet.
+      if (n > 0 && !haveRoster) return null;
+      return n;
     },
 
     /**

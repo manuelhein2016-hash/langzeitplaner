@@ -4871,3 +4871,197 @@ five acceptance runs. **Owner: `src/js/family/sharing.js`.**
    501 today).
 7. **`scripts/shell-family-e2e.mjs`'s stale phase label** — it still prints
    `BLOCKED (finding F-SHELL-1)` for any attempted phase that fails.
+
+---
+
+## 22. THE CLOSING PASS — R-1 answered, and the residual list re-issued (2026-09-03)
+
+**Full record: `docs/v2/V2-FINAL.md` §8 (re-issued).** This section is the findings half.
+
+The question this pass existed to answer: **can a stranger get from an e-mail to a shared family
+board, and does nobody lose anything on the way?** Both halves now have a measured answer, and the
+second one changed: the acceptance run's refusal ledger, which had never been flat, is **0**.
+
+### 22a. F-SHELL-3 was three defects, and the headline on it was wrong
+
+`docs/v2/V2-FINAL.md` R-1 read **„⛔ DATA LOSS — the owner loses her own entry"**. Measured on the
+shipped binary and in the fleet: **nothing was ever deleted.** `pub.alive` is NULLED and never set
+false, the patch is `pub.*` only, and the admin cannot address the owner's personal space at all
+(`core/project.js:750-760`). Her text, her entry and her `_alive` were intact in every run. What
+was lost was the **reversion** — she kept publishing an entry the admin had withdrawn, and the
+circle was split on the record while the admin's screen said it had worked.
+
+Three separate defects wore that one label.
+
+**(a) The admin chain is absorbed by the checkpoint, so the retraction is refused `notOwner`.**
+`core/authz.js:1404` stage 3a admits an admin's `pub.set` on another member's entity only if
+`adminAtKey(spaceKey(op.space), op.ts)` names him. `adminAtKey` resolves the chain stage 1 built,
+and **stage 1 builds it from `space.set{admin, adminPrev}` OPS only** (`authz.js:1234-1255`) —
+never from registers. After the owner's *first relaunch* her `_log.ops()` holds no `space.set`
+line at all, while `space:<id>.admin` still names the admin and `store.js#familyAdmin` answers
+correctly. Empty chain → `who === null` → `REJECT_REASONS.NOT_OWNER`, and a rejection is final, so
+L-1 re-refuses it on every later launch. That was the single `notOwner` in the residual ledger.
+
+This is **F-SHELL-1(b) one register over.** `store.js#_absorbedAttestOps` rebuilds absorbed
+`member.set{dev.*}` ops for exactly this reason; nothing rebuilt the `space.set` link.
+
+**Why no row caught it:** `tests/fleet/e9-attack-moderation.test.js` §3a and
+`tests/tier2/unshare-ui.dom.js` §5 are green because **neither ever reboots the owner's Mac.** The
+shipped app is nothing but reboots.
+
+**Closed** by `store.js#_absorbedChainOps()` — a sibling of `_absorbedAttestOps`, spread into the
+same three fold inputs (`_refoldAuthorized`, `applyRemote`, `unparkAttested`), rebuilding ONE
+`space.set{admin, adminPrev:null}` op per family space out of the `space:<id>` → `admin` cell,
+with `dev` read out of `devOf(cell.stamp)` and matched against the author's own member record. It
+is not trust: the reconstruction is handed back to `foldAuthorized` as an ordinary op and pays
+stage 0b and stage 1's `resolveChain` again. It is inert outside a family circle, and its bound is
+one op per space.
+
+**(b) A relaunch turned a FOREIGN entry into one of the viewer's OWN Privat notes, once per
+launch.** ADR 006 R1 re-migrates `board.json` into the spine on every launch
+(`store.js#_buildSpine`), `board.json` is `store.state`, and `store.state.notes` carries the
+viewer's redacted projection of another member's entry. `migrateV1` has no notion of a foreign
+entry: it cannot use `fnote:<mem>/<uuid>` as an entity id, so `migrate1to2.js#mintedId` mints one
+and the result is written as one of MY OWN `note.set` ops at `visibility: 'privat'`. Last launch's
+copy is then itself in `board.json` with a usable id, so the occurrence counter hands the next
+launch a fresh one. **Measured on the shipped binary at `78016e8`: seven copies of Papa's „Omas
+Geburtstag" on Mama's board after seven launches.**
+
+**Closed** by `store.js#withoutForeignEntries()`, called from `_buildSpine`. A foreign entry's
+truth is the owner's ops, which this Mac holds as `fnote:`/`fbar:` registers in its checkpoint and
+re-projects every launch — so dropping it from the spine loses nothing, and keeping it in was what
+turned a revocable view into a copy nobody can take back.
+
+**(c) „She lost her entry" was a HARNESS defect, not the product.**
+`shell-macos/main.swift#runTestFile` printed the TAP and called `exit()` from inside the
+`callAsyncJavaScript` completion. `exit()` does not run `applicationShouldTerminate` — the only
+other caller of `window.__lzpFlush` — and does not fire `pagehide`, so the page's 700 ms
+`SAVE_DEBOUNCE` was abandoned at the end of **every** phase and every tier-2 file. Under ADR 006
+`board.json` IS the truth, so the entry a phase had just created was gone next launch. ⌘Q always
+flushed; only the test runner did not. **Closed** by awaiting the same flush before `exit()`, with
+the same 2 s watchdog `applicationShouldTerminate` uses. No UI call was added; `isHeadless` and
+the `.accessory` activation policy are untouched, and `tests/tier1/headless-shell.test.js` asserts
+both — the flush and the absence of a new presentation site — in one row.
+
+### 22b. The residual inside R-1 that is NOT closed, and is now pinned
+
+`_absorbedChainOps` rebuilds only a **genesis-shaped** link (`cell.author === cell.value`, ADR 001
+§4.1's own root test). That is the limit of what one register cell contains, not a simplification:
+after `transferAdmin` the head link carries `adminPrev: <opId>` and `act !== admin`, and
+`resolveChain` needs the predecessor links to accept it — which a register cell does not retain.
+
+**The previous pass recorded „no shipped circle transfers the seat yet". That is wrong.**
+`family/adminpanel.js:654` ships `transferAdmin`, and `family/leavedelete.js:1433` calls it on the
+path where a founder hands the seat over before leaving. So a circle whose admin seat has moved
+still loses the admin's retraction once the owner's Mac has compacted.
+
+The wrong repair would be to rebuild it anyway with `adminPrev: null`, presenting a transferred
+seat as a genesis root — the rootless assertion `core/ops.js#transferAdmin` refuses to mint for
+exactly this reason. `tests/fleet/e12-unshare.test.js` **§8** is what stops that: a real transfer,
+through the shipped mutation and the shipped seal, and then the assertion that the reconstruction
+stays **silent**. The general repair — keep `space.set` chain links out of compaction in
+`store.js#_persistOps`, one op per transfer — is **not made here**, and it is residual R-1b.
+
+### 22c. F-SHELL-2 is answered by one measurement, and it is not what the report said
+
+`docs/v2/SHELL-VERIFICATION.md` §5 recorded `eligibleCosigners → 2` in a two-member stranded
+circle. The previous pass could not decide from `adminpanel.js` and `mount.js` alone whether that
+was a missing intersection or a stale roster, and asked for one run that records
+`rosterCache.length` beside the count. `mount.js#rosterSnapshot()` now does, and the driver prints
+it:
+
+```
+#    eligibleCosigners=0 · rosterCache=4 · alive on the relay=2
+```
+
+**The roster is present (4 rows) and the count is 0.** The stranded sentence fires. `membersui.js`
+already applies `removedAt` and `adminpanel.js#eligibleCosigners` already reads that view, so the
+number was right as soon as the roster was there — and it is there on the boot path. The **2** in
+§5 was taken on a Mac whose `rosterCache` was empty at that moment; it is not reproducible in 10
+consecutive runs of the shipped binary.
+
+### 22d. LZP-1009 was unwired, and the wiring found one thing the hand-off could not know
+
+`src/js/feedback/port.js` published the binding line its ticket did not own. It was one field
+wrong: a transport answers `{status, headers, json}` and a `FeedbackPort` promises `{status,
+body}` — `ui.js#doSend` reads `res.body.error` to name a refusal — so the suggested one-liner
+would have turned every named server answer (`payload_too_large`, `rate_limited`,
+`not_implemented`) into the generic failure sentence. `family/mount.js#bindFeedback` maps it.
+
+It binds from `start()` on a personal-space Mac and from `startCircleEngine()` on one in a circle,
+and **which one is decided by asking, not by racing** — both binders are async, so „last one wins"
+would have been a coin flip on a slow key export. A solo Mac binds nothing, which is not a gap:
+`canSend()` is false, „Senden" is disabled, `copy.js#noRelay` says why, and the two fallbacks are
+on the preview screen before any attempt.
+
+Two adversary rows went red on arrival and were **inverted, not weakened**:
+
+- `tests/attack/e10-network-scope.test.js` §2a asserted the set of files that may mention the
+  feedback tree is exactly `{settings.js}`. It is now exactly `{family/mount.js, settings.js}`,
+  two seams with two different jobs, and the row gained the assertion that keeps them apart: the
+  binder may not reach `openFeedback`/`buildHelpSection`/`initFeedback`, and the drawer may not
+  reach a transport. A third file still reddens it.
+- `tests/attack/privacy-e5-endpoint.test.js` §5 enumerates every path the source can build. It
+  read six files and **not** `feedback/port.js`, which is where `FEEDBACK_PATH` lives — so for one
+  pass the product could address a ninth path and this row could not see it. The file is in the
+  list and `/api/v1/feedback` is in the expected set. `docs/v2/server-metadata.md` carries its
+  line: what a platform request log records is *that somebody reported something, and when*.
+
+**What is still owed is a destination, not a binding.** `server/dev-server.mjs` binds
+`ctx.feedbackSink`; `server/adapters/vercel.js#buildCtx` binds none, so the deployed relay answers
+**501 not_implemented** — honestly, rather than accepting a report and dropping it.
+
+### 22e. Two things another agent's file was wrong about, corrected in place
+
+1. **`tests/server/store-contract.test.js`'s `PRISMA_BLOCKED` is now empty.** Its one entry, C40,
+   was a fixture defect: `putInvite({ id: 'inv_other', spaceId: SP2 })` named a space nothing had
+   created, `memory` and `file` accepted the orphan because they have no referential integrity,
+   and PostgreSQL 17.10 raised `Invite_spaceId_fkey` and was right to. `server/core/store-interface.js`
+   now creates SP2 first. **The guard that made this an event rather than a stale skip went RED the
+   moment the fixture was fixed**, which is the whole reason it exists. 66 of 66 cases against a
+   live cluster; `test:server` reads **1069 / 0 / 0 skip** with `LZP_CONTRACT_DATABASE_URL` set.
+2. **`server/vercel.json`'s `ignoreCommand` was single-commit** and is now the whole
+   `VERCEL_GIT_PREVIOUS_SHA..HEAD` range, with both fail-open guards asserted by running the real
+   string: an unset SHA exits 1 (BUILD) and an unresolvable one exits 128 (BUILD).
+   `.github/scripts/check-deploy-window.mjs` no longer assumes the window — it reads it out of
+   `vercel.json` and checks the half that a range does not fix. Mutant: a `${…:-HEAD}` fallback
+   that skips on an unset SHA is caught and named.
+
+### 22f. Every fix in this pass, and the mutant that kills it
+
+Scratch copies of the tree (`tar`, never `git stash`), one run each, honest-path control green on
+the same copy before every mutant.
+
+| # | Mutant | Rows that died |
+|---|---|---|
+| **M-CHAIN-1** | `store.js#_absorbedChainOps` returns `[]` — i.e. exactly as the code shipped | `e12` §2 §3 §4 §5 (3/4). Control 8/8. |
+| **M-CHAIN-2** | the rebuilt link's `dev` is **this Mac's own device** instead of `devOf(cell.stamp)` | `e12` §2 §3 §4 §5 — stage 0b refuses it `unattestedDevice`, which is the point: an invented device is the one field nothing could back |
+| **M-CHAIN-3** | the genesis guard `cell.author !== cell.value` is deleted | `e12` §8 — a **transferred** seat is rebuilt as a genesis root. *(This mutant SURVIVED the first cut of the file; §8 was written because of it.)* |
+| **M-FOREIGN-1** | `withoutForeignEntries` is a no-op | `e12` §6 |
+| **M-SWIFT-1** | the flush is removed from `runTestFile` — `exit()` as it shipped | `tests/tier1/headless-shell.test.js` „the --test runner flushes the page before exit()", **and the shipped binary goes back to `unshare-owner (B) — BLOCKED` with „the owner lost her own entry — unshare DELETED instead of reverting"** while the refusal ledger stays **0**. That one run is the proof that (a) and (c) are two defects and that the „DATA LOSS" headline was the harness. |
+| **M-FB-1** | the `setFeedbackPort({…})` call is deleted from `mount.js` | `e10-network-scope` §2a |
+| **M-FB-2** | the binder gains a path to `openFeedback` | `e10-network-scope` §2a (the „binder may not open the screen" half) |
+| **M-PATH-1** | `feedback/port.js` is dropped from the path enumeration's file list — the state before this pass | `privacy-e5-endpoint` §5 |
+| **M-DW-1** | `vercel.json` reverts to `git diff --quiet HEAD^ HEAD -- .` | `check-deploy-window.mjs` takes the single-commit branch and is red on the push it guards |
+| **M-DW-2** | the range is kept but the fail-safe is dropped (`${VERCEL_GIT_PREVIOUS_SHA:-HEAD}`) | `check-deploy-window.mjs` — „ignoreCommand skips on an unset SHA" |
+| **C40** | *(no mutant needed)* — fixing the fixture made the „a case listed as BLOCKED must still be blocked" guard go **red**, which is the whole reason that guard exists |
+
+One mutant that **survived**, recorded rather than hidden: `if (false) setFeedbackPort({…})`. §2a's
+`assert.match(bindCode, /setFeedbackPort\s*\(/)` is textual and cannot see reachability. The
+row's real teeth are the file-set assertion and the two „may not do the other's job" assertions,
+all three of which M-FB-1 and M-FB-2 kill; the behavioural pin is the shell e2e's `feedback`
+phase, which asks `canSend()` about a port **the test did not bind** and then gets a 202.
+
+### 22g. Owed after this pass
+
+The residual list is `docs/v2/V2-FINAL.md` §8, re-issued. In one line each:
+
+1. **R-1b** — a TRANSFERRED admin seat is not rebuilt after compaction. `store.js#_persistOps`.
+2. **§A4** — the 9 px ink floor. A PO ruling; `palette.js` is pinned by the tier-1 oracle.
+3. **§E3** — the row asks 75 % where 48 % is the mathematical ceiling for any ordering.
+4. **§E1** — `findWorst` straddles 16.7 ms; the last ~6 ms is `src/css/app.css:942-950`, i.e. what
+   find looks like, which is a PO call.
+5. **A production `feedbackSink`**, and the real relay origin substituted into the four
+   invitation files (both now on `RELEASE-CHECKLIST.md` §A).
+6. **R8-R1** — the adapter has met a local cluster, not Frankfurt's pooler.
+7. **`storage.js#quarantineLogAside` still has no native command** in either shell.

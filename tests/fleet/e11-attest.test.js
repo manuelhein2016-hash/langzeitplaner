@@ -80,6 +80,7 @@
 //   And this file green with no mutant applied.
 
 import '../helpers/env.js';
+import { localStorage as LS } from '../helpers/env.js';
 import test, { describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -859,8 +860,9 @@ describe('§4 · five consecutive launches, real relay, real engine', () => {
 //            longer DECLINES), so a second identical claim is authored          → §5e RED
 //
 // Six mutants, one run each on a scratch copy, rows MEASURED not predicted; control 25/25.
-// §5e is a CHARACTERIZATION, not a fix: F-SHELL-4 is measured and open, and its docblock says
-// which hypothesis was built, tested and DISPROVEN rather than shipped.
+// §5e was a CHARACTERIZATION written while F-SHELL-4 was open. It is closed now — the cause was
+// `_persistOps`'s write ORDER and not this guard — and §5f–§5i hold the fix, its own four
+// mutants and the two false leads the open round left behind.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Absorb every line at or below the current max into the checkpoint — what `_persistOps` ②
@@ -1083,18 +1085,25 @@ describe('§5 · the attestation the checkpoint absorbed', () => {
     // refusal ledger read **2 · 34 · 48 · 2 · 34** — the 2s being one unrelated `notOwner`
     // (F-SHELL-3), the rest being this.
     //
-    // ⚠ THE CAUSE IS NOT YET NAMED, AND THIS ROW DOES NOT CLAIM IT IS. The obvious hypothesis —
-    // that `publishMyAttestation` reads `store.registers()`, which is the AUTHORIZED fold, and
-    // so sees no cell before `engine.js:733` installs `attestOpen` — was built, tested here, and
-    // DISPROVEN: `_noteAuthzVerdict` returns the raw base map unless there are withdrawals, and
-    // `store.js#_withdrawalsOf` names `badAttestation` and `writeOnce` as explicitly NOT
-    // withdrawals, so the cell is visible with or without a verifier. The fix built on that
-    // hypothesis was reverted rather than shipped. In the failing run Mama's `KHtu…` also
-    // carried `seq: null` and never reached the relay at all, which is the thread to pull next.
+    // ✔ THE CAUSE IS NAMED NOW, AND IT WAS NOT IN THIS FUNCTION. §5f–§5i below hold it:
+    // `store.js#_persistOps` created `ops.jsonl` before `checkpoint.json` existed, a launch that
+    // ended between the two left a bare tail, `adoptable()` refuses that `no-checkpoint`, and a
+    // Mac cannot move a refused log aside — so the log was read-only FOR EVER, `registers()`
+    // could never carry the claim, and this guard re-minted one on every launch. Closed by
+    // `_persistOps` step ⓪b. This row is unchanged and stays exactly as it was: it is what let
+    // the next reader start from a tested guard instead of from nothing.
     //
-    // WHAT THIS ROW IS FOR. The guard had NO test of any kind — which is how a defect this loud
-    // survived six rounds. It pins the two cases the guard must answer, so that whoever fixes
-    // F-SHELL-4 starts from a characterized guard rather than from nothing.
+    // TWO THINGS THE ROUND THAT WROTE THIS ROW BELIEVED, CORRECTED HERE SO NOBODY RE-DERIVES THEM:
+    //   · The `store.registers()` hypothesis was DISPROVEN and the docblock was right to say so —
+    //     `_noteAuthzVerdict` returns the raw base map unless there are withdrawals, and
+    //     `store.js#_withdrawalsOf` names `badAttestation` and `writeOnce` as explicitly NOT
+    //     withdrawals, so the cell is visible with or without a verifier. Case (1) below is that
+    //     fact, and it still holds.
+    //   · "Mama's first attestation carried `seq: null`, so it never reached the relay" was a
+    //     FALSE LEAD. A line's `seq` is written once, at append time; the ack rides in
+    //     `checkpoint().seqs` and is re-attached by `load()`. Measured on a kept scratch dir from
+    //     a HEALTHY run: the line on disk read `seq: null` and the loaded log read `seq: 4`.
+    //     `seq` in `ops.jsonl` is evidence of nothing.
     const C = await buildCircle(['papa', 'mama']);
     const { papa } = C;
     await refreshRoster(C);
@@ -1197,5 +1206,294 @@ describe('§5 · the attestation the checkpoint absorbed', () => {
       mama.store._familySpaceId = C.spaceId;
       return r;
     }), [], 'a solo board must reconstruct nothing at all');
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // §5f–§5h · F-SHELL-4 — THE BARE TAIL, AND WHY IT SPLIT THE CIRCLE'S RECORD
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // §5e above CHARACTERIZED the guard and said, in as many words, that the cause was not yet
+  // named and that the `store.registers()` hypothesis had been built, tested and DISPROVEN. It
+  // is named now, and it was measured in the shipped `.app` rather than argued:
+  //
+  //   `store.js#_persistOps` wrote `ops.jsonl` (step ①) BEFORE `checkpoint.json` (step ③). A
+  //   launch that ended between them left a tail with no header. `store.js#adoptable()` refuses
+  //   exactly that — `no-checkpoint`, "a line format carries no header and therefore no lineage"
+  //   — and is right to; it is what makes A3-C1's one-stray-line attack unreachable. But the
+  //   refusal is not a session: `_logMayBeWritten()` is false while the refused bytes are on
+  //   disk, and `storage.js#quarantineLogAside` has no native command, so on a Mac it is
+  //   PERMANENT. From then on that Mac writes no history at all, `registers()` can never carry
+  //   `member:<me>` → `dev.<short>`, and `family/engine.js#publishMyAttestation` — with
+  //   `core/ops.js#attestMyDevice`'s idempotence gate behind it, reading the SAME `ctx.regs` —
+  //   sees no claim and mints a fresh op for the same device, same blob, EVERY LAUNCH.
+  //
+  // MEASURED, `node scripts/shell-family-e2e.mjs --keep`, five runs × 26 launches of the shipped
+  // binary. One run reproduced it: Mama's scratch dir held `ops.jsonl` with 2 lines and NO
+  // `checkpoint.json`; every launch after her join warned `op log QUARANTINED (no-checkpoint)`;
+  // her own log named `Lu98wHjodUpn42jsA4lJIQ` (ts …313990) as the writer of her `dev.` register
+  // while Papa's and Opa's named `0w6I5WjBt7-mh__GxLkKCg` (ts …318175) — the same 545-byte blob,
+  // byte for byte, 4.19 s apart — and her refusal ledger read 1 · 11 · 13 · 21 `writeOnce`.
+  //
+  // THE FIX IS AN ORDERING AND NOTHING ELSE. `adoptable()` is untouched; ADR 001 §4.0's
+  // write-once is untouched; the terminal refusal of a second claim is untouched, because it is
+  // correct. `_persistOps` step ⓪b writes the header once, before the file it is the header of
+  // can exist, at the same `cap` ① and ③ are selected against.
+  //
+  // FOUR MUTANTS, one run each on a scratch copy of `src/js/store.js`, rows MEASURED not
+  // predicted; control 29/29 on the same copy with none applied:
+  //
+  //   M-E11-12 step ⓪b deleted (`_persistOps` exactly as it shipped)   → §5f · §5g · §5h RED
+  //   M-E11-13 ⓪b kept, the `_checkpointOnDisk` reset in
+  //            `_sequesterQuarantine` removed                           → §5h RED
+  //   M-E11-14 `store.logIsWritable()` hard-wired to `true` — the input
+  //            `engine.js#publishMyAttestation`'s new sentence reads    → §5i RED
+  //   M-E11-15 `init()`'s `_checkpointOnDisk = !!checkpoint` forced
+  //            `false`, so ⓪b bootstraps on every launch for ever       → §5f RED
+  //
+  // ⚠ WHAT NO ROW HERE PINS, said plainly: `family/engine.js#publishMyAttestation` is
+  // module-private, so `shippedGuard()` below is a REPLICA of it and the sentence that function
+  // now prints is prose. What is pinned is the fact it branches on — `store.logIsWritable()`,
+  // §5i — and a mutant on it dies. The replica can drift from the source; §4c already carries
+  // that debt and this is the second file to owe it.
+  //
+  // THE HONEST-PATH CONTROLS, without which the three rows above are satisfiable the wrong way:
+  //   §5f's second half — an ORDINARY persist (a log that already has a header) still writes the
+  //     tail first, so ⓪b is one-shot and ADR 006 §6's shape is unchanged rather than inverted.
+  //   §5g's tail — the relaunched Mac PUBLISHES its claim and keeps it, so the row cannot be
+  //     passed by a build that never attests at all (E6-1 from the far side).
+
+  /** The two log slots, in the order `store.js` actually writes them during `fn()`. */
+  async function slotWrites(fn) {
+    const seen = [];
+    const real = LS.setItem.bind(LS);
+    LS.setItem = (k, v) => {
+      const key = String(k);
+      if (key === 'langzeitplaner.ops' || key === 'langzeitplaner.checkpoint') seen.push(key);
+      return real(key, v);
+    };
+    try { await fn(); } finally { delete LS.setItem; }
+    return seen;
+  }
+
+  /** The same, with `saveCheckpoint` made to fail — the crash shape, in process. */
+  async function checkpointFails(fn) {
+    const real = LS.setItem.bind(LS);
+    LS.setItem = (k, v) => {
+      if (String(k) === 'langzeitplaner.checkpoint') throw new Error('simulated: the checkpoint write did not land');
+      return real(String(k), v);
+    };
+    try { await fn(); } catch { /* the persist is allowed to fail; the DISK is the assertion */ }
+    finally { delete LS.setItem; }
+  }
+
+  /** `family/engine.js#publishMyAttestation`'s guard, verbatim, plus what it now reports. */
+  async function shippedGuard(mac) {
+    const short = mac.forStore.deviceShort;
+    const held = mac.store.registers().get(`member:${mac.forStore.memberId}`)?.get(`dev.${short}`);
+    if (held !== undefined && typeof held.value === 'string' && held.value !== '') return 'declined';
+    const durable = mac.store.logIsWritable();
+    const authored = mac.store.apply('attestMyDevice', { deviceShort: short, blob: mac.myBlob });
+    return authored ? (durable ? 'published' : 'published-into-a-log-that-forgets') : 'declined';
+  }
+
+  test('§5f · the header is written before the first line ever is — and only once', async () => {
+    const C = await buildCircle(['papa', 'mama']);
+    const { papa } = C;
+    await refreshRoster(C);
+    await bootMac(C, papa);                       // a fresh disk: no checkpoint.json anywhere
+
+    const first = await on(papa, () => slotWrites(async () => {
+      papa.store.apply('attestMyDevice', {
+        deviceShort: papa.forStore.deviceShort, blob: papa.myBlob,
+      });
+      await papa.store.persistNow();
+    }));
+    assert.ok(first.includes('langzeitplaner.checkpoint') && first.includes('langzeitplaner.ops'),
+      `the first persist wrote neither slot: ${JSON.stringify(first)}`);
+    assert.ok(first.indexOf('langzeitplaner.checkpoint') < first.indexOf('langzeitplaner.ops'),
+      'the tail was created before its header — a launch that ends here leaves a bare ops.jsonl, '
+      + `which the next one refuses \`no-checkpoint\` for ever: ${JSON.stringify(first)}`);
+
+    // ── THE CONTROL. ⓪b is a BOOTSTRAP, not a re-ordering: with a header already on disk the
+    //    ordinary persist keeps ADR 006 §6's shape — append the new tail, THEN checkpoint. It is
+    //    taken ACROSS A RELAUNCH, because "a header exists" is a fact about the DISK and a
+    //    control that never re-reads it would be satisfied by a build that bootstraps for ever.
+    await relaunch(C, papa);
+    const second = await on(papa, () => slotWrites(async () => {
+      papa.store.apply('claimAdmin', {});
+      await papa.store.persistNow();
+    }));
+    assert.equal(second.filter((k) => k === 'langzeitplaner.checkpoint').length, 1,
+      `an ordinary persist wrote the checkpoint twice: ${JSON.stringify(second)}`);
+    assert.ok(second.indexOf('langzeitplaner.ops') < second.indexOf('langzeitplaner.checkpoint'),
+      `⓪b did not stand down once the header existed: ${JSON.stringify(second)}`);
+  });
+
+  test('§5g · a persist whose checkpoint never lands appends NOTHING, and one claim survives', async () => {
+    const C = await buildCircle(['papa', 'mama']);
+    const { papa } = C;
+    await refreshRoster(C);
+    await bootMac(C, papa);
+
+    // THE CRASH, at the exact instant the shipped app took it: the joiner's first persist with a
+    // writable log — `createjoin.js#adoptCircleIntoLog`, one `await` after `useFamilySpace`.
+    const disk = await on(papa, async () => {
+      papa.store.apply('attestMyDevice', {
+        deviceShort: papa.forStore.deviceShort, blob: papa.myBlob,
+      });
+      await checkpointFails(() => papa.store.persistNow());
+      return {
+        ops: LS.getItem('langzeitplaner.ops'),
+        checkpoint: LS.getItem('langzeitplaner.checkpoint'),
+      };
+    });
+    assert.equal(disk.checkpoint, null, 'the fixture did not simulate anything');
+    assert.equal(disk.ops, null,
+      'a tail was written with no header beside it. That is the F-SHELL-4 disk state: the next '
+      + 'launch refuses the whole log `no-checkpoint`, permanently, and this Mac re-publishes '
+      + 'its device attestation on every launch afterwards');
+
+    // ── AND THE LOG IS STILL A LOG. Three launches, the shipped guard on each: the claim is
+    //    published once — by a Mac that CAN remember it — and never again.
+    const verdicts = [];
+    for (let i = 0; i < 3; i++) {
+      /* eslint-disable no-await-in-loop */
+      await relaunch(C, papa);
+      verdicts.push(await on(papa, async () => {
+        assert.equal(papa.store.quarantine, null,
+          `launch ${i} refused its own log: ${JSON.stringify(papa.store.quarantine)}`);
+        const v = await shippedGuard(papa);
+        await papa.store.persistNow();
+        return v;
+      }));
+      /* eslint-enable no-await-in-loop */
+    }
+    assert.deepEqual(verdicts, ['published', 'declined', 'declined'],
+      `three launches answered ${JSON.stringify(verdicts)} — one register, one writer, or F-SHELL-4`);
+
+    const mine = await on(papa, () => [...papa.store._log.ops({ includeParked: true })]
+      .filter((o) => o.k === 'member.set' && o.act === papa.forStore.memberId
+        && Object.keys(o.f || {}).includes(`dev.${papa.forStore.deviceShort}`)));
+    assert.equal(mine.length, 1,
+      `${mine.length} attestation ops for one write-once register: ${mine.map((o) => o.id).join(', ')}`);
+  });
+
+  test('§5h · a moved-aside log is a first persist again — and `logIsWritable` is §9.5\'s verdict', async () => {
+    const C = await buildCircle(['papa', 'mama']);
+    const { papa } = C;
+    await refreshRoster(C);
+    await bootMac(C, papa);
+    await on(papa, async () => {
+      papa.store.apply('attestMyDevice', {
+        deviceShort: papa.forStore.deviceShort, blob: papa.myBlob,
+      });
+      await papa.store.persistNow();
+      assert.equal(papa.store.logIsWritable(), true, 'a live family log must be writable');
+    });
+
+    // A log from somebody else's lineage: `adoptable()` refuses it `foreign-lineage`, the browser
+    // path CAN move it aside, and the session then writes history again (ADR 006 §9.5).
+    await on(papa, async () => {
+      const cp = JSON.parse(LS.getItem('langzeitplaner.checkpoint'));
+      cp.lzp = { ...cp.lzp, lineageId: 'lin_000000000000000000000a' };
+      LS.setItem('langzeitplaner.checkpoint', JSON.stringify(cp));
+    });
+    await relaunch(C, papa);
+
+    const after = await on(papa, () => ({
+      refused: papa.store.quarantine && papa.store.quarantine.reason,
+      moved: !!(papa.store.quarantine && papa.store.quarantine.movedAside),
+      writable: papa.store.logIsWritable(),
+      onDisk: {
+        ops: LS.getItem('langzeitplaner.ops'),
+        checkpoint: LS.getItem('langzeitplaner.checkpoint'),
+      },
+    }));
+    assert.equal(after.moved, true, `the fixture did not reach a move-aside: ${JSON.stringify(after)}`);
+    assert.equal(after.writable, true, 'a log that was moved aside leaves nothing to preserve — §9.5');
+    assert.equal(after.onDisk.checkpoint, null, 'the move-aside left a checkpoint behind');
+    assert.equal(after.onDisk.ops, null, 'the move-aside left a tail behind');
+
+    // …so the next persist is a FIRST persist, and ⓪b has to run again. Without the reset in
+    // `_sequesterQuarantine` this writes a bare tail and the launch after it is quarantined for
+    // ever — F-SHELL-4, reached by the one path that is supposed to CURE a quarantine.
+    const order = await on(papa, () => slotWrites(async () => {
+      papa.store.apply('setMyProfile', { displayName: 'Papa' });
+      await papa.store.persistNow();
+    }));
+    assert.ok(order.indexOf('langzeitplaner.checkpoint') < order.indexOf('langzeitplaner.ops'),
+      `the persist after a move-aside wrote a bare tail: ${JSON.stringify(order)}`);
+  });
+
+  test('§5i · a log that CANNOT be moved aside re-publishes every launch — and now says so', async () => {
+    // ═══ THE SHIPPED MAC'S EXACT STATE, AND THE ONE ROUTE TO F-SHELL-4 THAT SURVIVES ⓪b ══════
+    //
+    // `storage.js#quarantineLogAside` has no native command (`isTauri()` returns `moved:false`
+    // with the sentence the e2e printed on every one of Mama's launches), so on a Mac a refused
+    // log stays refused. §9.5 then says the session writes no history — which is CORRECT, and is
+    // exactly the state in which `publishMyAttestation`'s register guard cannot work, because
+    // there is no register map to guard with. This row pins that state, the verdict
+    // `family/engine.js` reads to describe it, and the loop itself, so that the next reader of a
+    // peer's `writeOnce` ledger is not told a forgery happened.
+    const C = await buildCircle(['papa', 'mama']);
+    const { papa } = C;
+    await refreshRoster(C);
+    await bootMac(C, papa);
+    await on(papa, async () => {
+      papa.store.apply('attestMyDevice', {
+        deviceShort: papa.forStore.deviceShort, blob: papa.myBlob,
+      });
+      await papa.store.persistNow();
+    });
+    await on(papa, () => {
+      const cp = JSON.parse(LS.getItem('langzeitplaner.checkpoint'));
+      cp.lzp = { ...cp.lzp, lineageId: 'lin_000000000000000000000a' };
+      LS.setItem('langzeitplaner.checkpoint', JSON.stringify(cp));
+    });
+
+    /** The native shell's answer, in process: the refused bytes cannot be renamed away. */
+    const withStuckQuarantine = async (fn) => {
+      const real = LS.setItem.bind(LS);
+      LS.setItem = (k, v) => {
+        if (String(k).includes('.quarantined-')) throw new Error('simulated: no move-aside command');
+        return real(String(k), v);
+      };
+      try { return await fn(); } finally { delete LS.setItem; }
+    };
+
+    const launches = [];
+    for (let i = 0; i < 2; i++) {
+      /* eslint-disable no-await-in-loop */
+      await withStuckQuarantine(() => relaunch(C, papa));
+      launches.push(await on(papa, async () => {
+        const q = papa.store.quarantine;
+        const state = {
+          refused: q && q.reason,
+          moved: !!(q && q.movedAside),
+          writable: papa.store.logIsWritable(),
+          cell: papa.store.registers().get(`member:${papa.forStore.memberId}`)
+            ?.get(`dev.${papa.forStore.deviceShort}`),
+        };
+        state.verdict = await shippedGuard(papa);
+        return state;
+      }));
+      /* eslint-enable no-await-in-loop */
+    }
+
+    for (const [i, l] of launches.entries()) {
+      assert.equal(l.refused, 'foreign-lineage', `launch ${i} did not refuse the planted log`);
+      assert.equal(l.moved, false, `launch ${i} moved it aside — the fixture is not the shipped Mac`);
+      assert.equal(l.writable, false,
+        `launch ${i}: a quarantined log reported itself writable. \`logIsWritable()\` IS ADR 006 `
+        + '§9.5\'s verdict and `family/engine.js#publishMyAttestation` describes the re-publish '
+        + 'from it — a wrong answer here is a wrong sentence in a support bundle');
+      assert.equal(l.cell, undefined,
+        `launch ${i} could see its own claim, so this row is not measuring the state it names`);
+      assert.equal(l.verdict, 'published-into-a-log-that-forgets',
+        `launch ${i} answered ${l.verdict}`);
+    }
+    // TWO launches, TWO ops, one write-once register. That is F-SHELL-4, and after ⓪b this is
+    // the only way left to reach it: a log that is genuinely refused and cannot be moved away.
+    // It is reported rather than silent, and `store.js#_persistOps` no longer manufactures it.
   });
 });

@@ -499,13 +499,19 @@ describe('§5 · everything two real Macs address over a real session', () => {
     }
   });
 
-  test('FAILED — the complete set of paths the SOURCE can build is eight, all under /api/v1/', () => {
+  test('FAILED — the complete set of paths the SOURCE can build is nine, all under /api/v1/', () => {
     // The session above exercises the steady state. Pairing and opt-in add five more paths that
     // no fleet run reaches (the harness drives pairing over `mitm.js`, not over HTTP), so they
     // are read out of the source instead — which is the stronger statement anyway: this is every
     // path the product is CAPABLE of building, not every path one run happened to build.
+    //
+    // `src/js/feedback/port.js` IS IN THIS LIST AND WAS NOT (LZP-1009, this pass). It holds
+    // `FEEDBACK_PATH`, and `family/mount.js#bindFeedback` addresses it by that IDENTIFIER — so
+    // for one pass the product could build a ninth path and this enumeration could not see it.
+    // A path constant that lives in a leaf module is exactly the shape this row exists to catch.
     const files = ['src/js/sync/personal.js', 'src/js/family/mount.js', 'src/js/family/engine.js',
-      'src/js/family/pairflow.js', 'src/js/crypto/pairing.js', 'src/js/crypto/backup.js'];
+      'src/js/family/pairflow.js', 'src/js/crypto/pairing.js', 'src/js/crypto/backup.js',
+      'src/js/feedback/port.js'];
     const paths = new Set();
     for (const f of files) {
       for (const m of repoFile(f).matchAll(/['"`](\/api\/v1\/[^'"`]*)['"`]/g)) {
@@ -514,6 +520,10 @@ describe('§5 · everything two real Macs address over a real session', () => {
     }
     assert.deepEqual([...paths].sort(), [
       '/api/v1/devices/adopt',
+      // LZP-1009. The ONE path a solo Mac can address, and only after a person has written a
+      // sentence and read the whole payload on the preview screen. `docs/v2/server-metadata.md`
+      // carries its line; story 21.5's „zero requests in solo mode" was already amended for it.
+      '/api/v1/feedback',
       '/api/v1/ops',
       '/api/v1/pair/:id',
       '/api/v1/pair/answer',

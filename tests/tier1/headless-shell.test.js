@@ -51,6 +51,48 @@ test('the headless activation policy is .accessory, never .prohibited', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+// F-SHELL-3(c) — THE TEST RUNNER MUST FLUSH BEFORE IT EXITS
+//
+// `runTestFile` printed the TAP and called `exit()` from inside the `callAsyncJavaScript`
+// completion. `exit()` does not run `applicationShouldTerminate` — the only other caller of
+// `window.__lzpFlush` — and it does not fire `pagehide` either, so the page's 700 ms
+// `SAVE_DEBOUNCE` was abandoned at the end of EVERY phase. Under ADR 006 `board.json` IS the
+// truth, so the entry a phase had just created was gone on the next launch, and
+// `scripts/shell-family-e2e.mjs` reported that as „the owner lost her own entry — unshare DELETED
+// instead of reverting". ⌘Q always flushed; only the test runner did not.
+//
+// This is asserted here, statically, because no page can see it: a tier-2 file runs INSIDE the
+// launch whose exit is the question. `tests/tier2/unshare-owner.dom.js` §7 owns the other half —
+// that `window.__lzpFlush` exists and actually writes `board.json` — and between them the claim
+// is complete.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+test('the --test runner flushes the page before exit(), and keeps a watchdog on it', () => {
+  const src = shellSource();
+  const i = src.indexOf('private func runTestFile');
+  assert.ok(i > 0, 'runTestFile is gone — this row names a function that no longer exists');
+  // The function body, up to the next `private func` at the same indentation.
+  const rest = src.slice(i);
+  const end = rest.indexOf('\n    // 11.1');
+  const body = end > 0 ? rest.slice(0, end) : rest;
+
+  assert.match(body, /__lzpFlush/,
+    'runTestFile exits without asking the page to flush, so every tier-2 and every e2e phase '
+    + 'abandons its 700 ms save debounce and loses whatever it wrote last (F-SHELL-3c)');
+  assert.match(body, /asyncAfter\(deadline: \.now\(\) \+ 2\.0\)/,
+    'the flush has no watchdog — a page that never answers would wedge the whole suite, which is '
+    + 'why applicationShouldTerminate carries the same 2 s deadline');
+  assert.match(body, /exit\(code\)/,
+    'the exit code is no longer computed once and used by both the flush path and the watchdog — '
+    + 'two exits with two different codes is worse than no flush');
+
+  // AND THE FLUSH IS NOT A UI CALL. This is the rule the top of this file exists for: the repair
+  // must not have bought a save by presenting something in a headless run.
+  const unguarded = presentationSites().filter((x) => !x.guarded);
+  assert.deepEqual(unguarded, [], 'the flush repair introduced an unguarded presentation site');
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 // LZP-1002 — `sync_request`, and the shape that keeps it from being an SSRF primitive
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //

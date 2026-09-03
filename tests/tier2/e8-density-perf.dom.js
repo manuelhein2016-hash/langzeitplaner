@@ -296,6 +296,24 @@ test('§E1 · build, render, member toggle, scroll and find — against one 16.7
 // `findWorst` is `find.js`'s cell, not this one's, and it was already red before
 // this ticket at 19.8 / 18.1 ms on the same two baseline runs.
 //
+// R-5 WENT AT IT AND CAME BACK WITH A NUMBER THAT IS NOT 16.7. This file run
+// ALONE, seven times on an idle machine: **15.4 – 17.0 ms**, against 21.4 ms for
+// the same file and fixture at 78016e8. Interleaved A/B on a BUSY machine, eight
+// pairs, the two `find.js` versions alternating in one tree: 16.0 – 18.6 after,
+// 18.9 – 63.8 before, and the after arm is lower in all eight. So: about one
+// frame, median just either side of it, and the row is NOT closed — it goes
+// green in most runs and red in some, which is what „1.0 frames" means and why
+// it is reported as a range rather than as a pass. §E1c below says what changed
+// and pins it. What is left is not code
+// shape: 13 of those milliseconds are the browser recalculating style for the
+// ~516 board nodes whose appearance genuinely changes when the hit set moves,
+// at ~25 µs each, and the marking is already down to the difference between two
+// hit sets. The next millisecond is in `app.css` — neutralising the three rules
+// find writes (`.note.hit`'s border, `body.finding`'s `opacity: .3` dimming and
+// `.bar.hit`'s box-shadow) TOGETHER takes the same measurement to 8.6 ms, while
+// removing any ONE of them buys ~0.4 ms. That is a change to what find LOOKS
+// like, in a file the tier-1 oracle pins, and it is not made here.
+//
 // The equality of the two paths — that the patched board IS the rebuilt board,
 // node for node — is not asserted here but in `tests/tier2/e1-incremental.dom.js`,
 // over 66 single mutations across 25 kinds and 10 chains of 8.
@@ -391,6 +409,162 @@ test('§E1b · an unchanged board is not rebuilt, and a changed one is not rebui
       why: `re-rendering an unchanged family board costs ${idle} ms` });
   } finally { restore(before); }
   verdict('§E1b · the render is incremental', rows);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// §E1c · THE MARKING IS A DIFFERENCE, AND IT IS STILL EXACT (R-5)
+//
+// §E1's `findWorst` came down because `find.js#run` stopped clearing every
+// `.hit` on the board and putting most of them straight back: it now brings the
+// marked set to exactly the matching set and writes only the difference.
+//
+// A stopwatch cannot tell that apart from a search that has quietly stopped
+// marking things. These cells can.
+//
+// The hazard a difference brings with it is `board.js#renderBoard`, which scrubs
+// `hit` and `current` off the board on every render: an implementation that
+// believed its own record of what is marked would put nothing back, and the
+// hits would vanish on the next redraw. Two things stop that, and only one of
+// them is testable from here. `applyMarks` adds the class only when the node is
+// not already wearing it — a `contains` test, which is what makes the additions
+// idempotent and therefore correct after a scrub; MEASURED: swapping the live
+// collection for a cached Set does NOT break these cells, because that guard
+// carries the case on its own. The live `getElementsByClassName` read is the
+// belt to that pair of braces — it can also drop a mark this file never put on
+// — and it is not what c3 proves. c3 proves the visible requirement: after a
+// re-render the marks are back on exactly the matching nodes.
+// ═════════════════════════════════════════════════════════════════════════════
+
+const { refreshFind } = await importApp('find.js');
+
+/** Type `q` into the find field the way a keystroke does. */
+function type(q) {
+  const input = $('#find-input');
+  input.value = q;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+/** The notes whose own ink contains `q` — what `.hit` must be on, and on nothing else. */
+const notesMatching = (q) => $$('#board .note').filter((n) => n.textContent.toLowerCase().includes(q.toLowerCase()));
+const markedNotes = () => $$('#board .note.hit');
+const sameSet = (a, b) => a.length === b.length && a.every((n) => b.includes(n));
+
+test('§E1c · find marks the difference, and the difference is the whole matching set', () => {
+  const before = snapshot();
+  const rows = [];
+  try {
+    install({ ...FX, settings: SET });
+
+    // ── c1 · a first query marks exactly what matches ────────────────────────
+    type('Chorprobe');
+    const want1 = notesMatching('Chorprobe');
+    const got1 = markedNotes();
+    diag(`   „Chorprobe": ${want1.length} notes carry the text, ${got1.length} carry .hit`);
+    rows.push({ id: 'R-5/first-query-marks-exactly-the-matches', ok: want1.length > 0 && sameSet(got1, want1),
+      why: `${got1.length} nodes marked, ${want1.length} match the text` });
+
+    // ── c2 · the SECOND query is where a difference can lie ──────────────────
+    // Every node that matched „Chorprobe" and does not match „Zahnarzt" has to
+    // lose its mark, and every node that matches „Zahnarzt" has to gain one.
+    // A clear-all/mark-all implementation passes this too — that is the point:
+    // the difference must be indistinguishable from the whole.
+    type('Zahnarzt');
+    const want2 = notesMatching('Zahnarzt');
+    const got2 = markedNotes();
+    const stale = want1.filter((n) => n.classList.contains('hit') && !want2.includes(n));
+    diag(`   „Zahnarzt": ${want2.length} match, ${got2.length} marked, ${stale.length} of the previous query's marks survived`);
+    rows.push({ id: 'R-5/second-query-marks-exactly-the-matches', ok: want2.length > 0 && sameSet(got2, want2),
+      why: `${got2.length} nodes marked, ${want2.length} match the text` });
+    rows.push({ id: 'R-5/no-mark-outlives-its-query', ok: stale.length === 0,
+      why: `${stale.length} node(s) still wear .hit from the previous query` });
+
+    // ── c3 · a re-render scrubs the board; refreshFind must put them back ────
+    // `main.js#redraw` is renderBoard → … → refreshFind, and renderBoard's
+    // `scrubMarks` takes every `hit` and `current` off the board first. This is
+    // the cell that goes red if the marked set is ever remembered instead of
+    // read back from the DOM.
+    renderBoard(boardEl());
+    const scrubbed = markedNotes().length;
+    refreshFind();
+    const restored = markedNotes();
+    const want3 = notesMatching('Zahnarzt');
+    diag(`   after a re-render: ${scrubbed} marks on the bare board, ${restored.length} after refreshFind (${want3.length} match)`);
+    rows.push({ id: 'R-5/a-render-scrubs-the-marks', ok: scrubbed === 0,
+      why: `renderBoard left ${scrubbed} .hit nodes on the board — this cell's premise is gone` });
+    rows.push({ id: 'R-5/refreshFind-restores-every-mark-after-a-render', ok: want3.length > 0 && sameSet(restored, want3),
+      why: `${restored.length} of ${want3.length} matching notes carry .hit after a re-render` });
+
+    // ── c4 · a query with no results leaves NOTHING behind ───────────────────
+    // `.current` is the one that used to be cleared by the `clearMarks()` at the
+    // top of every run. It is not any more, so the no-results path has to clear
+    // it itself, and this is the cell that says so.
+    type('Zahnarzt');
+    const hadCurrent = $$('#board .current').length;
+    type('xyzzykeintreffer');
+    const leftHit = $$('#board .hit').length;
+    const leftCurrent = $$('#board .current').length;
+    diag(`   „keine Treffer": ${hadCurrent} .current before, ${leftHit} .hit and ${leftCurrent} .current after`);
+    rows.push({ id: 'R-5/no-results-clears-every-hit', ok: leftHit === 0,
+      why: `${leftHit} .hit node(s) survived a query that matches nothing` });
+    rows.push({ id: 'R-5/no-results-clears-the-current-outline', ok: hadCurrent > 0 && leftCurrent === 0,
+      why: `${leftCurrent} .current node(s) survived a query that matches nothing (${hadCurrent} before)` });
+
+    // ── c5 · leaving find takes every mark with it ───────────────────────────
+    type('Chorprobe');
+    type('');
+    const afterExit = $$('#board .hit, #board .current').length;
+    rows.push({ id: 'R-5/an-empty-query-unmarks-the-board', ok: afterExit === 0,
+      why: `${afterExit} mark(s) left on the board after the query was cleared` });
+    rows.push({ id: 'R-5/an-empty-query-leaves-find-mode', ok: !document.body.classList.contains('finding'),
+      why: 'body.finding survived an empty query' });
+
+    // ── c6 · a bar's STRIPES light up with its label ─────────────────────────
+    // The stripe index is the part of `run()` R-5 rewrote from a full-document
+    // attribute selector to the live `.bar` collection filtered by the ids that
+    // matched. A six-month bar wears one label per month but many stripes, and
+    // all of them are supposed to light.
+    type('Ferienlager');
+    const litLabels = $$('#board .bar-label.hit');
+    const litStripes = $$('#board .bar.hit');
+    const litIds = new Set(litLabels.map((n) => n.dataset.barId));
+    const wantStripes = $$('#board .bar[data-bar-id]').filter((b) => litIds.has(b.dataset.barId));
+    diag(`   „Ferienlager": ${litLabels.length} labels lit over ${litIds.size} bar(s), `
+      + `${litStripes.length} stripes lit of ${wantStripes.length} that belong to them`);
+    rows.push({ id: 'R-5/a-hit-bar-lights-every-one-of-its-stripes', ok: wantStripes.length > 0 && sameSet(litStripes, wantStripes),
+      why: `${litStripes.length} stripes carry .hit, ${wantStripes.length} belong to a matching bar` });
+
+    // ── c7 · the off-window list is still the off-window list ────────────────
+    // `offscreenHits` used to be `historyHits(q).filter(...)`: it scanned and
+    // sorted the whole store and then discarded the on-screen half. The date
+    // test is now first, which is only allowed if the list is byte-identical.
+    // The fixture runs 180 days before the visible window, so „Chorprobe" has
+    // matches on both sides of it.
+    type('Chorprobe');
+    const m = L.buildBoard(store.state);
+    const listed = $$('#find-history .fh-row .fh-date').map((n) => n.textContent);
+    const iso = (d) => `${d.slice(6, 10)}-${d.slice(3, 5)}-${d.slice(0, 2)}`;
+    const inWindow = listed.filter((d) => iso(d) >= m.firstISO && iso(d) <= m.lastISO);
+    const allOff = store.state.notes
+      .filter((n) => typeof n.text === 'string' && n.text.toLowerCase().includes('chorprobe'))
+      .filter((n) => n.date < m.firstISO || n.date > m.lastISO).length;
+    // The list itself only ever draws 8 rows, and the fixture's off-window half
+    // runs BEFORE the window — so eight ascending dates would look right even if
+    // the filter were gone entirely. The „+n" cap is the row that counts: it is
+    // the size of the whole list minus the eight that are drawn.
+    const caps = $$('#find-history .fh-cap').map((n) => n.textContent);
+    const plusN = Number((caps.find((c) => /^\+\d+$/.test(c)) || '').slice(1));
+    diag(`   „Chorprobe": ${allOff} matching note(s) outside ${m.firstISO}..${m.lastISO}; `
+      + `the list shows ${listed.length} row(s), ${inWindow.length} of them inside the window, and a „+${plusN}" cap`);
+    rows.push({ id: 'R-5/the-off-window-list-holds-only-off-window-dates', ok: allOff > 0 && listed.length > 0 && inWindow.length === 0,
+      why: `${inWindow.length} of ${listed.length} listed rows are inside the visible window` });
+    rows.push({ id: 'R-5/the-off-window-list-counts-only-off-window-matches', ok: plusN === allOff - listed.length,
+      why: `the list says +${plusN} beyond its ${listed.length} rows, so it holds ${plusN + listed.length} matches where ${allOff} are outside the window` });
+    rows.push({ id: 'R-5/the-off-window-list-is-sorted', ok: listed.every((d, i) => i === 0 || iso(listed[i - 1]) <= iso(d)),
+      why: `the listed dates are not ascending: ${listed.join(' ')}` });
+  } finally {
+    type('');
+    restore(before);
+  }
+  verdict('§E1c · the marking is a difference, and it is exact', rows);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

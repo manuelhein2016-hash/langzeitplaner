@@ -53,6 +53,11 @@ import { useSharing, memberNameOf } from '../popover.js';
 import { installConflictNotice } from './conflict.js';
 import * as sharing from './sharing.js';
 import { chooseTransport } from '../platform/net.js';
+// LZP-1009 / E10-1009-A — the one binding `feedback/port.js` has been waiting for. `feedback/`
+// imports nothing that can open a socket (that is the whole reason it holds a PORT), so the
+// module that already owns a transport binds it, and that module is this one — the single dynamic
+// door ADR 003 §7 gate 2 allows. `port.js` is a leaf: importing it here adds no reachability.
+import { setFeedbackPort, FEEDBACK_PATH } from '../feedback/port.js';
 import { exportRawPublic, signBytes } from '../crypto/identity.js';
 import { b64u } from '../core/b64.js';
 
@@ -158,6 +163,10 @@ export async function start(handle, hooks) {
   // opening the key store twice on a real Mac is two IndexedDB handles and two chances to mint a
   // second identity, which is `armStore`'s own reason for existing.
   startCircleEngine(hooks, handle.armed);
+  // LZP-1009. A Mac with BOTH engines is bound by the CIRCLE one, so that `spaceKind` reads
+  // `family` — and it is decided here by asking, not by racing: both binders are async, so
+  // "last one wins" would be a coin flip on a slow key export rather than a rule.
+  if (!readCircleConfig(store.state && store.state.settings)) bindFeedback(handle.parts, 'personal');
   return handle;
 }
 
@@ -184,12 +193,17 @@ function installSections(handle, hooks) {
 //
 // `createjoin.js`, `membersui.js` and `adminpanel.js` reach the network and the key store, so by
 // this file's own rule they may be imported only from here. They ship their own DEFAULT_PORTS
-// (the product's real clock, key store and transport), so `initCreateJoin()` and
-// `initAdminPanel()` are called with nothing: the defaults ARE the wiring, and calling them makes
-// the mount explicit and resets any state a previous mount left behind.
+// (the product's real clock, key store and transport), so `initCreateJoin()` is called with
+// nothing: the defaults ARE the wiring, and calling it makes the mount explicit and resets any
+// state a previous mount left behind.
 //
-// `initMembersUI` is the one that needs a real port, because the member list is a join of two
-// sources that live in two different modules — see `MembersPort` in `membersui.js`.
+// `initMembersUI` and `initAdminPanel` are the two that need a real port, and for the same
+// reason: both answer a question that is a JOIN of two sources living in two different modules.
+// `initMembersUI` — see `MembersPort` in `membersui.js`. `initAdminPanel` needs exactly one
+// property, `roster`, because a LEAVE authors no op and so only the relay's roster knows about
+// it — and because a count taken with NO roster is a different fact from a count taken with one
+// (finding F-SHELL-2; the whole argument is on `adminpanel.js#eligibleCosigners`). Both are
+// handed the SAME `rosterCache`.
 //
 // `setProfile` IS story 15.6's write half, and it is one property because `core/ops.js` now has
 // the mutation (`setMyProfile`, row 23) and `store.useFamilySpace()` has a caller. It was absent
@@ -221,11 +235,25 @@ let mountedFor = null;
  *
  * `initCreateJoin()` and `initAdminPanel()` are unconditional and that is correct — both draw
  * from `familyCircle()` directly and are already silent without one, and `createjoin.js` must be
- * armed BEFORE there is a circle, because it is what creates one.
+ * armed BEFORE there is a circle, because it is what creates one. `initAdminPanel`'s one port is
+ * a lambda over `rosterCache` rather than the array, so it is read at the moment the count is
+ * taken and not at the moment the sheet was mounted — and the `!circle` branch below, which
+ * empties the cache, is therefore seen by it too.
  */
 function syncCircleMounts(hooks) {
   initCreateJoin();
-  initAdminPanel();
+  // The ONE port `adminpanel.js` cannot build for itself: the relay's roster, which is the only
+  // list on this Mac that knows who has LEFT (a leave authors no op — the relay purges the
+  // leaver's ops in the same transaction, `handlers/lifecycle.js:229`). It is the SAME array
+  // `initMembersUI` is handed below, deliberately, and it is a lambda so both read `rosterCache`
+  // at the moment the question is asked rather than at the moment the sheet was mounted.
+  //
+  // ⚠ This does NOT close F-SHELL-2, and `adminpanel.js#eligibleCosigners` says why at length:
+  // `membersui.js#readMembers` already applies `removedAt`, so the count was already right
+  // whenever `rosterCache` was populated. What the shell measured is `rosterCache` being EMPTY at
+  // the moment of the count. What this line buys is that the count can now TELL that state from
+  // "nobody has left" and answer `null` instead of a ceiling.
+  initAdminPanel({ roster: () => rosterCache });
   const circle = familyCircle();
   const key = circle ? circle.spaceId : null;
   if (key === mountedFor) return;
@@ -430,6 +458,7 @@ export function startCircleEngine(hooks, armed) {
         try { hooks?.onChange?.('settings'); } catch { /* a redraw that throws is not ours */ }
       },
     });
+    bindFeedback(circleParts, 'family');   // LZP-1009 — last binder wins; see `bindFeedback`
     return circleParts;
   })()
     .catch((e) => {
@@ -478,6 +507,69 @@ const lazyAnon = () => ({
 });
 
 const CLIENT_V = '2.0.0';
+
+/**
+ * ── LZP-1009 · BINDING „Rückmeldung senden" TO THE RELAY THIS MAC ALREADY TALKS TO ───────────
+ *
+ * `E10-1009-A` (FINDINGS §18c) was: `setFeedbackPort(...)` existed and nothing called it, so
+ * `canSend()` was false on every Mac, „Senden" was disabled, and the screen said so honestly.
+ * This is the caller.
+ *
+ * THREE THINGS IT IS NOT, EACH ONE DELIBERATE:
+ *
+ *   · It is not a second door. `feedback/port.js` is a leaf module — it imports `nothing that can
+ *     open a socket` by its own header, and it is imported HERE, behind the one dynamic import
+ *     the boot graph makes. `tests/tier1/network-scope.test.js` §2 still measures one door.
+ *   · It is not an origin. The port carries `send`, never a URL: the path is fixed at
+ *     `FEEDBACK_PATH` in this one line, and `net.js#assertReachable` refuses every path outside
+ *     the one prefix at the other end. Nothing downstream can point the sender somewhere else.
+ *     (Written without a quoted path literal on purpose: `tests/attack/privacy-e5-endpoint.test.js`
+ *     §5 enumerates the addressable set by reading these files' raw bytes, and a path in a comment
+ *     would enter that set as if the product could build it.)
+ *   · It is not telemetry. Nothing here sends anything. It makes a button pressable; the person
+ *     writes the text, reads the whole payload on the preview screen, and presses „Senden".
+ *
+ * THE SHAPE CORRECTION `port.js`'s header could not know. A transport answers
+ * `{status, headers, json}` (`platform/net.js`), and a `FeedbackPort` promises `{status, body}`
+ * (`feedback/ui.js#doSend` reads `res.body.error`). The suggested one-liner would have handed the
+ * screen `body: undefined` and turned every named server refusal — `payload_too_large`,
+ * `rate_limited`, `not_implemented` — into the generic failure sentence. So it is mapped here.
+ *
+ * SIGNING IS OPTIONAL AND IS SUPPLIED. `handlers/feedback.js` accepts an anonymous report and
+ * records `proves: 'unsigned'`; with a device signature it records `device_continuity`, which is
+ * what lets a maintainer tell two reports from one Mac apart from two Macs. The key is the
+ * device signing key that already signs every sync request, and `signBytes` is the only thing
+ * that can cross that boundary (`IK_sig` is `extractable: false`).
+ *
+ * @param {Object} parts what `startEngine` / `startFamilyEngine` returned
+ * @param {'personal'|'family'} spaceKind which engine bound it — `report.js#SPACE_KINDS`
+ */
+async function bindFeedback(parts, spaceKind) {
+  try {
+    const transport = parts && parts.transport;
+    if (!transport || typeof transport.request !== 'function') return;
+    const devSig = parts.armed && parts.armed.identity && parts.armed.identity.devSig;
+    let devicePub;
+    let sign;
+    if (devSig && devSig.publicKey && devSig.privateKey) {
+      devicePub = b64u(await exportRawPublic(devSig.publicKey));
+      sign = (bytes) => signBytes(devSig.privateKey, bytes);
+    }
+    setFeedbackPort({
+      send: async (body) => {
+        const r = await transport.request('POST', FEEDBACK_PATH, undefined, body);
+        return { status: r.status, body: r.json };
+      },
+      ...(devicePub ? { devicePub, sign } : {}),
+      appVersion: CLIENT_V,
+      spaceKind,
+    });
+  } catch (e) {
+    // A feedback button that cannot be bound is a disabled button with a sentence on screen —
+    // never a boot failure. The screen's own `noRelay` line is the honest rendering of this.
+    console.warn('[feedback] the sender could not be bound:', e);
+  }
+}
 
 /** The second Mac's flow: no identity, no space, no signed transport. */
 function makeJoinerFlow(hooks) {
@@ -702,5 +794,23 @@ function findPeerKex(body, memberId, deviceId) {
   }
   return null;
 }
+
+/**
+ * ── F-SHELL-2, THE MEASUREMENT THE REPORT COULD NOT MAKE ─────────────────────────────────────
+ *
+ * `adminpanel.js#eligibleCosigners` answers a different question depending on whether this Mac
+ * holds a roster: with one, the count is log ∩ roster; with none, a positive count is a CEILING
+ * and is reported as `null`. `docs/v2/SHELL-VERIFICATION.md` §5 recorded **2** on a Mac where no
+ * log state can produce 2 with a roster present — so `rosterCache` must have been empty at that
+ * moment, and F-SHELL-2 is a FRESHNESS defect rather than a missing intersection.
+ *
+ * That sentence was not decidable from `adminpanel.js` and `mount.js` alone: it needs the number
+ * recorded beside the count, on the real binary, in the phase that measured it. This is that
+ * accessor, and it is READ-ONLY and a COPY — nothing outside this module may hold the live array
+ * and nothing may write it.
+ *
+ * @returns {Array<Object>} a copy of the roster this Mac last fetched; `[]` means "none yet"
+ */
+export function rosterSnapshot() { return rosterCache.slice(); }
 
 export { refreshSyncChrome, createSpaceOnRelay, adoptOnRelay, exportRawPublic };

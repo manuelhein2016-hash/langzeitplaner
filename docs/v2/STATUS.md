@@ -1,86 +1,118 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-03 · **Stopped at:** **the final integration — four parallel fix passes
-landed, and a family works in the app we ship, five times out of five.** Full record:
-`docs/v2/V2-FINAL.md`; findings in `FINDINGS.md` §21.
+**Last session:** 2026-09-03 (closing pass) · **Stopped at:** **the acceptance run is clean —
+`unshare-owner` completed 10 of 10, and the refusal ledger is 0.** Full record:
+`docs/v2/V2-FINAL.md`; findings in `FINDINGS.md` §22.
 
 ---
 
-## THE HEADLINE: the founder receives a joiner's entry — 5 of 5, where it was 0 of 5
+## THE HEADLINE: the refusal ledger is **0**, and it had never once been flat
 
 ```
-npm test 2216/2216 · test:property 101/101 · test:attack 970/970
-test:server 998/998 · test:fleet 423/423 · test:dom 902 pass / 3 fail (54 files)
+npm test 2229/2229 · test:property 101/101 · test:attack 970/970
+test:server 1002/1002 (1069 with a live Postgres) · test:fleet 435/435
+test:dom 875 pass / 3 fail (55 files)
 ```
 
-**5 610 green rows, 3 red** — and the three reds are the three named residuals in the same two
-files: `e8-density-legibility` §A4 (the 9 px ink floor, a PO ruling on `palette.js`),
-`e8-density-perf` §E1 (the 60 fps frame) and §E3 (the saturated poster, a spec threshold error
-where 48 % is the mathematical ceiling and the row asks 75 %). None is new.
+**5 612 green rows, 3 red** — and the three reds are the three named residuals:
+`e8-density-legibility` §A4 (the 9 px ink floor, a PO ruling on `palette.js`), `e8-density-perf`
+§E1 (`findWorst` straddling the 60 fps frame) and §E3 (the saturated poster, a spec threshold
+error where 48 % is the mathematical ceiling and the row asks 75 %). None is new.
 
-### The acceptance run — five consecutive runs, 26 launches of the shipped binary each
+### The acceptance run — TEN consecutive runs, 27 launches of the shipped binary each
 
-| Run | Phases failed | Founder received a joiner's entry | Crossed to | Refusal ledger |
+| Run | Phases failed | Founder received a joiner's entry | `unshare-owner (B)` | Refusal ledger |
 |---|---|---|---|---|
-| 1 | 0 of 26 | **YES** | B and C | 2 |
-| 2 | 0 of 26 | **YES** | B and C | 2 |
-| 3 | 0 of 26 | **YES** | B and C | 2 |
-| 4 | 0 of 26 | **YES** | B and C | 34 |
-| 5 | 0 of 26 | **YES** | B and C | 2 |
+| 1–10 | **0 of 27**, every run | **YES**, every run | **completed**, every run | **0**, every run |
 
-Before: **0 of 5**, the entry crossing to one peer in 4 of 5, and the ledger climbing
-0 → 6 → 13 → 25 as the founder relaunched.
+Before this pass: `unshare-owner (B)` **BLOCKED 10 of 10** and the ledger **2 · 2 · 2 · 34 · 2**.
+Before that (`SHELL-VERIFICATION.md` §9): the founder received a joiner's entry in **0 of 5** and
+the ledger climbed 0 → 6 → 13 → 25 as the founder relaunched.
 
-**The bar was 5 of 5 with the ledger flat at zero. The first half is met; the second is not.**
-The ledger is two open findings and nothing else — `F-SHELL-3` (the unshare path; the "2" is one
-`notOwner` remembered by L-1) and `F-SHELL-4` (a second, identical self-attestation; the "34").
-Neither is an attestation defect and neither blocks a phase. `FINDINGS.md` §21c, §21d.
+**The bar was 5 of 5 with the ledger flat at zero. Both halves are met, twice over.**
 
-### THE DEFECT THIS PASS FOUND: `_absorbedAttestOps` had never once run
+### R-1 was three defects, and the „DATA LOSS" headline on it was wrong
 
-The fix that was supposed to close the other half of F-SHELL-1 was **inert**. `foldAuthorized`'s
-Pass A runs `classifyOp` first, and it requires `op.gid` to be a 22-char GroupId; the
-reconstruction passed `gid: null`. Every rebuilt attestation op was discarded
-`{stage:'attestation', reason:'shape'}` before a single attestation condition ran. It shipped with
-**no test of any kind**, which is exactly how 5 448 green rows failed to see it, and it read as
-flakiness in the shell because it only bites the Mac whose checkpoint absorbed the founder's op.
-`FINDINGS.md` §21a.
+Nothing was ever deleted: `pub.alive` is nulled and never set false, the patch is `pub.*` only,
+and the admin cannot address the owner's personal space at all. What was lost was the
+**reversion**. The three:
 
-### The v1 oracle did not move — checked PER FILE, not as a total
+1. **`store.js#_absorbedChainOps`** — `core/authz.js` stage 1 builds the admin chain from
+   `space.set` **ops** and never from registers, so after the owner's first relaunch the chain is
+   empty, `adminAtKey` answers `null`, and stage 3a refuses the retraction `notOwner` — terminally.
+   This is `F-SHELL-1(b)` one register over. **That single refusal was the whole residual ledger.**
+2. **`store.js#withoutForeignEntries`** — ADR 006 re-migrates `board.json` every launch, and
+   `migrateV1` turned another member's entry into one of the viewer's OWN Privat notes, once per
+   launch. Measured on the shipped binary: **seven copies after seven launches.**
+3. **`shell-macos/main.swift#runTestFile`** — `exit()` never ran `applicationShouldTerminate`, so
+   the 700 ms save debounce was abandoned at the end of every phase. That was the „she lost her
+   entry" message, and it was the harness.
 
-Every row of the 11 characterization files added at `328c683`, run at `6268cbe` in a clean
+### And one that is NOT closed, and is new
+
+`_absorbedChainOps` rebuilds only a **genesis-shaped** link. `transferAdmin` **is** shipped
+(`adminpanel.js:654`, reached from `leavedelete.js:1433`), so a circle whose admin seat has moved
+is still exposed. The previous residual list said no circle transfers the seat; it was wrong.
+`tests/fleet/e12-unshare.test.js` §8 pins the refusal to guess. **R-1b, owner `store.js#_persistOps`.**
+
+### LZP-1009 is wired, end to end, on the real relay
+
+`family/mount.js#bindFeedback` binds the sender the ticket could not bind itself. The shell e2e's
+new `feedback` phase asserts the app — not the test — bound it, builds a report off the live
+board, searches the wire body for the Privat entry that is on that board, and gets a **202** with
+a verified device signature. 10 of 10. **What is still owed is a destination:**
+`server/adapters/vercel.js` binds no `feedbackSink`, so the deployed relay answers 501, honestly.
+
+### The Mom test is green
+
+`node scripts/mom-test-probe.mjs` — **35 rows · 33 pass · 2 note · 0 FAIL**, exit 0. It was
+29 · 2 · 4, and all four FAILs were the missing relay address.
+
+### The v1 oracle did not move — checked PER FILE against `78016e8`
+
+Every row of the 11 characterization files added at `328c683`, run at **`78016e8`** in a clean
 `git archive` tree and in this tree, compared file by file including nested rows:
-**626 rows (515 tier-1 + 111 tier-2), byte-identical, 0 red, in all 11 files.**
 
-### LZP-1007 — the ticket passes, the row does not
+| File | Rows | Red | Verdict |
+|---|--:|--:|---|
+| `tier1/dates-holidays.test.js` | 103 | 0 | **identical** |
+| `tier1/layout.test.js` | 108 | 0 | **identical** |
+| `tier1/palette.test.js` | 6 | 0 | **identical** |
+| `tier1/repeats-find-i18n.test.js` | 137 | 0 | **identical** |
+| `tier1/storage.test.js` | 11 | 0 | **identical** |
+| `tier1/store-persistence.test.js` | 139 | 0 | **identical** |
+| `tier1/suite-integrity.test.js` | 11 | 0 | **identical** |
+| `tier2/board-render.dom.js` | 19 | 0 | **identical** |
+| `tier2/dom-rendering.dom.js` | 44 | 0 | **identical** |
+| `tier2/interaction.dom.js` | 32 | 0 | **identical** |
+| `tier2/shell-bridge.dom.js` | 16 | 0 | **identical** |
 
-`renderBoard` **60.8 → 3.3–3.5 ms** (0.2 of a frame), byte-identical to the rebuild it replaced —
-89 identity cells in `tests/tier2/e1-incremental.dom.js` compare `#board.outerHTML` and the
-`<textarea>` values against a from-scratch render. §E1 stays red on two cells that are not
-`renderBoard`: `memberToggle` 19.4–20.5 ms and `findWorst` 22.3–23.4 ms (`find.js`, red before
-this ticket).
+**626 rows (515 tier-1 + 111 tier-2). Not one changed.** `store-persistence.test.js` — the oracle
+file that exercises the code this pass edited — is in that list: `_absorbedChainOps` and
+`withoutForeignEntries` both return before looking at anything when there is no family space,
+which is what keeps a v1 board out of them entirely.
 
-### The standing bar held a seventh time
+### The standing bar held an eighth time
 
-Zero bytes of a Privat entry: **302 tier-1/attack/fleet rows + 37 tier-2 rows + 38 SSRF rows
-across 29 launches of the shipped `.app`**, all green. An attestation change moves who is
-admitted, which is exactly where it could have broken.
+Zero bytes of a Privat entry — including on the one payload that now leaves a Mac that is not
+syncing, the feedback report, which is searched for the needle before it is sent.
 
 ---
 
 ## ⛔ WHAT A PERSON WOULD BE SHIPPING
 
-The full list with owners is `docs/v2/V2-FINAL.md` §8. The three that matter:
+The full list with owners is `docs/v2/V2-FINAL.md` §8, re-issued. The three that matter:
 
-1. **R-1 · F-SHELL-3 — the owner loses her own entry.** The admin's „→ Privat" arrives on the
-   owner's Mac as a deletion, not a reversion. BLOCKED in 10 of 10 runs. The only residual that
-   loses data. Owner: `family/sharing.js`.
-2. **R-2 · F-SHELL-4 — a second, identical self-attestation.** Permanent `writeOnce` refusals on
-   every peer for ever. Nothing breaks; the record splits. Cause not yet named — the obvious
-   hypothesis was built, tested, disproven and reverted.
-3. **R-3 · The Mom test cannot be run.** The shipped invitation carries **no relay address at
-   all**, so `submitJoin` dead-ends and she cannot join. One `Server:` line in
-   `docs/v2/email/invitation.*` (LZP-108) and the probe goes green.
+1. **R-8b · the adapter has met a local cluster, not Frankfurt's pooler.** `prisma.js` passes 66
+   of 66 contract cases against PostgreSQL 17.10, and four defects were found by running it — one
+   of which no single-process test could ever find. But a transaction-mode pooler can refuse an
+   interactive `$transaction` or silently downgrade `Serializable`, and every atomicity guarantee
+   rests on getting one. Run `RUNBOOK.md` §2.5.1 against the deployed database first.
+2. **R-1b · a transferred admin seat.** Above.
+3. **R-9b · two deployment lines nobody can write from here** — a production `feedbackSink`, and
+   the real relay origin substituted into the four invitation files (which today carry the
+   literal `https://lzp-sync-po.vercel.app`, a name nobody has claimed). Both are now checkboxes
+   in `RELEASE-CHECKLIST.md` §A.
 
 ---
 

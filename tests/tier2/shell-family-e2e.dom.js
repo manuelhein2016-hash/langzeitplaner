@@ -62,6 +62,10 @@ const leavedelete = await importApp('family/leavedelete.js');
 const familysettings = await importApp('family/familysettings.js');
 const engine = await importApp('family/engine.js');
 const popover = await importApp('popover.js');
+const fbport = await importApp('feedback/port.js');
+const fbreport = await importApp('feedback/report.js');
+const fbredact = await importApp('feedback/redact.js');
+const board = await importApp('board.js');
 
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args || {});
 
@@ -667,12 +671,24 @@ test('§7 the two-member caveat: the circle IS stranded, and the sentence for it
   // was written for, `eligibleCosigners` does not return 0, so the sentence does not fire. The
   // person meets a `403 founder_gone_every_removal_needs_second_key` instead — which §6 shows is
   // at least readable — rather than the paragraph that explains it. Recorded as **F-SHELL-2**.
+  //
+  // ── AND THE NUMBER THAT DECIDES WHICH DEFECT F-SHELL-2 IS ────────────────────────────────
+  //
+  // `eligibleCosigners` returns log ∩ roster when this Mac HOLDS a roster, and `null` (UNKNOWN)
+  // for a positive log-only count when it does not. §5 of `docs/v2/SHELL-VERIFICATION.md`
+  // recorded **2** — a value no log state can produce with the roster present — so the roster
+  // must have been empty at the moment of the count. `mount.rosterSnapshot()` records that
+  // directly, beside the count, on the real binary. Without it the two readings are guesses.
+  const cached = mount.rosterSnapshot();
   const eligible = port.eligibleCosigners(E2E.target);
-  assert.equal(typeof eligible, 'number',
-    'the member view is not mounted — `null` is "unknown" and must never be read as zero (T5-M3)');
-  diag(`eligibleCosigners → ${eligible}; the relay says ${alive.length - 1} member(s) besides me `
-    + `are alive, of whom ${Math.max(0, alive.length - 2)} could co-sign`);
+  assert.ok(eligible === null || typeof eligible === 'number',
+    'eligibleCosigners answered neither a number nor `null` — `null` is "unknown" and must never '
+    + 'be read as zero (T5-M3)');
+  diag(`eligibleCosigners → ${eligible}; rosterCache holds ${cached.length} row(s); the relay says `
+    + `${alive.length - 1} member(s) besides me are alive, of whom `
+    + `${Math.max(0, alive.length - 2)} could co-sign`);
   OUT.eligibleFromLog = eligible;
+  OUT.rosterCached = cached.length;
   OUT.aliveOnRelay = alive.length;
   // The relay's own count of who could actually co-sign an act against the target: alive, not me,
   // not the target. THIS is zero, and it is the number the sentence is about.
@@ -700,6 +716,127 @@ test('§7 the two-member caveat: the circle IS stranded, and the sentence for it
   await sleep(200);
   assert.equal(WIRE.sync_request.length, before,
     'reading the caveat reached the relay — it is being met as a 403, not as a sentence');
+  emit();
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §7b · LZP-1009 — „Rückmeldung senden", END TO END, ON THE REAL RELAY
+//
+// `tests/tier2/feedback.dom.js` proves the screen: it composes, it previews the exact payload,
+// and it sends — through a port THE TEST BINDS. That leaves the one claim neither tier can make
+// on its own and that R-10 recorded as OPEN: **does the shipped app bind it, and does a real
+// relay take the report?** Until this pass nothing called `setFeedbackPort`, so `canSend()` was
+// false on every Mac and „Senden" was disabled with the reason on screen (E10-1009-A).
+//
+// So this phase binds NOTHING. It asks the port that `family/mount.js#bindFeedback` left behind
+// whether it can send, builds a report off the REAL board in this launch, and posts it over the
+// bridge to `server/dev-server.mjs` — the same `server/core/router.js` and the same
+// `handlers/feedback.js` that would run in Frankfurt. A 202 means the relay took custody; a 501
+// would mean `ctx.feedbackSink` is unbound, which is exactly what the DEPLOYED relay still
+// answers and what the residual list still owes.
+//
+// AND IT IS INSIDE THE REDACTION BOUNDARY. The board this launch is looking at carries a Privat
+// entry. The wire body is searched for it, byte for byte, before anything is sent.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+test('§7b „Rückmeldung senden" is BOUND by the shipped app, and the real relay answers 202', async () => {
+  if (PHASE !== 'feedback') skip(PHASE ? `phase is ${PHASE}` : SKIP_REASON);
+  await armShell();
+  await waitFor(() => mount.circleEngine(), { ...settleTimeout, what: 'the circle engine' });
+
+  // The binder is asynchronous (it exports a raw public key on the way), so it is waited for
+  // rather than assumed — and a timeout here IS the finding, not a flake.
+  await waitFor(() => fbport.canSend(), { ...settleTimeout, what: 'the feedback port to be bound' });
+  const port = fbport.feedbackPort();
+  assert.ok(port, '`canSend()` is true and `feedbackPort()` is null — the two disagree');
+  assert.equal(typeof port.send, 'function', 'the bound port carries no `send`');
+  assert.equal(port.spaceKind, 'family', `the port says spaceKind=${port.spaceKind} on a Mac in a circle`);
+  assert.equal(typeof port.devicePub, 'string',
+    'the port carries no device public key, so every report is anonymous and two reports from '
+    + 'one Mac cannot be told from two Macs (`proves: unsigned`)');
+  assert.equal(typeof port.sign, 'function', 'the port carries a devicePub it cannot sign with');
+
+  // ── A PRIVAT ENTRY, ON THIS BOARD, RIGHT NOW ───────────────────────────────────────────────
+  const NEEDLE = 'Scheidungsanwältin Dr. Kübler 14:30';
+  const day = $('.board .day[data-date]');
+  assert.ok(day, 'the board drew no day row — the report would be about nothing');
+  store.mutate('e2e:fb-seed', (st) => {
+    st.notes.push({ id: 'e2e-fb-1', date: day.dataset.date, text: NEEDLE,
+      categoryId: st.categories[0].id, repeatsYearly: false });
+  });
+  board.renderBoard($('#board'));
+  assert.ok(document.body.textContent.includes(NEEDLE), 'the needle is not on the board');
+
+  // The SAME two calls `feedback/ui.js#openFeedback` makes, in the same order: the picture is
+  // rendered off the live board before anything else, and `buildReport` is handed the object
+  // `renderRedactedBoard` returns (`{bytes, w, h, counts}`), not a data URL.
+  const image = fbredact.renderRedactedBoard($('#board'));
+  assert.ok(image && image.bytes && image.bytes.length > 0, 'the redacted picture came out empty');
+  const built = fbreport.buildReport({
+    text: 'Die Wochenspalte springt beim Scrollen.',
+    screen: 'board', now: Date.now(), image,
+    appVersion: port.appVersion, spaceKind: port.spaceKind,
+  });
+  assert.ok(built.text.includes('Die Wochenspalte'), 'her sentence is not in the report');
+  const body = fbreport.wireBody(built, {
+    pub: port.devicePub,
+    sig: fbreport.b64(await port.sign(fbreport.signedBytes(built))),
+  });
+
+  // ── THE STANDING BAR, ON THE ONE PAYLOAD THAT LEAVES A SOLO MAC ────────────────────────────
+  const wire = JSON.stringify(body);
+  for (const needle of [NEEDLE, 'Scheidungsanwältin', 'Kübler', day.dataset.date]) {
+    assert.equal(wire.includes(needle), false,
+      `the feedback payload carries „${needle}" — a Privat entry reached the wire`);
+  }
+
+  // ── WHY THE WIRE COUNTER IS NOT THE WITNESS HERE, MEASURED RATHER THAN ASSUMED ────────────
+  //
+  // `mount.js#ports()` captures `window.__TAURI__.core.invoke` BY REFERENCE, and the circle
+  // engine is armed at BOOT — before `runTestFile` injects this file and its counter wrapper. So
+  // a transport the app built for itself calls the original `invoke` and `WIRE.sync_request`
+  // never sees it. (Measured: this row failed on exactly that, with the send having succeeded.)
+  // The phases that count the wire build their transports from inside the phase, which is why
+  // they can.
+  //
+  // The witness that survives that is stronger anyway: a 202 from `server/dev-server.mjs` cannot
+  // be produced without the bytes arriving there. And the claim the counter WAS carrying —
+  // "nothing here used fetch" — is still asserted, because `window.fetch` is wrapped in place.
+  const fetchBefore = WIRE.fetch.length;
+  const res = await port.send(body);
+  assert.equal(WIRE.fetch.length, fetchBefore,
+    `„Senden" reached for fetch: ${JSON.stringify(WIRE.fetch.slice(fetchBefore))}`);
+  assert.equal(res.status, 202,
+    `the relay answered ${res.status} ${JSON.stringify(res.body)}. 501 means ctx.feedbackSink is `
+    + 'unbound on that relay — honest, and not a send');
+  assert.equal(res.body.ok, true);
+  // `proves` is the SENTENCE `handlers/feedback.js#PROVES` holds, not a token — the relay answers
+  // in words on purpose. The signed sentence is about a key signing twice; the unsigned one says
+  // „nothing at all". Matching the first and refusing the second is the whole of the claim.
+  assert.match(String(res.body.proves), /signed by the same private key/,
+    `the relay recorded proves=${res.body.proves} — the device signature did not verify`);
+  assert.equal(/nothing at all/.test(String(res.body.proves)), false,
+    'the relay took the report as UNSIGNED — the port bound no key, or the signature was dropped');
+  assert.ok(typeof res.body.provesNot === 'string' && res.body.provesNot.length > 0,
+    'the relay did not say what the report does NOT prove');
+  assert.match(String(res.body.provesNot), /self-minted client-side and never enrolled/,
+    'the relay\'s disclaimer is not the one LZP-1009 requires on every answer');
+
+  // AND IT WENT TO THE ONE ORIGIN. The port holds no URL at all — the path is fixed at
+  // `FEEDBACK_PATH` in the binder and the origin is the shell's pin — so the strongest thing
+  // this row can say is that the transport it was handed is the circle's own.
+  const parts = mount.circleEngine();
+  assert.equal(parts.transport.origin, E2E.origin,
+    'the bound sender is pointed at an origin that is not the circle\'s');
+  assert.equal(parts.transportKind, 'bridge',
+    `the circle engine chose ${parts.transportKind}, so the report did not travel on the bridge`);
+
+  store.mutate('e2e:fb-clean', (st) => { st.notes = st.notes.filter((n) => n.id !== 'e2e-fb-1'); });
+  await store.persistNow();
+
+  OUT.feedbackStatus = res.status;
+  OUT.feedbackSigned = /signed by the same private key/.test(String(res.body.proves));
+  OUT.feedbackBytes = wire.length;
   emit();
 });
 

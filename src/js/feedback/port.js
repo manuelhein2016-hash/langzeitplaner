@@ -20,23 +20,25 @@
 // screen is a preview screen with two fallbacks, which is a real feature and not a stub.
 //
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// ██ THE ONE LINE THIS TICKET DOES NOT OWN, STATED AS A FACT RATHER THAN A HOPE ██
+// ██ THE BINDING — LANDED, AND CORRECTED ON ONE FIELD ██
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 //
-// `src/js/family/mount.js` belongs to a parallel workflow and is not this ticket's to edit. The
-// binding it owes is this, beside the `setFamilySections(...)` call it already makes:
+// `src/js/family/mount.js#bindFeedback` binds this port, from `start()` on a personal-space Mac
+// and from `startCircleEngine()` on one in a Familienkreis. E10-1009-A is CLOSED.
 //
-//     import { setFeedbackPort } from '../feedback/port.js';
-//     setFeedbackPort({
-//       send: (body) => parts.transport.request('POST', '/api/v1/feedback', undefined, body),
-//       appVersion: cfg.clientVersion,
-//       spaceKind: armed.familySpaceId ? 'family' : 'personal',
-//     });
+// The line this header used to publish was one field wrong, and the correction is worth keeping
+// because it is the kind of mistake a hand-off makes:
 //
-// Until that line lands, a Mac that HAS a relay still cannot send from the app, and the honest
-// consequence is on screen in `copy.js` → `noRelay`, not hidden behind a spinner. It is filed as
-// **E10-1009-A** in FINDINGS.md. `tests/tier1/feedback.test.js` §6 pins the port's contract so
-// that the line, when it lands, cannot land wrong.
+//     send: (body) => parts.transport.request('POST', '/api/v1/feedback', undefined, body)
+//
+// A transport answers `{status, headers, json}` (`platform/net.js`), and this port promises
+// `{status, body}` — `ui.js#doSend` reads `res.body.error` to name a refusal. Unmapped, every
+// named server answer (`payload_too_large`, `rate_limited`, `not_implemented`) would have reached
+// the person as the generic failure sentence. The binder maps it.
+//
+// A Mac with NO relay — solo — still binds nothing, and that is not a gap: `canSend()` is false,
+// „Senden" is disabled, `copy.js#noRelay` says why, and „Kopieren" / „Als Datei sichern" are on
+// the preview screen from the start. `tests/tier1/feedback.test.js` §6 pins this contract.
 //
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // WHY A PORT AND NOT A TRANSPORT
@@ -44,7 +46,10 @@
 // `send` is `(body) => Promise<{status, body}>` — the shape `net.js`'s transports already have,
 // and the smallest thing that can be. It is NOT handed an origin, a path, or headers: the path is
 // fixed by the binder, so nothing in this tree can be pointed at a second endpoint by a bug here,
-// and `assertReachable` still refuses every path but `/api/v1/…` at the other end.
+// and `assertReachable` still refuses every path outside the one prefix at the other end.
+// (Spelled without a quoted path literal: `tests/attack/privacy-e5-endpoint.test.js` §5 now
+// reads this file's raw bytes to enumerate every path the product can build, and a path in a
+// comment would join that set as though it were addressable.)
 
 /** @typedef {{ send:(body:Object)=>Promise<{status:number, body:any}>,
  *              sign?:(bytes:Uint8Array)=>Promise<Uint8Array>,

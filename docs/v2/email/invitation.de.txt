@@ -72,7 +72,18 @@ DEIN EINLADUNGSCODE
 
     {{EINLADUNGSCODE}}
 
-In der App: Einstellungen -> „Familienkreis beitreten", den Code einsetzen,
+
+UND DIE SERVERADRESSE DAZU
+
+Die App fragt auch danach — sie hat keine Adresse fest eingebaut. Hier
+steht sie:
+
+    https://lzp-sync-po.vercel.app
+
+
+In der App: Einstellungen -> „Familienkreis beitreten". Am einfachsten
+markierst du diese ganze E-Mail, kopierst sie und setzt sie oben in das
+große Feld ein — beides holt sich die App dann selbst heraus. Danach noch
 Namen und eine Farbe aussuchen. Das war's, du bist dabei.
 
 Eine Sache noch, damit du nicht wartend davorsitzt: Die gemeinsamen

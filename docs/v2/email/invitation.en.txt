@@ -70,8 +70,18 @@ YOUR INVITATION CODE
 
     {{EINLADUNGSCODE}}
 
-In the app: Settings -> "Join family circle", paste the code, pick a name
-and a colour. That's it, you're in.
+
+AND THE SERVER ADDRESS THAT GOES WITH IT
+
+The app asks for this too — it has no address built into it. Here it is:
+
+    https://lzp-sync-po.vercel.app
+
+
+In the app: Settings -> "Join family circle". The easiest way: select this
+whole e-mail, copy it, and paste it into the big field at the top — the app
+picks both out of it by itself. Then pick a name and a colour. That's it,
+you're in.
 
 One more thing, so you're not sitting there waiting: the shared entries
 won't be there the moment you join. They arrive on their own, as soon as

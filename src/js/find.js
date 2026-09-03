@@ -46,6 +46,8 @@ let onJump = null;
 let hits = [];
 let cursor = -1;
 let active = false;
+/** bar id → its stripe elements, rebuilt by each `run()`. See `mark()`. */
+let stripes = new Map();
 
 export const findActive = () => active;
 
@@ -85,8 +87,8 @@ export function refreshFind() {
 
 function run(qRaw, keepCursor = false) {
   const q = qRaw.trim().toLowerCase();
-  clearMarks();
   if (!q) {
+    clearMarks();
     active = false;
     document.body.classList.remove('finding');
     counter.textContent = '';
@@ -103,14 +105,26 @@ function run(qRaw, keepCursor = false) {
   hits = [];
   const handles = ownerHandles();
   const seenBars = new Set();
+  // Every node that must be wearing `.hit` when this call returns. Collected
+  // rather than marked as we go — see `applyMarks` below for why.
+  const wantHit = new Set();
   for (const n of nodes) {
     const text = n.tagName === 'TEXTAREA' ? n.value : n.textContent;
     // A6 — the owner's name joins the node's own ink, and only for a foreign
     // entry: `handles` holds nothing else, so my own board searches exactly
     // what v1 searched.
-    const hay = `${text ?? ''}${handles.get(n.dataset.noteId || n.dataset.barId) ?? ''}`;
+    //
+    // The join is CONDITIONAL, not because a missing handle is a special case
+    // but because `${text}${undefined ?? ''}` is a string allocation per node
+    // per keystroke that produces exactly `text` — 862 of them on the family
+    // fixture. A board with no family reaches none of them. The two branches
+    // must stay one expression apart: a query may span the seam between an
+    // entry's own text and its owner's name, so they are still searched JOINED
+    // and never separately.
+    const handle = handles.get(n.dataset.noteId || n.dataset.barId);
+    const hay = handle === undefined ? (text ?? '') : `${text ?? ''}${handle}`;
     if (!hay || !hay.toLowerCase().includes(q)) continue;
-    n.classList.add('hit');
+    wantHit.add(n);
     // A six-month bar wears one label per month segment (3.7) but it is still
     // one entry — stepping through it five times would be a lie about how many
     // things matched. Note occurrences do count separately: each is a real,
@@ -135,23 +149,69 @@ function run(qRaw, keepCursor = false) {
   //
   // The stripes are indexed once instead. Same nodes, same classes, same order;
   // the only thing that changes is that the board is walked once rather than
-  // once per hit. `cssEsc` is no longer needed on this path at all, which also
-  // removes a bar id's ability to reach a CSS selector parser.
-  const stripes = new Map();
-  for (const b of document.querySelectorAll('.board .bar[data-bar-id]')) {
-    const id = b.dataset.barId;
-    const list = stripes.get(id);
-    if (list) list.push(b); else stripes.set(id, [b]);
+  // once per hit. `cssEsc` was needed on this path and is now gone from the
+  // file entirely (R-5 took its last caller out of `mark()`), which also
+  // removes a bar id's ability to reach a CSS selector parser at all.
+  //
+  // R-5 finished the job. Two things were still proportional to the BOARD here
+  // rather than to the hits: the scan itself was `querySelectorAll` with an
+  // attribute selector, which is a walk over all 4 195 elements, and it indexed
+  // every stripe on the board when only the stripes of MATCHING bars are ever
+  // read. It is now the live `.bar` collection — engine-maintained, the same
+  // one `board.js#scrubMarks` leans on — filtered by the ids that matched.
+  const hitBarIds = new Set();
+  for (const n of hits) if (n.dataset.barId) hitBarIds.add(n.dataset.barId);
+  stripes = new Map();
+  if (hitBarIds.size) {
+    const live = boardRoot()?.getElementsByClassName('bar') || [];
+    for (let i = 0; i < live.length; i++) {
+      const b = live[i];
+      const id = b.dataset.barId;
+      if (!id || !hitBarIds.has(id)) continue;
+      const list = stripes.get(id);
+      if (list) list.push(b); else stripes.set(id, [b]);
+      wantHit.add(b);
+    }
   }
-  for (const n of hits) {
-    if (!n.dataset.barId) continue;
-    for (const b of stripes.get(n.dataset.barId) || []) b.classList.add('hit');
-  }
+
+  // ═══ MARK THE DIFFERENCE, NOT THE WHOLE HIT SET (R-5) ══════════════════════
+  // This is the second half of the cost the LZP-1007 note above found the first
+  // half of, and it is where `findWorst`'s remaining milliseconds were.
+  //
+  // MEASURED, before this changed: of 21.4 ms in `run()`, **16.5 ms was one
+  // line** — the first `getBoundingClientRect()` in `scrollTo`, which is the
+  // first geometry read after the marking and therefore pays for the style
+  // recalculation the marking made necessary. The other eight phases together
+  // were 2.8 ms. The read is not the cost; the marking is, and the read is
+  // merely where the bill arrives.
+  //
+  // And the marking was doing twice the work it needed to. `clearMarks()` took
+  // `.hit` off EVERY node that had it, and the loop then put it back on every
+  // node that matched — so a keystroke that moves the hit set from „E" to „El"
+  // dirties ~500 nodes it is about to re-mark identically. Measured on the 8x2
+  // fixture: touching 358 notes + 136 bar nodes costs 11.6 ms of recalculation
+  // whatever the property is (border-bottom 8.8 ms, box-shadow 8.6 ms,
+  // background alone 4.1 ms — so this is style recalculation and paint, not
+  // reflow, and no CSS edit would have helped).
+  //
+  // `applyMarks` brings the marked set to exactly `wantHit` and touches only
+  // the difference. It reads the set it is diffing against out of the LIVE
+  // `getElementsByClassName` collection rather than out of a cached Set, which
+  // is what makes it safe next to `board.js#scrubMarks`: a render that strips
+  // every mark, a full rebuild that replaces every node, `applySelection`, or
+  // anything else that touches these classes simply shows up in the collection,
+  // and the next `run()` reconciles to it. There is no state to get stale.
+  applyMarks('hit', wantHit);
 
   // 14.2 [Could] — hits in rolled-out history, listed as clickable results.
   renderHistory(offscreenHits(q));
 
   if (!hits.length) {
+    // `clearMarks()` used to run at the top of every call and took `.current`
+    // with it. It does not any more, so the no-results path has to say so:
+    // without this the previous query's `.current` outline survives on a board
+    // whose counter reads „keine Treffer".
+    applyMarks('current', EMPTY);
     counter.textContent = t('noResults');
     counter.classList.add('none');
     cursor = -1;
@@ -222,11 +282,22 @@ function searchable(e, ownText) {
   return { hay: `${ownText}${handleOf(e)}`, text: ownText };
 }
 
-/** Store-wide matches whose dates fall outside the visible 12-month window. */
+/**
+ * Store-wide matches whose dates fall outside the visible 12-month window.
+ *
+ * This was `historyHits(q).filter(...)`: every entry in the store was
+ * lowercased and substring-tested, the matches were collected and SORTED, and
+ * then the half of them that are on screen — the half the board has already
+ * marked — was thrown away. The date test is the cheap one and it is now first,
+ * so the string work and the sort are paid only for entries that can actually
+ * appear in the list. The result is the same list in the same order;
+ * `historyHits` itself is untouched and still uncapped and still sorted, which
+ * is what the v1 rows pin.
+ */
 function offscreenHits(q) {
   const m = currentModel();
   if (!m) return [];
-  return historyHits(q).filter((h) => h.date < m.firstISO || h.date > m.lastISO);
+  return scanStore(q, (date) => date < m.firstISO || date > m.lastISO);
 }
 
 function renderHistory(list) {
@@ -263,17 +334,48 @@ function step(dir) {
 }
 
 function mark() {
-  document.querySelectorAll('.board .current').forEach((n) => n.classList.remove('current'));
   const n = hits[cursor];
-  if (!n) return;
-  n.classList.add('current');
-  if (n.dataset.barId) {
-    document
-      .querySelectorAll(`.board .bar[data-bar-id="${cssEsc(n.dataset.barId)}"]`)
-      .forEach((b) => b.classList.add('current'));
+  const want = new Set();
+  if (n) {
+    want.add(n);
+    // The stripe index `run()` built a moment ago, instead of a second
+    // full-document attribute scan per step. It is rebuilt by every `run()`,
+    // and `refreshFind()` makes every re-render a `run()`, so it is exactly as
+    // fresh as `hits` itself — which `step()` has always trusted.
+    if (n.dataset.barId) for (const b of stripes.get(n.dataset.barId) || []) want.add(b);
   }
+  applyMarks('current', want);
+  if (!n) return;
   counter.textContent = `${cursor + 1}/${hits.length}`;
   scrollTo(n);
+}
+
+/** The board root the marks live under; `null` before the DOM exists (tier 1). */
+const boardRoot = () => document.querySelector('.board');
+
+/**
+ * Make the set of nodes under the board carrying `cls` be exactly `want`,
+ * writing only the difference.
+ *
+ * The „had" side is read from the live HTMLCollection `getElementsByClassName`
+ * maintains — the same collection `board.js#scrubMarks` relies on, and for the
+ * same reason: the engine keeps it per class name, so this is a length read and
+ * a copy rather than a walk over 4 195 elements. It is snapshotted into an array
+ * BEFORE anything is removed, because removing the class shrinks the collection
+ * under the loop.
+ *
+ * `classList.contains` is a string test against the token list; it neither
+ * invalidates style nor forces layout. `add`/`remove` do, which is the whole
+ * point of only calling them on the difference.
+ */
+function applyMarks(cls, want) {
+  const root = boardRoot();
+  if (!root) return;
+  const live = root.getElementsByClassName(cls);
+  const had = [];
+  for (let i = 0; i < live.length; i++) had.push(live[i]);
+  for (const n of had) if (!want.has(n)) n.classList.remove(cls);
+  for (const n of want) if (!n.classList.contains(cls)) n.classList.add(cls);
 }
 
 function scrollTo(node) {
@@ -290,33 +392,57 @@ function scrollTo(node) {
   else if (nr.bottom > wr.bottom - 12) wrap.scrollTop += nr.bottom - (wr.bottom - 12);
 }
 
+const EMPTY = new Set();
 function clearMarks() {
-  document
-    .querySelectorAll('.board .hit, .board .current')
-    .forEach((n) => n.classList.remove('hit', 'current'));
+  applyMarks('hit', EMPTY);
+  applyMarks('current', EMPTY);
+  stripes = new Map();
 }
-
-const cssEsc = (s) => (window.CSS?.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
 
 /** All store-wide matches, regardless of the visible window. */
 export function historyHits(q) {
+  return scanStore(q, null);
+}
+
+/**
+ * The store-wide sweep both callers share. `keep` is an optional date predicate
+ * applied BEFORE any string work; `null` means every date.
+ * @param {string} q @param {((date: string) => boolean)|null} keep
+ */
+function scanStore(q, keep) {
   const query = q.trim().toLowerCase();
   if (!query) return [];
   const out = [];
+  // `searchable()` is the decision, and it stays the decision — but it is only
+  // CONSULTED for a foreign entry. For my own note the answer it returns is
+  // `{hay: text, text}`, so calling it allocates an object per entry per
+  // keystroke to be told what the caller already had. 3 475 of those on the
+  // family fixture; on a solo board, all of them.
   for (const n of store.state.notes) {
+    if (keep && !keep(n.date)) continue;
     // `n.text` was `n.text.toLowerCase()` here, which is v1 and was safe for as
     // long as every note in the array was mine and therefore had a text. A
     // foreign Belegt note has `text: null` — it was never transmitted — and one
     // keystroke in the search field threw a TypeError that took the whole find
     // with it, offscreen list and all. `searchable` is where that decision now
     // lives, once, for both arrays.
-    const { hay, text } = searchable(n, typeof n.text === 'string' ? n.text : '');
+    const own = typeof n.text === 'string' ? n.text : '';
+    if (!n.isForeign) {
+      if (own.toLowerCase().includes(query)) out.push({ kind: 'note', date: n.date, text: own });
+      continue;
+    }
+    const { hay, text } = searchable(n, own);
     if (hay.toLowerCase().includes(query)) out.push({ kind: 'note', date: n.date, text });
   }
   for (const b of store.state.bars) {
-    const { hay, text } = searchable(b, typeof b.label === 'string' ? b.label : '');
-    if (hay.toLowerCase().includes(query))
-      out.push({ kind: 'bar', date: b.startDate, text });
+    if (keep && !keep(b.startDate)) continue;
+    const own = typeof b.label === 'string' ? b.label : '';
+    if (!b.isForeign) {
+      if (own.toLowerCase().includes(query)) out.push({ kind: 'bar', date: b.startDate, text: own });
+      continue;
+    }
+    const { hay, text } = searchable(b, own);
+    if (hay.toLowerCase().includes(query)) out.push({ kind: 'bar', date: b.startDate, text });
   }
   return out.sort((a, b) => (a.date < b.date ? -1 : 1));
 }

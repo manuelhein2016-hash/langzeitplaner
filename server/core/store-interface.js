@@ -1277,6 +1277,13 @@ export const STORE_CONTRACT_CASES = Object.freeze([
   { id: 'C40', title: 'listOpenInvites is the rotation re-wrap list: not used, not revoked, not expired', tags: ['invites', 'rotation'],
     run: async ({ makeStore, assert, clock }) => {
       const store = await withSpace(makeStore);
+      // SP2 IS CREATED BEFORE AN INVITE NAMES IT — the same two lines C11 and C22 already write.
+      // `Invite.spaceId` carries a foreign key onto `Space`; `memory` and `file` have no
+      // referential integrity and accepted the orphan, and PostgreSQL 17.10 raised
+      // `Invite_spaceId_fkey` and was right to. The case is about `listOpenInvites` filtering by
+      // space, not about what an unparented row does, so the fixture is what was wrong (R8, and
+      // it was the one row the live contract could not run).
+      await store.createSpace(fixtures.space({ id: SP2 }));
       const t = clock.now();
       await store.putInvite(fixtures.invite({ id: 'inv_open', expiresAt: new Date(t + 86400000) }));
       await store.putInvite(fixtures.invite({ id: 'inv_used', expiresAt: new Date(t + 86400000) }));

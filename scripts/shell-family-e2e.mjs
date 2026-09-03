@@ -327,7 +327,7 @@ if (!receivers.some((r) => r.ok)) {
 }
 log(`#    the entry crossed to: ${receivers.filter((r) => r.ok).map((r) => r.tag).join(', ')}`
   + (receivers.some((r) => !r.ok)
-    ? ` · blocked on ${receivers.filter((r) => !r.ok).map((r) => r.tag).join(', ')} (F-SHELL-1)`
+    ? ` · blocked on ${receivers.filter((r) => !r.ok).map((r) => r.tag).join(', ')} (F-SHELL-3)`
     : ''));
 
 log('');
@@ -345,6 +345,13 @@ must(run('A', { phase: 'unshare', spaceId: SPACE, text: MAMAS }), 'unshare (A)')
 // reverting it to Privat — tier-2 row §10, owner `family/sharing.js`'s unshare path. See
 // `docs/v2/FINDINGS.md` F-SHELL-3.
 attempt(run('B', { phase: 'unshare-owner', spaceId: SPACE, text: MAMAS }), 'unshare-owner (B)');
+
+log('');
+log('# ── 6b. „Rückmeldung senden" — LZP-1009, bound by the app and taken by the relay ──────');
+// The one path a Mac addresses that is not sync. It is REQUIRED, not attempted: `mount.js`
+// binds the port (E10-1009-A, closed this pass) and `server/dev-server.mjs` binds the sink, so a
+// 501 here is a real regression rather than a known gap.
+must(run('B', { phase: 'feedback', spaceId: SPACE }), 'feedback (B)');
 
 log('');
 log('# ── 7. the founder LEAVES — the circle is now founder-less ───────────────────────────');
@@ -374,7 +381,13 @@ must(run('D', {
   phase: 'removed', spaceId: SPACE, epochBefore: spent.epochBefore,
 }), 'removed (D)');
 must(run('B', { phase: 'settle', spaceId: SPACE, expectMembers: 2 }), 'settle (B, post-removal)');
-must(run('B', { phase: 'stranded', spaceId: SPACE, target: oma.memberId }), 'stranded (B)');
+const stranded = must(run('B', { phase: 'stranded', spaceId: SPACE, target: oma.memberId }), 'stranded (B)');
+// F-SHELL-2's deciding number, printed rather than buried in a phase file. `eligibleCosigners`
+// answers log ∩ roster when this Mac HOLDS a roster and `null` (UNKNOWN) for a positive log-only
+// count when it does not — so the two numbers together say which defect F-SHELL-2 is.
+// `SHELL-VERIFICATION.md` §5 recorded eligible=2, which no log state can produce with a roster.
+log(`#    eligibleCosigners=${JSON.stringify(stranded.eligibleFromLog)} · rosterCache=`
+  + `${JSON.stringify(stranded.rosterCached)} · alive on the relay=${JSON.stringify(stranded.aliveOnRelay)}`);
 
 log('');
 log('# ── 10. solo mode, on an instance that never joined anything ─────────────────────────');

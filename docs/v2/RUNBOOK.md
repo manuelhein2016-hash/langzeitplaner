@@ -88,6 +88,26 @@ If the database starts refusing connections under a load two Macs cannot plausib
 is the first thing to check and `U-COLD` in `server/adapters/vercel.js#UNVERIFIED_CLAIMS` is the
 claim that just failed.
 
+**And it has teeth in the other direction, which is how R-8 found the defect that would have made
+this deploy fail on its first request.** With exactly one connection per instance, *any* query a
+transaction body issues on the outer client waits for the connection its own transaction is
+holding. That is not slow, it is a deadlock: it blocks for the full pool timeout and the
+transaction then dies with `Transaction already closed`. Every transactional method in
+`prisma.js` did exactly that until 2026-09-03 — 33 of 66 contract cases failed that way, which
+is push, key wraps, invite redemption, pairing and rate limits, i.e. everything. Fixed
+(`R8-TXCLIENT`), and the shape that prevents its return is `runTx(fn)`, which hands the body the
+transaction client so `db` is never in scope for it.
+
+**The second consequence is the retry.** `connection_limit=1` means one *instance* cannot conflict
+with itself — its transactions queue — so a single-process test can never reach a Serializable
+write conflict. Production is N instances. Measured with two clients: concurrent pushes made the
+loser throw and **lose its ops**, and 3 of 6 concurrent rate-limit decisions threw instead of
+answering. `prisma.js` now retries a rolled-back transaction up to five times (`R8-RETRY`), and it
+classifies **two** codes, because an ORM call arrives as `P2034` while a raw query — `reserveSeq`,
+the one statement RULE 2 rests on — arrives as `P2010` with SQLSTATE `40001` in `meta.code`.
+After five retries it re-throws, and nothing above it maps that to a status code yet: see
+`RESIDUAL_RISKS` `R8-R2` in that file.
+
 ### 2.3 The preview-database trap
 
 `server/vercel.json`'s build command runs `prisma migrate deploy` **only** when
@@ -192,6 +212,19 @@ DATABASE_URL="…?connection_limit=1" SHADOW_DATABASE_URL="…/scratch" \
   node ../.github/scripts/check-server-config.mjs --deep
 ```
 
+**They have now been settled once, and this is what it read** (2026-09-03, PostgreSQL 17.10,
+`prisma` 6.19.3, a scratch `lzp_shadow` database):
+
+```
+ready    41 passed · 0 failed · 0 warning(s) · 0 not checked here — every check this script has ran, and passed.
+```
+
+L1 passed (`prisma migrate status`: reachable, every migration applied) and L2 passed (`prisma
+migrate diff`: **no drift — the migration set reproduces `schema.prisma` exactly**), which is the
+first time this script has printed a ledger with no outstanding skip. The shallow run is
+unchanged at **39 passed · 0 failed · 2 stated skips**, and those two skips still mean exactly
+what they say.
+
 #### 2.4.2 The migration was applied to a real Postgres, and this is what it produced
 
 The committed migration was swept into `101073b` by a workflow that was killed mid-flight, so it
@@ -223,14 +256,24 @@ The check's offline model of `migration.sql` was diffed against that live databa
 column: **10 tables, 64 columns, 3 uniques, 8 indexes, 6 FKs — exact agreement**, including every
 `ON DELETE` action. That is what licenses M9–M16 to answer without a database in CI.
 
-**What this does not prove:** that `server/adapters/prisma.js` works against it. That needs the
-generated client and is §2.5's `store-contract.test.js` run, which is still owed.
+**What this did not prove, and no longer needs to:** that `server/adapters/prisma.js` works
+against it. That was owed until 2026-09-03 and is now done — §2.5.
 
 ### 2.5 The smoke test that settles four unverified claims at once
 
-`server/adapters/prisma.js` and `server/adapters/vercel.js` have **never executed** — there is no
-Postgres and no Vercel account on the authoring machine, and both files carry an explicit
-`UNVERIFIED_CLAIMS` export saying so. The first deploy is where they are settled.
+`server/adapters/vercel.js` has **never executed** — there is no Vercel account on the authoring
+machine — and it carries an explicit `UNVERIFIED_CLAIMS` export saying so. The first deploy is
+where it is settled.
+
+**`server/adapters/prisma.js` is no longer in that sentence.** As of 2026-09-03 it has been run
+against a real PostgreSQL 17.10 cluster with `prisma`/`@prisma/client` 6.19.3 on
+`connection_limit=1` — see §2.5.1 for how, and for the four defects that run found. Its claim
+ledger now carries a `verifiedOn` witness on all 22 rows and a separate `RESIDUAL_RISKS` export
+for what a local cluster could not settle. The largest of those residuals is the one an operator
+must act on: **Frankfurt is Prisma Postgres behind the platform pooler, and the run was a direct
+connection.** A pooler in transaction mode can refuse an interactive transaction or silently
+downgrade `Serializable`, and every atomicity guarantee in the relay rests on getting one. Run
+§2.5.1 once against the real database before it holds a family.
 
 ```
 curl -si https://<deployment>/api/v1/meta
@@ -253,16 +296,46 @@ the one claim whose failure is total: if the platform parsed the body before the
 immediate, which is the fail-closed direction and the reason this is safe to find out in
 production.
 
-Finally, once there is a database at all:
+#### 2.5.1 Running the store contract against a real database
+
+The variable is **`LZP_CONTRACT_DATABASE_URL`, never `DATABASE_URL`** — the harness `TRUNCATE`s all
+ten tables before every case, and `DATABASE_URL` is the name the relay itself reads. Pointing the
+suite at the served database would erase a family's board, so the harness refuses when the two
+strings are equal and refuses a database with no applied migration rather than creating tables in
+whatever it was handed.
 
 ```
-DATABASE_URL="postgres://…?connection_limit=1" node --test tests/server/store-contract.test.js
+createdb lzp_contract
+cd server && npm ci
+DATABASE_URL="postgresql://…/lzp_contract" npx prisma migrate deploy
+DATABASE_URL="postgresql://…/lzp_contract" npx prisma generate
+cd .. && LZP_CONTRACT_DATABASE_URL="postgresql://…/lzp_contract?connection_limit=1" npm run test:server
 ```
 
-That is the 60-case contract both other adapters already pass. Until it runs, treat every
-`UNVERIFIED_CLAIMS` row as an open question rather than as documentation. Two of them (`U-SEQ`,
-`U-TX`) need concurrency, not just a database: run the suite twice simultaneously against the same
-`DATABASE_URL`.
+`server/node_modules/` is **gitignored and server-only**. The Prisma client is a build-time
+dependency of the separately-deployed relay, not of the app; the app's zero-dependency rule is
+unaffected and `.github/scripts/check-server-config.mjs` still judges only the deploy path.
+
+**What to expect, measured 2026-09-03:** `# pass 1068 · fail 0 · skipped 1`. The 66 contract cases
+run against `prismaStore` as a third witness; **65 pass**. The skip is `C40`, and it is a fixture
+defect in `server/core/store-interface.js`, not an adapter defect — the case builds an `Invite` for
+a `Space` it never creates, which the foreign key correctly refuses and which `memory`/`file`
+accept only because they have no referential integrity. It is stated as a skip with its one-line
+remedy, and a guard row fails if it ever starts passing. Without the variable the same run is
+`# pass 1002 · skipped 1`, and the skip **says** that nothing about `prisma.js` was settled.
+
+**Concurrency needs two clients, not two runs.** The old instruction here — "run the suite twice
+simultaneously against the same `DATABASE_URL`" — does not work: the two runs would `TRUNCATE`
+each other's rows. It also would not have found what two clients found. At `connection_limit=1` a
+single process cannot conflict with itself, so `U-SEQ`, `U-TX`, `U-RATE`, `U-CONSUME` and
+`U-WRAPONCE` are all green in one process while being **wrong in production**. Open two
+`PrismaClient`s in one script and race them: concurrent `upsertOps`, `consumeInvite`,
+`putKeyWraps` on one cell, and six `rateAllow` calls against `max: 3`. Before `R8-RETRY` that gave
+lost ops and three `P2034`s where answers were owed; after it, seqs `1,2,3,4` gapless, one invite
+winner and one `null`, one wrap cell standing, and exactly three of six admitted.
+
+Until §2.5.1 has run against **the deployed** database, treat `RESIDUAL_RISKS` `R8-R1` in
+`server/adapters/prisma.js` as the open question, not the whole ledger.
 
 ### 2.6 What is still owed before a family can be told the relay exists
 
@@ -279,6 +352,7 @@ copy of this file needs.
 |---|---|
 | ~~`server/prisma/migrations/`~~ | generated and committed; applied to a real PostgreSQL 17.10 and introspected — §2.4.2. The pre-flight row that failed to notice its absence is §2.4.1's **M1**, now covered by `tests/server/deploy-readiness.test.js` §2 |
 | ~~the 21.3 Datenschutz section in the app~~ | LZP-1001. *Frankfurt*, *Vercel* and *Prisma* now appear in `src/js/settings.js` in both languages — the claim in the previous edition of this table ("nowhere in `src/`, verified by grep") is **no longer true**, and §7.1 below remains the source text |
+| ~~`server/adapters/prisma.js` has never run against the database~~ | R-8, 2026-09-03. The generated client plus §2.5.1's contract run: **65 of 66 cases against PostgreSQL 17.10**, and `node .github/scripts/check-server-config.mjs --deep` now reads **41 passed · 0 failed · 0 not checked here** — L1 and L2 were stated skips in every previous edition of this file and are now passes. It did not pass first time: four defects were found and fixed (`R8-TXCLIENT`, `R8-RETRY`, `R8-DEVSPACE`, `R8-BUMPREAD`/`R8-TZ`), three of them defects that only a real Postgres could have shown. What remains is `RESIDUAL_RISKS` in that file, of which **`R8-R1` — the deployed database is behind a pooler and was not the one tested — is the one that must be run before a family is told the relay exists** |
 
 ---
 

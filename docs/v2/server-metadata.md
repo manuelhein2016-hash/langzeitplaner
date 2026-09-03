@@ -277,6 +277,26 @@ database at all — can reconstruct this section's entire activity timeline per 
 Two more paths carry a space id in the path rather than the query: `/api/v1/spaces/:id/members`
 and `/api/v1/spaces/:id/keys`.
 
+### The ninth path — `POST /api/v1/feedback` (LZP-1009)
+
+Added when „Rückmeldung senden" was bound to a transport (`family/mount.js#bindFeedback`), and it
+is the **only** path a Mac with no Familienkreis and no own-device sync can ever address. It is
+never on the cadence: it is reached once, when a person has written a sentence, read the entire
+payload on the preview screen, and pressed „Senden".
+
+What the platform's request log therefore records is `POST /api/v1/feedback`, a source IP, a
+timestamp and a byte count — **the fact that somebody reported something, and when.** There is no
+space id in the path and none in the query; there is no space id in the body either, because
+`server/core/handlers/feedback.js` holds no space and is given none. The report carries an
+optional device signature, so an operator can tell two reports from one Mac apart from two reports
+from two Macs (`proves: device_continuity`) — which is the point of it, and it is stated on the
+preview screen before anything is sent.
+
+The relay's own record is whatever `ctx.feedbackSink` is configured to be. `server/dev-server.mjs`
+writes two files beside the store; `server/adapters/vercel.js` binds no sink at all, so the
+deployed relay answers **501 not_implemented** — honestly, rather than accepting a report and
+dropping it. That is a deployment step the RUNBOOK still owes.
+
 ### What an operator derives from all of it
 
 An operator with the database and nothing else can derive, per machine, per day:

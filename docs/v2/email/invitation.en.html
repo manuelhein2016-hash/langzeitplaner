@@ -12,6 +12,18 @@
   subject line (it is in <title> and repeated in the first comment below), attach
   LangzeitPlaner.dmg, and replace the four {{PLACEHOLDERS}}.
 
+  ONE VALUE IN THE BODY IS NOT A PLACEHOLDER: the relay address under
+  "And the server address that goes with it" is written out in full, because `scripts/mom-test-probe.mjs`
+  parses these files with only the four {{...}} slots filled and has to see a real
+  origin to check that the paste gesture yields one. It is
+  `https://lzp-sync-po.vercel.app` in all four invitation files. If the Vercel
+  project is created under a different name, substitute it in all four at once:
+
+      sed -i '' 's|https://lzp-sync-po\.vercel\.app|https://NEW-HOST|g' docs/v2/email/invitation.*
+
+  and update RELAY_ORIGIN in scripts/mom-test-probe.mjs and RELAY in
+  tests/tier1/createjoin.test.js to match. The probe is the check that they agree.
+
   Rules this file follows on purpose, checked by .github/scripts/check-email-copy.mjs:
     · every style is inline — mail clients drop <style> blocks unpredictably
     · exactly one image, referenced by relative filename; no remote URL of any kind,
@@ -104,7 +116,20 @@
   <tr><td align="center" style="padding:16px;background:#f4f7fb;border:1px dashed #a8c0e6;border-radius:10px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:20px;letter-spacing:2px;color:#16233d;">{{EINLADUNGSCODE}}</td></tr>
   </table>
 
-  <p style="margin:0 0 16px 0;">In the app: <strong>Settings → “Join family circle”</strong>, paste the code, pick a name and a colour. That’s it, you’re in.</p>
+  <p style="margin:0 0 10px 0;font-weight:700;">And the server address that goes with it</p>
+
+  <p style="margin:0 0 10px 0;">The app asks for this too — it has no address built into it. Here it is:</p>
+
+  <!-- M6 (scripts/mom-test-probe.mjs): the address stands ALONE in its cell — no full
+       stop, no comma, no “quotes” touching it. `parseInvitePaste`'s URL match runs to
+       the next whitespace, quote or angle bracket, so punctuation glued to the address
+       becomes part of the hostname and the join screen then reports a server that was
+       never spelled right. -->
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 16px 0;">
+  <tr><td align="center" style="padding:14px;background:#f4f7fb;border:1px dashed #a8c0e6;border-radius:10px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:15px;color:#16233d;">https://lzp-sync-po.vercel.app</td></tr>
+  </table>
+
+  <p style="margin:0 0 16px 0;">In the app: <strong>Settings → “Join family circle”</strong>. The easiest way: select this whole e-mail, copy it, and paste it into the big field at the top — the app picks both out of it by itself. Then pick a name and a colour. That’s it, you’re in.</p>
 
   <!-- D9: membership is instant, content is not. Said plainly, framed as normal,
        and never as something Mum has to chase somebody else about. -->

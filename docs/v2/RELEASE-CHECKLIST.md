@@ -39,6 +39,21 @@ Nothing below repeats. All of it is still open today.
 - [ ] `shell-macos/main.swift`'s `UPDATE_MANIFEST_URL` no longer says `OWNER-PLACEHOLDER`
 - [ ] **`workflow_dispatch` run completed green before any real tag** — `src-tauri/` has never been
       compiled; nobody knows whether the Rust half builds
+- [ ] ⛔ **The relay address in the four invitation files is the REAL one.**
+      `docs/v2/email/invitation.{de,en}.{txt,html}` each carry a `SERVERADRESSE` / `SERVER ADDRESS`
+      line with the literal `https://lzp-sync-po.vercel.app` on it, alone, unpunctuated. That host
+      is the project's own placeholder name and **no such app exists yet** — a `*.vercel.app`
+      project name is claimable by anyone until the PO claims it. It is a literal and not a
+      `{{…}}` placeholder because `scripts/mom-test-probe.mjs`'s `FILL` substitutes only
+      `NAME`/`RELEASE_URL`/`EINLADUNGSCODE`/`ABSENDER`, and probe row `M2` asserts the parsed
+      origin equals that exact string. Substitute it before the mail is sent; both HTML files
+      carry the `sed` in their head comment. → real origin: ...................................
+- [ ] **Note what that address changed, and say so if anyone asks.** Before it, the e-mail alone
+      was not enough to join — the reader had to learn the relay address elsewhere. Now it is.
+      That is inside the accepted model (ADR 002 §8.4 and §5's residual-risk paragraph: whoever
+      reads the mail within 7 days can consume the invite and become a member; the member list
+      15.4 and epoch-rotating removal 20.2 are the controls) and it is not a key: „what they
+      cannot do is read anything from the email alone" is unchanged.
 - [ ] Vercel project created, **Root Directory `server`**, region `fra1`
 - [ ] Prisma Postgres created in `eu-central-1`
 - [ ] `DATABASE_URL` set in Vercel **Production**, carrying `connection_limit=1`
@@ -51,9 +66,20 @@ Nothing below repeats. All of it is still open today.
       **no** `Access-Control-Allow-Origin` ☐
 - [ ] One authenticated request returned 200 — this settles `U-RAWBODY`, the claim whose failure
       is a total outage
-- [ ] `DATABASE_URL=… node --test tests/server/store-contract.test.js` run against a real Postgres
-      (60 cases; until it runs, every `UNVERIFIED_CLAIMS` row is an open question)
-- [ ] Same suite run **twice concurrently** — this is the only way `U-SEQ` and `U-TX` get checked
+- [x] `LZP_CONTRACT_DATABASE_URL=… npm run test:server` run against a real Postgres —
+      **done 2026-09-03 against PostgreSQL 17.10: 66 of 66 contract cases, 1069 rows, 0 fail, 0
+      skip.** `U-SEQ` and `U-TX` were checked with two concurrent clients and both were WRONG as
+      written: no retry existed anywhere for a `Serializable` abort, and every transaction body
+      issued its queries on the outer client. Both are fixed (`server/adapters/prisma.js`).
+- [ ] ⛔ **Re-run §2.5.1 against the DEPLOYED database, not a local cluster.** Frankfurt is Prisma
+      Postgres behind the platform pooler; a transaction-mode pooler can refuse an interactive
+      `$transaction` or silently downgrade `Serializable`, and every atomicity guarantee rests on
+      getting one. This is residual R8-R1 and it is the one that matters.
+- [ ] **Bind a production `feedbackSink`** — `server/adapters/vercel.js#buildCtx` binds none, so
+      `POST /api/v1/feedback` answers **501 not_implemented** on the deployed relay. Honest, and
+      not a send: „Rückmeldung senden" is bound in the app (`family/mount.js#bindFeedback`) and
+      works end to end against `server/dev-server.mjs`, so the only missing half is a destination.
+      → where reports go: ....................................
 - [ ] The first CI-built DMG **looked at by a human**: is the Finder layout styled, or did it ship
       without a `.DS_Store`? Nobody has ever seen it (`E1-VERIFICATION.md` §3, LZP-107)
 - [ ] Decide whether `Bitte zuerst lesen.html` goes on the disk image

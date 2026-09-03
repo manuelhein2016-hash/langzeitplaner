@@ -94,6 +94,22 @@ jobs:
       - name: Invitation e-mail says what it must (LZP-108)
         run: node .github/scripts/check-email-copy.mjs
 
+      # R-9.1. `server.yml`'s path filter did not name `tests/server/**`, so the
+      # workflow that runs the 998-row server suite was not triggered by an edit
+      # to the server suite: a weakened assertion could be merged without
+      # anything ever running it. The line is added; this is what keeps it
+      # there. It derives the read set from server.yml itself — every script its
+      # run: steps invoke, every npm script's glob and `--import` helper — so a
+      # NEW step that reads a new directory fails here until the filter names
+      # it, rather than the next time someone needed the guard.
+      #
+      #   node .github/scripts/check-ci-triggers.mjs --would-run <paths…>
+      #
+      # answers "would a push changing exactly these files have run it?", which
+      # is how the hole was shown and how the repair was confirmed.
+      - name: Every CI trigger covers what its jobs read (R-9.1)
+        run: node .github/scripts/check-ci-triggers.mjs
+
   release-artwork:
     name: Release artwork builds from source
     runs-on: macos-14

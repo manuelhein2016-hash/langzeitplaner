@@ -2129,7 +2129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         let name = (path as NSString).lastPathComponent
         let body = AppDelegate.harnessJS + "\n// ── \(name) ──\n" + source + "\n" + AppDelegate.runnerJS
 
-        webView.callAsyncJavaScript(body, in: nil, in: .page) { result in
+        webView.callAsyncJavaScript(body, in: nil, in: .page) { [weak webView] result in
             var failed = 0
             var skipped = 0
             print("TAP version 13")
@@ -2193,7 +2193,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
                 if skipped > 0 { print("# skip \(skipped)") }
             }
             fflush(stdout)
-            exit(failed == 0 ? 0 : 1)
+            // ── F-SHELL-3(c) · THE HARNESS DEFECT THAT LOOKED LIKE THE PRODUCT LOSING DATA ─────
+            //
+            // `exit()` here used to be the last statement. `exit()` does not run
+            // `applicationShouldTerminate` — the ONLY caller of `window.__lzpFlush` — and it does
+            // not fire `pagehide` either, so the page's 700 ms `SAVE_DEBOUNCE` was abandoned
+            // every time. Under ADR 006 `board.json` IS the truth, so an entry a phase had just
+            // created was simply gone on the next launch, and `shell-family-e2e.mjs` reported it
+            // as „the owner lost her own entry — unshare DELETED instead of reverting".
+            //
+            // ⌘Q always flushed; only the test runner did not. This is the same call
+            // `applicationShouldTerminate` makes, with the same 2 s watchdog so a hung page
+            // cannot wedge a suite, and it adds NO UI call — `isHeadless` and the `.accessory`
+            // activation policy are untouched.
+            let code: Int32 = failed == 0 ? 0 : 1
+            var exited = false
+            let leave: () -> Void = {
+                if exited { return }
+                exited = true
+                fflush(stdout)
+                exit(code)
+            }
+            guard let wv = webView else { leave(); return }
+            wv.callAsyncJavaScript(
+                "if (window.__lzpFlush) { await window.__lzpFlush(); } return true;",
+                in: nil, in: .page) { _ in leave() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { leave() }
         }
     }
 

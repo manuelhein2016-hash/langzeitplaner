@@ -97,7 +97,7 @@ import {
 } from './core/ids.js';
 import { crock32 } from './core/b64.js';
 import {
-  createClock, isStamp, cmp, msOf, ctrOf, fmt as fmtStamp,
+  createClock, isStamp, cmp, msOf, ctrOf, devOf, fmt as fmtStamp,
   MAX_FUTURE_DRIFT_MS, MAX_STAMP_CTR, MAX_STAMP_MS,
 } from './core/stamp.js';
 import { createOpLog, ZERO_STAMP } from './core/oplog.js';
@@ -280,6 +280,45 @@ export function defaultState() {
 // (byte-for-byte the baseline commit's), so the honest repair is to open a door onto it rather
 // than let a test vendor a copy that can rot. The v1 surface in `store.contract.js` §2.2 is
 // unchanged; this only adds to it.
+/**
+ * ── F-SHELL-3(b) · A FOREIGN ENTRY IS NOT MINE TO AUTHOR ──────────────────────────────────────
+ *
+ * `board.json` is `store.state` (11.4), and `store.state.notes` carries the viewer's REDACTED,
+ * REVOCABLE projection of another member's entry — `isForeign: true`, `entityKey: 'fnote:<mem>/
+ * <uuid>'`. ADR 006 R1 re-migrates that file into the spine on EVERY launch, and `migrateV1` has
+ * no notion of a foreign entry: it reads the array as v1 notes, cannot use `fnote:<mem>/<uuid>`
+ * as an entity id, MINTS one (`migrate1to2.js#mintedId`), and writes the result as one of MY OWN
+ * `note.set` ops at `visibility: 'privat'`.
+ *
+ * So every launch converted somebody else's entry into a permanent private copy on my own board
+ * — and because last launch's copy is itself in `board.json` with a usable id, `mintedId`'s
+ * occurrence counter hands the next launch a fresh one. MEASURED on the shipped binary: seven
+ * copies of Papa's „Omas Geburtstag" on Mama's board after seven launches (HEAD `78016e8`).
+ *
+ * A foreign entry's truth is the OWNER's ops, which this Mac holds as `fnote:`/`fbar:` registers
+ * in its checkpoint and re-projects every launch — so dropping it from the spine loses nothing:
+ * it comes back through the log, still foreign, still revocable. Keeping it in the spine is what
+ * lost it, by turning a view into a copy nobody can take back.
+ *
+ * Both tests are belt and braces on purpose: `isForeign` is `materialize.js`'s decoration and the
+ * `entityKey` prefix is `core/entities.js`'s, and a board hand-edited to carry one without the
+ * other must still not be authored as mine.
+ *
+ * @param {Object} board a migrated v1-shaped board
+ * @returns {{board: Object, dropped: number}} the same object when nothing is foreign
+ */
+function withoutForeignEntries(board) {
+  const isForeign = (e) => !!e && typeof e === 'object'
+    && (e.isForeign === true
+      || (typeof e.entityKey === 'string' && /^f(?:note|bar):/.test(e.entityKey)));
+  const notes = Array.isArray(board.notes) ? board.notes.filter((n) => !isForeign(n)) : board.notes;
+  const bars = Array.isArray(board.bars) ? board.bars.filter((b) => !isForeign(b)) : board.bars;
+  const dropped = (Array.isArray(board.notes) ? board.notes.length - notes.length : 0)
+    + (Array.isArray(board.bars) ? board.bars.length - bars.length : 0);
+  if (!dropped) return { board, dropped: 0 };
+  return { board: { ...board, notes, bars }, dropped };
+}
+
 export function migrate(raw) {
   if (!raw || typeof raw !== 'object') return defaultState();
   let s = raw;
@@ -1457,6 +1496,13 @@ class Store {
      *  One-shot: the first `_persistOps` of the session compacts and clears it. */
     this._tailOverBytes = false;
     /**
+     * Is there a `checkpoint.json` on disk beside the tail? `init()` sets it from the file it
+     * actually read; `_persistOps` sets it the moment it writes one; `_sequesterQuarantine`
+     * clears it when the move-aside takes both files away. It exists for ONE reason — see
+     * `_persistOps` step ⓪b, F-SHELL-4 — and nothing else may branch on it.
+     */
+    this._checkpointOnDisk = false;
+    /**
      * Set when even a repaired projection could not be rendered. The app opens on whatever it
      * could build and REFUSES TO WRITE for the rest of the session — the one thing worse than a
      * board that cannot be drawn is that board's replacement committed over the file (I-2).
@@ -1800,6 +1846,18 @@ class Store {
 
   /** The `fsp_…` id in force, or `null` when this Mac is in no Familienkreis. */
   familySpaceId() { return this._familySpaceId; }
+
+  /**
+   * **WILL HISTORY BE WRITTEN THIS SESSION?** ADR 006 §9.5's verdict (`_logMayBeWritten()`), as
+   * decided by `init()` and re-decided by `useFamilySpace()`, published read-only.
+   *
+   * It exists because a caller that authors an op the log cannot keep is not making a mistake —
+   * a quarantined Mac still has a board, a member list and a working push — but it IS producing
+   * a fact that will be re-minted on the next launch, and only this flag can tell it so. Its one
+   * caller is `family/engine.js#publishMyAttestation`, which says it out loud rather than
+   * leaving F-SHELL-4's `writeOnce` refusals on every peer as the only trace.
+   */
+  logIsWritable() { return this._opsPersisted === true; }
 
   /**
    * THE FAMILY OUTBOX — `outbox()`'s definition, over the family space (ADR 003 §8.1).
@@ -2471,6 +2529,15 @@ class Store {
    */
   _buildSpine(board, { restamp }) {
     const spine = createOpLog({ now: () => Date.now() });
+    // F-SHELL-3(b) — see `withoutForeignEntries`. A foreign entry is another member's, held as
+    // `fnote:`/`fbar:` registers and re-projected from them; it may never be re-authored as mine.
+    const { board: own, dropped } = withoutForeignEntries(board);
+    if (dropped) {
+      this._warn(`${dropped} entr${dropped === 1 ? 'y' : 'ies'} in board.json belong${dropped === 1 ? 's' : ''} to `
+        + 'another member of the Familienkreis; they were NOT re-authored as your own notes. They '
+        + 'are re-projected from the circle\'s own registers (ADR 004 §4.1)');
+    }
+    board = own;
     // `personalSpaceId` — LZP-502. `migrateV1` has taken it since WP-3 (ADR 001 §8.2: "omitted in
     // solo mode … the ops carry the 'personal' placeholder and are rewritten the first time a
     // personal space is created") and nothing passed it, so the whole spine — i.e. THE WHOLE
@@ -2532,6 +2599,12 @@ class Store {
     // pair or a `lines()` record, exactly as `oplog.load()` accepts them.
     this._tailLines = tail.length;
     this._opsCommitted = new Set(tail.map((l) => tailLineKey(l && typeof l === 'object' && l.op ? l.op : l)));
+    // The FILE, not the verdict: a checkpoint that `adoptable()` goes on to refuse is still a
+    // checkpoint on disk, and step ⓪b's question is only "would the next append create a bare
+    // tail". A refused log is read-only anyway (`_logMayBeWritten`), so the two never disagree
+    // anywhere it matters — and reading the verdict here instead would make ⓪b write a second
+    // checkpoint over the very bytes the quarantine exists to preserve.
+    this._checkpointOnDisk = !!checkpoint;
     // ADR 001 §7.2's SECOND compaction trigger — "…or on launch when it exceeds 2 MB" — armed
     // here and consumed by the first `_persistOps` of the session. See `TAIL_COMPACT_BYTES` for
     // why the byte bound is independent of the line bound and why it is measured only here.
@@ -3331,6 +3404,10 @@ class Store {
     catch (e) { r = { moved: false, reason: `${e.name}: ${e.message}` }; }
     if (this.quarantine) this.quarantine.movedAside = r.moved ? { ops: r.ops, checkpoint: r.checkpoint } : null;
     if (r.moved) {
+      // Both slots have just been renamed away, so the next persist is a log's FIRST persist
+      // again and step ⓪b has to write the header before the first line. Without this line a
+      // move-aside hands the launch after it exactly the bare tail F-SHELL-4 is made of.
+      this._checkpointOnDisk = false;
       this._warn(`the refused op log was moved aside to ${[r.ops, r.checkpoint].filter(Boolean).join(' and ')}; `
         + 'it is still on disk and can be inspected or restored, and it will not be re-read on the next launch.');
     } else {
@@ -3738,7 +3815,7 @@ class Store {
   _refoldAuthorized(base) {
     let verdict;
     try {
-      const all = [...this._absorbedAttestOps(), ...this._log.ops({ includeParked: true })];
+      const all = [...this._absorbedAttestOps(), ...this._absorbedChainOps(), ...this._log.ops({ includeParked: true })];
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
       verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
     } catch (e) {
@@ -4386,7 +4463,7 @@ class Store {
       // fold per remote batch, over a set that is already in memory — and it is paid ONLY when
       // the identity is durable, because in solo mode `_myDevices()` is `null` by design and the
       // second fold would be identical to the first.
-      const all = [...this._absorbedAttestOps(wellFormed), ...this._log.ops({ includeParked: true }), ...wellFormed];
+      const all = [...this._absorbedAttestOps(wellFormed), ...this._absorbedChainOps(wellFormed), ...this._log.ops({ includeParked: true }), ...wellFormed];
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
       verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
     } catch (e) {
@@ -4599,6 +4676,86 @@ class Store {
    * @returns {string[]} the opIds that became live
    */
   /**
+   * ── F-SHELL-3(a) · THE ADMIN-CHAIN LINK OPS THE CHECKPOINT HAS ABSORBED ───────────────────
+   *
+   * The same defect as `_absorbedAttestOps`, one register over, and it is the one that loses a
+   * person's entry. `core/authz.js` stage 1 resolves the admin chain from `space.set{admin,
+   * adminPrev}` OPS — never from registers (authz.js:1234-1255) — and stage 3a then asks
+   * `adminAtKey(spaceKey(op.space), op.ts)` (authz.js:1404) before it will admit an admin's
+   * `pub.set` on somebody else's entity. After the owner's FIRST relaunch the checkpoint has
+   * absorbed every one of those link ops out of `_log.ops()`, the chain resolves to `null`, and
+   * the admin's retraction is REJECTED `notOwner` — and a rejection is final, so L-1 re-refuses
+   * it on every later launch. On the owner's Mac the shared entry then never reverts to Privat.
+   *
+   * Rebuilding it is not trusting a peer: `applyRemote` gates every remote op on
+   * `foldAuthorized` BEFORE it reaches the log, so a link that lost the longest-chain resolution
+   * never became a register write at all. The reconstruction is handed back to `foldAuthorized`
+   * as an ordinary op and pays stage 0b (`attested.get(op.act).has(op.dev)`) and stage 1's own
+   * `resolveChain` again.
+   *
+   * ONLY A GENESIS-SHAPED LINK IS REBUILT — `cell.author === cell.value`, §4.1's own root test.
+   * A transfer's head names a predecessor this Mac may no longer hold; see RESIDUAL below.
+   *
+   * It is INERT OUTSIDE A FAMILY CIRCLE (`_familySpaceId === null`), which is what keeps the v1
+   * characterization suite exactly where it was.
+   *
+   * THE BOUND is one op per family space.
+   *
+   * RESIDUAL (not closed here): a circle whose admin seat has been TRANSFERRED. The general
+   * repair is to keep `space.set` links (and `member.set{dev.*}`) out of compaction in
+   * `_persistOps` — bounded at one op per transfer and per (member, device). No shipped circle
+   * transfers the seat yet.
+   *
+   * @returns {Object[]} ops, or `[]`
+   */
+  _absorbedChainOps(arriving = null) {
+    if (this._familySpaceId === null) return [];
+    let regs;
+    try { regs = this._log.registers(); } catch { return []; }
+    const live = new Set();
+    for (const op of this._log.ops({ includeParked: true })) live.add(op.id);
+    if (arriving) for (const op of arriving) if (op && typeof op.id === 'string') live.add(op.id);
+    const key = `space:${this._familySpaceId}`;
+    const cells = regs && typeof regs.get === 'function' ? regs.get(key) : null;
+    const cell = cells && typeof cells.get === 'function' ? cells.get('admin') : null;
+    if (!cell || typeof cell.value !== 'string') return [];
+    if (typeof cell.op !== 'string' || !isOpId(cell.op)) return [];
+    // Still a line (or in this fold's own input): the fold already has the real op, and a second
+    // copy is read as envelope splicing — the defect `_absorbedAttestOps` records above.
+    if (live.has(cell.op)) return [];
+    if (typeof cell.stamp !== 'string' || typeof cell.author !== 'string') return [];
+    if (cell.author !== cell.value) return [];
+    // THE AUTHORING DEVICE, READ OUT OF THE STAMP AND MATCHED AGAINST THE AUTHOR'S OWN RECORD.
+    // Stage 0b asks `attested.get(op.act).has(op.dev)`, so a rebuilt op needs the deviceId the
+    // link was actually authored on. A stamp's last sixteen characters ARE that device's short
+    // (`stamp.js#devOf`), and the author's `member:` record maps a short to its deviceId. No
+    // match, no reconstruction — an invented device would be the one field here nothing backs.
+    const short = devOf(cell.stamp);
+    let dev = null;
+    const mine = regs.get(`member:${cell.author}`);
+    if (mine && typeof mine[Symbol.iterator] === 'function') {
+      for (const [name, c] of mine) {
+        if (!DEV_REGISTER_NAME.test(name) || !c || typeof c.value !== 'string') continue;
+        const att = parseAttestationBlob(c.value);
+        if (att && att.deviceShort === short && typeof att.deviceId === 'string') { dev = att.deviceId; break; }
+      }
+    }
+    if (dev === null) return [];
+    return [Object.freeze({
+      v: 1,
+      id: cell.op,
+      ts: cell.stamp,
+      space: this._familySpaceId,
+      act: cell.author,
+      dev,
+      gid: cell.op,
+      k: 'space.set',
+      e: key,
+      f: Object.freeze({ admin: cell.value, adminPrev: null }),
+    })];
+  }
+
+  /**
    * ── F-SHELL-1(b) · THE ATTESTATION OPS THE CHECKPOINT HAS ABSORBED ────────────────────────
    *
    * `foldAuthorized` is given `_log.ops()`. A compacted op is no longer a line, so it is not in
@@ -4717,7 +4874,7 @@ class Store {
   unparkAttested() {
     const held = this._log.parkedOps({ reason: PARK_REASONS.ATTESTATION });
     if (!held.length) return [];
-    const all = [...this._absorbedAttestOps(), ...this._log.ops({ includeParked: true })];
+    const all = [...this._absorbedAttestOps(), ...this._absorbedChainOps(), ...this._log.ops({ includeParked: true })];
     let verdict;
     try {
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
@@ -5031,6 +5188,10 @@ class Store {
    *
    * THE SHAPE ADR 006 §6 ASKS FOR — "append the new tail, checkpoint, then `truncateOps(folded)`":
    *
+   *   ⓪b BOOTSTRAP THE HEADER, once per log lifetime and never again. `ops.jsonl` may not exist
+   *      without a `checkpoint.json` beside it, because `adoptable()` refuses a bare tail
+   *      `no-checkpoint` and a Mac cannot move a refused log aside. F-SHELL-4; see the block at
+   *      the step itself for what that cost, measured in the shipped app.
    *   ① APPEND what the coming checkpoint will not carry. That is the outbox of §9.2 and it is
    *      the only reason `ops.jsonl` exists. A line already committed is never written twice
    *      (`_opsCommitted`), and a PARKED line is never written at all — it rides in
@@ -5048,6 +5209,52 @@ class Store {
     //    `undefined` means "nothing is unacknowledged" — the overwhelmingly common case and the
     //    only case a solo install ever has — and every step below then behaves exactly as it did.
     const cap = this._outboxHorizonCap();
+
+    // ⓪b THE HEADER EXISTS BEFORE THE FIRST LINE DOES — **F-SHELL-4, and this is its cause.**
+    //
+    //    `adoptable()` refuses a bare `ops.jsonl` with no `checkpoint.json` (`no-checkpoint`) and
+    //    is RIGHT to: a line format carries no header, so it carries no lineage, and that is what
+    //    makes A3-C1's one-stray-line attack structurally unreachable. Its docblock priced the
+    //    cost at "one crash shape (append written, checkpoint write lost) costs a session's
+    //    HISTORY". **The price is higher than that, and it was measured in the shipped app.**
+    //
+    //    A quarantine costs no content, but it is not a session: `_logMayBeWritten()` is false
+    //    for as long as the refused bytes are on disk, and the native shell has no move-aside
+    //    command yet, so on a Mac the refusal is PERMANENT. From then on the log is never written
+    //    again, `registers()` never carries `member:<me>` → `dev.<short>`, and
+    //    `family/engine.js#publishMyAttestation`'s guard — and `core/ops.js#attestMyDevice`'s
+    //    idempotence gate behind it, which reads the same `ctx.regs` — see no claim and mint a
+    //    FRESH attestation op for the same device, with the same 545-byte blob, on every launch.
+    //    Every peer admits the first and refuses every later one `writeOnce`, terminally and
+    //    correctly (ADR 001 §4.0). The circle then disagrees about who wrote that register.
+    //
+    //    MEASURED, `scripts/shell-family-e2e.mjs`, five runs of 26 launches of the shipped .app.
+    //    In the run that reproduced it Mama's Mac held `ops.jsonl` with 2 lines and NO
+    //    `checkpoint.json`; every launch after her join warned `op log QUARANTINED
+    //    (no-checkpoint)`, her own log named `Lu98wHjodUpn42jsA4lJIQ` as the writer of her
+    //    register while Papa's and Opa's named `0w6I5WjBt7-mh__GxLkKCg` — same blob, byte for
+    //    byte, 4.19 s apart — and the refusal ledger read 1 · 11 · 13 · 21 `writeOnce` and rising.
+    //
+    //    THE WINDOW IS NOT EXOTIC. A joiner's FIRST persist with a writable log is
+    //    `family/createjoin.js#adoptCircleIntoLog`'s `await store.persistNow()` — `useFamilySpace`
+    //    turns `_opsPersisted` on in the middle of a session — and nothing awaits the join flow,
+    //    so a quit (or an exiting headless launch) between ① and ③ lands exactly here. Any
+    //    `saveCheckpoint` that fails after a successful `appendOps` does too.
+    //
+    //    THE FIX IS AN ORDERING, NOT A RELAXATION. `adoptable()` is untouched and write-once is
+    //    untouched. The header is simply written BEFORE the file it is the header of can exist,
+    //    once per log lifetime, at the same `cap` ① and ③ are selected against — so the bytes it
+    //    writes are the bytes ③ would have written anyway. If it throws, nothing is appended and
+    //    the log stays as it was: the failure is closed, not half-open.
+    //
+    //    The crash shape it replaces the old one with is the DESIGNED one: a checkpoint whose
+    //    tail never arrived loses the lines above its horizon, and `board.json` is the truth, so
+    //    `_reconcileOntoBoard` mints the difference and says so ("reconciled N changes board.json
+    //    carried that the log did not"). Content cannot be lost either way (ADR 006 R5/INV-8).
+    if (!this._checkpointOnDisk) {
+      await storage.saveCheckpoint(this._stampedCheckpoint(hash, cap));
+      this._checkpointOnDisk = true;
+    }
 
     // ① the outbox (ADR 006 §9.2)
     const pending = this._uncommittedTailLines(cap === undefined ? this._comingHorizon() : cap);
@@ -5082,6 +5289,7 @@ class Store {
     // ③ the checkpoint, under the SAME cap ① was selected against
     const cp = this._stampedCheckpoint(hash, cap);
     await storage.saveCheckpoint(cp);
+    this._checkpointOnDisk = true;
 
     // ④ drop only what ③ folds
     if (this._tailLines > 0 && !this._log.ops().some((o) => cmp(o.ts, cp.horizon) > 0)) {
