@@ -6,27 +6,37 @@
 // 3.8 / 2.4: what a row cannot draw is counted and reachable, never lost.
 //
 // ─────────────────────────────────────────────────────────────────────────────
-// THE ASYMMETRY THIS FILE IS ABOUT
+// THE ASYMMETRY THIS FILE FOUND, AND THE RULE THAT CLOSED IT (LZP-806)
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// `layout.js` contains a comparator prefix called `ownFirst`, with a comment
-// that states the problem exactly:
+// `layout.js` contained a comparator prefix called `ownFirst`, with a comment
+// that stated the problem exactly:
 //
 //     „three of Mama's long stripes take lanes 0–2 for six months and MY OWN
 //      vacation bar becomes a '+n' badge on MY OWN board. Measured … 41 % of my
 //      own bar segments were pushed out of the lanes."
 //
-// `ownFirst` is applied in `assignLanes`. `assignLanes` is for BARS.
+// `ownFirst` was applied in `assignLanes`. `assignLanes` is for BARS.
 //
 // The capacity slice for NOTES is `layout.js`: `notesHere.slice(0, noteSlots)`,
 // fed by `core/entities.js:noteOccurrences`, whose own docstring says
 // „occurrence order within a day is `state.notes` order" — and `state.notes` is
 // `sortNotes` = `(_born asc, id asc)`, i.e. CREATION TIME ACROSS THE WHOLE
-// FAMILY. No `ownFirst` anywhere on that path.
+// FAMILY. There was no `ownFirst` anywhere on that path, and the fixture has
+// 3 059 notes against 416 bars: the protected entity was the rare one.
 //
-// The fixture has 3 059 notes and 416 bars. The protected entity is the rare
-// one. §B1 shows the mechanism on two notes; §B2 measures it on the fixture,
-// against the SOLO board, exactly the way §6 measures it for bars.
+//   WHAT THIS FILE MEASURED WHEN IT WAS AN ATTACK, at 22 px on the 8 × 2 fixture:
+//     I founded the circle and entered mine first    0 of 185 lost   ( 0.0 %)
+//     everyone entered together                    100 of 185 lost   (54.1 %)
+//     I joined an established circle, entering last 173 of 185 lost  (93.5 %)
+//
+// `layout.js:orderForCapacity` is the answer, and it is the same shape as the
+// bar rule: a PREFIX in front of v1's array order, provably inert on a solo
+// board, with a second tier for 17.5 („changed before unchanged", inside the
+// foreign block only). Every row below now asserts the FIXED behaviour and
+// prints the lottery numbers as `diag`, the way `family-render.dom.js` §6 does
+// for bars. §B1 pins the mechanism on two notes and pins it under BOTH stamp
+// orders, so it cannot pass by accident; §B2 and §B2b pin it on the fixture.
 //
 // Plain script: globals are test, assert, $, $$, waitFor, sleep, importApp,
 // diag, skip.
@@ -120,41 +130,60 @@ const dayNode = (date = DAY) => $(`#board .col[data-month="${COL.key}"] .day[dat
 diag(`window ${M0.cols[0].key} … ${M0.cols[11].key} · clean day ${DAY}`);
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §B1 · THE MECHANISM — two notes, one slot, and the family wins
+// §B1 · THE MECHANISM — two notes, one slot, and MY note takes the row
 //
 // The 22 px row has capacity 2. Give the day a Feiertag, or set the row to
 // v1's 18 px minimum, and it has ONE note slot. Mama entered hers in March; I
-// entered mine this morning. `sortNotes` is `(_born asc, id asc)` and there is
-// no owner term, so the slice takes hers.
+// entered mine this morning. `sortNotes` is `(_born asc, id asc)` and carries
+// no owner term, so the slice used to take hers.
+//
+// It is run under BOTH stamp orders — hers older, then mine older — because a
+// rule that only holds for one arrival order is not a rule, and because a
+// one-order test of an ordering fix is a test that cannot fail. Under both, the
+// drawn entry is mine and the foreign one is the „+1"; and in both the row is
+// identical to the SOLO board's row, which is the whole of 17.2's promise.
 // ═════════════════════════════════════════════════════════════════════════════
 
-test('§B1 · at one note slot, an older FOREIGN note takes the row and MINE goes into „+n"', () => {
+test('§B1 · at one note slot MY note takes the row, whoever entered theirs first', () => {
   const MARCH = Date.UTC(2026, 2, 1);
   const TODAY = Date.UTC(2026, 8, 1);
-  const scene = {
+  const SET18 = { rowHeight: 18, layers: NO_LAYERS, hiddenMembers: {} };
+  const scene = (mineMs, hersMs) => ({
     notes: [
-      own('mine', DAY, 'Zahnarzt', { _born: born(TODAY) }),
-      foreign('hers', DAY, 'geteilt', { who: MEMBERS[0], text: 'Chorprobe', _born: born(MARCH) }),
+      own('mine', DAY, 'Zahnarzt', { _born: born(mineMs) }),
+      foreign('hers', DAY, 'geteilt', { who: MEMBERS[0], text: 'Chorprobe', _born: born(hersMs) }),
     ],
     bars: [],
-  };
-  const r = withBoard({ ...scene, settings: { rowHeight: 18, layers: NO_LAYERS, hiddenMembers: {} } }, () => {
-    const day = dayNode();
-    const drawn = $$('.note', day).map((n) => ({ text: n.textContent.trim(), foreign: n.classList.contains('foreign') }));
-    return { capacity: L.rowCapacity(18), drawn, more: $('.d-more', day) ? $('.d-more', day).textContent : '—' };
   });
-  const soloR = withBoard({ notes: [scene.notes[0]], bars: [], settings: { rowHeight: 18, layers: NO_LAYERS, hiddenMembers: {} } },
+  const read = () => {
+    const day = dayNode();
+    return {
+      capacity: L.rowCapacity(18),
+      drawn: $$('.note', day).map((n) => ({ text: n.textContent.trim(), foreign: n.classList.contains('foreign') })),
+      more: $('.d-more', day) ? $('.d-more', day).textContent : '—',
+    };
+  };
+  const ORDERS = {
+    'HERS is older (March) — the case that used to lose': [TODAY, MARCH],
+    'MINE is older (March) — the case that never lost': [MARCH, TODAY],
+  };
+  const solo = withBoard({ notes: [own('mine', DAY, 'Zahnarzt', { _born: born(TODAY) })], bars: [], settings: SET18 },
     () => $$('.note', dayNode()).map((n) => n.textContent.trim()));
+  diag(`   the same day on a SOLO board: ${JSON.stringify(solo)}`);
 
-  diag(`18 px · capacity ${r.capacity} · drawn ${JSON.stringify(r.drawn)} · overflow ${r.more}`);
-  diag(`   the same day on a SOLO board: ${JSON.stringify(soloR)}`);
-  diag('   `sortNotes` = (_born asc, id asc). Mama\'s note is older, so it takes the one slot.');
-  diag('   `layout.js:ownFirst` — the exact fix for this — is applied in `assignLanes` (BARS) only.');
-
-  verdict('§B1 · the capacity slice', [
-    { id: '17.2/my-board-stays-mine', ok: r.drawn.some((d) => !d.foreign),
-      why: `the only entry drawn on my own board is ${JSON.stringify(r.drawn)} — my note is in „${r.more}"` },
-  ]);
+  const rows = [];
+  for (const [label, [mineMs, hersMs]] of Object.entries(ORDERS)) {
+    const r = withBoard({ ...scene(mineMs, hersMs), settings: SET18 }, read);
+    diag(`18 px · capacity ${r.capacity} · ${label}`);
+    diag(`   drawn ${JSON.stringify(r.drawn)} · overflow ${r.more}`);
+    rows.push({ id: `17.2/my-board-stays-mine · ${label}`,
+      ok: r.drawn.length === 1 && !r.drawn[0].foreign && r.drawn[0].text === solo[0] && r.more === '+1',
+      why: `the entry drawn on my own board is ${JSON.stringify(r.drawn)} (overflow „${r.more}"), `
+        + `and the solo board draws ${JSON.stringify(solo)}` });
+  }
+  diag('   `sortNotes` = (_born asc, id asc) and has no owner term; `layout.js:orderForCapacity`');
+  diag('   supplies one in front of it, for notes, the way `ownFirst` already did for bars.');
+  verdict('§B1 · the capacity slice', rows);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -243,14 +272,23 @@ test('§B2 · what seven other people take from MY OWN board — notes against b
     + `LOST ${lostBars.length} (${(lostBars.length / Math.max(1, solo.bars.size) * 100).toFixed(1)} %)`);
   diag(`days carrying a „+n" badge — solo ${solo.more} · with the family ${family.more}`);
   for (const k of lostNotes.slice(0, 8)) diag(`   ! my note ${k} is on the solo board and NOT on the family board`);
-  diag('   `ownFirst` protects the 416 bars. Nothing protects the 3 059 notes.');
+  diag('   `assignLanes:ownFirst` protects the 416 bars; `orderForCapacity` protects the 3 059 notes.');
+  diag(`   the family did not vanish for it: ${family.more} of the 365 day rows carry a „+n" and every`);
+  diag('   entry inside one is reachable through the day popover (2.4/2.5) — see §E3 for the split.');
 
   verdict('§B2 · 17.2 across both entity kinds', [
     { id: '17.2/bars-are-protected', ok: lostBars.length === 0,
       why: `${lostBars.length} of my own bar segments vanished when the family arrived` },
+    // The property, not the percentage: EVERY occurrence of mine the solo board
+    // draws is still drawn once seven other people are on the board — the exact
+    // sentence `layout.js` already wrote for bars, now true of notes.
     { id: '17.2/notes-are-protected-too', ok: lostNotes.length === 0,
       why: `${lostNotes.length} of ${solo.notes.size} of my own note occurrences (${(lostNotes.length / Math.max(1, solo.notes.size) * 100).toFixed(1)} %) `
         + 'vanished from MY OWN board when seven other people joined — pushed out of the capacity slice by an OLDER foreign entry' },
+    // …and it is not bought by drawing FEWER of mine on the solo board.
+    { id: '17.2/the-solo-baseline-is-a-complete-board', ok: solo.more === 0,
+      why: `the solo baseline carries ${solo.more} „+n" badges, so „every occurrence the solo board draws" `
+        + 'is no longer the same thing as „every occurrence of mine" — the comparison would be measuring itself' },
   ]);
 });
 
@@ -260,12 +298,16 @@ test('§B2 · what seven other people take from MY OWN board — notes against b
 // The one honest objection to §B2 is that the loss depends on WHEN things were
 // created, and this fixture interleaves the eight people's stamps. So the same
 // board is measured under the three orderings that bracket every real case:
-// I joined an established circle and enter last (worst), everyone enters
-// together (§B2's model), and I was there first (best). If the range has a bad
-// end, the rule has a bad end — a fixture cannot manufacture that.
+// I joined an established circle and enter last (was the worst), everyone
+// enters together (§B2's model), and I was there first (was the best). If the
+// range has a bad end, the rule has a bad end — a fixture cannot manufacture
+// that, and an ordering fix that only holds for one arrival order is not a fix.
+//
+// The range is now a POINT — 0 in all three — which is the only shape that
+// proves the answer no longer depends on `_born` at all.
 // ═════════════════════════════════════════════════════════════════════════════
 
-test('§B2b · the loss under the three creation orders that bracket every real family', () => {
+test('§B2b · no creation order costs me my board — the range is a point', () => {
   const settings = { rowHeight: 22, layers: NO_LAYERS, hiddenMembers: {}, colWidth: 118, bundesland: '' };
   const shift = (notes, mineMs, theirsMs) => notes.map((n, i) => ({
     ...n, _born: born((n.isForeign ? theirsMs : mineMs) + i, i % 1000000),
@@ -287,10 +329,15 @@ test('§B2b · the loss under the three creation orders that bracket every real 
   const worst = Math.max(...Object.values(out));
   const best = Math.min(...Object.values(out));
   diag(`   THE RANGE: ${(best / solo.size * 100).toFixed(1)} % … ${(worst / solo.size * 100).toFixed(1)} % of my own entries lost from my own board.`);
-  diag('   The best end is not zero either: at capacity 2 the second slot is decided by the same lottery.');
+  diag('   It was 0.0 % … 93.5 % before `orderForCapacity`, and the spread was the finding:');
+  diag('   the answer depended on `_born`, which is a lottery held between eight people.');
   verdict('§B2b · the range', [
     { id: '17.2/no-creation-order-costs-me-my-board', ok: worst === 0,
       why: `in the worst of the three orders ${worst} of ${solo.size} of my own note occurrences (${(worst / solo.size * 100).toFixed(1)} %) are not drawn on my own board` },
+    // The shape, not just the worst end: a rule whose answer still moved with
+    // `_born` would leave a spread here even if the worst end happened to be 0.
+    { id: '17.2/creation-order-is-not-an-input', ok: best === worst,
+      why: `the three orders answer ${JSON.stringify(out)} — the loss still depends on WHEN people entered things` },
   ]);
 });
 
@@ -364,39 +411,164 @@ test('§B4 · the „+n" load, solo against family, and the widest badge on the 
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §B5 · 17.5 — the „neu" dot a crowded row never draws
+// §B5 · 17.5 — the „neu" dot a crowded row never drew
 //
 // „Entries added or changed by others since my last session carry a quiet „neu"
 // dot … so I NOTICE CHANGE the way I'd notice new ink on a wall calendar."
 //
-// The dot is a child of the `.note`. A note that lost the capacity slice draws
+// The dot is a child of the `.note`. A note that lost the capacity slice drew
 // no dot, and `membersui.js` states — deliberately, and with an argument — that
 // the family half of the legend carries NO marker. So on a crowded day a peer's
-// change can arrive with no visible signal anywhere on the board.
+// change arrived with no visible signal anywhere on the board: 113 of 219,
+// 51.6 %, measured here when this was an attack.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FIX IS TWO THINGS, AND THIS SECTION ASSERTS BOTH
+// ─────────────────────────────────────────────────────────────────────────────
+//
+//   1. `orderForCapacity`'s SECOND tier — „changed before unchanged", inside
+//      the foreign block only. Without it the winner among the peers was
+//      `_born` again: the oldest UNCHANGED foreign entry outranked the one that
+//      changed this morning. With it, 187 of 219 draw their own dot.
+//   2. `day.overflowNew` — how many of the entries the row could not draw are
+//      peer changes. This is the accounting the „+n" badge needs, and it exists
+//      because of what this section originally said in its own words: the badge
+//      „looks identical whether it hides a change or not". A day that hides a
+//      change now says so in the model, and a day that hides none answers 0 —
+//      the quiet state (Principle 8).
+//
+// THE RESIDUE IS PRINCIPLE 3, AND THAT IS THE TRADE, NOT A LEAK. The 32 peer
+// changes still folded into a badge are on days where MY OWN entries filled the
+// row. The third cell below asserts exactly that: a peer change is never
+// displaced by an UNCHANGED foreign entry — only by my own ink or by another
+// peer change. Principle 3 says the user's own entries win; 17.1 says the
+// family appears; this is where the two meet, and the boundary is checked
+// rather than asserted in prose.
+//
+// PRINCIPLE 9 IS UNTOUCHED BY THE ORDERING. `materialize.js:isNewOf` answers
+// false for a downgrade and for a deletion before any caller hook is consulted,
+// so a downgraded Belegt block sorts exactly where an always-Belegt block of
+// the same age sorts. §B5d pins that, because an ordering keyed on `isNew`
+// would be a surveillance mechanic if `isNew` were not already downgrade-blind.
 // ═════════════════════════════════════════════════════════════════════════════
 
-test('§B5 · how many of the family\'s „neu" markers the board actually draws', () => {
+test('§B5 · every one of the family\'s „neu" markers is drawn or accounted for', () => {
   const settings = { rowHeight: 22, layers: NO_LAYERS, hiddenMembers: {}, bundesland: '' };
   const r = withBoard({ ...FX, settings }, (m) => {
     // every isNew occurrence inside the visible window, from the MODEL
-    let inWindow = 0; let drawn = 0;
+    let inWindow = 0; let drawn = 0; let accounted = 0; let unaccounted = 0;
+    let displacedByMine = 0; let displacedByAnotherChange = 0; const displacedByStale = [];
+    const halfEmpty = [];
     for (const c of m.cols) {
       for (const d of c.days) {
         if (d.empty) continue;
-        inWindow += (d.allNotes || []).filter((x) => x.isNew).length;
-        drawn += (d.notes || []).filter((x) => x.isNew).length;
+        const all = (d.allNotes || []).filter((x) => x.isNew);
+        const shown = (d.notes || []).filter((x) => x.isNew);
+        inWindow += all.length;
+        drawn += shown.length;
+        const hidden = all.length - shown.length;
+        if (!hidden) continue;
+        // (2) — the badge on this row must report that it is carrying changes.
+        if (d.overflowNew >= hidden) accounted += hidden; else unaccounted += hidden;
+        // …and WHAT took the line from them. Only my own ink, or another change.
+        for (const x of (d.notes || [])) {
+          if (!x.foreign) displacedByMine += 1;
+          else if (x.isNew) displacedByAnotherChange += 1;
+          else displacedByStale.push(`${d.date} „${(x.note.text || 'Belegt')}"`);
+        }
+        // A change may only be folded away by a FULL row — never while a line stood empty.
+        if (d.notes.length < m.capacity) halfEmpty.push(`${d.date} drew ${d.notes.length} of ${m.capacity}`);
       }
     }
-    return { inWindow, drawn, dots: $$('#board .note .neu-dot').length, labelDots: $$('#board .bar-label .neu-dot').length };
+    // ── THE GLASS HALF (3) ───────────────────────────────────────────────────
+    // The model can only be trusted about the badge if something DRAWS it. Two
+    // censuses, from the DOM, compared against the model's own answer per row:
+    // every badge whose day reports `overflowNew > 0` must carry the tell, and
+    // no badge whose day reports 0 may carry it — a tell on every badge would
+    // be the same non-signal as a tell on none.
+    let tellMissing = 0; let tellSpurious = 0; let tellDrawn = 0; let quietBadges = 0;
+    const byDate = new Map();
+    for (const c of m.cols) for (const d of c.days) if (!d.empty) byDate.set(d.date, d);
+    for (const badge of $$('#board .d-more')) {
+      const d = byDate.get(badge.dataset.date);
+      if (!d) continue;
+      const has = badge.classList.contains('has-new');
+      if (d.overflowNew > 0) { if (has) tellDrawn += 1; else tellMissing += 1; }
+      else { quietBadges += 1; if (has) tellSpurious += 1; }
+    }
+    return { inWindow, drawn, accounted, unaccounted, displacedByMine, displacedByAnotherChange,
+      displacedByStale, halfEmpty, capacity: m.capacity,
+      tellMissing, tellSpurious, tellDrawn, quietBadges,
+      dots: $$('#board .note .neu-dot').length, labelDots: $$('#board .bar-label .neu-dot').length };
   });
-  const lost = r.inWindow - r.drawn;
+  const folded = r.inWindow - r.drawn;
   diag(`17.5 · foreign notes marked „neu" inside the 12-month window: ${r.inWindow}`);
-  diag(`      drawn with their dot: ${r.drawn} (${r.dots} „neu" dots were in the DOM at render time)`);
-  diag(`      SWALLOWED BY „+n": ${lost} (${(lost / Math.max(1, r.inWindow) * 100).toFixed(1)} %) — no dot, and the legend has no marker by design`);
+  diag(`      drawn with their own dot: ${r.drawn} (${(r.drawn / r.inWindow * 100).toFixed(1)} %) — `
+    + `${r.dots} „neu" dots were in the DOM at render time. It was 106 before the second tier existed.`);
+  diag(`      folded into a „+n": ${folded} — of which ${r.accounted} sit on a day whose model reports `
+    + `overflowNew > 0, and ${r.unaccounted} do not`);
+  diag(`      what took their line: ${r.displacedByMine} lines of MY OWN ink · ${r.displacedByAnotherChange} another peer change `
+    + `· ${r.displacedByStale.length} an UNCHANGED foreign entry`);
   diag(`      bar labels carrying a dot: ${r.labelDots}`);
+  diag(`      the „+n" tell on the glass: ${r.tellDrawn} badges carry it, ${r.tellMissing} that should do not, `
+    + `and ${r.tellSpurious} of ${r.quietBadges} badges hiding no change carry it anyway`);
+  for (const s of r.displacedByStale.slice(0, 8)) diag(`   ! an unchanged foreign entry holds the line on ${s}`);
   verdict('§B5 · 17.5 reachability', [
-    { id: '17.5/every-change-is-noticeable', ok: lost === 0,
-      why: `${lost} of ${r.inWindow} peer changes inside the visible window render NO „neu" dot anywhere — `
-        + 'they are inside a „+n" badge that looks identical whether it hides a change or not' },
+    { id: '17.5/every-change-is-noticeable', ok: r.unaccounted === 0,
+      why: `${r.unaccounted} of ${r.inWindow} peer changes inside the visible window are neither drawn with `
+        + 'their dot nor counted by their day\'s `overflowNew` — inside a „+n" badge that looks identical '
+        + 'whether it hides a change or not' },
+    { id: '17.5/a-change-outranks-an-unchanged-peer-entry', ok: r.displacedByStale.length === 0,
+      why: `${r.displacedByStale.length} peer changes lost the row to an UNCHANGED foreign entry: `
+        + r.displacedByStale.slice(0, 4).join(' · ') },
+    // The trade, named and bounded: a change is folded only by a FULL row.
+    { id: '2.4/a-change-is-never-folded-while-a-line-stands-empty', ok: r.halfEmpty.length === 0,
+      why: `${r.halfEmpty.length} day rows folded a peer change into „+n" without filling their `
+        + `${r.capacity} lines: ` + r.halfEmpty.slice(0, 4).join(' · ') },
+    // ── AND IT REACHES THE GLASS ─────────────────────────────────────────────
+    // `overflowNew` shipped as a model field with nothing reading it, so for one
+    // round 17.5 was closed in the layout and open on the board: the badge still
+    // „looks identical whether it hides a change or not", which is this
+    // section's own wording for the defect. These two cells are what stops that
+    // from happening again, and they are a PAIR on purpose — the first alone is
+    // satisfied by marking every badge, which signals nothing.
+    { id: '17.5/the-badge-says-it-is-holding-a-change', ok: r.tellMissing === 0,
+      why: `${r.tellMissing} badges sit on a day whose model reports overflowNew > 0 and carry no tell — `
+        + 'the change is counted in the model and invisible on the board' },
+    { id: '17.5/and-stays-quiet-when-it-is-not', ok: r.tellSpurious === 0,
+      why: `${r.tellSpurious} of ${r.quietBadges} badges hiding NO change carry the tell anyway — `
+        + 'a mark on every badge is Principle 8\'s quiet state broken, and says nothing' },
+  ]);
+});
+
+test('§B5d · a downgrade does not move in the queue — Principle 9, on the comparator', () => {
+  // ADR 004 §7 rule 1: a Belegt block downgraded from Geteilt renders identically
+  // to one that was always Belegt. `orderForCapacity`'s second tier reads `isNew`,
+  // and `materialize.js:isNewOf` answers false for a downgrade — so the two sort
+  // to the same place. Asserted on the RENDERED row, not on the comparator, because
+  // the claim is about what a viewer can see.
+  const SET = { rowHeight: 22, layers: NO_LAYERS, hiddenMembers: {} };
+  const T = Date.UTC(2026, 0, 1);
+  // One slot for the family: my own note takes the first of the two lines.
+  const base = (hers) => ({
+    notes: [
+      own('mine', DAY, 'Zahnarzt', { _born: born(T + 90) }),
+      hers,
+      foreign('theirs', DAY, 'geteilt', { who: MEMBERS[1], text: 'Ballett', _born: born(T + 10), isNew: true }),
+    ],
+    bars: [],
+  });
+  const read = () => $$('.note', dayNode()).map((n) => n.textContent.trim());
+  // „was Geteilt yesterday, now Belegt": `isNew` is false by materialization.
+  const downgraded = foreign('hers', DAY, 'belegt', { who: MEMBERS[0], _born: born(T), isNew: false });
+  // „always Belegt", same owner, same age, same everything.
+  const alwaysBelegt = foreign('hers', DAY, 'belegt', { who: MEMBERS[0], _born: born(T), isNew: false });
+  const a = withBoard({ ...base(downgraded), settings: SET }, read);
+  const b = withBoard({ ...base(alwaysBelegt), settings: SET }, read);
+  diag(`   downgraded-from-Geteilt row: ${JSON.stringify(a)}`);
+  diag(`   always-Belegt row:           ${JSON.stringify(b)}`);
+  verdict('§B5d · Principle 9 on the queue', [
+    { id: 'principle-9/a-downgrade-sorts-where-an-always-belegt-entry-sorts', ok: JSON.stringify(a) === JSON.stringify(b),
+      why: 'the two rows differ, so the ORDER of the capacity slice reports a level history' },
   ]);
 });

@@ -538,23 +538,41 @@ const theirBar = (id, who, from, to, x = {}) => ({
 /**
  * The crowded day: every marker in the family present at once, from four different people.
  *
- * THE FOREIGN WORST CASE IS FIRST, and that ordering is what makes the 18 px run worth running.
- * `rowCapacity(18)` is 1, so the floor shows exactly ONE note — and if that one were mine, the
- * density floor would be tested against the two markers that were already in v1. The heaviest
- * prefix the family layer can produce (dot + chip + ↻ = 23 px of a ~60 px text budget) is the one
- * that has to survive there.
+ * THE FOREIGN WORST CASE HAS TO BE ON THE ROW, and arranging that is what makes the 18 px run
+ * worth running. `rowCapacity(18)` is 1, so the floor shows exactly ONE note — and if that one were
+ * mine, the density floor would be tested against the two markers that were already in v1. The
+ * heaviest prefix the family layer can produce (dot + chip + ↻ = 23 px of a ~60 px text budget) is
+ * the one that has to survive there.
+ *
+ * ═══ HOW IT IS ARRANGED CHANGED WITH `orderForCapacity` (17.2) ══════════════════════════════════
+ * It used to be arranged by ARRAY ORDER — the foreign worst case was simply the first note, and
+ * the capacity slice took whatever came first. `layout.js:orderForCapacity` now runs mine, then
+ * the family's changes, then the family, ahead of v1's array order, because store order was
+ * costing the owner up to 93.5 % of their own notes depending on nothing but creation order
+ * (`e8-density-crowding.dom.js` §B2b). An index in this array no longer decides anything.
+ *
+ * So the scene takes a parameter instead. `CROWD()` is the mixed day — one note of mine, which
+ * takes slot 1 and carries the OWN worst case, and the peer change behind it, which carries the
+ * FOREIGN worst case; that is the only shape in which both halves of the badge family are on
+ * screen at once, and at 22 px they are. `CROWD({ mine: false })` is the day I have not written
+ * on, which is the only shape in which a peer can hold a capacity-1 row — so the 18 px floor is
+ * still asked of the heaviest family prefix, and asked of it at BOTH densities.
+ *
+ * The cost of the rule is asserted rather than avoided: on the mixed day at 18 px the one line is
+ * mine, and the family reaches the note line as a digit. See `17.2/the-floor-line-is-mine`.
  */
-const CROWD = () => ({
+const CROWD = ({ mine = true } = {}) => ({
   notes: [
-    // theirs: the foreign worst case — „neu" dot + initial chip + ↻ (23 px)
+    // theirs: the foreign worst case — „neu" dot + initial chip + ↻ (23 px).
+    // A CHANGE, so 17.5's tier puts it ahead of the peers that did not change.
     theirs('c2', EIGHT[1], { text: 'Zahnarzt', isNew: true, repeatsYearly: true }),
     // mine: the own worst case — exposure badge + ↻ (17 px of the ~60 px text budget)
-    own('c1', 'Omas Geburtstag', { repeatsYearly: true, exposure: { level: 'geteilt', pending: false } }),
+    ...(mine ? [own('c1', 'Omas Geburtstag', { repeatsYearly: true, exposure: { level: 'geteilt', pending: false } })] : []),
     // theirs, Belegt: the block, which costs no extra width because it is a fill
     theirs('c3', EIGHT[2], { level: 'belegt', redacted: true, isNew: true }),
     // and two more, so the capacity slice and the „+n" chip are both exercised
     theirs('c4', EIGHT[3], { text: 'Chor' }),
-    own('c5', 'Einkaufen'),
+    theirs('c5', EIGHT[4], { text: 'Einkaufen' }),
   ],
   bars: [
     theirBar('c6', EIGHT[1], 1, 20, { isNew: true }),
@@ -601,14 +619,19 @@ for (const rowH of [22, 18]) {
       diag(`crowd@${rowH}px · row ${h} px · ${shown.length}/${notes.length} notes · `
         + `markers ${[...seen].sort().join(',')} · widest prefix ${widest} px · `
         + `overflow "${more.textContent}"`);
-      // The foreign worst case is the first note, so it is on screen at BOTH densities: all
-      // three of the family's own markers, together, at the floor as well as at the default.
-      for (const cls of ['neu-dot', 'chip', 'rep']) {
-        assert.equal(seen.has(cls), true, `the foreign worst case lost its .${cls} at ${rowH} px`);
-      }
-      // …and at 22 px the own worst case is beside it, which is the only row where the two
-      // disjoint halves of the badge family are on screen at the same time.
-      assert.equal(seen.has('exp'), rowH >= 22, `the exposure badge at ${rowH} px`);
+      // 17.2 — MY OWN INK TAKES THE ROW. `orderForCapacity` runs mine first, so on this mixed
+      // day the line at the 18 px floor is mine and at 22 px mine leads. That is the rule's
+      // price and it is asserted, not implied: at capacity 1 the family reaches the note line
+      // only as a digit in the „+n" (the lanes still carry it — §17.2 in family-render.dom.js).
+      assert.equal(shown[0].dataset.foreign === '1', false,
+        `17.2/the-floor-line-is-mine — the first line at ${rowH} px went to a peer`);
+      // …and the own worst case's own markers are whole wherever it stands.
+      assert.equal(seen.has('exp'), true, `the exposure badge went missing at ${rowH} px`);
+      assert.equal(seen.has('rep'), true, `the ↻ went missing at ${rowH} px`);
+      // At 22 px the peer CHANGE takes slot 2, which is the only row where the two disjoint
+      // halves of the badge family are on screen at the same time (17.5 orders it there).
+      assert.equal(seen.has('chip'), cap >= 2, `the initial chip at ${rowH} px with ${cap} slots`);
+      assert.equal(seen.has('neu-dot'), cap >= 2, `the „neu" dot at ${rowH} px with ${cap} slots`);
       assert.ok(widest <= L.PREFIX_COST_PX.foreignWorst + 1,
         `the prefix costs ${widest} px, over PREFIX_COST_PX.foreignWorst (${L.PREFIX_COST_PX.foreignWorst})`);
 
@@ -627,6 +650,38 @@ for (const rowH of [22, 18]) {
             + `(marker ${px(b.top)}–${px(b.bottom)}, line ${px(line.top)}–${px(line.bottom)})`);
         }
       }
+    });
+
+    // ── THE SAME DENSITY, ON THE DAY I HAVE NOT WRITTEN ON ────────────────────
+    // This is what the file used to get from putting the foreign worst case at
+    // array index 0, and it is the half `orderForCapacity` moved rather than
+    // removed: at BOTH densities, the heaviest prefix the family layer can
+    // produce — dot + chip + ↻, 23 px of a ~60 px budget — has to survive on a
+    // row it actually holds. At 18 px this is the ONLY shape in which it can.
+    const peersOnly = CROWD({ mine: false });
+    withBoard({ ...peersOnly, settings: { rowHeight: rowH } }, () => {
+      const d = dayNode();
+      const shown = $$('.note', d);
+      assert.equal(shown.length, L.rowCapacity(rowH), `peers-only: ${shown.length} notes at capacity ${L.rowCapacity(rowH)}`);
+      assert.equal(shown[0].dataset.foreign === '1', true,
+        `17.1 — with no ink of mine, a peer must hold the line at ${rowH} px`);
+      const seen = new Set(shown.flatMap((n) => [...n.children].map((c) => c.className.split(' ')[0])));
+      for (const cls of ['neu-dot', 'chip', 'rep']) {
+        assert.equal(seen.has(cls), true, `the foreign worst case lost its .${cls} at ${rowH} px`);
+      }
+      // 17.5 — and the entry that leads is the one that CHANGED, not an index.
+      assert.equal(!!$('.neu-dot', shown[0]), true,
+        `17.5 — the peer change did not take the first line at ${rowH} px`);
+      const widest = px(Math.max(...shown.map((n) => {
+        const kids = [...n.children].filter((c) => c.className !== 'redacted-word');
+        return kids.reduce((w, c) => w + c.getBoundingClientRect().width, 0);
+      })));
+      assert.ok(widest <= L.PREFIX_COST_PX.foreignWorst + 1,
+        `peers-only: the prefix costs ${widest} px, over PREFIX_COST_PX.foreignWorst (${L.PREFIX_COST_PX.foreignWorst})`);
+      assert.equal(px(d.getBoundingClientRect().height), rowH,
+        `peers-only: the crowded day grew at rowHeight ${rowH}`);
+      diag(`crowd@${rowH}px · peers only · ${shown.length}/${peersOnly.notes.length} notes · `
+        + `markers ${[...seen].sort().join(',')} · widest prefix ${widest} px`);
     });
     unmount();
   });

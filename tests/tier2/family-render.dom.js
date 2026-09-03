@@ -377,9 +377,29 @@ test('§2 · 17.2 — my entries keep MY category colours, theirs never do (D4)'
 
 test('§3 · 2.4 — foreign notes go through the capacity slice and into "+n", not around it', () => {
   // Four notes on one day, two of them mine. At 22 px capacity is 2, so exactly
-  // two render and the badge says +2 — and the two that render are the first two
-  // in store order, not "mine first". 17.4 means the family obeys the rule, and
-  // v1's rule is store order (ADR 001 §5 step 5, which keeps "+n" deterministic).
+  // two render and the badge says +2. 17.4 means the family obeys the density
+  // rule — there is no second path on which a family entry could bypass it.
+  //
+  // ═══ WHICH TWO RENDER CHANGED, AND THIS ROW IS WHERE IT IS RECORDED ═══════
+  // This row used to assert `[false, true]` — "store order decides, not
+  // ownership" — reading ADR 001 §5 step 5 as the rule for the capacity slice.
+  // It was measuring a real defect and calling it the contract: on the 8-member
+  // fixture, store order cost the user 54.1 % of their OWN notes on a shared
+  // day, and the loss moved with creation order (0 % / 54.1 % / 93.5 % across
+  // three orders of the same data). 17.2 — „my board stays mine" — says that is
+  // not a board the owner can trust, and `e8-density-crowding.dom.js` §B2/§B2b
+  // now pin the repair: my own occurrences drawn, solo 185 · with the family
+  // 185 · lost 0, and identical under every creation order.
+  //
+  // `layout.js:orderForCapacity` is the queue that does it — mine, then the
+  // family's CHANGES, then the family, then v1's array order — a stable prefix
+  // over v1's own order, exactly the shape `assignLanes:ownFirst` already had.
+  // `allNotes` still carries the array order, because that is the popover's
+  // source (2.5) and `tier1/layout.test.js`'s „store order, repeats included"
+  // row, which is oracle and did not move.
+  //
+  // So the two that render are MINE, and the peers are in the „+n" — which the
+  // last two assertions below now state, in both directions.
   const notes = [
     own('e1', 4, 'Zahnarzt'),
     foreign('e2', 4, 'geteilt', { text: 'Chorprobe' }),
@@ -395,8 +415,28 @@ test('§3 · 2.4 — foreign notes go through the capacity slice and into "+n", 
     assert.equal(L.rowCapacity(rowHeight), capacity, 'and the model agrees');
     return shown.map((n) => n.dataset.foreign === '1');
   });
-  assert.deepEqual(at(22, 2), [false, true], '22 px: store order decides, not ownership');
+  assert.deepEqual(at(22, 2), [false, false], '22 px: ownership decides the slice, and both of mine are drawn');
   assert.deepEqual(at(18, 1), [false], '18 px: the floor still holds and still counts theirs');
+
+  // The counterweight. `[false, false]` on its own is also what a board that
+  // simply DROPPED every peer would print, and that is the opposite defect —
+  // 17.1 says the family is on the board. So: with none of mine on the day, the
+  // same slice draws THEIRS, newest change first (17.5), and the peers that did
+  // not fit are still counted rather than lost.
+  const theirsOnly = [
+    foreign('t1', 5, 'geteilt', { text: 'Chorprobe' }),
+    foreign('t2', 5, 'geteilt', { who: PAPA, text: 'Turnier', isNew: true }),
+    foreign('t3', 5, 'belegt', { who: PAPA }),
+  ];
+  withBoard({ notes: theirsOnly, settings: { rowHeight: 22, layers: NO_LAYERS } }, () => {
+    const shown = notesAt(5);
+    assert.equal(shown.length, 2, 'a day with none of mine still draws a full row of theirs');
+    assert.deepEqual(shown.map((n) => n.dataset.foreign === '1'), [true, true],
+      'ownership-first is a PREFIX, not a filter — with no ink of mine the family has the whole row');
+    assert.equal(!!$('.neu-dot', shown[0]), true,
+      '17.5 — and the peer CHANGE leads, ahead of the peer entry that did not change');
+    assert.equal(moreAt(5).textContent, '+1', 'the third is counted, not dropped');
+  });
 });
 
 test('§3 · 2.5 — a foreign note truncates like mine, and the markers survive truncation', () => {

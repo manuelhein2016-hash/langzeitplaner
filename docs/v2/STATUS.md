@@ -1,6 +1,74 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-03 · **Stopped at:** **E10 — privacy, migration and hardening,
+**Last session:** 2026-09-03 · **Stopped at:** **THE DENSITY / CO-EDITOR INTEGRATION PASS** — four
+parallel fixers merged, the one collision between two of them resolved, two regressions this round
+introduced closed, and everything re-measured. Full record: `FINDINGS.md` §17.
+
+---
+
+## THE HEADLINE: `test:dom` 714 pass / 17 fail → **836 pass / 3 fail**, and the oracle did not move
+
+```
+npm test  2121/2121 · test:property 101/101 · test:attack 960/960
+test:server 903/903 · test:fleet 397/397 · test:dom 836 pass / 3 fail (46 files)
+```
+
+**The v1 oracle was checked per file, not per total** — the headline count moving from 2 105 to
+2 121 is not evidence either way. Against a pristine `git archive 28f2a35`: 40 of 41 tier-1 files
+report a byte-identical row count and pass; the one that differs is
+`tests/tier1/headless-shell.test.js` (2 → 18), the shell workflow's LZP-1002 rows. **Not one v1
+characterization row changed.**
+
+### The seven stories the tier-2 sweep failed
+
+| story | verdict | evidence |
+|---|---|---|
+| **2.4** the „+n" badge | **PASS** | 15.1 px of a 61 px line covered → **0 px**; on A4 the badge is out of the line and 0 px over the note box |
+| **2.5** truncation you can read | **PASS** | under the badge at 92 px: 0 → **6 characters**; a peer's note on A4: 1 → **5** |
+| **3.7** labels land on empty space | **PASS** *(screen)* | 98 of 142 labels overprinted → **0 of 142**. On PAPER the retreat is unavailable — a 24 px A4 gutter cannot hold a badge and a label chip. Named in §17c |
+| **17.2** my board stays mine | **PASS** | own notes drawn: solo 185 · with the family 185 · **lost 0**, and identical under all three creation orders |
+| **17.3** the member toggle is reachable | **PASS** | reachable at 900/1000/1100/1280/1440; the 80-cell sweep breaks 0 |
+| **17.5** every change is noticeable | **PASS** | dots 106 → **187 of 219**, the 32 residue all accounted; **and the „+n" now says so on the glass** — 25 badges carry the tell, 0 missing, 0 of 329 spurious |
+| **LZP-1007** the 60 fps frame | **FAIL** | `renderBoard` **60.9 ms** = 3.6 frames. Not a regression; not closeable by optimisation. §17e |
+
+### The three rows still red, and what each needs
+
+1. **§E1 · LZP-1007** — 60.9 ms for a full twelve-month rebuild of 4 195 boxes: 3 ms model,
+   ~23 ms DOM construction, ~34 ms style + layout. Seven CSS levers measured, **none moves it**
+   (`contain` makes it worse). Closing it needs an **incremental `renderBoard`**, not a tuning
+   pass. One cell was genuinely improved on the way: `find.js` was doing a full-document
+   `querySelectorAll` per hit, on every keystroke — `findWorst` 25.4 → 20.1 ms.
+2. **§A4 · the 9 px ink floor** — five v1 tones miss `palette.js`'s own 4.5:1 on white.
+   **Left red on purpose:** closing it edits `palette.js`, and `tests/tier1/palette.test.js:38`
+   pins those hex values. **PO ruling first** — the proposed set compresses eight tones onto
+   ~5.9:1, which is the channel story 4.5 relies on. The E8 half (`UNKNOWN_MEMBER_COLOR`, the
+   „Belegt" word) is landable and does not touch the oracle.
+3. **§E3 · the saturated poster** — 365 rows × capacity 2 = 730 slots against 1 527 entries.
+   **48 % is the ceiling for any ordering**; the model draws 715 of the 730. The row asks 75 %.
+   A spec decision, not a layout change, and the threshold was not re-cut to fit.
+
+### Also closed by this pass
+
+- **The E9 co-editor red team: 33 rows, all green.** 8 closed and inverted, 3 open and honestly
+  labelled (§2f, §2g, §4c-b), 17 working defences, 5 controls. **No defence regressed.**
+- **The redaction boundary held a fifth time.** 114 rows. This was the round where it was most
+  exposed — finding 1's §2c puts a `geteiltOnly` value into `registers()` and onto disk. Zero
+  bytes of a Privat entry.
+- **A print regression this round introduced** — the „+n" badge was taking 20 px of a 39.5 px A4
+  line and buying nothing. A peer's printed note went 1 → 5 characters. §17c.
+- **17.5's glass half** — `overflowNew` shipped as a model field with nothing reading it. §17d.
+
+### Owed after this pass
+
+`core/materialize.js`'s bar-interval invariant · `PARK_REASONS.WITHDRAWN` · 18.5's withdrawal
+report · the palette PO ruling · an incremental `renderBoard` · the saturated-poster spec decision
+· `adr/001-op-log.md` §5 step 5's stale bullet. Details in `FINDINGS.md` §17i.
+
+---
+
+# Previous session — 2026-09-03
+
+**Stopped at:** **E10 — privacy, migration and hardening,
 INTEGRATED**. Full record: `docs/v2/E10-VERIFICATION.md`; findings in `FINDINGS.md` §16. The E9
 record below it is unchanged and still current.
 

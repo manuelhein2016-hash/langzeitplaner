@@ -300,22 +300,86 @@ function decorate(entry, catOf) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// THE THIRD METRIC — PAPER (F12 · LZP-806)
+//
+// `print.css` re-metrics the IDENTICAL DOM for the sheet: A4 gives the day row
+// 20 px and the note 6.5 pt, A3 gives it 29 px and 8 pt. Both numbers are
+// smaller than the screen's *relative* to each other, and that is the point —
+// the row shrinks and the type shrinks with it.
+//
+// `rowCapacity` did not know that. It took ONE argument and answered in
+// Kompakt's line box, so asking it about a paper row silently priced 9 px
+// screen type into a 6.5 pt sheet:
+//
+//     rowCapacity(20)          → 1     ← the question, asked wrong
+//     the A4 row actually draws  2     ← measured: body wants 18 px, has 18 px
+//
+// „The model sliced the day to 2 entries; the paper's own capacity is 1" is
+// what `e8-density-perf.dom.js` §E2 reported, and it is not a print bug: it is
+// this function answering a question about paper in the units of glass. Both
+// halves were right and they had no common language.
+//
+// So the paper gets NAMED METRICS, on the same terms the density presets have:
+// `lineH` is the MEASURED line box plus .5 slack, `typePt` is published so a
+// reviewer can check `print.css` against the number derived from it without
+// opening a browser, and `rowHeight` is `print.css`'s own `--row-h`. §E2
+// measures all four in WebKit under the real `@media print` rules and goes red
+// if a type change in `print.css` ever moves a line box out from under them.
+//
+// WHAT THIS DOES NOT DO, and must not: it does not change what prints. The
+// print path renders the same model the screen does (12.3 — „what I see is what
+// prints"), and this function is a predicate, not a policy. Nothing in
+// `buildBoard` consumes a paper metric; the sheet's own capacity is now merely
+// SAYABLE, so the two can be asserted equal instead of hoped equal.
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * How many text lines a day row can host at the current density.
+ * The paper line boxes, measured in WebKit under `print.css`'s own rules.
+ *
+ * A4: 6.5 pt Ubuntu at `line-height: 1.15` renders a 9 px line box, so two fit
+ * in the 20 px row's 18 px body — which is exactly what a 22 px screen row at
+ * Kompakt draws. A3: 8 pt at 1.25 renders a 13 px box, and two fit in 29 px.
+ * The two papers therefore agree with the screen and with each other, and the
+ * agreement is now a checked fact rather than a coincidence.
+ */
+export const PAPER = Object.freeze({
+  a4: Object.freeze({ lineH: 9.5, typePt: 6.5, rowHeight: 20, colWidth: 88 }),
+  a3: Object.freeze({ lineH: 13.5, typePt: 8, rowHeight: 29, colWidth: 126 }),
+});
+
+/** The papers, in the order the print sheet offers them. */
+export const PAPERS = Object.freeze(['a4', 'a3']);
+
+/**
+ * Which line box a metric name selects. Unknown → Kompakt, for the reason
+ * `densityOf` answers Kompakt: a board written by a future build that grows a
+ * third preset must still open here, and the safe fallback is the one that fits
+ * every display.
+ */
+const metricOf = (name) => DENSITY[name] || PAPER[name] || DENSITY.kompakt;
+
+/**
+ * How many text lines a day row can host in a given TYPE METRIC.
  *
  * DESIGN-DECISIONS §B, generalised over the type size instead of over one
- * hard-coded line box. `density` is OPTIONAL and defaults to `kompakt`, whose
+ * hard-coded line box. `metric` is OPTIONAL and defaults to `kompakt`, whose
  * `lineH` IS v1's `LINE_H` — so every existing caller, and every v1
  * characterization row (`rowCapacity(18) === 1`, `(22) === 2`, `(32) === 2`,
  * `(33) === 3`), gets the identical answer it got before this seam existed.
  *
- * The clamp to 3 is 3.8's, not arithmetic: neither preset can reach it inside
- * the 18–32 px slider (Kompakt needs 33 px, Komfort 39), which is the same
- * ceiling `tests/COVERAGE.md` records as „rowCapacity(32) is 2, not 3".
+ * The second argument is a metric NAME and not a number on purpose: a row
+ * height means nothing without the type that goes in it, and the whole class of
+ * defect §E2 found is what happens when the two are separated. `kompakt` and
+ * `komfort` are glass, `a4` and `a3` are paper.
+ *
+ * The clamp to 3 is 3.8's, not arithmetic: no preset can reach it inside the
+ * 18–32 px slider (Kompakt needs 33 px, Komfort 39), which is the same ceiling
+ * `tests/COVERAGE.md` records as „rowCapacity(32) is 2, not 3" — and neither
+ * paper can reach it at all, because the sheet's row is fixed by the sheet.
  */
-export function rowCapacity(rowH, density = 'kompakt') {
-  const lineH = (DENSITY[density] || DENSITY.kompakt).lineH;
-  return Math.max(1, Math.min(3, Math.floor((rowH - 1) / lineH)));
+export function rowCapacity(rowH, metric = 'kompakt') {
+  return Math.max(1, Math.min(3, Math.floor((rowH - 1) / metricOf(metric).lineH)));
 }
 
 /** First visible month, honouring rolling vs. pinned + paging (1.3, 1.5). */
@@ -353,6 +417,88 @@ export function visibleStart(settings, today = todayISO()) {
  * ownership). It only stops someone else's plan from outranking mine.
  */
 const ownFirst = (a, b) => (a.isForeign ? 1 : 0) - (b.isForeign ? 1 : 0);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE SAME RULE, FOR NOTES — and the asymmetry that made it necessary (LZP-806)
+//
+// `ownFirst` above closed 17.2 for BARS and stopped there. The docstring even
+// names the number it bought: „41 % of my own bar segments were pushed out of
+// the lanes". Nothing equivalent guarded the OTHER capacity decision the board
+// makes, one screen away in this same file:
+//
+//     const shown = notesHere.slice(0, noteSlots);
+//
+// `notesHere` arrives in `state.notes` order, which ADR 001 §5 step 5 fixes as
+// `(_born asc, id asc)` — CREATION TIME ACROSS THE WHOLE FAMILY, with no owner
+// term anywhere on the path. So at one note slot the older entry wins, and
+// „older" is a lottery held between eight people. Measured on the 8-member ×
+// 2-year fixture in `tests/tier2/e8-density-crowding.dom.js` §B2/§B2b, against
+// the SOLO board, exactly the way §6 measures it for bars:
+//
+//     I founded the circle and entered mine first    0 of 185 lost   ( 0.0 %)
+//     everyone entered together (the honest model)  100 of 185 lost  (54.1 %)
+//     I joined an established circle, entering last 173 of 185 lost  (93.5 %)
+//
+// A rule that only holds for one arrival order is not a rule. The protected
+// entity was also the numerous one: 3 059 notes against 416 bars.
+//
+// ── TIER 2 IS 17.5, AND IT IS NOT AN AFTERTHOUGHT ────────────────────────────
+// „Entries added or changed by others since my last session carry a quiet „neu"
+// dot … so I NOTICE CHANGE the way I'd notice new ink on a wall calendar."
+// Once mine take the front of the queue, the peers' entries compete for what is
+// left — and with no second term the winner among them is, again, `_born`: the
+// OLDEST unchanged foreign entry outranks the one that changed this morning.
+// Measured before this term existed: 113 of 219 peer changes inside the visible
+// window drew no dot anywhere. So the second tier is „changed before unchanged"
+// INSIDE the foreign block, which is the only place it can apply.
+//
+// ── PRINCIPLE 9 SURVIVES THIS, AND THAT IS AN ARGUMENT, NOT A HOPE ───────────
+// ADR 004 §7 rule 1: „a Belegt block that was downgraded from Geteilt renders
+// identically to one that was always Belegt." The tier reads `isNew`, and
+// `materialize.js:isNewOf` answers FALSE for a downgrade and for a deletion,
+// unconditionally and before any caller hook is consulted. So a downgraded
+// entry sorts exactly where an always-Belegt entry of the same age sorts, and
+// the ORDER is as blind to level history as the dot is. No new channel exists
+// here, because the term's only input is the one field Principle 9 already
+// governs. `belegt-render.dom.js` §4 and `visibility.test.js` X5 own that field;
+// this comparator only consumes it.
+//
+// ── AND IT IS A PREFIX, FOR THE REASON THE BAR COMPARATOR IS ─────────────────
+// Both terms answer 0 for every pair on a SOLO board — `decorate` sets
+// `isNew: foreign && …`, so an own entry can never be new — which is why
+// `layout.test.js`'s capacity-slice rows, `core-materialize.test.js`'s
+// „renders identically through the REAL layout.js" digest and the LZP-402
+// regression suite do not move. Below the two terms the array order decides,
+// and the array order is still ADR 001 §5 step 5's. The sort is applied to the
+// DAY's occurrence list only; `state.notes` itself is untouched, so §8.3's
+// deep-equal-including-array-order acceptance criterion is not in the blast
+// radius at all.
+//
+// It does NOT rescue me from the cap, and the wording matters as much as it did
+// for bars: three of MY OWN notes on a two-line day still cost the third one
+// its line. 2.4 is about the board's density, not about ownership. This only
+// stops someone else's entry from outranking mine.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 17.5 — a peer's change outranks a peer's unchanged entry, and nothing else. */
+const changedFirst = (a, b) =>
+  (a.foreign && a.isNew ? 0 : 1) - (b.foreign && b.isNew ? 0 : 1);
+
+/**
+ * The order the capacity slice consumes: mine, then the family's changes, then
+ * the family, then — for every pair the two terms tie — v1's array order.
+ *
+ * `Array.prototype.sort` is required to be stable (ES2019 §23.1.3.27), so „the
+ * array order decides below the prefix" is a language guarantee and not an
+ * implementation detail of one engine.
+ *
+ * @param {Array} rows decorated occurrences for ONE day
+ * @returns {Array} a new array; the input is not mutated
+ */
+export function orderForCapacity(rows) {
+  return [...rows].sort((a, b) =>
+    ((a.foreign ? 1 : 0) - (b.foreign ? 1 : 0)) || changedFirst(a, b));
+}
 
 /**
  * Global lane assignment (3.4/3.8).
@@ -575,8 +721,21 @@ export function buildBoard(state, opts = {}) {
         else holidayDemoted = true;
       }
       const noteSlots = Math.max(0, capacity - holidayLines);
-      const shown = notesHere.slice(0, noteSlots);
-      const hiddenCount = notesHere.length - shown.length + laneOverflow[d];
+      // 17.2 / 17.5 — the queue, not the array. See `orderForCapacity` above.
+      // `allNotes` keeps the ARRAY order, because that is the popover's source
+      // (2.5) and `layout.test.js`'s „store order, repeats included" row.
+      const queue = orderForCapacity(notesHere);
+      const shown = queue.slice(0, noteSlots);
+      const hidden = queue.slice(noteSlots);
+      const hiddenCount = hidden.length + laneOverflow[d];
+      // 17.5's accounting. A peer change the row could not draw has no dot of
+      // its own; the „+n" badge is the only mark left on that row, and without
+      // this count it „looks identical whether it hides a change or not"
+      // (`e8-density-crowding.dom.js` §B5, in its own words). The model states
+      // how many of the folded entries are peer changes so the badge can say
+      // so; nothing is inferred from the number's size, and a day with no
+      // hidden change answers 0 — the quiet state, as Principle 8 requires.
+      const hiddenNew = hidden.filter((x) => x.foreign && x.isNew).length;
 
       days.push({
         empty: false,
@@ -594,6 +753,7 @@ export function buildBoard(state, opts = {}) {
         notes: shown,
         allNotes: notesHere,
         overflow: hiddenCount > 0 ? hiddenCount : 0,
+        overflowNew: hiddenNew,          // 17.5 — peer changes inside the „+n"
         laneOverflow: laneOverflow[d],
       });
     }

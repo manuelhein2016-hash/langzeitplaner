@@ -106,6 +106,10 @@ import { createUndoStacks, makeTx, captureImages, shadowContent } from './core/u
 import { migrateV1, migrateSnapshots, toV1Snapshot } from './core/migrate1to2.js';
 import { planReplaceAll } from './core/replace.js';
 import { foldAuthorized, REJECT_REASONS } from './core/authz.js';
+// THE join, and nothing but the join. `registers.js` owns `≺` and the LWW fold; the withdrawal
+// repair in `registers()` re-folds the log's own lines minus the ops the fold withdrew, and it
+// does that with the product's one `applyOp` rather than a second copy of the comparator.
+import { applyOp, deserializeRegisters } from './core/registers.js';
 // ADR 004 §2 — the ONE function permitted to turn a local entry into something that leaves the
 // device, and `ops.contract.js` §6's derivation that calls it. The store owns §2.3's LOUD failure
 // path; `PUBLISH_FAILURE_CONTRACT` in that module is the specification `_publishAndEnqueue` below
@@ -129,6 +133,43 @@ import {
  * ADR 003 §7 gate 2 requires `sync/` to be unreachable from the boot graph.
  */
 const CURABLE_REFUSALS = new Set([REJECT_REASONS.NOT_MY_DEVICE, REJECT_REASONS.UNATTESTED_DEVICE]);
+
+/**
+ * THE REFUSALS A LATER OP CAN CREATE — the mirror of `CURABLE_REFUSALS`, and the whole input to
+ * the retroactive-withdrawal pass. See `store.registers()` for the argument and for what is
+ * deliberately absent (`notOwner`, `notCoEditable`, `notMember`, `lostAdminChain`).
+ *
+ * Spelled from `REJECT_REASONS` for the same reason the pair above is: a renamed verdict must be
+ * a build error here, never a filter that quietly stops matching and takes a convergence
+ * guarantee with it.
+ */
+const RETROACTIVE_REFUSALS = new Set([
+  REJECT_REASONS.NOT_ALIVE,             // stage 3b — the owner deleted it (18.6)
+  REJECT_REASONS.NO_COEDIT,             // stage 3b — the owner unticked the box (18.2)
+  REJECT_REASONS.NOT_GETEILT,           // stage 3b — the owner downgraded the level
+  REJECT_REASONS.CONTENT_ABOVE_LEVEL,   // stage 3c — redacted to nothing at the new level
+]);
+
+/**
+ * THE PARK VERDICTS ONLY THE FOLD CAN REACH — E9-C §3b-b, finding 2.
+ *
+ * `applyRemote` read `verdict.rejected` and nothing else, so the tri-state's whole middle had no
+ * reader at that seam. Every OTHER park reason survives that gap because it comes from
+ * `classifyOp`, which `_log.append` runs itself: `future`, `epoch`, `version`, `unknownKind`,
+ * `unknownField`, `unknownSpace` are all reached again one line later. `UNSHARE_SHAPE` is not —
+ * it is produced INSIDE `foldAuthorized` stage 3a and nowhere else — so an admin patch the fold
+ * decided to HOLD was appended as a live op and folded by the log's plain LWW, sentinel and all.
+ *
+ * Its first victim is not an attacker but an app update: the tri-state exists so that a v2.1
+ * retraction this build cannot confirm is retained and re-judged after an update, and instead it
+ * was applied wholesale by the build that could not read it.
+ *
+ * IT IS A SET, NOT A BRANCH, because the honest rule is "a park the classifier cannot reach must
+ * be honoured here" and today exactly one reason satisfies that. A future fold-only verdict adds
+ * a line; parking EVERY member of `verdict.parked` would double-park what `_log.append` already
+ * parks and would move the `future` seam R6-4c pins.
+ */
+const FOLD_ONLY_PARKS = new Set([PARK_REASONS.UNSHARE_SHAPE]);
 
 /**
  * Does this named mutation build ops that live in the FAMILY space? DERIVED from `OP_KINDS`, not
@@ -1302,6 +1343,15 @@ class Store {
      */
     this._attestOpen = null;
     this._log = createOpLog({ now: () => Date.now() });
+    /**
+     * ── THE RETROACTIVE-WITHDRAWAL REPAIR (E9-B · finding 1) ────────────────────────────────
+     * `{base, regs, withdrawn:Map<string, string[]|null>}` — see `_authorizedRegisters`. `null`
+     * means "not computed for the current log". `_authzArmed` is the ONE bit that decides whether
+     * `registers()` pays for a fold at all; it starts `true` because a log loaded from disk may
+     * already carry a withdrawn op, and it is re-derived on every fold.
+     */
+    this._authz = null;
+    this._authzArmed = true;
     this._stacks = this._makeStacks();
     this._personalSpaceId = null;
     this._familySpaceId = null;
@@ -1781,7 +1831,7 @@ class Store {
     if (this.redactionHalt) return [];                  // already halted; do not compound it
     let pubs = [];
     try {
-      pubs = derivePublication(localOps, this._log.registers(), {
+      pubs = derivePublication(localOps, this.registers(), {
         ...this._ctx(gid),
         me: this._me,
         truthOf: (truthKind, uuid) => this._truthOf(truthKind, uuid),
@@ -1807,6 +1857,7 @@ class Store {
       throw err;
     }
     if (!pubs.length) return [];
+    this._armAuthz(pubs);
     for (const op of pubs) this._log.append(op);
     return pubs;
   }
@@ -1824,7 +1875,7 @@ class Store {
    */
   _truthOf(truthKind, uuid) {
     let cells;
-    try { cells = this._log.registers().get(`${truthKind}:${uuid}`); } catch { cells = null; }
+    try { cells = this.registers().get(`${truthKind}:${uuid}`); } catch { cells = null; }
     if (!cells) return null;
     const truth = {};
     for (const [name, cell] of cells) truth[name] = cell === null ? null : cell.value;
@@ -1896,7 +1947,7 @@ class Store {
     // honest answer is that there is nothing to derive.
     if (owner !== this._me) return null;
     let cells;
-    try { cells = this._log.registers().get(`${truthKind}:${uuid}`); } catch { return null; }
+    try { cells = this.registers().get(`${truthKind}:${uuid}`); } catch { return null; }
     const cell = cells && typeof cells.get === 'function' ? cells.get('visibility') : undefined;
     const v = cell === undefined ? undefined : cell.value;
     return v === 'privat' || v === 'belegt' || v === 'geteilt' ? v : null;
@@ -1956,7 +2007,7 @@ class Store {
     if (owner === this._me) return null;          // mine: `derivePublication` owns it, not this
     if (this._familySpaceId === null) return null;
     let cells;
-    try { cells = this._log.registers().get(entityKey); } catch { return null; }
+    try { cells = this.registers().get(entityKey); } catch { return null; }
     if (!cells || typeof cells.get !== 'function') return null;
     const read = (field) => {
       const cell = cells.get(field);
@@ -2000,6 +2051,7 @@ class Store {
   applyCoEdit(entityKey, changes, label) {
     const level = this.familyCoEditLevelOf(entityKey);
     if (level === null) return false;                    // not granted, or not foreign, or gone
+    if (!this._intervalStaysOrdered(entityKey, changes)) return false;
     const colon = entityKey.indexOf(':');
     const slash = entityKey.indexOf('/');
     const kind = entityKey.slice(0, colon);
@@ -2026,6 +2078,82 @@ class Store {
   }
 
   /**
+   * ── THE BAR'S ONE CROSS-FIELD INVARIANT: `startDate <= endDate` (E9-D §4c) ────────────────
+   *
+   * A `fbar` has a value NO SINGLE FIELD OWNS. `pub.startDate` and `pub.endDate` are each a
+   * register with its own stamp and its own per-field LWW winner — which is correct, is what
+   * story 18.5 promises ("the later change wins PER FIELD"), and is heavily property-tested — and
+   * between the two of them sits an ordering nothing in the register model enforces. Two invited
+   * co-editors, two ordinary drags, one edge each: nobody's write is displaced, so 18.5 correctly
+   * tells nobody anything, and the bar converges to `start 2027-03-01 / end 2026-12-20`.
+   * `buildBoard` then emits ZERO segments and the entry leaves every board in the family,
+   * silently, while still sitting in `state.bars` and surviving a reload.
+   *
+   * ── WHAT THIS FUNCTION IS, AND WHAT IT DELIBERATELY IS NOT ───────────────────────────────
+   *
+   * IT IS the shipped door keeping its own promise: `applyCoEdit` is the ONE door `interact.js`
+   * may use, and a gesture that would invert the bar THIS MAC CAN SEE is a declined gesture, the
+   * same way a withdrawn grant is (`familyCoEditLevelOf` returning `null` above). It costs one
+   * register read and it is the half a door can honestly make true.
+   *
+   * IT IS NOT THE FIX FOR §4c, and pretending otherwise would be the third layer of D7's own
+   * warning about `layout.js:canEditEntry`: this is a promise about THIS Mac's hands and it
+   * proves nothing about a peer. Two writes that are each ordered where they were MADE still
+   * converge to an inverted pair — Mama pulls the right edge in to the 10th while Oma, who has
+   * not seen that, pushes the left edge out to the 15th — and no author-side predicate anywhere
+   * can see that, because neither author has the other's write.
+   *
+   * THE CONVERGENT HALF BELONGS IN THE PROJECTION, and it is owed rather than done here because
+   * `core/materialize.js` belongs to another owner this round. The rule it wants is ADR 001 §5
+   * step 7's shape exactly — "reference repair is a projection INVARIANT, not a mutation" — one
+   * more line beside the dangling-category repair:
+   *
+   *     a bar whose folded `startDate` is after its folded `endDate` projects with its interval
+   *     repaired from the LATER-STAMPED of the two registers (that edge is the one the family
+   *     most recently agreed to move; the other follows it), idempotently, without rewriting the
+   *     log and without either co-editor's op being touched.
+   *
+   * It has to live there for the same reason the category repair does: it is a pure function of
+   * the register map, so every device computes the same answer with nothing to synchronise, and
+   * an entry that is unrenderable is repaired rather than dropped.
+   *
+   * @param {string} entityKey the foreign `fbar:`/`fnote:` key being edited
+   * @param {Object} changes   the caller's patch, before `projectCoEditPatch` sees it
+   * @returns {boolean} `false` when this write would invert the bar as this Mac currently folds it
+   */
+  _intervalStaysOrdered(entityKey, changes) {
+    if (typeof entityKey !== 'string' || !entityKey.startsWith('fbar:')) return true;
+    if (!changes || typeof changes !== 'object') return true;
+    const wantsStart = Object.prototype.hasOwnProperty.call(changes, 'pub.startDate');
+    const wantsEnd = Object.prototype.hasOwnProperty.call(changes, 'pub.endDate');
+    if (!wantsStart && !wantsEnd) return true;
+    let cells = null;
+    try { cells = this.registers().get(entityKey); } catch { cells = null; }
+    const folded = (f) => {
+      const cell = cells && typeof cells.get === 'function' ? cells.get(f) : undefined;
+      return cell === undefined || cell === null ? undefined : cell.value;
+    };
+    const was = { s: folded('pub.startDate'), e: folded('pub.endDate') };
+    const start = wantsStart ? changes['pub.startDate'] : was.s;
+    const end = wantsEnd ? changes['pub.endDate'] : was.e;
+    // A half-published bar has no interval to invert yet, and an explicit `null` is a withdrawal
+    // rather than a date (ADR 004 §5.1). Neither is this predicate's business.
+    if (typeof start !== 'string' || typeof end !== 'string') return true;
+    if (start <= end) return true;                         // ISO dates compare lexicographically
+    // ⚠ IT REFUSES TO *CREATE* AN INVERSION, NEVER TO LIVE WITH ONE. If the bar this Mac folds
+    // is ALREADY inverted — because §4c-b happened, or because a peer's single-field write landed
+    // between the pointer going down and coming up — then refusing here would wedge the entry:
+    // every gesture that could repair it would be declined by the state it is trying to repair,
+    // and the entry that draws nothing would also be the entry nobody can move. So an interval
+    // that was broken before the gesture is not this predicate's to defend.
+    if (typeof was.s === 'string' && typeof was.e === 'string' && was.s > was.e) return true;
+    this._warn(
+      `co-edit declined: it would set ${entityKey} to start ${start} and end ${end}. A bar that `
+      + 'starts after it ends draws nothing at all, so the gesture is refused rather than folded.');
+    return false;
+  }
+
+  /**
    * Who holds the admin seat, and the opId a transfer must name as `adminPrev` (ADR 001 §4.1).
    *
    * The chain is `core/authz.js`'s to resolve and this does not re-resolve it: `applyRemote`
@@ -2040,7 +2168,7 @@ class Store {
     const sid = this._familySpaceId;
     const blank = { spaceId: sid, admin: null, headOpId: null, isMe: false };
     if (sid === null) return blank;
-    const cells = this._log.registers().get(`space:${sid}`);
+    const cells = this.registers().get(`space:${sid}`);
     const cell = cells && cells.get('admin');
     if (!cell || typeof cell.value !== 'string') return blank;
     return {
@@ -2422,13 +2550,19 @@ class Store {
       // ── R2. ONE EQUALITY. ─────────────────────────────────────────────────────
       if (!hasLog) {
         this._log = spine;                     // solo: nothing to adopt, nothing to refuse
+        // A DIFFERENT LOG: the withdrawal cache and its arming bit describe the old one.
+        this._authz = null; this._authzArmed = true;
       } else {
         const verdict = adoptable(binding, checkpoint, text);
         if (!verdict.ok) {
           this._log = spine;
+          // A DIFFERENT LOG: the withdrawal cache and its arming bit describe the old one.
+          this._authz = null; this._authzArmed = true;
           this._quarantineLog(verdict.reason, verdict.detail, checkpoint, tail);
         } else {
           this._log = this._adoptHistory(spine, checkpoint, tail, verdict);
+          // A DIFFERENT LOG: the withdrawal cache and its arming bit describe the old one.
+          this._authz = null; this._authzArmed = true;
         }
       }
     } else if (boardFile.kind === 'absent' && hasLog) {
@@ -2439,12 +2573,18 @@ class Store {
       // is the same file as its answer to an unreadable board (R6-6a/b). This is the only line
       // of `init()` this pass changed.
       this._log = this._recoverFromLog(checkpoint, tail, snaps.snapshots);
+      // A DIFFERENT LOG: the withdrawal cache and its arming bit describe the old one.
+      this._authz = null; this._authzArmed = true;
     } else if (boardFile.kind === 'absent') {
       board.settings.seenFirstRun = false;      // a fresh install. Story 15.1, INV-12.
       this._log = this._buildSpine(board, { restamp: false });
+      // A DIFFERENT LOG: the withdrawal cache and its arming bit describe the old one.
+      this._authz = null; this._authzArmed = true;
     } else {
       // The board file EXISTS and this app could not read it (R5-3a/b/c).
       this._log = this._bootUnreadableBoard(boardFile, checkpoint, tail, snaps.snapshots);
+      // A DIFFERENT LOG: the withdrawal cache and its arming bit describe the old one.
+      this._authz = null; this._authzArmed = true;
     }
     // The log is durable only once a space exists (ADR 001 §9/§11, ADR 006 §9.5). LZP-502 turns
     // this on — and MUST consult `store.quarantine` first, or it overwrites the very bytes the
@@ -3132,6 +3272,8 @@ class Store {
       + 'board.json, ops.jsonl or checkpoint.json this session, so every file on disk is exactly as '
       + 'it was. Restore a snapshot from Einstellungen, or send board.json in for a rescue.');
     this._log = createOpLog({ now: () => Date.now() });
+    // A DIFFERENT LOG: the withdrawal cache and its arming bit describe the old one.
+    this._authz = null; this._authzArmed = true;
     try {
       this.state = this._blankState();
       this._project({ settings: true });
@@ -3419,7 +3561,7 @@ class Store {
    */
   _syncLostOps() {
     if (this._personalSpaceId === null) return [];
-    const regs = this._log.registers();
+    const regs = this.registers();
     if (!regs || typeof regs.values !== 'function') return [];
 
     const online = new Set();
@@ -3478,12 +3620,254 @@ class Store {
       newGid,
       space: this._personalSpaceId ?? PERSONAL_PLACEHOLDER,
       familySpaceId: this._familySpaceId,
-      regs: (log ?? this._log).registers(),
+      regs: log ? log.registers() : this.registers(),
     };
   }
 
-  /** The RegisterMap — checkpoint ⊕ tail. Read-only; `core/` owns every write to it. */
-  registers() { return this._log.registers(); }
+  /**
+   * The RegisterMap — checkpoint ⊕ tail, WITH THE FOLD'S RETROACTIVE VERDICT APPLIED.
+   * Read-only; `core/` owns every write to it.
+   *
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   * WHY THIS IS NO LONGER `this._log.registers()` — E9-B, finding 1, and it was a CONVERGENCE
+   * BUG rather than an authorization one.
+   * ═════════════════════════════════════════════════════════════════════════════════════════
+   *
+   * `core/authz.js` stage 3b decides a co-edit against the FINAL value of `pub.coEdit`,
+   * `pub.level` and `pub.alive`, and says what that means: "an owner who revokes co-edit
+   * retroactively withdraws every co-editor write to that entity, at every stamp, ON EVERY
+   * DEVICE". Stage 3c says the same for content above a level, "whatever order the ops arrived
+   * in". Both sentences are TRUE of `foldAuthorized` — `e9-attack-diverge` §2d proves it over
+   * eight shuffles — and both were FALSE of this store, because `applyRemote` used the fold as
+   * an ARRIVAL GATE: it folded `[my log] + [this batch]`, dropped the ops OF THIS BATCH the
+   * verdict refused, and left every op already in the log exactly where it was. Which ops a
+   * withdrawal reached was therefore a function of WHEN EACH MAC HAPPENED TO PULL. Measured:
+   * one revocation, three ops, no patched client, and Oma read `Nordsee` while Eve read
+   * `Herbstferien` — for ever, because a further pull has nothing left to deliver.
+   *
+   * ── WHICH SIDE WAS WRONG, AND WHY IT IS THIS ONE ─────────────────────────────────────────
+   *
+   * The prose. A rule that admits a write because of a grant that was later withdrawn makes
+   * admissibility depend on which op the folding device saw first, and a device that folds from
+   * scratch — a fresh joiner's first pull, a restore, the fleet harness's convergence check —
+   * has no "first" to depend on. So the retroactive reading is the only one that converges and
+   * `authz.js` keeps it.
+   *
+   * THE TEMPTING ALTERNATIVE WAS COSTED AND REFUSED: let the owner's revocation carry a FORWARD
+   * write that restores their own value, so nothing has to be re-folded. It converges whenever
+   * the restoring write is newer than every withdrawn one — and the revoking device cannot know
+   * that, because the withdrawn writes are exactly the ops it has not pulled. `e9-attack-diverge`
+   * §2c is that case: Papa's downgrade is minted OLDER than Mama's co-edit and pushed after it,
+   * so a forward write loses the LWW contest it was minted to win. A withdrawal that only works
+   * when you are already in sync is not a withdrawal.
+   *
+   * ── AND THE COST, HONESTLY (ADR 006: `board.json` is the truth, the op log is history) ────
+   *
+   * A full `foldAuthorized` over the LZP-1007 fixture (8 members × 2 years, ≈6 000 entries,
+   * 12 013 ops) is **75 ms**, measured; the log's own plain LWW fold of the same set is 19 ms.
+   * Two of them — the `myDevices` two-pass — is 150 ms against ADR 001 §5.1's 40 ms materialize
+   * budget. So re-folding on every READ is not available, and neither is re-folding on every log
+   * MUTATION: `_commit` runs on every edit.
+   *
+   * What makes it affordable is that a withdrawal cannot appear out of nowhere. Every stage that
+   * can change an op's verdict reads registers written by exactly three kinds of op:
+   *
+   *     `member.set`  stages 0a/0b (attestations), 2 (membership), 3a (`membersIn`)
+   *     `space.set`   stage 1 (the admin chain), 3a (the unsharing admin)
+   *     `pub.set` carrying a GOVERNING field (`pub.level`, `pub.coEdit`, `pub.alive`, `_born`)
+   *                   stage 3a's own fold, which is what 3b and 3c read
+   *
+   * Nothing else in the vocabulary can change any other op's admissibility — a `note.set`, a
+   * `pref.set`, a `pad.set`, a co-editor's `pub.text` are all invisible to every predicate. So
+   * ONLY those three arm a fold (`_armAuthz`), and the arming bit stays raised for as long as a
+   * withdrawal is actually in force. That last half is the safety property: a missed arming site
+   * can delay noticing a NEW withdrawal until the next governing op; it can never drop one that
+   * is already held, because `_authzArmed` is re-derived from the withdrawal set on every fold.
+   *
+   * A remote batch pays nothing at all: `applyRemote` already folds, and hands its verdict here
+   * through `_noteAuthzVerdict`.
+   *
+   * ── WHAT THE REPAIR IS, AND WHAT IT IS NOT ───────────────────────────────────────────────
+   *
+   * It is NOT "return `verdict.regs`". That map is the fold of what the FOLD admitted, and the
+   * fold refuses ops for reasons that have nothing to do with a withdrawal — an unattested
+   * device, a personal-space op from a Mac I have not paired yet. Serving it would silently
+   * delete content on an ordinary board. The repair is subtractive and named: the ops the
+   * verdict withdrew are removed BY ID, the fields stage 3c redacted are removed BY NAME, and
+   * everything else is folded exactly as the log folds it. When nothing is withdrawn this method
+   * returns the log's own memoised map, by identity — the same object, at the same cost as
+   * before this existed.
+   */
+  registers() {
+    const base = this._log.registers();
+    const c = this._authz;
+    if (c !== null && c.base === base) return c.regs;
+    // Not armed: nothing that could create a withdrawal has entered the log, and none is in
+    // force. The log's fold IS the authorized fold, which is the ordinary case for every board.
+    if (!this._authzArmed) { this._authz = null; return base; }
+    return this._refoldAuthorized(base);
+  }
+
+  /**
+   * Fold the whole log and apply the verdict to it. The two passes are `applyRemote`'s, for the
+   * reason stated there: a `dev.*` attestation is itself an op, so the device set is not a
+   * constant and pass 1 exists only to learn it.
+   * @param {Object} base `this._log.registers()`
+   */
+  _refoldAuthorized(base) {
+    let verdict;
+    try {
+      const all = [...this._log.ops({ includeParked: true })];
+      const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
+      verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
+    } catch (e) {
+      // ADR 006 R4's rule, applied one layer down: every conceivable failure of this pass
+      // degrades to "history kept, nothing withdrawn" — never to lost content. It is loud.
+      this._warn(`the authorization fold failed (${e.name}: ${e.message}); the retroactive `
+        + 'withdrawal pass was skipped and the log\'s own fold is being served');
+      this._authz = { base, regs: base, withdrawn: new Map() };
+      return base;
+    }
+    return this._noteAuthzVerdict(verdict, base);
+  }
+
+  /**
+   * Record a verdict that has already been computed over this log, and repair the register map
+   * from it. `applyRemote` calls this so a remote batch pays for exactly one fold, not two.
+   * @param {Object} verdict an `AuthzResult` folded over this log's ops
+   * @param {Object} [base] `this._log.registers()`, when the caller already holds it
+   */
+  _noteAuthzVerdict(verdict, base = this._log.registers()) {
+    const withdrawn = this._withdrawalsOf(verdict);
+    this._authzArmed = withdrawn.size > 0;
+    const regs = withdrawn.size === 0 ? base : this._repairWithdrawn(withdrawn);
+    this._authz = { base, regs, withdrawn };
+    return regs;
+  }
+
+  /**
+   * The ops in MY OWN LOG that the current fold no longer admits — the retroactive verdicts and
+   * nothing else.
+   *
+   * WHY THE SET IS NARROW, AND WHAT IS DELIBERATELY OUT OF IT. Removing an op from the register
+   * map removes content, so the only refusals honoured here are the ones that are a FUNCTION OF
+   * ANOTHER OP'S FINAL VALUE — the ones that can become true after the op was admitted:
+   *
+   *   `notAlive` · `noCoEdit` · `notGeteilt`   stage 3b, read off the FINAL 3a registers
+   *   `contentAboveLevel`                      stage 3c, read off the FINAL `pub.level`
+   *   `unshareShape` (a PARK, not a refusal)   stage 3a's tri-state — held, and re-judged by a
+   *                                            build that can read it
+   *
+   * Everything else the fold can say is a verdict about the op ITSELF and cannot change:
+   * `notOwner` is structural (§4.4 — there is nothing to backdate), `notCoEditable` is a
+   * function of the patch, `shape`/`badAttestation`/`writeOnce` are the op's own form. An op in
+   * this log carrying one of those was never admitted by `applyRemote` in the first place, and
+   * treating "the fold refuses it" as "delete it" would make a local commit that the fold
+   * happens to dislike cost the user their entry.
+   *
+   * `notMember` and `lostAdminChain` ARE retroactive and are NOT here. A removal already has a
+   * mechanism of its own — `materialize`'s `currentMembers` filter (ADR 001 §5 step 3, story
+   * 20.2) drops every entry of a removed member without touching a register — and widening this
+   * pass to overlap it is a membership-lifecycle decision (WP-9), not a co-editor one. Recorded
+   * as owed rather than done, because the two mechanisms must be designed together or a re-join
+   * will resurrect what the other one hid.
+   *
+   * @param {Object} verdict
+   * @returns {Map<string, string[]|null>} opId → `null` (the whole op) or the field names dropped
+   */
+  _withdrawalsOf(verdict) {
+    const out = new Map();
+    const isLive = (id) => typeof id === 'string' && this._log.has(id) && !this._log.isParked(id);
+    const reasonOf = (id) => {
+      try { return verdict.rejectionOf(id)?.reason ?? null; } catch { return null; }
+    };
+    for (const op of (Array.isArray(verdict?.rejected) ? verdict.rejected : [])) {
+      const id = op && op.id;
+      if (!isLive(id)) continue;
+      if (RETROACTIVE_REFUSALS.has(reasonOf(id))) out.set(id, null);
+    }
+    for (const op of (Array.isArray(verdict?.parked) ? verdict.parked : [])) {
+      const id = op && op.id;
+      if (!isLive(id)) continue;
+      let why = null;
+      try { why = verdict.parkReasonOf(id); } catch { why = null; }
+      if (FOLD_ONLY_PARKS.has(why)) out.set(id, null);
+    }
+    for (const r of (Array.isArray(verdict?.contentAboveLevel) ? verdict.contentAboveLevel : [])) {
+      const id = r && r.opId;
+      if (!isLive(id) || out.get(id) === null) continue;   // `null` = the whole op is already gone
+      const fields = out.get(id) ?? [];
+      if (!fields.includes(r.field)) fields.push(r.field);
+      out.set(id, fields);
+    }
+    return out;
+  }
+
+  /**
+   * `checkpoint ⊕ (live lines − the withdrawn ones)`, with stage 3c's dropped fields removed
+   * from the bodies that survive. A plain LWW fold — `registers.js` owns the join and this does
+   * not carry a second copy of it.
+   *
+   * THE ONE THING IT CANNOT REPAIR, and it says so out loud rather than pretending otherwise: an
+   * op that has been COMPACTED is no longer a line. Its value is folded into the checkpoint, it
+   * is not in `_log.ops()` and therefore not in the set `foldAuthorized` is given, so the fold
+   * never names it and there is nothing here to subtract. `oplog.js:park()` refuses the same
+   * case for the same reason, in the same words.
+   *
+   * THE BOUND IS `_persistOps` STEP ②: compaction runs at `TAIL_COMPACT_AT` lines (capped at the
+   * outbox horizon, so nothing unacknowledged is folded), which is a count of THIS Mac's writes
+   * and not a promise that every peer has seen the op. So a revocation that arrives after that
+   * many local edits reaches every peer that has not compacted and not the one that has. It is
+   * the same residual `oplog.js` already carries for `park()`, it is bounded by ADR 001 §7.2's
+   * own policy rather than by anything this pass introduced, and closing it needs a checkpoint
+   * that can be re-folded — which is exactly what §7.2 says it deliberately is not.
+   * @param {Map<string, string[]|null>} withdrawn
+   */
+  _repairWithdrawn(withdrawn) {
+    const h = this._log.horizon();
+    const out = deserializeRegisters(this._log.checkpoint({ horizon: h ?? ZERO_STAMP }).regs);
+    for (const op of this._log.ops()) {
+      const w = withdrawn.has(op.id) ? withdrawn.get(op.id) : undefined;
+      if (w === null) continue;                             // withdrawn whole
+      if (w === undefined) { applyOp(out, op); continue; }
+      const f = {};
+      for (const [k, v] of Object.entries(op.f)) if (!w.includes(k)) f[k] = v;
+      if (Object.keys(f).length) applyOp(out, Object.freeze({ ...op, f: Object.freeze(f) }));
+    }
+    return out;
+  }
+
+  /**
+   * Raise the fold flag if any of `ops` could change another op's admissibility. See the essay
+   * on `registers()` for the derivation of the three kinds; the predicate is DERIVED from
+   * `FIELDS`' own `gov` marks rather than restating a list, so a new governing register arms this
+   * without anybody remembering to come here.
+   * @param {Iterable<Object>} ops
+   */
+  _armAuthz(ops) {
+    if (this._authzArmed) return;
+    for (const op of ops) {
+      if (!op || typeof op !== 'object') { this._authzArmed = true; return; }   // unknown ⇒ arm
+      if (op.k === 'member.set' || op.k === 'space.set') { this._authzArmed = true; return; }
+      if (op.k !== 'pub.set') continue;
+      const colon = typeof op.e === 'string' ? op.e.indexOf(':') : -1;
+      const table = colon > 0 ? FIELDS[op.e.slice(0, colon)] : null;
+      if (!table) { this._authzArmed = true; return; }                          // unknown ⇒ arm
+      for (const f of Object.keys(op.f || {})) {
+        if (table[f] && table[f].gov === true) { this._authzArmed = true; return; }
+      }
+    }
+  }
+
+  /** The opIds this device is currently withholding from its own board, and why. Diagnostics. */
+  withdrawnOps() {
+    this.registers();
+    const out = [];
+    for (const [id, fields] of (this._authz?.withdrawn ?? new Map())) {
+      out.push(Object.freeze({ id, fields: fields === null ? null : fields.slice() }));
+    }
+    return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
 
   /**
    * THE THREE MEMBER INPUTS `materialize()` NEEDS, out of the log and out of the local prefs.
@@ -3642,7 +4026,7 @@ class Store {
    */
   _project({ settings = false } = {}) {
     const d = defaultState();
-    const regs = this._log.registers();
+    const regs = this.registers();
     const full = materialize(regs, {
       me: this._me,
       familySpaceId: this._familySpaceId,
@@ -3689,6 +4073,7 @@ class Store {
     if (!p) return;
     const ops = this._diff(p, p.settings);
     if (!ops.length) return;
+    this._armAuthz(ops);
     for (const op of ops) this._log.append(op);
     this._projected = this._contentClone();
     this._projected.settings = structuredClone(this.state.settings);
@@ -3708,7 +4093,12 @@ class Store {
     // Captured against the PRE-transaction registers — `captureImages` is explicit that folding
     // first and capturing second records the post-state twice and produces an undo that does
     // nothing. It also refuses any op that is not mine, which IS story 18.4.
-    const { pre, post } = captureImages(this._log.registers(), ops, { me: this._me });
+    const { pre, post } = captureImages(this.registers(), ops, { me: this._me });
+    // E9-B · finding 1: a LOCAL op can withdraw a peer's write too — the owner unticking
+    // `pub.coEdit` on their own entry is a `_commit`, and every co-editor write already in
+    // this log has to go with it. `_armAuthz` raises the flag only for the three kinds that
+    // can change any predicate's answer; see `registers()`.
+    this._armAuthz(ops);
     for (const op of ops) this._log.append(op);
     this._project();
     // ADR 004 §2.3, §5 — the publication rides in the SAME group, so it is one ⌘Z. It is derived
@@ -3767,7 +4157,7 @@ class Store {
   txn(label, fn) {
     this._adopt();
     const shadow = this._shadow();
-    const tx = makeTx({ state: this.state, regs: this._log.registers(), ...this._ctx() });
+    const tx = makeTx({ state: this.state, regs: this.registers(), ...this._ctx() });
     const r = fn(tx);
     if (r === false || tx.ops.length === 0) return r;      // store.js:150, verbatim
     this._commit(label, tx.ops, shadow);
@@ -3992,7 +4382,42 @@ class Store {
       if (typeof verdict.rejectionOf !== 'function') return 'inadmissible';
       try { return verdict.rejectionOf(id)?.reason ?? 'inadmissible'; } catch { return 'inadmissible'; }
     };
+    // ── E9-C §3b-b · THE FOLD'S *PARK* VERDICT NOW HAS A READER ─────────────────────────────
+    //
+    // `verdict.parked` used to be dropped on the floor here, and `FOLD_ONLY_PARKS` says which
+    // half of it that actually cost us: `UNSHARE_SHAPE` is produced only inside `foldAuthorized`
+    // stage 3a, so `_log.append`'s own `classifyOp` — which is what saves every other park
+    // reason at this seam — never sees it. `{...unsharePatch, 'pub.text': 'gekapert'}` therefore
+    // landed on every peer as a live op while `authz.js:1209` was still claiming that "a parked
+    // op is never folded, so an admin who pads an unshare with a content write still gets no
+    // write primitive". The claim is true again because this map is consulted.
+    const held = new Map();
+    for (const op of (Array.isArray(verdict?.parked) ? verdict.parked : [])) {
+      const id = op && op.id;
+      if (typeof id !== 'string') continue;
+      let why = null;
+      try { why = verdict.parkReasonOf(id); } catch { why = null; }
+      if (FOLD_ONLY_PARKS.has(why)) held.set(id, why);
+    }
     for (const op of wellFormed) {
+      if (held.has(op.id) && !refused.has(op.id)) {
+        const why = held.get(op.id);
+        try {
+          this._log.park(op, why);
+          this._warn(
+            `remote op ${op.id} parked: ${why} — the authorization fold could not read this patch `
+            + 'as the withdrawal it declares itself to be. It is HELD, not applied and not lost, '
+            + 'and re-judged by a build that can read it (ADR 001 §7.4).');
+          result.refused.push({ id: op.id, reason: why, parked: true });
+          continue;
+        } catch (e) {
+          // Already folded into the checkpoint: there is no line left to park. Fall through to a
+          // refusal, which is honest about having kept nothing.
+          this._warn(`remote op ${op.id}: ${why}, and it could not be parked (${e.message})`);
+          result.refused.push({ id: op.id, reason: why });
+          continue;
+        }
+      }
       if (refused.has(op.id)) {
         const why = reasonOf(op.id);
         // ── F-6 · A CURABLE REFUSAL IS PARKED, NOT DROPPED ─────────────────────────────────
@@ -4087,6 +4512,19 @@ class Store {
       }
     }
 
+    // ── E9-B · THE VERDICT IS APPLIED TO THE WHOLE LOG, NOT ONLY TO THIS BATCH ─────────────
+    //
+    // This is finding 1, and the line above it is the bug in one sentence: everything before
+    // this point judges `wellFormed` — the ops that just ARRIVED — while `verdict` was folded
+    // over `[my whole log] + [this batch]` and therefore also knows which ops ALREADY IN MY LOG
+    // the batch has just retroactively withdrawn. Nobody read that half, so an owner's
+    // revocation reached only the ops that had not landed yet, and which ops those were was a
+    // function of when this Mac happened to pull. `store.registers()` carries the argument.
+    //
+    // It costs nothing: the fold has already run. `_noteAuthzVerdict` records it, and only
+    // re-folds the log if a LATER mutation invalidates the answer.
+    this._noteAuthzVerdict(verdict);
+
     // ── 18.3's OWNER-SIDE HALF · the moderation is reconciled, not merely received ──────────
     //
     // ADR 004 §5's admin-unshare row: "the owner's client also sets its local `visibility` to
@@ -4110,7 +4548,8 @@ class Store {
     // exactly `{visibility:'privat'}` and there is no op kind that could carry a notice.
     if (this._familySpaceId !== null && result.applied.length) {
       try {
-        const follow = adminUnshareFollowUp(this._log.registers(), { ...this._ctx(), me: this._me });
+        const follow = adminUnshareFollowUp(this.registers(), { ...this._ctx(), me: this._me });
+        this._armAuthz(follow);
         for (const op of follow) this._log.append(op);
       } catch (e) {
         // Never let the reconciliation cost the batch that arrived. The disagreement it closes is
@@ -4244,6 +4683,7 @@ class Store {
     this._adopt();
     const ops = this._stacks.undo(this.state);
     if (!ops.length) return false;
+    this._armAuthz(ops);
     for (const op of ops) this._log.append(op);
     this._project();
     // ⌘Z ON A SHARED ENTRY MUST WITHDRAW IT (ADR 004 §5.1, `core/undo.js`'s own reasoning).
@@ -4262,6 +4702,7 @@ class Store {
     this._adopt();
     const ops = this._stacks.redo(this.state);
     if (!ops.length) return false;
+    this._armAuthz(ops);
     for (const op of ops) this._log.append(op);
     this._project();
     if (this._publishAndEnqueue(ops, ops[0]?.gid ?? null).length) this._project();   // see undo()
@@ -4285,7 +4726,7 @@ class Store {
   replaceAll(next) {
     this._adopt();
     const board = migrate(next);                 // v1's own door first: every quirk preserved
-    const plan = planReplaceAll(this._log.registers(), board, {
+    const plan = planReplaceAll(this.registers(), board, {
       mint: () => this._clock.tick(),
       me: this._me,
       deviceId: this._device,
@@ -4319,6 +4760,7 @@ class Store {
     // had accumulated — including the migration report the user had not been shown yet.
     if (plan.lossy) this._warn('import: this file could not be represented in full — see the entries below');
     this._warnAll(plan.warnings);
+    this._authzArmed = true;                 // a whole board arrived; re-derive from scratch
     for (const op of plan.ops) this._log.append(op);
     if (rehearsal.repair) {
       this._warn(`import: ${rehearsal.repair.what} could not be drawn as given and was reset to the default; `

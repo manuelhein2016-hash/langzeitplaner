@@ -304,7 +304,7 @@ test('§E2 · A4 — what a family board actually puts on paper at ~6 pt', () =>
         colW: px(col.getBoundingClientRect().width),
         rowH,
         modelCapacity: L.rowCapacity(store.state.settings.rowHeight || 22),
-        paperCapacity: L.rowCapacity(rowH),
+        paperCapacity: L.rowCapacity(rowH, 'a4'),   // the PAPER's own line box — see PAPER in layout.js
         notesInThisRow: $$('.note', day).length,
         bodyNeeds: px(body.scrollHeight),
         bodyHas: px(body.getBoundingClientRect().height),
@@ -315,6 +315,16 @@ test('§E2 · A4 — what a family board actually puts on paper at ~6 pt', () =>
         neuPx: (() => { const c = $('#board .note .neu-dot'); return c ? px(c.getBoundingClientRect().width) : null; })(),
         morePx: more ? px(more.getBoundingClientRect().width) : null,
         moreFont: more ? getComputedStyle(more).fontSize : null,
+        morePos: more ? getComputedStyle(more).position : null,
+        // Does the printed badge overlap the printed sentence? Asked of the two
+        // boxes rather than of the stylesheet, so it survives any re-metric.
+        moreOverText: (() => {
+          const d = $$('#board .day[data-date]').find((x) => $('.d-more', x) && $('.note', x));
+          if (!d) return null;
+          const mb = $('.d-more', d).getBoundingClientRect();
+          const nb = $('.note', d).getBoundingClientRect();
+          return px(Math.max(0, Math.min(mb.right, nb.right) - Math.max(mb.left, nb.left)));
+        })(),
         labelMax: lab ? getComputedStyle(lab).maxWidth : null,
         labelFont: lab ? getComputedStyle(lab).fontSize : null,
         // Characters of a real German note that survive on paper, own vs peer.
@@ -332,11 +342,13 @@ test('§E2 · A4 — what a family board actually puts on paper at ~6 pt', () =>
 
     diag(`A4 · ${r.rulesLifted} print rules lifted · column ${r.colW} px · row ${r.rowH} px · note type ${r.noteFontPx}`);
     diag(`   the MODEL was built at capacity ${r.modelCapacity} (settings.rowHeight ${store.state.settings.rowHeight || 22}); the PAPER's own row is capacity ${r.paperCapacity}`);
+    diag('   — and „the paper\'s own" now means asked in the paper\'s own line box. Asked in Kompakt\'s,'
+      + ` the same row answers ${L.rowCapacity(r.rowH)}, which is the disagreement this section used to report.`);
     diag(`   this row draws ${r.notesInThisRow} note(s); its body wants ${r.bodyNeeds} px and has ${r.bodyHas} px`);
     diag(`   the note's own text column on A4: ${r.textColumnPx} px`);
     diag(`   the badges do NOT scale with the paper (app.css: „Text scales, marks do not"):`
       + ` chip ${r.chipPx} px · exposure ${r.expPx} px · neu ${r.neuPx} px`);
-    diag(`   the „+n" badge on A4: ${r.morePx} px at ${r.moreFont} — an opaque box inside that same text column`);
+    diag(`   the „+n" badge on A4: ${r.morePx} px at ${r.moreFont}, ${r.morePos} — it overlaps the note's own box by ${r.moreOverText} px`);
     diag(`   the bar label on A4: max-width ${r.labelMax} at ${r.labelFont}, and it still carries a chip and a dot`);
     diag(`   „Elternsprechtag Klasse 3b" on A4 — MY note: ${r.charsOwn} characters`
       + (r.charsPeer ? ` · A PEER'S note [${r.charsPeer.marks.join(' ')}]: ${r.charsPeer.chars} characters in ${r.charsPeer.textPx} px` : ''));
@@ -365,17 +377,74 @@ test('§E2 · A4 — what a family board actually puts on paper at ~6 pt', () =>
     store.state.settings.rowHeight = 22;
     renderBoard(boardEl());
 
+    // ── THE THIRD METRIC (LZP-806) ──────────────────────────────────────────
+    // „The model sliced the day to 2 entries; the paper's own capacity is 1" was
+    // not a print bug. It was `rowCapacity` answering a question about PAPER in
+    // the units of GLASS: it took one argument and priced 9 px screen type into
+    // a 6.5 pt sheet. `layout.js:PAPER` names the paper line boxes the way
+    // `DENSITY` names the screen ones, and the two capacities can now be
+    // asserted equal instead of hoped equal.
+    //
+    // The metrics are MEASURED here, under the real `@media print` rules, and
+    // the published `lineH` has to be the smallest half-pixel above the line box
+    // WebKit actually lays out — so a type change in `print.css` moves the box,
+    // misses the window, and goes red rather than silently re-cutting the sheet.
+    const paper = {};
+    for (const size of L.PAPERS) {
+      paper[size] = withPrintRules(size, () => {
+        const day = $$('#board .day[data-date]').find((d) => $$('.note', d).length >= 1);
+        const note = $('.note', day);
+        return {
+          rowH: px(day.getBoundingClientRect().height),
+          lineBox: px(note.getBoundingClientRect().height),
+          notePx: getComputedStyle(note).fontSize,
+        };
+      });
+      const p = L.PAPER[size];
+      const m = paper[size];
+      diag(`   ${size.toUpperCase()} — print.css row ${m.rowH} px at ${m.notePx}; one line box measures ${m.lineBox} px`);
+      diag(`      layout.js PAPER.${size}: rowHeight ${p.rowHeight} · lineH ${p.lineH} · typePt ${p.typePt}`
+        + ` → rowCapacity(${m.rowH}, '${size}') = ${L.rowCapacity(m.rowH, size)}`);
+    }
+
     const rows = [];
+    for (const size of L.PAPERS) {
+      const p = L.PAPER[size];
+      const m = paper[size];
+      rows.push({ id: `F12/${size}-metric-is-the-stylesheet's-own`, ok: p.rowHeight === m.rowH,
+        why: `layout.js publishes PAPER.${size}.rowHeight ${p.rowHeight} and print.css draws a ${m.rowH} px row` });
+      rows.push({ id: `F12/${size}-lineH-is-the-measured-line-box`, ok: p.lineH >= m.lineBox && p.lineH < m.lineBox + 1,
+        why: `PAPER.${size}.lineH is ${p.lineH} and WebKit lays out a ${m.lineBox} px line box under print.css — `
+          + 'the published metric no longer describes the type that is on the paper' });
+    }
+    rows.push({ id: 'F12/model-and-paper-agree-on-capacity', ok: r.modelCapacity === L.rowCapacity(paper.a4.rowH, 'a4'),
+      why: `the model sliced the day to ${r.modelCapacity} entries for a 22 px screen row; A4 re-metrics the same DOM to a ${paper.a4.rowH} px row whose own capacity is ${L.rowCapacity(paper.a4.rowH, 'a4')}` });
+    rows.push({ id: 'F12/a3-agrees-too', ok: r.modelCapacity === L.rowCapacity(paper.a3.rowH, 'a3'),
+      why: `A3 — the recommended wall format — re-metrics the same DOM to a ${paper.a3.rowH} px row whose own capacity is ${L.rowCapacity(paper.a3.rowH, 'a3')}, against the model's ${r.modelCapacity}` });
     rows.push({ id: 'F12/the-screen-setting-does-not-clip-the-paper', ok: clip[32].clipped === 0,
       why: `at the screen's maximum row height (32 px, capacity 3) ${clip[32].clipped} day rows overflow the A4 row by up to ${clip[32].worstPx} px — clipped by \`.day { overflow: hidden }\`, on paper, with no „+n" to account for it` });
     // The one that decides whether a family poster is a poster.
     rows.push({ id: 'F12/the-paper-row-holds-what-the-model-drew', ok: r.bodyNeeds <= r.bodyHas + 0.5,
       why: `the A4 day row is ${r.bodyHas} px and the entries the model put in it need ${r.bodyNeeds} px — the surplus is clipped by \`.day { overflow: hidden }\`, on paper, with no „+n" to say so` });
-    rows.push({ id: 'F12/model-and-paper-agree-on-capacity', ok: r.modelCapacity === r.paperCapacity,
-      why: `the model sliced the day to ${r.modelCapacity} entries for a 22 px screen row; A4 re-metrics the same DOM to a ${r.rowH} px row whose own capacity is ${r.paperCapacity}` });
     rows.push({ id: 'A8/a-peer-entry-is-legible-on-A4', ok: r.textColumnPx - (r.neuPx + r.chipPx + 4) > 20,
       why: `a peer's note on A4 has ${r.textColumnPx} px of text column, of which the fixed-size badges take `
         + `${px((r.neuPx || 0) + (r.chipPx || 0) + 4)} px — leaving ${px(r.textColumnPx - ((r.neuPx || 0) + (r.chipPx || 0) + 4))} px at ${r.noteFontPx}` });
+    // ── THE COUNTERWEIGHTS ──────────────────────────────────────────────────
+    // The row above was closed by taking the „+n" badge back OUT of the printed
+    // line (`print.css`: `.day.claimed .d-more` stays an overlay on paper — the
+    // retreat it pays for cannot happen there, because `body.paper-a4
+    // .bar-label` out-specifies `.bar-label.on-ink`). These two rows are what
+    // stops that from being re-spent: one says the badge is not in flow, the
+    // other says it is not sitting on the sentence either. Without them the
+    // A8 row could be met again by widening the column instead of by moving the
+    // badge, and the defect would come back the next time a paper is re-metricked.
+    rows.push({ id: 'A8/the-printed-badge-takes-no-width-from-the-sentence', ok: r.morePos === 'absolute',
+      why: `the „+n" badge is \`position: ${r.morePos}\` on A4, so it is a flex sibling of \`.d-body\` and takes `
+        + 'its box out of the note text — 20 px of a 39.5 px line, on the one surface with no hover to recover it' });
+    rows.push({ id: 'A8/and-does-not-sit-on-it-either', ok: r.moreOverText === 0,
+      why: `the „+n" badge overlaps the note's own box by ${r.moreOverText} px on A4 — v1 printed it at `
+        + '`--gutter + 1px`, one pixel inside the text column; it belongs in the lane gutter the row already reserved' });
+
     verdict('§E2 · A4 parity', rows);
   } finally { restore(before); }
 });
@@ -386,25 +455,80 @@ test('§E3 · how much of the family reaches the paper at all', () => {
     const count = (fx) => {
       install({ ...fx, settings: SET });
       const m = L.buildBoard(store.state);
-      let inWindow = 0; let drawn = 0; let overflow = 0;
+      let inWindow = 0; let drawn = 0; let overflow = 0; let rows = 0;
+      const byOwner = new Map();      // ownerId → [inWindow, drawn]
       for (const c of m.cols) for (const d of c.days) {
         if (d.empty) continue;
+        rows += 1;
         inWindow += (d.allNotes || []).length;
         drawn += (d.notes || []).length;
         overflow += d.overflow || 0;
+        for (const x of (d.allNotes || [])) {
+          const k = x.note.ownerId || 'mem_me';
+          if (!byOwner.has(k)) byOwner.set(k, [0, 0]);
+          byOwner.get(k)[0] += 1;
+        }
+        for (const x of (d.notes || [])) {
+          const k = x.note.ownerId || 'mem_me';
+          if (!byOwner.has(k)) byOwner.set(k, [0, 0]);
+          byOwner.get(k)[1] += 1;
+        }
       }
-      return { inWindow, drawn, overflow, badges: $$('#board .d-more').length };
+      return { inWindow, drawn, overflow, rows, byOwner, badges: $$('#board .d-more').length };
     };
     const solo = count({ notes: MINE_N, bars: MINE_B });
     const family = count(FX);
+    const ceiling = family.rows * L.rowCapacity(SET.rowHeight);
     diag(`   solo   — ${solo.inWindow} note occurrences in the 12-month window, ${solo.drawn} printed, ${solo.overflow} folded into ${solo.badges} „+n" badges`);
     diag(`   family — ${family.inWindow} note occurrences in the 12-month window, ${family.drawn} printed (${(family.drawn / family.inWindow * 100).toFixed(0)} %), ${family.overflow} folded into ${family.badges} „+n" badges`);
     diag('   Paper has no popover. Everything inside a „+n" on an A4 sheet is a NUMBER and nothing else —');
     diag('   which is DESIGN-DECISIONS\' own reason for printing the badge, and also the ceiling on what');
     diag('   „a family wall poster is now a two-click product" (A8) can mean at eight members.');
+
+    // ── WHO reaches the paper, which is the half A8 is actually about ────────
+    // 17.2 puts my own entries at the front of the capacity slice. The obvious
+    // way to get that wrong is to buy it by making the family invisible — and
+    // 17.1's whole point is that the family APPEARS. So the split is measured
+    // per member, in both directions, and both ends are asserted.
+    const shareOf = (k) => {
+      const v = family.byOwner.get(k) || [0, 0];
+      return { inWindow: v[0], drawn: v[1], pct: v[0] ? v[1] / v[0] : 1 };
+    };
+    const me = shareOf('mem_me');
+    const peers = MEMBERS.map((p) => ({ id: p.id, ...shareOf(p.id) }));
+    diag(`   WHO reaches the paper — mine ${me.drawn}/${me.inWindow} (${(me.pct * 100).toFixed(0)} %)`);
+    for (const p of peers) diag(`      ${p.id.padEnd(10)} ${String(p.drawn).padStart(4)}/${String(p.inWindow).padStart(4)} (${(p.pct * 100).toFixed(0)} %)`);
+    const quietest = peers.slice().sort((a, b) => a.pct - b.pct)[0];
+    diag(`   the quietest member on the sheet is ${quietest.id} at ${(quietest.pct * 100).toFixed(0)} % — `
+      + 'every one of them still has ink on the poster, which is what 17.1 asks for.');
+
+    // ── THE ARITHMETIC CEILING, so the next reader does not re-derive it ─────
+    // A 22 px row has capacity 2 (DESIGN-DECISIONS §B) and the window has 365
+    // day rows, so at most 730 occurrences can be drawn at all — 48 % of this
+    // fixture's 1 527. Capacity 3 is the clamp's own ceiling and reaches 72 %.
+    // No reachable row height and no paper metric makes 75 % true here; closing
+    // this cell needs a spec decision about what a saturated poster should do,
+    // not a layout change. It is left RED, with the number, deliberately.
+    diag(`   THE CEILING: ${family.rows} day rows × capacity ${L.rowCapacity(SET.rowHeight)} = ${ceiling} drawable `
+      + `occurrences, against ${family.inWindow} in the window — ${(ceiling / family.inWindow * 100).toFixed(0)} % is `
+      + `the most ANY ordering can print at this row height, and the model draws ${family.drawn} of those ${ceiling}.`);
+    diag(`   At the clamp's own ceiling (capacity 3, DESIGN-DECISIONS §B) it would be `
+      + `${(family.rows * 3 / family.inWindow * 100).toFixed(0)} % — still under the 75 % this cell asks for.`);
+
     verdict('§E3 · the poster', [
+      // Not yet closable by layout: see THE CEILING above. Left at its original
+      // strictness rather than re-cut to a number the product happens to hit.
       { id: 'A8/most-of-the-family-reaches-the-paper', ok: family.drawn / family.inWindow >= 0.75,
         why: `${(family.drawn / family.inWindow * 100).toFixed(0)} % of the entries in the printed window are drawn; the other ${(100 - family.drawn / family.inWindow * 100).toFixed(0)} % are a digit in a badge` },
+      // …and the two properties that ARE the ownership rule's job, both ends.
+      { id: '17.2/all-of-mine-reaches-the-paper', ok: me.pct === 1,
+        why: `${me.inWindow - me.drawn} of my own ${me.inWindow} occurrences are a digit in a badge on my own poster` },
+      { id: '17.1/no-member-is-erased-from-the-poster', ok: peers.every((p) => p.drawn > 0),
+        why: `${peers.filter((p) => !p.drawn).map((p) => p.id).join(', ')} has no ink at all on the printed sheet — `
+          + 'the ownership rule was bought by making the family invisible' },
+      { id: '17.1/the-page-does-not-fill-with-one-page', ok: family.drawn - me.drawn > me.drawn,
+        why: `of ${family.drawn} printed entries ${me.drawn} are mine and only ${family.drawn - me.drawn} are the other seven people's — `
+          + 'a „family wall poster" that is mostly one person is not one' },
     ]);
   } finally { restore(before); }
 });

@@ -22,34 +22,40 @@
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
 // All four ATTACKS on the verb itself FAILED — the moderation is not a delete, not an oracle, not
-// replayable and not available to a non-admin. §3b-b is a `SUCCEEDED` row and it is not about the
-// verb at all: it is about the SEAM the verb's tri-state verdict crosses. It is an OPEN FINDING,
-// pinned to today's behaviour and therefore GREEN while the defect exists.
+// replayable and not available to a non-admin. §3b-b was a `SUCCEEDED` row and it was never about
+// the verb at all: it was about the SEAM the verb's tri-state verdict crosses.
 //
-//     IF §3b-b GOES RED, THE DEFECT WAS PROBABLY FIXED. Invert it, do not repair it.
+//     §3b-b IS CLOSED AND HAS BEEN INVERTED. It now asserts that the fold's PARK verdict is
+//     honoured at that seam.
 //
-// It is not covered by D7: the op is one every honest device applies, and its first victim is a
-// staggered app update rather than an adversary.
+// WHAT CLOSED IT (`store.js:applyRemote`): the door read `verdict.rejected` and nothing else, so
+// the tri-state's whole middle had no reader. Every OTHER park reason survived that gap because
+// it comes from `classifyOp`, which `_log.append` runs one line later; `UNSHARE_SHAPE` is
+// produced INSIDE `foldAuthorized` stage 3a and nowhere else. `FOLD_ONLY_PARKS` is the set of
+// verdicts the classifier cannot reach, `applyRemote` parks them under the fold's own reason,
+// and `authz.js`'s claim — "a parked op is never folded, so an admin who pads an unshare with a
+// content write still gets no write primitive" — is true again because that map is consulted.
 //
 // The file's non-vacuity controls are §3a, which moderates successfully on the same rig, and
 // §3f, which shows a SECOND unshare still works — without those, a build in which
-// `adminUnshareOp` did nothing at all would look identical.
+// `adminUnshareOp` did nothing at all would look identical. Both are green under the fix, which
+// is the measurement that says the fix costs the moderation verb nothing.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // THE MUTANT — one run, scratch copy
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-//   M-C1  `store.js:applyRemote` — before the refusal check, an incoming `pub.set` whose patch
-//         `classifyUnsharePatch` reads as `skew` is parked under `PARK_REASONS.UNSHARE_SHAPE`,
-//         which is what every other park reason at that seam already does.
+//   M-C1  `store.js` — `const FOLD_ONLY_PARKS = new Set();` (empty), i.e. restore the seam with
+//         no reader while leaving every other line of the fix in place.
 //         MEASURED, twice, in a scratch copy: **§3b-b dies and NOTHING ELSE DOES** — the other
-//         28 rows in the four E9 attack files stay green, §3a and §3f (the non-vacuity controls)
-//         included, so the fix costs the moderation verb nothing.
+//         rows in the four E9 attack files stay green, §3a and §3f included, and `npm test`,
+//         `npm run test:attack` and `npm run test:server` are unmoved.
 //
-//         ⚠ A COARSER VERSION OF THE SAME MUTANT — parking EVERY op in `verdict.parked` — also
-//         kills `e9-attack-diverge` §2c, because the fold parks more at that seam than the skew
-//         case alone. Recorded because it is a fact about the seam a reader should have before
-//         writing the real fix, and because it is why this mutant is written narrowly.
+//         ⚠ A COARSER VERSION — parking EVERY op in `verdict.parked` — is why the set exists
+//         rather than a branch: the fold parks more at that seam than the skew case alone, and
+//         `_log.append` already parks the five `classifyOp` reasons one line later. Double-
+//         parking them would move the `future` seam R6-4c pins. Recorded because it is a fact
+//         about the seam a reader should have before widening the set.
 
 import '../helpers/env.js';
 import test, { describe, before } from 'node:test';
@@ -173,25 +179,29 @@ describe('E9-C · the moderation verb, attacked four ways', () => {
       'and in the FOLD\'s register map nothing moved — which is the sentence §3b-b falsifies');
   });
 
-  test('§3b-b · SUCCEEDED · `applyRemote` ignores the fold\'s PARK verdict and applies it anyway', async () => {
-    // `store.applyRemote` reads `verdict.rejected` and nothing else. `verdict.parked` — the
-    // tri-state's whole middle — has no reader at that seam, so a `pub.set` the fold decided to
-    // HOLD is appended to the log as a live op and folded by the log's plain LWW.
+  test('§3b-b · CLOSED · `applyRemote` reads the fold\'s PARK verdict and holds the op', async () => {
+    // `store.applyRemote` used to read `verdict.rejected` and nothing else. `verdict.parked` —
+    // the tri-state's whole middle — had no reader at that seam, so a `pub.set` the fold decided
+    // to HOLD was appended to the log as a live op and folded by the log's plain LWW.
     //
-    // ⚠ EVERY OTHER PARK REASON IS HANDLED. `future`, `unknown epoch`, `attestation`: those come
-    // from `classifyOp`, which `applyRemote` calls itself (§3h is a parked `future` and it really
-    // is held). `PARK_REASONS.UNSHARE_SHAPE` is parked ONLY inside `foldAuthorized` — it is the
-    // one verdict in the product that is produced in a place the store does not read.
+    // ⚠ EVERY OTHER PARK REASON ALREADY SURVIVED. `future`, `unknown epoch`, `attestation`: those
+    // come from `classifyOp`, which `applyRemote` calls itself (§3h is a parked `future` and it
+    // really is held). `PARK_REASONS.UNSHARE_SHAPE` is parked ONLY inside `foldAuthorized` — it
+    // is the one verdict in the product produced in a place the store did not read.
     //
-    // ⚠ AND ITS FIRST VICTIM IS NOT AN ATTACKER, IT IS AN APP UPDATE. The tri-state exists for
+    // ⚠ AND ITS FIRST VICTIM WAS NOT AN ATTACKER, IT WAS AN APP UPDATE. The tri-state exists for
     // version skew: "a future version that withdraws a field with a sentinel rather than with
     // `null` is PARKED: retained, not applied, re-evaluated after an app update. Version skew
     // then degrades to 'not yet unshared, and the log still knows why', never to 'silently not
-    // unshared, and the op is gone'." It degrades to a THIRD thing the ADR did not consider:
-    // APPLIED WHOLESALE, sentinel and all, by the build that could not read it — and never
-    // re-judged, because a live op is not a parked one.
-    const e = await mamaEntry(C, { text: 'Elternsprechtag', level: 'geteilt' });
+    // unshared, and the op is gone'." It used to degrade to a THIRD thing the ADR did not
+    // consider: APPLIED WHOLESALE, sentinel and all, by the build that could not read it.
+    // ONE ENTRY PER PAD. The two halves must not be able to lean on each other: a parked line
+    // that a later `unpark()` promotes is withheld from the register map by `store.registers()`
+    // (`FOLD_ONLY_PARKS` is read there too, which is defence in depth), and this row is about the
+    // GATE, so it is given nothing else to be right for.
     for (const pad of [{ 'pub.alive': false }, { 'pub.text': 'gekapert' }]) {
+      const e = await mamaEntry(C, { text: 'Elternsprechtag', level: 'geteilt' });
+      const before = await regsOf(C.oma, e.key);
       let op = null;
       await on(C.papa, () => {
         const base = adminUnshareOp(C.papa.store._ctx(), {
@@ -199,19 +209,22 @@ describe('E9-C · the moderation verb, attacked four ways', () => {
         });
         op = { ...base, f: { ...base.f, ...pad } };
       });
-      assert.equal(classifyUnsharePatch('fnote', op.f), 'skew', 'the fold would park this');
+      assert.equal(classifyUnsharePatch('fnote', op.f), 'skew', 'the fold parks this');
       await on(C.oma, () => {
         const r = C.oma.store.applyRemote([op]);
-        assert.deepEqual(r.applied, [op.id], 'APPLIED — not parked, not refused');
-        assert.deepEqual(r.refused, []);
+        assert.deepEqual(r.applied, [], 'NOT applied');
+        assert.deepEqual(r.refused, [{ id: op.id, reason: 'unshareShape', parked: true }],
+          'HELD, under the fold\'s own reason, and reported as held rather than as lost');
       });
-      assert.deepEqual(await parkedOn(C.oma), [],
-        'and nothing is held, so no app update will ever re-judge it');
+      assert.ok((await parkedOn(C.oma)).includes('unshareShape'),
+        'and it is in the parked set, so an app update WILL re-judge it (ADR 001 §7.4)');
       const after = await regsOf(C.oma, e.key);
-      for (const [f, v] of Object.entries(pad)) {
-        assert.equal(after[f], v,
-          `the padded field "${f}" was written to another member's entity by a patch the fold refused to fold`);
-      }
+      assert.deepEqual(after, before,
+        `nothing of the padded patch reached the register map — not the pad ${JSON.stringify(pad)}, `
+        + 'and not the unshare it was hiding behind');
+      assert.equal(after['pub.level'], 'geteilt',
+        'NON-VACUITY: the entry is still Geteilt, so the op really did carry a withdrawal that '
+        + 'would have moved something had it been folded');
     }
   });
 

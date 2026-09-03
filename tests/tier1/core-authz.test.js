@@ -1911,6 +1911,13 @@ test('every declared reason code is actually reachable — except the one that i
     S(BASE + 20, 0, D[PAPA].short), { act: PAPA }),
   pubOp('fnote', PAPA, U1, { 'pub.text': 'x' }, S(BASE + 60, 0, D[PAPA].short), { act: PAPA })], CTX())); // contentAboveLevel
 
+  // notAlive — stage 3b's THIRD governing register, landed with E9-A §1i. The entry is Geteilt
+  // and co-editable, the owner deletes it (18.6), and a co-editor writes to the corpse. The
+  // author side (`store.familyCoEditLevelOf`) always refused this; the receiving side did not.
+  collect(foldAuthorized([...ops, pub,
+    pubOp('fnote', PAPA, U1, { 'pub.alive': false }, S(BASE + 40, 0, D[PAPA].short), { act: PAPA }),
+    pubOp('fnote', PAPA, U1, { 'pub.text': 'x' }, S(BASE + 60, 0, D[MAMA].short), { act: MAMA })], CTX())); // notAlive
+
   const declared = Object.values(REJECT_REASONS).sort();
   const unreachable = [REJECT_REASONS.NOT_COEDITABLE];   // see the "defence in depth" test above
   assert.deepEqual([...seen].sort(), declared.filter((r) => !unreachable.includes(r)));

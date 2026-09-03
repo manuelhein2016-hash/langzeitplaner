@@ -81,7 +81,7 @@ const MEMBERS = [
   { id: 'mem_opa', colorRef: 'rot', initial: 'O' },
   { id: 'mem_oma', colorRef: 'braun', initial: 'A' },
 ];
-const [MAMA, PAPA, LENA] = MEMBERS;
+const [MAMA, PAPA, LENA, JONAS] = MEMBERS;
 
 const iso = (y, m, d) => `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 const D = (n) => iso(COL.y, COL.m, n);
@@ -149,20 +149,38 @@ function verdict(label, rows) {
 // ═════════════════════════════════════════════════════════════════════════════
 // THE SCENE — one day carrying the whole badge family at once
 //
-// It is ordered so the two entries the capacity rule actually draws are the two
-// that between them carry all five marks. That ordering is a property of the
+// It is composed so the two entries the capacity rule actually draws are the two
+// that between them carry all five marks. That composition is a property of the
 // FIXTURE, not of the product: §2 shows what the same day does at 18 px, where
 // the capacity rule draws one entry and three of the five marks go into „+n".
+//
+// ═══ HOW IT IS COMPOSED CHANGED WITH `orderForCapacity` (17.2) ══════════════
+// It used to be composed by ARRAY ORDER: Papa's block first, my note second, so
+// the slice took those two. `layout.js:orderForCapacity` now runs mine, then
+// the family's changes, then the family, ahead of v1's array order — because
+// store order was costing the owner 54.1 % of their own notes on a shared day
+// and the loss moved with creation order (`e8-density-crowding.dom.js` §B2b:
+// 0 % / 54.1 % / 93.5 % across three orders of the same data).
+//
+// So the scene is composed by OWNERSHIP instead: exactly ONE note of mine, which
+// takes slot 1 and brings the exposure badge and the ↻, and the peer CHANGE that
+// 17.5 promotes takes slot 2 and brings the chip, the „neu" dot and the Belegt
+// block. Same five marks, same one row, chosen by the rule the product actually
+// applies rather than by an array index. `17.2/a-second-note-of-mine-…` below
+// pins the cost of that rule instead of hiding it: on a day where I have TWO
+// entries, both are mine and every peer mark is a digit in the „+n".
 // ═════════════════════════════════════════════════════════════════════════════
 const SCENE = () => ({
   notes: [
-    // Papa · the Belegt block (16.7) + the „neu" dot (17.5) + his chip (17.2)
+    // Papa · the Belegt block (16.7) + the „neu" dot (17.5) + his chip (17.2).
+    // A CHANGE, so 17.5's tier puts him in front of the two peers below.
     foreign('f2', DAY, 'belegt', { who: PAPA, isNew: true }),
-    // mine · the visibility badge (16.6) + the ↻ repeat marker (9.2)
+    // mine · the visibility badge (16.6) + the ↻ repeat marker (9.2).
+    // The only note of mine on the day — see the header.
     own('own1', DAY, 'Omas Geburtstag', { repeatsYearly: true, exposure: { level: 'geteilt', pending: false } }),
     // …and three more, so the row also carries „+n"
     foreign('f1', DAY, 'geteilt', { who: MAMA, text: 'Chorprobe', repeatsYearly: true, isNew: true }),
-    own('own2', DAY, 'Bilanz', { exposure: { level: 'belegt', pending: true } }),
+    foreign('f4', DAY, 'geteilt', { who: JONAS, text: 'Bilanz' }),
     foreign('f3', DAY, 'geteilt', { who: LENA, text: 'Ballett' }),
   ],
   bars: [
@@ -241,6 +259,53 @@ test('§1 · the whole badge family lands on ONE 22 px row, and nothing touches 
   });
 });
 
+// ═════════════════════════════════════════════════════════════════════════════
+// §1b · WHAT THE SCENE ABOVE COSTS — 17.2's price, stated where it is paid
+//
+// The scene puts one note of mine on the day, and that is not incidental: it is
+// the composition `layout.js:orderForCapacity` obliges if all five marks are to
+// be on one row. Add a SECOND note of mine and the whole badge family leaves the
+// note line, because both slots are mine.
+//
+// That is the correct outcome — 17.2 („my board stays mine") is what makes a
+// shared board trustworthy, and `e8-density-crowding.dom.js` §B2 measures the
+// alternative at 54.1 % of the owner's own notes lost. But it is a real cost to
+// the family layer on a crowded day, and a fixture that quietly avoided it would
+// be reporting deliverable 17 as unconditionally true when it is conditional.
+// So the condition is asserted here, in both directions, at the default density.
+// ═════════════════════════════════════════════════════════════════════════════
+test('§1b · 17.2 — a second note of mine takes the row, and the family becomes a digit', () => {
+  const twoOfMine = SCENE();
+  twoOfMine.notes = [
+    ...twoOfMine.notes,
+    own('own2', DAY, 'Bilanz', { exposure: { level: 'belegt', pending: true } }),
+  ];
+  withBoard({ ...twoOfMine, settings: { rowHeight: 22, layers: NO_LAYERS, hiddenMembers: {} } }, () => {
+    const day = dayNode();
+    const shown = $$('.note', day);
+    const flat = markNames(day).flat();
+    const more = $('.d-more', day);
+    const rows = [];
+    rows.push({ id: '17.2/both-lines-are-mine', ok: shown.length === 2 && shown.every((n) => n.dataset.foreign !== '1'),
+      why: `the row drew ${shown.map((n) => (n.dataset.foreign === '1' ? 'theirs' : 'mine')).join(' + ')} — an entry of mine was folded for a peer's` });
+    rows.push({ id: '17.2/and-no-peer-mark-is-on-the-note-line', ok: !flat.includes('chip') && !flat.includes('neu-dot'),
+      why: 'a peer mark survived on a row where both lines are mine: ' + flat.join(',') });
+    // 2.4 — and it is a DIGIT, not a disappearance. Every peer is accounted.
+    // `>=` because 17.4's badge counts hidden NOTES and hidden BARS together
+    // (`family-render.dom.js` §4), and this scene overflows a lane as well.
+    const folded = twoOfMine.notes.length - shown.length;
+    rows.push({ id: '2.4/the-family-is-counted-not-dropped', ok: !!more && Number(more.textContent.replace('+', '')) >= folded,
+      why: `${folded} entries were folded and the badge says "${more && more.textContent}"` });
+    // …and the ownership channel is NOT gone from the board — it moved to the
+    // lanes, which is where family-render.dom.js §2 measures it costing 0 px.
+    rows.push({ id: '17.1/the-family-is-still-on-the-board', ok: $$('.bar.foreign', dayNode().closest('.col')).length > 0,
+      why: 'no foreign bar in the column either — the family really did vanish' });
+    diag(`22 px · two of mine · drawn ${shown.map((n) => (n.dataset.foreign === '1' ? 'theirs' : 'mine')).join(',')}`
+      + ` · marks ${JSON.stringify(markNames(day))} · overflow ${more ? more.textContent : '—'}`);
+    verdict('17.2 · the price of ownership-first', rows);
+  });
+});
+
 test('§1 · the smallest mark is the 3 px „neu" dot, and every gap is ≥ 1 px', () => {
   withBoard({ ...SCENE(), settings: { rowHeight: 22, layers: NO_LAYERS, hiddenMembers: {} } }, () => {
     const day = dayNode();
@@ -288,14 +353,57 @@ test('§2 · at 18 px the row still holds, and what it drops it drops into „+n
     rows.push({ id: '2.4/nothing-vanishes', ok: !!more && Number(more.textContent.replace('+', '')) >= SCENE().notes.length - shown.length,
       why: 'the „+n" badge does not account for the entries the row could not draw: ' + (more && more.textContent) });
     // The marks that DO render still render whole.
-    rows.push({ id: '17.5+17.2/still-drawn', ok: markNames(day).flat().includes('chip'), why: 'the surviving entry lost its chip at 18 px' });
+    //
+    // ═══ WHOSE ENTRY SURVIVES AT CAPACITY 1 (17.2) ═════════════════════════
+    // This cell used to read `…flat().includes('chip')` — the survivor is a
+    // PEER, so its chip must still be there. That was true of the old capacity
+    // slice, which took whatever came first in the array; under
+    // `layout.js:orderForCapacity` the single line a capacity-1 row can draw
+    // belongs to ME whenever I have anything on the day. That is 17.2 („my
+    // board stays mine") at its sharpest, and it is stated here rather than
+    // discovered later: at v1's minimum row height, on a day I have written on,
+    // the family reaches the note line only as a digit.
+    //
+    // The geometric question the cell was asking — does a surviving entry keep
+    // its marks WHOLE at 18 px — is still asked, of both survivors: mine here,
+    // and a peer's on the peers-only variant below, which is the only shape in
+    // which a peer can now hold a capacity-1 row.
+    const mineMarks = markNames(day).flat();
+    rows.push({ id: '17.2/the-one-line-at-capacity-1-is-mine', ok: shown.length === 1 && shown[0].dataset.foreign !== '1',
+      why: 'the single line a capacity-1 row can draw went to a peer while an entry of mine was folded into „+n"' });
+    rows.push({ id: '17.5+17.2/still-drawn', ok: mineMarks.includes('exp geteilt') && mineMarks.includes('rep'),
+      why: 'the surviving entry lost a mark at 18 px: ' + mineMarks.join(',') });
 
     diag(`18 px · ${shown.length} of ${SCENE().notes.length} notes, ${marks.length} marks, ${bad.length} collisions, overflow ${more ? more.textContent : '—'}`);
     diag(`   marks per note ${JSON.stringify(markNames(day))}`);
-    diag('   THE COST, STATED: at v1\'s minimum row height the day row can carry at most the marks of ONE entry.');
+    diag('   THE COST, STATED: at v1\'s minimum row height the day row can carry at most the marks of ONE entry,');
+    diag('   and under 17.2 that entry is MINE on every day I have written on.');
     diag('   The badge family still coexists on the BOARD — the three bar lanes and their labels carry');
     diag('   ownership at 18 px unchanged — but not on the note line. That is the capacity rule, not E8.');
     verdict('deliverable 17 · 18 px', rows);
+  });
+
+  // …and the other half of the same rule: with none of my ink on the day, the
+  // one line goes to the peer CHANGE (17.5), and it keeps its chip and its dot
+  // whole. Without this, `17.5+17.2/still-drawn` above would be satisfiable by a
+  // board that had simply stopped drawing peer marks at 18 px altogether.
+  const peersOnly = SCENE();
+  peersOnly.notes = peersOnly.notes.filter((n) => n.isForeign);
+  withBoard({ ...peersOnly, settings: { rowHeight: 18, layers: NO_LAYERS, hiddenMembers: {} } }, () => {
+    const day = dayNode();
+    const shown = $$('.note', day);
+    const flat = markNames(day).flat();
+    const rows = [];
+    rows.push({ id: '17.1/a-peer-can-hold-the-line', ok: shown.length === 1 && shown[0].dataset.foreign === '1',
+      why: 'with no ink of mine on the day the capacity-1 row still drew nothing of theirs' });
+    rows.push({ id: '17.5/the-change-leads', ok: flat.includes('neu-dot'),
+      why: 'the peer entry that HAS a change did not take the one line: ' + flat.join(',') });
+    rows.push({ id: '17.2/and-keeps-its-chip', ok: flat.includes('chip'),
+      why: 'the surviving peer entry lost its chip at 18 px: ' + flat.join(',') });
+    rows.push({ id: 'deliverable-17/no-collision', ok: overlaps(marksOnRow(day)).length === 0,
+      why: overlaps(marksOnRow(day)).join(' · ') });
+    diag(`18 px · peers only · marks per note ${JSON.stringify(markNames(day))}`);
+    verdict('deliverable 17 · 18 px · a peer holds the line', rows);
   });
 });
 

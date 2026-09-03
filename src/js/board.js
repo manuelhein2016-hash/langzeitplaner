@@ -38,6 +38,7 @@ const FAMILY_COPY = {
     belegtOwnerTip: 'Andere sehen: Datum, deinen Namen, deine Farbe — keinen Text.',
     geteiltOwnerTip: 'Andere sehen: Datum, Text, deinen Namen, deine Farbe.',
     expPending: 'noch nicht abgeglichen',
+    overflowNew: 'neu',
   },
   en: {
     belegt: 'Busy',
@@ -46,6 +47,7 @@ const FAMILY_COPY = {
     belegtOwnerTip: 'Others see: the date, your name, your colour — no text.',
     geteiltOwnerTip: 'Others see: the date, the text, your name, your colour.',
     expPending: 'not synced yet',
+    overflowNew: 'new',
   },
 };
 
@@ -96,8 +98,31 @@ function renderColumn(col, m, state) {
   rows.style.height = 'calc(var(--row-h) * 31)';
   rows.dataset.month = col.key;
 
-  for (const d of col.days) rows.appendChild(renderDay(d, m));
-  for (const seg of col.segs) renderSegment(rows, seg);
+  // ── WHICH ROWS HAVE A BAR LABEL STANDING IN THEIR GUTTER (2.4 · 3.7) ───────
+  // Two things are painted to the right of a day's text: the „+n" badge and, on
+  // one row per month segment, a bar label. Both used to be opaque overlays over
+  // the TEXT COLUMN; both now live in the lane gutter instead (see `app.css`
+  // `.d-more` and `.bar-label.on-ink`). 27 px does not hold two of them side by
+  // side, so on the rows where they meet the badge steps into the line and takes
+  // width — and this loop is what tells the CSS which rows those are.
+  //
+  // `inkOf` is `layout.js`'s own label-scan predicate, to the term: a label that
+  // landed on a row scoring 0 landed on empty space, which is what 3.7 promised,
+  // and it keeps all 66 px. Everything is read from the MODEL — no layout is
+  // forced and nothing here is read back from the DOM.
+  const inkOf = (d) => (d.holidayShown ? 1 : 0) + d.notes.length + (d.overflow > 0 ? 1 : 0);
+  const dayAtRow = new Map();
+  for (const d of col.days) if (!d.empty) dayAtRow.set(d.row, d);
+
+  /** Rows where a bar label landed on ink and must therefore give way. */
+  const claimed = new Set();
+  for (const seg of col.segs) {
+    const host = dayAtRow.get(seg.labelRow);
+    if (host && inkOf(host) > 0) claimed.add(seg.labelRow);
+  }
+
+  for (const d of col.days) rows.appendChild(renderDay(d, m, claimed.has(d.row)));
+  for (const seg of col.segs) renderSegment(rows, seg, claimed.has(seg.labelRow));
 
   if (col.horizon) {
     rows.appendChild(el('div', 'horizon-cue', t('continues')));
@@ -107,13 +132,18 @@ function renderColumn(col, m, state) {
   return c;
 }
 
-function renderDay(d, m) {
+function renderDay(d, m, claimed) {
   const row = el('div', 'day');
   row.dataset.row = String(d.row);
   if (d.empty) {
     row.classList.add('void');
     return row;
   }
+  // 3.7 — a bar label landed on this row, this row already carries ink, and the
+  // label has therefore retreated into the lane gutter rather than paint over
+  // the sentence. The class is how the „+n" badge finds out that the gutter is
+  // taken; `app.css` `.day.claimed .d-more` owns what it does about it.
+  if (claimed) row.classList.add('claimed');
   row.dataset.date = d.date;
   if (d.weekend) row.classList.add('we');
   if (d.ferien) row.classList.add('fer');
@@ -144,10 +174,31 @@ function renderDay(d, m) {
   if (d.overflow > 0) {
     const more = el('div', 'd-more', `+${d.overflow}`);
     more.dataset.date = d.date;
-    more.title =
+    // ═══ 17.5 — THE BADGE SAYS WHETHER IT IS HIDING A CHANGE ══════════════════
+    // „Jede Änderung ist bemerkbar." A peer change the row had no line for gets
+    // no „neu" dot of its own, because there is no note element to hang one on:
+    // the „+n" badge is the only mark left on that row. Without this class the
+    // badge looks IDENTICAL whether it hides a change or four unchanged entries,
+    // and `e8-density-crowding.dom.js` §B5 measured 32 of 219 peer changes
+    // arriving that way on the 8-member fixture — noticeable nowhere.
+    //
+    // `layout.js` publishes the count as `day.overflowNew`, and it inherits
+    // §7.2's two suppressions for free: it counts `foreign && isNew`, and
+    // `materialize.js:isNewOf` is blind to a downgrade and has nothing to count
+    // for a deletion. So a DOWNGRADE still leaves no marker and a DELETION still
+    // leaves no marker — `family-legend.dom.js`'s tripwire row holds unchanged.
+    //
+    // The tell is a class and nothing else: `app.css` `.d-more.has-new` paints
+    // it INSIDE the badge's existing 17 px box, so it costs the sentence zero
+    // pixels on every board, screen and paper alike.
+    if (d.overflowNew > 0) more.classList.add('has-new');
+    const base =
       d.laneOverflow > 0 && d.overflow === d.laneOverflow
         ? `${d.laneOverflow} ${t('lanesFull')}`
         : `${d.overflow} ${t('more')}`;
+    // The hover says HOW MANY are changes, because the mark itself can only say
+    // „at least one" — and a number nobody can read is not an answer (2.5).
+    more.title = d.overflowNew > 0 ? `${base} · ${d.overflowNew} ${ft('overflowNew')}` : base;
     row.appendChild(more);
   }
   return row;
@@ -287,7 +338,7 @@ const redactedTitle = (n) =>
     ? `${n.initial} · ${ft('belegt')}`
     : ft('belegt');
 
-function renderSegment(rows, seg) {
+function renderSegment(rows, seg, labelOnInk) {
   const right = `calc(2px + var(--lane-gap) * ${seg.lane})`;
   const bar = el('div', 'bar');
   bar.dataset.barId = seg.bar.id;
@@ -329,8 +380,19 @@ function renderSegment(rows, seg) {
   lab.dataset.barId = seg.bar.id;
   lab.dataset.row = String(seg.labelRow);
   lab.style.top = `calc(var(--row-h) * ${seg.labelRow} + (var(--row-h) - 11px) / 2)`;
-  lab.style.right = `calc(2px + var(--lane-gap) * ${seg.lane + 1})`;
+  // 3.7 — the promise is that the chip lands on empty space. `layout.js`'s scan
+  // reaches for that first, but on a family board 99 % of day rows carry ink and
+  // there is no empty row left to move to. Principle 3 decides what happens
+  // then, and it is not close: the label retreats into the lane gutter — board
+  // furniture, already reserved — and the user's sentence keeps every pixel it
+  // had. The anchor moves to the column edge on the same branch, because a chip
+  // capped to the gutter but hung one lane-gap inboard of lane 2 would still
+  // have half of itself in the text column. `app.css` `.bar-label.on-ink` caps
+  // the width; `usedLabelRows` in `layout.js` guarantees one label per row per
+  // column, so two retreating chips can never land on each other.
+  lab.style.right = labelOnInk ? '2px' : `calc(2px + var(--lane-gap) * ${seg.lane + 1})`;
   lab.style.background = seg.color;
+  if (labelOnInk) lab.classList.add('on-ink');
   // The label chip is white-on-colour, so the initial chip inverts inside it:
   // a member-coloured chip on a member-coloured chip is invisible.
   lab.style.setProperty('--seg-ink', seg.color);

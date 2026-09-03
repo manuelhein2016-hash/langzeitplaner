@@ -9,32 +9,41 @@
 // the only one that matters now that E9 has opened write paths into other people's entities.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// DISPOSITION OF THE `SUCCEEDED` ROW IN THIS FILE — READ THIS BEFORE TRUSTING A GREEN RUN
+// DISPOSITION — §1i IS CLOSED AND HAS BEEN INVERTED
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// `§1g … SUCCEEDED …` is an OPEN FINDING, pinned to the behaviour the code has TODAY, so it is
-// GREEN while the defect exists. That inverts the usual reading of red and green:
+// `§1i` used to be the one that got through: `authz.js` stage 3b read `pub.level` and
+// `pub.coEdit` and NOT `pub.alive`, while `store.familyCoEditLevelOf` — the author side, the
+// predicate `interact.js` asks before it offers the gesture — read all three. So the honest
+// client refused a co-edit of a deleted entry and the RECEIVING side, which is the only side
+// that decides anything, refused nobody.
 //
-//     IF §1g GOES RED, THE DEFECT WAS PROBABLY FIXED. Do not "repair" it — invert it.
+// IT IS CLOSED: stage 3b now reads all three governing registers, in the order the author side
+// reads them, under `REJECT_REASONS.NOT_ALIVE`. The row asserts the refusal and the two 18.6 /
+// 17.6 consequences that used to follow from its absence.
 //
-// It is NOT covered by D7. D7's accepted trade is "a patched member can emit an op the others
-// will REJECT — but not one they will ACCEPT". §1g's op is one every honest device ACCEPTS,
-// folds identically, and agrees with. It therefore breaks D7's stated guarantee rather than
-// falling under it, exactly as the `ownership-authz-*` headers already say of their own rows.
+// §1h's LAST ASSERTION has been inverted with it, for the reason that assertion existed: it was
+// the cross-reference to `e9-attack-diverge` §2b, and §2b is closed.
 //
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// THE MUTANT — one run each, in a scratch copy of the tree, baseline restored between
+// THE MUTANTS — one run each, in a scratch copy of the tree, baseline restored between
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-//   M-A1  `core/authz.js` stage 3b gains the ONE line the author side already has —
+//   M-A1  `core/authz.js` stage 3b — delete the one line the author side already had,
 //         `registerValue(govRegs, op.e, 'pub.alive') === false → reject`.
-//         MEASURED, twice, in a scratch copy: **§1i dies and NOTHING ELSE DOES** — all 28 other
-//         rows in the four E9 attack files stay green. That is the mutant's whole point: §1i is
-//         not vacuous, and the divergence between the author side and the receiving side is one
-//         predicate in one place.
+//         MEASURED, twice, in a scratch copy (`--test-concurrency=1`, baseline 32/32):
+//           dies  §1i, and NOTHING ELSE in the four E9 attack files.
+//           dies  the `notAlive` row of `tests/tier1/core-authz.test.js`'s reason-code census,
+//                 which is where the enum is proved reachable rather than merely declared.
+//         That is the mutant's whole point: §1i is not vacuous, and the divergence between the
+//         author side (`store.familyCoEditLevelOf`, three registers) and the receiving side
+//         (stage 3b, two) was one predicate in one place.
 //
-//   ⚠ §1h's LAST ASSERTION is the cross-reference to `e9-attack-diverge.test.js` §2b and dies
-//     under THAT file's M-B1, not under M-A1. It is deliberately not a §1h claim about 18.1.
+//   ⚠ §1h's last assertion dies under `e9-attack-diverge`'s M-B1 and M-B4, not under M-A1. It is
+//     deliberately not a §1h claim about 18.1.
+//
+//   HONEST-PATH CONTROL: §1a is the non-vacuity row — the grant really is exercisable on this
+//   rig — and it is green under M-A1 and under the fix.
 
 import '../helpers/env.js';
 import test, { describe, before } from 'node:test';
@@ -206,22 +215,22 @@ describe('E9-A · every route into somebody else\'s entry', () => {
       assert.equal(C.mama.store.familyCoEditLevelOf(e.key), null, 'no further write is offered');
       assert.equal(C.mama.store.applyCoEdit(e.key, { 'pub.text': 'noch eine' }), false);
     });
-    // ⚠ WHAT DOES *NOT* HOLD, AND IS THE SUBJECT OF `e9-attack-diverge.test.js` §2b: the write
-    // she ALREADY made is still standing on her own board, because it entered her log through
-    // `_commit` and `applyRemote` removes nothing. Asserted here so this row cannot be read as
-    // "the withdrawal held everywhere".
-    assert.equal((await regsOf(C.mama, e.key))['pub.text'], 'Mamas Fassung',
-      'the co-editor keeps the write the family withdrew — see e9-attack-diverge §2b');
+    // ⚠ AND IT HOLDS ON HER OWN BOARD TOO, which is `e9-attack-diverge.test.js` §2b: the write
+    // she ALREADY made entered her log through `_commit` and never passed an arrival gate, so
+    // the withdrawal has to reach the LOG rather than the door. Asserted here so this row cannot
+    // be read as "the withdrawal held everywhere except where it was made".
+    assert.equal((await regsOf(C.mama, e.key))['pub.text'], 'Ferienhaus',
+      'the co-editor loses the write the family withdrew — see e9-attack-diverge §2b');
   });
 
   // ───────────────────────────────────────────────────────────────────────────────────────────
-  // THE ONE THAT GOT THROUGH
+  // THE ONE THAT USED TO GET THROUGH
   // ───────────────────────────────────────────────────────────────────────────────────────────
-  test('§1i · SUCCEEDED · stage 3b never reads `pub.alive`: I write to a DELETED entry and every honest device agrees with me', async () => {
+  test('§1i · CLOSED · stage 3b reads `pub.alive`: a co-edit of a DELETED entry is refused by every honest device', async () => {
     // `store.familyCoEditLevelOf` reads three registers — `pub.level`, `pub.coEdit` AND
-    // `pub.alive` — and refuses when the entry is dead. `authz.js` stage 3b reads only the first
-    // two. The author side and the receiving side therefore disagree about one of the three
-    // governing registers, and the receiving side is the one that decides.
+    // `pub.alive` — and refuses when the entry is dead. Stage 3b used to read only the first two,
+    // so the author side and the receiving side disagreed about one of the three governing
+    // registers, and the receiving side is the one that decides.
     const e = await papaShares(C, { 'pub.coEdit': true, 'pub.text': 'Skiwoche' });
     await on(C.papa, async () => {
       await patchedOp(C, C.papa, mkPubSet(C, C.papa, e.key, { 'pub.alive': false }));   // 18.6
@@ -234,23 +243,38 @@ describe('E9-A · every route into somebody else\'s entry', () => {
         'MY OWN honest client refuses — it reads `pub.alive`');
       assert.equal(C.mama.store.applyCoEdit(e.key, { 'pub.text': 'GHOST' }), false);
     });
-    // …and the patched one is not refused by anybody.
+    // …and the patched one is now refused by everybody, by name.
     await on(C.mama, () => patchedOp(C, C.mama, mkPubSet(C, C.mama, e.key, { 'pub.text': 'GHOST' })));
     await converge(C, [C.papa, C.oma]);
     for (const m of [C.papa, C.oma]) {
-      assert.equal((await regsOf(m, e.key))['pub.text'], 'GHOST',
-        `${m.tag} ACCEPTED a co-editor's write to a deleted entity`);
+      assert.equal((await regsOf(m, e.key))['pub.text'], 'Skiwoche',
+        `${m.tag} folded a co-editor's write to a deleted entity`);
+      await on(m, () => {
+        assert.match(m.store.warnings.join('\n'), /refused: notAlive/,
+          `${m.tag} refused it for the right reason, not by accident`);
+      });
     }
 
-    // 18.6: "my undo of my own deletion restores the entry as a new shared operation".
+    // 18.6: "my undo of my own deletion restores the entry as a new shared operation" — and what
+    // it restores is HIS text, because nothing of hers was ever admitted.
     await on(C.papa, () => patchedOp(C, C.papa, mkPubSet(C, C.papa, e.key, { 'pub.alive': true })));
     await converge(C, [C.oma]);
     let row = null;
     await on(C.oma, () => { [row] = boardOf(C, C.oma).filter((n) => n.entityKey === e.key); });
     assert.ok(row, 'the entry is back on the family board');
-    assert.equal(row.text, 'GHOST',
-      'PAPA\'S RESTORE RESURRECTED A VERSION HE NEVER WROTE — the text he deleted is gone and mine is standing');
+    assert.equal(row.text, 'Skiwoche',
+      'PAPA\'S RESTORE RESTORED THE VERSION HE WROTE — 18.6 is about HIS destructive act being '
+      + 'reversible for HIM, and a post-mortem write from somebody else has no place in it');
     assert.equal(row.updatedBy, C.papa.forStore.memberId,
-      '…and 17.6 attributes it to HIM: his `pub.alive` write is the newest register on the entity');
+      '…and 17.6 attributes it to him, which is now true rather than merely stated');
+
+    // AND THE REFUSAL IS RETROACTIVE, exactly as `pub.coEdit`'s is: the restore re-admits nothing,
+    // because her op was never in anybody's log to re-admit — it was refused at the gate on
+    // arrival, and refused again by the fold on every device that had already pulled it.
+    await on(C.oma, () => {
+      const ghosts = [...C.oma.store._log.ops({ includeParked: true })]
+        .filter((o) => JSON.stringify(o.f).includes('GHOST'));
+      assert.deepEqual(ghosts, [], 'no line of it survives anywhere on a peer\'s Mac');
+    });
   });
 });

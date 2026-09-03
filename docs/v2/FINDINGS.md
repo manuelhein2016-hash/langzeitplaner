@@ -4074,3 +4074,267 @@ measurement.
    parses as a valid invitation code and wins; the e-mail carries no relay address and the parser
    takes the download host; trailing punctuation becomes part of the hostname.
 6. **E10-1, E10-2, E10-4** above.
+
+---
+
+## 17. THE DENSITY/CO-EDITOR INTEGRATION PASS (2026-09-03)
+
+Four parallel fixers — `fix:convergence` (the E9 co-editor red team), `fix:legibility`
+(`app.css` + `board.js`), `fix:fairness` (`layout.js`) and `fix:legend` (`legend.js`) — landed
+against one tree. This pass applied the cross-file work neither of them could reach, resolved the
+one genuine collision between two of them, and re-measured everything.
+
+**`test:dom` went 714 pass / 17 fail → 836 pass / 3 fail.** The three that remain are named in
+§17e with the story each fails. Five suites are green: `npm test` **2121/2121** · `test:property`
+**101/101** · `test:attack` **960/960** · `test:server` **903/903** · `test:fleet` **397/397**.
+
+### 17a. THE V1 ORACLE DID NOT MOVE — verified per file, not per total
+
+The headline number changed (2 105 → 2 121) and that is *not* evidence either way, so the check
+was done file by file against a pristine `git archive 28f2a35` tree, which is the E9-close state
+the brief quotes:
+
+```
+41 tier-1 files · 40 report a byte-identical row count and pass
+ 1 differs: tests/tier1/headless-shell.test.js   2 → 18
+```
+
+All sixteen new rows are the shell workflow's LZP-1002 rows (`sync_request` as a pinned-origin
+bridge command). **Not one v1 characterization row changed, and the three deletions in the whole
+tier-1 diff are an import line and two test doubles gaining a now-required `url` field** — a
+strengthening, in the parallel net workflow's own files. `core-authz.test.js` gained one
+`collect(…)` and no row, obliged by E9-A §1i's new `notAlive` enum member.
+
+### 17b. THE ONE REAL COLLISION: `orderForCapacity` against deliverable 17
+
+`fix:fairness` closed 17.2 („my board stays mine") by putting a stable ownership prefix in front
+of v1's array order in the capacity slice. It was right to: store order was costing the owner up
+to **93.5 % of their own notes** on a shared day, and *which* 93.5 % moved with nothing but
+creation order.
+
+Three E8 files then went red, and they were not wrong either — they were asserting the pre-fix
+contract, each with a fixture **composed by array index** so that a peer's marks landed in the
+slice:
+
+| file | row | what it assumed |
+|---|---|---|
+| `family-render.dom.js` §3 | `22 px: store order decides, not ownership` | said so in as many words |
+| `family-density.dom.js` §1/§2 | `16.7/belegt-block`, `17.2/initial-chip`, `17.5/neu-dot` | SCENE put Papa's block at index 0 |
+| `family-legend.dom.js` ×2 | `the foreign worst case lost its .neu-dot` | „THE FOREIGN WORST CASE IS FIRST" |
+
+**All four are inverted to the new contract, and none is inverted quietly.** Each file now also
+carries the *cost* of the rule as its own row, because a fixture that avoids a cost reports a
+conditional guarantee as an unconditional one:
+
+- `family-density.dom.js` **§1b** — with two notes of mine on the day, both lines are mine, no peer
+  mark reaches the note line, and the family is a digit in the „+n" that counts every one of them.
+- `family-density.dom.js` §2 — at capacity 1 the one line is mine (`17.2/the-one-line-at-capacity-1-is-mine`),
+  and a **peers-only** variant asks the same geometric question of the survivor that can now only
+  be a peer.
+- `family-legend.dom.js` — `CROWD()` takes a `{ mine }` parameter instead of relying on an index;
+  the mixed day proves both halves of the badge family coexist at 22 px, the peers-only day proves
+  the heaviest family prefix survives at **both** densities.
+- `family-render.dom.js` §3 — plus a counterweight, because `[false, false]` is also what a board
+  that simply *dropped* every peer would print: with none of mine on the day the slice draws
+  theirs, the change leads, and the third is counted.
+
+**The product consequence, stated:** on a day the owner has written on, at capacity 1 the family
+reaches the note line only as a digit; at capacity 2, only if the owner has at most one entry
+there. The ownership channel is not gone from those rows — it is in the lanes, which
+`family-render.dom.js` §2 measures costing 0 px. This is the trade 17.2 asks for and
+`e8-density-crowding.dom.js` §B2 prices the alternative at 54.1 % of the owner's own notes.
+
+### 17c. A REGRESSION THIS ROUND INTRODUCED, ON THE PRINT PATH — closed
+
+`app.css`'s `.day.claimed .d-more` promotes the „+n" badge from an overlay to a flex sibling on
+rows where a bar label has retreated into the lane gutter. On screen that is a good trade priced
+against a 61 px line. **On A4 it took 20 px of a 39.5 px line — half the sentence, on the one
+surface with no hover to recover it** — and it bought nothing, because
+`body.paper-a4 .bar-label` (0,2,1) out-specifies `.bar-label.on-ink` (0,2,0), so the retreat it was
+paying for never happens on paper. There was no chip in the gutter to make room for.
+
+`print.css` now keeps the badge an overlay, parked by `app.css`'s own
+`right: calc(var(--gutter) - 2px - var(--more-w))` — 5 px on A4, inside the gutter and clear of the
+text column. Measured in real WebKit under the lifted print rules:
+
+```
+                       before → after
+.d-body                 19.5 → 39.5 px
+the note's text column  21.5 → 41.5 px
+a peer's text column     6.5 → 26.5 px
+„Elternsprechtag Klasse 3b", mine     5 → 9 characters
+„Chorprobe Kinder", a peer's          1 → 5 characters
+```
+
+This is better than the state this round created **and** better than what v1 printed, where the
+badge sat at `--gutter + 1px` and covered the sentence outright. `§E2` went 8/9 → **11/11**: the
+`A8/a-peer-entry-is-legible-on-A4` row it closes is joined by two counterweights, so the fix
+cannot be re-spent by widening the column instead of moving the badge.
+
+**RESIDUAL, NAMED:** 3.7's „the label retreats into the gutter" is therefore a **screen-only**
+guarantee. A 24 px A4 gutter cannot hold a 17 px badge and a label chip side by side, so on paper a
+bar label that lands on an inked row still overprints the note under it — v1's own trade on the
+print path, unchanged by this round and not made worse by it.
+
+### 17d. 17.5 WAS CLOSED IN THE MODEL AND OPEN ON THE GLASS — closed
+
+`fix:fairness` shipped `layout.js:day.overflowNew`, the count of peer changes a row could not draw,
+and **nothing read it**. Both that workflow and `fix:legend` listed the painting half as owed. It
+is a `board.js` + `app.css` change, so no single-file owner could make it.
+
+`board.js` sets `.d-more.has-new` from `overflowNew` and puts the count in the hover in both
+languages („2 weitere · 1 neu" / „2 more · 1 new"). `app.css` paints it as a **2 px accent rule
+along the badge's bottom edge, as a background** — not the 5 px lime plate used elsewhere, because
+the badge is a fixed 17 px box that „+99" fills and a corner dot would land on the second digit,
+which is the exact defect this round spent itself closing. As a background it adds no child node to
+the row's collision audit, changes no geometry (measured: 17 px either way), and costs
+`PREFIX_COST_PX` nothing.
+
+Two rows, deliberately a pair — the first alone is satisfied by marking every badge, which signals
+nothing: `17.5/the-badge-says-it-is-holding-a-change` and `17.5/and-stays-quiet-when-it-is-not`.
+On the fixture: 25 badges carry the tell, **0** that should do not, **0 of 329** quiet badges carry
+it. Principle 9 is untouched — `overflowNew` counts `foreign && isNew`, and `materialize.js:isNewOf`
+is already blind to a downgrade and has nothing to count for a deletion, so
+`family-legend.dom.js`'s tripwire row holds unchanged.
+
+### 17e. WHAT IS STILL RED, AND WHY — three rows
+
+**1. `e8-density-perf.dom.js` §E1 — `LZP-1007`. The honest number is 60.9 ms, and the row's own
+threshold is 16.7.**
+
+Measured in isolation (the full 46-file run reports ~75–107 ms for the same code; that is machine
+contention, not the product, and a single suite-run reading of this row should not be quoted):
+
+```
+operation      solo    family   ×     frames of 16.7 ms
+buildBoard      0.7       3.0  4.3    0.2
+renderBoard    19.5      60.9  3.1    3.6   ← the floor
+memberToggle   18.2      62.6  3.4    3.7
+scroll          0.7       3.1  4.4    0.2
+findKeystroke   1.8       9.9  5.5    0.6
+findWorst       4.9      23.7  4.8    1.4
+DOM nodes: solo 1975 · family 4195
+```
+
+E8 measured `renderBoard` at 51 ms and `buildBoard` at 3 ms. **It did not regress**: 51 ms was the
+median of the scripting alone (`family-render.dom.js` still reports 56 ms); §E1 forces a style and
+layout flush after every call, which is the honest unit for a frame. Decomposed on the 8-member
+fixture:
+
+```
+buildBoard (the model)                 3.0 ms
+DOM construction (4 195 nodes)       ~23   ms
+style resolution + layout            ~34   ms   (measured by clone-swapping the finished subtree)
+```
+
+**No CSS lever moves it.** Measured, each as a full re-run: `.d-num`/`.d-wd` back to fixed widths
+58.3, `text-overflow: clip` 60.9, pads hidden 58.8, `contain: layout style` on `.day` **74.3**
+(worse), on `.col` 67.8, on `.rows` 65.3, `.bar-label` max-width removed 64.1 — against a baseline
+that reads 59.3–65.5 on repeat. All inside the noise. `content-visibility` is not available: 11 of
+12 columns are on screen at the harness's 1291 px viewport, and off-screen content reports no boxes,
+which would falsify a large number of tier-2 geometry rows.
+
+**The conclusion is architectural and should be read as a finding, not a shrug: a full twelve-month
+rebuild of 4 195 boxes cannot fit in one 60 fps frame in WebKit.** Closing §E1 means not rebuilding
+the whole board — an incremental renderer keyed on what changed. `renderBoard` is `textContent = ''`
+plus a fresh tree today, and it is called by every settings change, every data change, and the
+member toggle 17.3 puts one click away.
+
+**One cell was genuinely improved.** `find.js` ran a full-document
+`querySelectorAll('.board .bar[data-bar-id="…"]')` **inside the hit loop** — O(hits × nodes),
+paid on every keystroke, and a one-letter query is exactly what the first keystroke of every
+search is. Indexing the stripes once took `findWorst` **25.4 → 20.1 ms** and `findKeystroke`
+**10.9 → 8.9 ms** (both re-measured at 23.7/9.9 on a later run; the run-to-run spread is ±3 ms).
+It is behaviour-preserving, so no row dies without it — `repeats-find-i18n` 121/121,
+`interaction.dom.js` 32/32 and `family-attribution.dom.js` 25/25 are what hold it, and its only
+claim is a number §E1 prints and is still red on.
+
+**2. `e8-density-legibility.dom.js` §A4 — the 9 px ink contrast floor. Two distinct causes, and
+one of them is a PO decision this pass deliberately did not take.**
+
+- `v1/palette-holds-its-own-floor` — five of v1's ten tones miss `palette.js`'s **own** stated
+  „≥ 4.5:1 against #FFFFFF" on plain white, before any ambient shade: blau 4.43, tuerkis 4.08,
+  gold 3.64, gruen 3.28, orange 2.94. **Closing it means changing `palette.js`'s hex values, and
+  `tests/tier1/palette.test.js:38` pins `colorOf('blau') === '#2A7CC0'`.** The v1 characterization
+  suite is the oracle and may not be weakened to make a v2 row pass, so this was left red rather
+  than closed. `fix:legibility` computed a landable set (blau `#2368A0`, gruen `#426F24`, orange
+  `#90560A`, tuerkis `#0B7070`, gold `#7D5F13`, magenta `#BE196B`, rot `#B93228`, schiefer
+  `#566675`) which reads 4.53–10.99 on all six binding backgrounds — **and it must be weighed
+  against story 4.5 before landing**: eight tones converge on ~5.9:1 against white, which compresses
+  the value channel the 6 px ownership rail relies on. This needs a PO ruling and an oracle
+  amendment, in that order.
+- `E8/new-inks-hold-the-same-floor` — `layout.js:UNKNOWN_MEMBER_COLOR` at 3.71 and the „Belegt"
+  word in `--ink-3` at 3.71 (3.09 on its own pill). These are **E8's own inks failing E8's own
+  floor**, and unlike the half above they do not touch the oracle: `--ink-3` is pinned as the v1
+  `.d-num` ink by `dom-rendering.dom.js:1158`, so the word needs a token of its own (`#685E8B`
+  holds 4.54–5.90 on all six) and `belegt-render.dom.js:379` inverts with it. **Landable, not
+  landed** — it does not change §A4's colour, and this pass chose not to open a palette change it
+  could not finish in the same breath as the v1 half.
+
+**3. `e8-density-perf.dom.js` §E3 — `A8/most-of-the-family-reaches-the-paper`. Arithmetically
+unreachable, and left at its original strictness.**
+
+365 day rows × capacity 2 = **730** drawable occurrences against **1 527** in the window: **48 % is
+the ceiling for any ordering**, and the model draws 715 of the 730 available. At the clamp's own
+maximum (capacity 3, DESIGN-DECISIONS §B) it is 72 %, still under the 75 % the cell asks for.
+Every member still has ink on the poster (17 %–79 %; mine 100 %), which is what 17.1 asks for.
+**This needs a spec decision about what a saturated poster does** — DESIGN-DECISIONS §B forbids the
+only lever an engineer has — and the threshold was deliberately not re-cut to a number the product
+happens to hit.
+
+### 17f. The mutation table for this pass
+
+Every fix reverted in a scratch copy of the tree, `shasum`-verified restored between runs.
+
+| mutant | victim |
+|---|---|
+| **M-P1** `print.css`'s `.day.claimed .d-more` override deleted | `A8/a-peer-entry-is-legible-on-A4` **and** `A8/the-printed-badge-takes-no-width-from-the-sentence` — and only those |
+| **M-O1** `orderForCapacity` → `[...rows]` (v1 array order) | `17.2/both-lines-are-mine`, `17.2/and-no-peer-mark-is-on-the-note-line`, `17.2/the-one-line-at-capacity-1-is-mine`, `17.5+17.2/still-drawn`, `17.2/the-floor-line-is-mine` ×2, `family-render` §3 — i.e. every row §17b inverted |
+| **M-O2** `changedFirst` → `() => 0` | `family-render` §3's `17.5 — the peer CHANGE leads` alone. *(The peers-only cells in `family-density`/`family-legend` survive it, because in those fixtures the change is also first in array order — they are not load-bearing for 17.5's tier, and are not claimed to be.)* |
+| **M-N1** drop `more.classList.add('has-new')` | `17.5/the-badge-says-it-is-holding-a-change` alone — 25 badges |
+| **M-N2** add `has-new` to every badge | `17.5/and-stays-quiet-when-it-is-not` alone — 329 of 329 |
+
+Honest-path controls, unmutated: `family-density` 10/10 · `family-legend` 13/13 ·
+`family-render` 18/18 · `e8-density-crowding` 7/7 · `e8-density-chrome` 5/5 ·
+`e8-density-truncation` 3/3 · `dom-rendering` 44/44 · `board-render` 19/19 ·
+`belegt-render` 20/20 · `density-808` 8/8.
+
+### 17g. The E9 co-editor red team, re-run in full
+
+**33 rows, all green** (29 at the brief's writing; `fix:convergence` added four). Census:
+
+- **CLOSED and inverted — 8:** §1i, §2a, §2b, §2c, §2e, §2h, §3b-b, §4c
+- **Still open, and honestly labelled — 3:** §2f (18.5 cannot report a withdrawal at all — the
+  refusal only ever sees a *later* write, and a withdrawal leaves the older one standing),
+  §2g (a retroactively-refused *arrival* is dropped rather than parked, so a re-grant reaches only
+  the Mac that held the line), §4c-b (two drags each ordered where they were made still converge to
+  an inverted bar — the projection invariant is owed to `core/materialize.js`)
+- **FAILED, i.e. working defences — 17:** §1b–§1h, §3b, §3c, §3d, §3e, §3g, §3h, §3i, §4a, §4b, §4d
+- **Non-vacuity controls — 5:** §1a, §2d, §3a, §3f, §4c-c
+
+**Not one defence regressed.**
+
+### 17h. The standing bar — the redaction boundary, round five
+
+This is the round where it was most exposed: finding 1's §2c put a `geteiltOnly` value into
+`registers()` and onto disk. **114 rows, all green** — `e7-leak-{routes,downgrade,observer}` 91/91,
+`e6-attack-privat` + `e6-gate-privat` 23/23, plus E9-D §4d („the standing bar: not one byte of a
+Privat entry, after all of the above") and E9-B §2c („no `geteiltOnly` register stands at Belegt").
+**Zero bytes of a Privat entry, for the fifth consecutive round.**
+
+### 17i. Owed after this pass
+
+1. **`core/materialize.js`** — the bar-interval projection invariant (E9-A §4c-b). Owed since
+   `fix:convergence`; turns that row red, and it inverts then.
+2. **`core/ops.js`** — `PARK_REASONS.WITHDRAWN`, so `applyRemote` can park a retroactively-refused
+   arrival instead of dropping it (§2g). `oplog.js:park()` validates against `isParkReason`, so the
+   constant lands there first.
+3. **`core/registers.js` / `family/conflict.js`** — 18.5 still cannot report a withdrawal (§2f).
+4. **`palette.js`** — §A4's v1 half. **PO ruling first**, then an oracle amendment; see §17e.
+5. **`layout.js` + a new `--ink-belegt` token** — §A4's E8 half. Landable today; costs one inversion
+   in `belegt-render.dom.js:379`.
+6. **An incremental `renderBoard`** — the only thing that closes §E1. See §17e.
+7. **A spec decision on the saturated poster** — §E3. Not an engineering ticket.
+8. **`adr/001-op-log.md` §5 step 5** still says array order decides the capacity slice. It decides
+   it *below* the prefix now; the bullet should name `layout.js:orderForCapacity` the way it
+   already names `assignLanes`.

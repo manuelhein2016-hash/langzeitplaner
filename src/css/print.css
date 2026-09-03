@@ -26,6 +26,42 @@
      not chrome. It just loses its button affordance. */
   .d-more { cursor: default; background: transparent; padding: 0; color: #6B5CA5; }
 
+  /* ── THE BADGE DOES NOT TAKE WIDTH FROM A PRINTED SENTENCE ────────────────
+     `app.css`'s `.day.claimed .d-more` promotes the badge from an overlay to a
+     flex sibling on the one kind of row where a bar label has already retreated
+     into the lane gutter — two 17–22 px chips do not fit in a 27 px gutter side
+     by side, so the badge steps into the line and takes 17 px + 3 px of margin.
+
+     That is a SCREEN trade, priced against a 61 px line: it costs a third of it,
+     the ellipsis survives, and the full text is one hover away.
+
+     ON PAPER THE SAME 20 px IS HALF THE SENTENCE, AND IT BUYS NOTHING. Measured
+     on the 8-member fixture under these very rules: A4's day row is 87.5 px, of
+     which `.d-num` 13 + `.d-wd` 11 + `--gutter` 24 are fixed, leaving 39.5 px of
+     line. The promoted badge took 20 of them — `.d-body` 19.5 px, a peer's note
+     down to ONE character of „Elternsprechtag Klasse 3b" — on the one surface
+     that has no hover to recover them.
+
+     And it paid for a retreat THAT DOES NOT HAPPEN HERE: `body.paper-a4
+     .bar-label` (0,2,1) out-specifies `.bar-label.on-ink` (0,2,0), so on paper a
+     yielded label keeps its per-paper `max-width` (52 px on A4) instead of
+     folding into the gutter. There was never a chip in the gutter to make room
+     for. The badge goes back to being an overlay, parked in the gutter by
+     `app.css`'s own `right: calc(var(--gutter) - 2px - var(--more-w))` — which
+     on A4 is 5 px, i.e. INSIDE the 24 px gutter and clear of the text column.
+     That is better than this round AND better than what v1 printed, where the
+     badge sat at `--gutter + 1px` and covered the sentence outright.
+
+     RESIDUAL, NAMED RATHER THAN HIDDEN: 3.7's „the label retreats" is therefore
+     a screen-only guarantee. A 24 px A4 gutter cannot hold a 17 px badge and a
+     label chip side by side, so on paper a bar label that lands on an inked row
+     still overprints the note under it — v1's own trade on the print path,
+     unchanged by this round and not made worse by it. FINDINGS §16 carries it. */
+  .day.claimed .d-more {
+    position: absolute; transform: translateY(-50%);
+    flex: none; margin-left: 0;
+  }
+
   .app { display: block; height: auto; }
   .board-wrap { overflow: visible !important; height: auto; }
   .board { width: 100%; padding: 0; page-break-inside: avoid; }

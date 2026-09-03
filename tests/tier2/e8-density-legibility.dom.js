@@ -20,8 +20,12 @@
 //      TEXT NODE (`document.createTextNode(text)`), so `[...note.children]` —
 //      the audit's own input — cannot see it. Everything the user came to read
 //      is invisible to the collision audit that clears the row.
-//   2. `.d-more` AND `.bar-label` ARE ABSOLUTELY POSITIONED OVER THE DAY ROW,
-//      with opaque backgrounds, and neither is checked against the text.
+//   2. `.d-more` AND `.bar-label` WERE ABSOLUTELY POSITIONED OVER THE TEXT
+//      COLUMN, with opaque backgrounds, and neither was checked against the
+//      text. §A2 and §A3 closed both — both now stand in the LANE GUTTER, which
+//      the row had already reserved — and these are the rows that hold them
+//      closed, including the one collision the new arrangement could have:
+//      27 px does not hold a badge and a label side by side.
 //   3. THE BOARD IS LEGAL WITH THE LAYERS ON. A Feiertag, Schulferien and a
 //      weekend are not exotic; they are three of v1's five hard problems, and
 //      the brief asks for the day where all of it lands at once.
@@ -301,29 +305,62 @@ test('§A1 · eight people + Feiertag + Ferien on one legal day, at 22 px and 18
     why: `${a.entriesOnTheDay - a.drawn} entries not drawn, „+n" accounts for ${a.overflowCount - a.laneOverflow}` });
   rows.push({ id: 'A1/18px-nothing-vanishes-uncounted', ok: b.overflowCount === b.entriesOnTheDay - b.drawn + b.laneOverflow,
     why: `${b.entriesOnTheDay - b.drawn} entries not drawn, „+n" accounts for ${b.overflowCount - b.laneOverflow}` });
-  // ⚠ THE ADVERSARY'S CENTRAL CLAIM. Principle 3: the user's own entries win.
+  // ⚠ THE ADVERSARY'S CENTRAL CLAIM, AND THE PROPERTY THAT NOW HOLDS.
+  // Principle 3: the user's own entries win. On this day — eight people, a
+  // Feiertag, Schulferien, a weekend, three lanes full and „+9" on the row —
+  // 15.1 px of her „Zahnarzt Kinder" used to be under the overflow badge, and
+  // 15.1 px of the Feiertag line with it. Both are 0 px now: the badge and the
+  // labels stand in the lane gutter the row had already reserved, and on the one
+  // kind of row where both need it the badge takes width and the line truncates
+  // in the open. Nothing is covered at either row height.
   rows.push({ id: 'principle-3/my-own-text-is-not-overprinted', ok: a.ownCoveredPx === 0,
     why: `${a.ownCoveredPx} px of MY OWN note text is painted over by an opaque overlay on this row` });
   rows.push({ id: '3.7/no-overlay-covers-any-entry-text', ok: a.coveredPx === 0,
     why: `${a.coveredPx} px of entry text is painted over: ${a.hits.join(' · ')}` });
+  // The 18 px row is the harder half and had the same defect, so it is a cell of
+  // its own rather than a line of diagnostics: at capacity 1 the one entry the
+  // row can draw is the ONLY entry, and covering it covers the whole day.
+  rows.push({ id: 'principle-3/18px-my-own-text-is-not-overprinted', ok: b.ownCoveredPx === 0,
+    why: `${b.ownCoveredPx} px of MY OWN note text is painted over at 18 px: ${b.hits.join(' · ')}` });
+  // And she still has a sentence left to read afterwards. A fix that reserved so
+  // much width that the line went to nothing would satisfy every „covered === 0"
+  // cell above and be a worse board than the one it replaced.
+  rows.push({ id: 'principle-3/and-there-is-still-a-line-to-read', ok: a.ownVisible >= 20,
+    why: `after the badge and the labels take their width, MY OWN text on the worst legal day is ${a.ownVisible} px` });
   verdict('§A1 · the legal crowded day', rows);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §A2 · THE „+n" BADGE IS PAINTED ON TOP OF THE TEXT IT IS COUNTING
+// §A2 · THE „+n" BADGE STANDS BESIDE THE TEXT IT IS COUNTING — CLOSED
 //
-// `app.css`: `.d-more { position:absolute; right: calc(var(--gutter) + 1px);
-// background: var(--chip) }` — an OPAQUE box whose right edge is 1 px INSIDE the
-// `.d-body` content edge, i.e. inside the note's own text column. It is v1 CSS,
-// and on a solo board it is close to harmless because most days have no overflow
-// at all. E8 makes overflow the NORMAL case (§A1: 8 entries into 2 slots) and
-// makes the number two digits, so the badge is wider and on far more rows.
+// WHAT THIS ROW FOUND. `app.css` drew the badge
+// `position:absolute; right: calc(var(--gutter) + 1px); background: var(--chip)`
+// — an OPAQUE box whose right edge sat 1 px INSIDE the `.d-body` content edge,
+// i.e. inside the note's own text column. Measured on the fixture below: a
+// 15.1 px lid over a 61 px line, 25 % of the reader's own sentence, INCLUDING
+// the position WebKit puts the ellipsis in — so the characters went and the
+// only cue that characters were missing went with them. v1 CSS, close to
+// harmless on a solo board because most days never overflow; E8 made overflow
+// the normal case (§A1: 8 entries into 2 slots) and the number two digits.
+// Stories 2.4 and 2.5 both failed on it.
 //
-// The audit in `family-density.dom.js` §1 cannot see this, because the thing
+// WHAT CLOSED IT. The badge is still an overlay — that was never the defect —
+// but it is parked in the LANE GUTTER instead of over the sentence:
+// `right: calc(var(--gutter) - 2px - var(--more-w))`. The gutter is board
+// furniture every row already reserves for the three bar lanes, so this costs
+// `.d-body` nothing at all and `layout.js:FAMILY_LAYOUT_COST_PX`'s published
+// `noteTextWidth: 0` stays true — a first pass made the badge a flex sibling
+// instead, and `family-density.dom.js` §4 caught the family board's `.d-body`
+// dropping 60 px → 42 px against exactly that claim. What the badge crosses now
+// is lanes 1 and 2 where they carry a stripe: a stripe reads above and below a
+// 10 px chip, a sentence does not, and this badge is what announces lane
+// overflow in the first place.
+//
+// The audit in `family-density.dom.js` §1 could not have caught this: the thing
 // being covered is a text node and its input is `note.children`.
 // ═════════════════════════════════════════════════════════════════════════════
 
-test('§A2 · „+n" is opaque, sits inside the text column, and eats the ellipsis', () => {
+test('§A2 · „+n" is opaque, so it stands outside the text column and keeps the ellipsis', () => {
   const long = 'Elternsprechtag Grundschule';
   const scene = {
     notes: [
@@ -351,40 +388,74 @@ test('§A2 · „+n" is opaque, sits inside the text column, and eats the ellips
     return {
       badge: more.textContent, badgeW: px(mr.width), badgeBg: st.backgroundColor,
       bodyRight: px($('.d-body', day).getBoundingClientRect().right),
+      badgeLeft: px(mr.left),
       badgeRight: px(mr.right),
+      // The row has no bar through it, so every one of the three lanes is free
+      // and the badge should be leaning into the gutter rather than into the
+      // sentence. `dayRight − badgeRight` is how much gutter it left unused.
+      dayRight: px(day.getBoundingClientRect().right),
       notes: out,
     };
   });
 
-  diag(`„+n" badge ${r.badge} · ${r.badgeW} px wide · background ${r.badgeBg} (opaque)`);
-  diag(`   the badge's right edge ${r.badgeRight} px, the note text column's right edge ${r.bodyRight} px`);
-  diag(`   → the badge is ${px(r.bodyRight - r.badgeRight)} px INSIDE the text column, and ${r.badgeW} px wide`);
+  diag(`„+n" badge ${r.badge} · ${r.badgeW} px wide · background ${r.badgeBg} (still opaque — that is not the fix)`);
+  diag(`   the badge's LEFT edge ${r.badgeLeft} px, the note text column's right edge ${r.bodyRight} px`);
+  diag(`   → the badge starts ${px(r.badgeLeft - r.bodyRight)} px OUTSIDE the text column, and is ${r.badgeW} px wide`);
+  diag(`   → it sits in the lane gutter: ${px(r.dayRight - r.badgeRight)} px short of the column edge, no stripe on this row`);
   for (const n of r.notes) {
     diag(`   "${n.text}" — ${n.visibleTextPx} px visible, ellipsised ${n.clipped}, ${n.coveredPx} px painted over by the badge`);
   }
   const worst = Math.max(...r.notes.map((n) => n.coveredPx));
   const pct = r.notes[0].visibleTextPx ? (worst / r.notes[0].visibleTextPx * 100).toFixed(0) : '0';
-  diag(`   WORST: ${worst} px of a ${r.notes[0].visibleTextPx} px text column — ${pct} % of the reader's own line, including the ellipsis position.`);
+  diag(`   WORST: ${worst} px of a ${r.notes[0].visibleTextPx} px text column — ${pct} % of the reader's own line.`);
+  diag('   Every note on the row is still ellipsised: the sentence is TRUNCATED in the open (2.5),');
+  diag('   which is v1\'s own trade, and not hidden under a lid, which was never anybody\'s trade.');
 
-  verdict('§A2 · the „+n" overprint', [
+  verdict('§A2 · the „+n" badge and the sentence', [
+    // The row this file opened with. It is a property now, not a finding.
     { id: '2.4+2.5/badge-does-not-cover-text', ok: worst === 0,
       why: `the „+n" badge paints an opaque ${r.badgeW} px box over ${worst} px (${pct} %) of the note text it is counting` },
+    // …and the MECHANISM, so a fix that merely moved the badge a few pixels — or
+    // one that let a later edit put it back over the column — cannot pass by
+    // accident on a fixture whose text happens to be short.
+    { id: '2.4/badge-stands-outside-the-text-column', ok: r.badgeLeft >= r.bodyRight,
+      why: `the badge's left edge is ${px(r.bodyRight - r.badgeLeft)} px inside the text column's right edge` },
+    // It pays for itself out of the empty gutter, not out of her line: with no
+    // stripe on the row the badge must sit entirely right of `.d-body`.
+    { id: '2.4/an-unused-lane-pays-for-the-badge', ok: r.badgeRight > r.bodyRight && r.badgeRight <= r.dayRight + 0.5,
+      why: `badge ${r.badgeLeft}…${r.badgeRight} px against a text column ending at ${r.bodyRight} px and a row ending at ${r.dayRight} px` },
+    // The ellipsis is the other half of 2.5: the reader must be able to SEE that
+    // the sentence continues. It was the first thing the old lid ate.
+    { id: '2.5/the-ellipsis-survives', ok: r.notes.every((n) => n.clipped),
+      why: `${r.notes.filter((n) => !n.clipped).length} of ${r.notes.length} over-long notes are not reported as clipped` },
   ]);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §A3 · 3.7's LABEL-PLACEMENT SCAN — the guarantee, and what a family does to it
+// §A3 · 3.7's LABEL PLACEMENT — the guarantee, and how it now survives a family
 //
 // DESIGN-DECISIONS §C: „Label placement (3.7) scans the first six rows of each
 // month segment for one carrying NO holiday text, NO note and NO `+n` badge, and
 // puts the chip there. So the chip lands on empty space rather than covering the
 // user's own ink."
 //
-// `layout.js`'s own E8 comment concedes pass A („no ink at all") is reached at
-// 0 % on the 8-member fixture, and adds passes B/C/D — which choose the LEAST
-// INKED row and, failing that, ANY row. Passes B–D avoid label-on-LABEL. Nothing
-// avoids label-on-NOTE, and `.bar-label` is opaque, up to 66 px wide, and
-// positioned across the note's whole text column.
+// WHAT THIS ROW FOUND. `layout.js`'s own E8 comment concedes pass A („no ink at
+// all") is reached at 0 % on the 8-member fixture, and adds passes B/C/D — which
+// choose the LEAST INKED row and, failing that, ANY row. Passes B–D avoid
+// label-on-LABEL. Nothing avoided label-on-NOTE, and `.bar-label` is opaque, up
+// to 66 px wide and positioned across the note's whole text column. Measured:
+// 98 of 142 family labels (69 %) were painted over an entry's text, 46 of them
+// over the OWNER'S own, 955.7 px of her sentences buried under 18 356 px² of
+// somebody else's chip. Solo was not clean either — 3 of 35.
+//
+// WHAT CLOSED IT, AND WHY NOT IN THE SCAN. When 99 % of day rows carry ink there
+// is no ink-free row to move to; a better scan cannot exist. So the fix is a
+// priority rule, not a search: `board.js` marks a label that landed on a written
+// row `.on-ink`, and `app.css` caps it to a strip the row reserves for it
+// (`.day.claimed`). The label gives width back and keeps its identity marks; the
+// sentence truncates with its ellipsis, in the open, where the reader can see
+// that there is more. Principle 3 — her ink wins — decides which of the two
+// yields, and the answer is never her sentence.
 //
 // This measures the promise directly, solo against family, on the same fixture.
 // ═════════════════════════════════════════════════════════════════════════════
@@ -437,6 +508,7 @@ const FX = fixture8x2();
 function labelOverprint() {
   const labels = $$('#board .bar-label');
   let covered = 0; let coveredOwn = 0; let labelsThatCover = 0; let labelsThatCoverMine = 0;
+  let coveredBadges = 0;
   let inkArea = 0;
   const examples = [];
   for (const lab of labels) {
@@ -459,13 +531,36 @@ function labelOverprint() {
     for (const hl of $$('.d-hol', col)) {
       if (isect(hl.getBoundingClientRect(), lr)) { touchedAny = true; }
     }
+    // The „+n" badge counts what the row could not draw (2.4 — „nothing
+    // vanishes uncounted"), and a count nobody can read has vanished. Both the
+    // label and the badge now live in the 27 px lane gutter, which does not hold
+    // two of them side by side, so this is the collision the arrangement has to
+    // keep impossible rather than the one it happens to avoid.
+    for (const mo of $$('.d-more', col)) {
+      if (isect(mo.getBoundingClientRect(), lr)) coveredBadges++;
+    }
     if (touchedAny) labelsThatCover++;
     if (touchedMine) labelsThatCoverMine++;
   }
-  return { labels: labels.length, labelsThatCover, labelsThatCoverMine, covered: px(covered), coveredOwn: px(coveredOwn), inkArea: px(inkArea), examples };
+  // WHAT THE LABEL STILL SAYS. „Nothing overprints" is trivially satisfiable by
+  // not drawing the label, or by shrinking it to a sliver, and either would be a
+  // worse board than the one with the defect. So the audit also counts the
+  // labels that survive as something a reader can use: a chip wide enough for
+  // the 8 px initial (17.2) and a text node still in it.
+  let narrowest = Infinity; let stillNamed = 0;
+  for (const lab of labels) {
+    const w = lab.getBoundingClientRect().width;
+    if (w < narrowest) narrowest = w;
+    for (const n of lab.childNodes) if (n.nodeType === 3 && n.textContent.trim()) { stillNamed++; break; }
+  }
+  return {
+    labels: labels.length, labelsThatCover, labelsThatCoverMine,
+    covered: px(covered), coveredOwn: px(coveredOwn), inkArea: px(inkArea), examples,
+    narrowest: labels.length ? px(narrowest) : 0, stillNamed, coveredBadges,
+  };
 }
 
-test('§A3 · at family density a bar label lands ON the user\'s own note text, not beside it', () => {
+test('§A3 · at family density a bar label lands BESIDE the user\'s own note text, not on it', () => {
   const settings = { rowHeight: 22, layers: { ...LEGAL }, hiddenMembers: {}, colWidth: 118 };
   const solo = withBoard({ notes: FX.notes.filter((n) => !n.isForeign), bars: FX.bars.filter((b) => !b.isForeign), settings },
     () => ({ ...labelOverprint(), notes: $$('#board .note').length }));
@@ -476,6 +571,8 @@ test('§A3 · at family density a bar label lands ON the user\'s own note text, 
   diag(`family ${family.labels} bar labels · ${family.labelsThatCover} overprint an entry (${(family.labelsThatCover / Math.max(1, family.labels) * 100).toFixed(0)} %) · ${family.covered} px of text buried · ${family.coveredOwn} px of it MINE`);
   diag(`family: ${family.labelsThatCoverMine} of ${family.labels} labels bury MY OWN text (${(family.labelsThatCoverMine / Math.max(1, family.labels) * 100).toFixed(0)} %) · buried ink ${family.inkArea} px²`);
   for (const e of family.examples) diag('   ! ' + e);
+  diag(`   labels that still name themselves: solo ${solo.stillNamed}/${solo.labels} · family ${family.stillNamed}/${family.labels}`);
+  diag(`   narrowest label on the board: solo ${solo.narrowest} px · family ${family.narrowest} px (3.3 — a bar's only name on the board)`);
   diag(`   the ONE promise: DESIGN-DECISIONS §C — „the chip lands on empty space rather than covering the user's own ink".`);
 
   verdict('§A3 · 3.7 label placement', [
@@ -483,6 +580,21 @@ test('§A3 · at family density a bar label lands ON the user\'s own note text, 
       why: `${family.labelsThatCover} of ${family.labels} bar labels are painted over an entry's text (solo: ${solo.labelsThatCover} of ${solo.labels})` },
     { id: 'principle-3/my-ink-wins', ok: family.coveredOwn === 0,
       why: `${family.coveredOwn} px of MY OWN note text is buried under a bar label on the family board (solo: ${solo.coveredOwn} px)` },
+    // v1's OWN board had the defect too, at 9 %. A family-only fix would have
+    // left it there, so the solo half is a cell and not a footnote.
+    { id: '3.7/solo-labels-land-on-empty-space-too', ok: solo.labelsThatCover === 0,
+      why: `${solo.labelsThatCover} of ${solo.labels} bar labels overprint an entry on a SOLO board — this was v1's own 9 %` },
+    // ⚠ THE COUNTERWEIGHT. Every cell above is satisfied by a board that draws
+    // no labels at all, or draws them as slivers. 3.3 says the label is where a
+    // bar says what it is; it may yield width, it may not stop existing.
+    { id: '3.3/every-bar-still-names-itself', ok: family.stillNamed === family.labels && family.labels > 0,
+      why: `${family.labels - family.stillNamed} of ${family.labels} bar labels lost their text node` },
+    { id: '3.3/no-label-is-narrower-than-its-own-initial-chip', ok: family.narrowest >= 14,
+      why: `the narrowest label on the family board is ${family.narrowest} px — the 17.2 initial chip alone is 10 px` },
+    // …and the retreat did not simply move the overprint onto the other thing
+    // standing in the gutter. A „+n" nobody can read is an entry that vanished.
+    { id: '2.4/a-retreating-label-does-not-bury-the-„+n"', ok: family.coveredBadges === 0,
+      why: `${family.coveredBadges} „+n" badges are painted over by a bar label on the family board (solo: ${solo.coveredBadges})` },
   ]);
 });
 
@@ -554,6 +666,21 @@ test('§A4 · every ink E8 puts on the board at 9 px, against every ambient shad
 // ═════════════════════════════════════════════════════════════════════════════
 // §A5 · THE FERIEN HATCH BEHIND 9 px TYPE — v1's own „off by default" reason,
 // and what a Belegt pill does on top of it.
+//
+// WHAT THIS ROW FOUND. 1k's hatch is a 1 px stroke every 5 px. v1's „neu" dot
+// (17.5) was a 3 × 3 px disc — SMALLER THAN THE HATCH PERIOD — so the board's
+// only signal that a peer changed something had to be told apart from the
+// wallpaper it was drawn on. Two marks of the same order are a moiré, not a
+// distinction, and „turn the hatch off again" is not an answer to a setting the
+// product ships.
+//
+// WHAT CLOSED IT. The dot now carries its own ground: `app.css` draws it as a
+// 5 px OPAQUE PLATE — one full hatch period across — with the 3 px accent disc
+// and its hairline ring inside. The texture stops at the mark's edge instead of
+// running through it, and the same plate makes the dot readable on every ambient
+// shade, not only on the hatch. It costs the identical 5 px `PREFIX_COST_PX`
+// already priced (v1 spent 3 px of disc plus 2 px of margin), so nothing was
+// bought here with a character of anybody's sentence.
 // ═════════════════════════════════════════════════════════════════════════════
 
 // A Ferien day WITHOUT a Feiertag, so the capacity rule leaves room for a
@@ -575,27 +702,55 @@ test('§A5 · with „Ferien schraffieren" on, the family marks still separate f
       notes: [foreign('h1', FDAY, 'geteilt', { who: REAL[0], text: 'Chorprobe', isNew: true, repeatsYearly: true })],
       bars: [],
     };
+    // The period is READ from the shipped token, never assumed: if somebody
+    // retunes 1k's hatch, this row has to re-decide rather than keep quoting 5.
+    const hatchDecl = getComputedStyle(document.documentElement).getPropertyValue('--ferien-hatch');
+    const stops = (hatchDecl.match(/-?\d+(\.\d+)?px/g) || []).map(parseFloat);
+    const PERIOD = stops.length ? Math.max(...stops) : 5;
+
     const r = withBoard({ ...scene, settings: { rowHeight: 22, layers: { ...LEGAL }, hiddenMembers: {}, colWidth: 118 } }, () => {
       const day = $(`#board .col[data-month="${FCOL.key}"] .day[data-date="${FDAY}"]`);
       const marks = [];
-      for (const n of $$('.note', day)) for (const c of n.children) marks.push({ n: c.className, r: c.getBoundingClientRect() });
+      for (const n of $$('.note', day)) for (const c of n.children) marks.push({ n: c.className, r: c.getBoundingClientRect(), el: c });
       const st = day ? getComputedStyle(day) : null;
+      const dot = $('.neu-dot', day);
+      const dst = dot ? getComputedStyle(dot) : null;
       return {
         ferien: day.classList.contains('fer'),
         bgImage: st ? st.backgroundImage.slice(0, 60) : '',
         smallest: marks.length ? px(Math.min(...marks.map((m) => Math.min(m.r.width, m.r.height)))) : 0,
         smallestName: marks.length ? marks.slice().sort((a, b) => area(a.r) - area(b.r))[0].n : '—',
         marks: marks.length,
+        // What the 17.5 dot costs the line, box + margins, against the number
+        // `layout.js` publishes. The plate may not be bought with characters.
+        dotW: dot ? px(dot.getBoundingClientRect().width) : 0,
+        dotCost: dot
+          ? px(dot.getBoundingClientRect().width
+              + parseFloat(dst.marginLeft || 0) + parseFloat(dst.marginRight || 0))
+          : 0,
+        // The plate is what makes the mark readable ON the texture: an opaque
+        // ground drawn inside the mark's own box, not a colour laid over it.
+        dotPlate: dst ? (dst.backgroundImage || '') : '',
       };
     });
     diag(`hatch on · day in Ferien: ${r.ferien} · background-image ${r.bgImage || 'none'}`);
-    diag(`   ${r.marks} marks on the row, smallest ${r.smallest} px (${r.smallestName})`);
-    diag('   The hatch is `repeating-linear-gradient(45deg, #E1D8F6 0 1px, transparent 1px 5px)` — a 1 px stroke');
-    diag('   every 5 px. The „neu" dot is 3 × 3 px, i.e. SMALLER THAN THE HATCH PERIOD, and it is the');
-    diag('   board\'s only signal that a peer changed something (17.5).');
+    diag(`   the hatch token declares a ${PERIOD} px period; ${r.marks} marks on the row, smallest ${r.smallest} px (${r.smallestName})`);
+    diag(`   the 17.5 „neu" dot: ${r.dotW} px of box, ${r.dotCost} px of line (PREFIX_COST_PX.neu = ${L.PREFIX_COST_PX.neu})`);
+    diag(`   its ground: ${r.dotPlate.slice(0, 90)}`);
+    diag('   The mark is one full hatch period across and paints its own opaque plate, so the texture');
+    diag('   stops at its edge — and the same plate carries it on the weekend, Ferien and today shades.');
     verdict('§A5 · the hatch under the badges', [
-      { id: '1k/hatch-period-vs-smallest-mark', ok: r.smallest >= 5,
-        why: `the smallest E8 mark is ${r.smallest} px against a 5 px hatch period — the „neu" dot (17.5) is smaller than the texture it has to be seen against` },
+      { id: '1k/hatch-period-vs-smallest-mark', ok: r.smallest >= PERIOD,
+        why: `the smallest E8 mark is ${r.smallest} px against a ${PERIOD} px hatch period — the „neu" dot (17.5) is smaller than the texture it has to be seen against` },
+      // ⚠ THE COUNTERWEIGHT, and the reason this was not fixed by enlarging.
+      // A 7 px dot would clear the hatch and quietly take two more characters
+      // off every peer entry on the board.
+      { id: '1k/the-mark-did-not-buy-it-with-her-line', ok: r.dotCost <= L.PREFIX_COST_PX.neu,
+        why: `the „neu" dot now costs ${r.dotCost} px of the text line, and PREFIX_COST_PX prices it at ${L.PREFIX_COST_PX.neu} px` },
+      // And the mechanism: the mark has a ground of its own, so it does not
+      // depend on the row it happens to land on.
+      { id: '17.5/the-mark-carries-its-own-ground', ok: /gradient/.test(r.dotPlate),
+        why: `the „neu" dot's background is ${JSON.stringify(r.dotPlate)} — a flat fill has no plate, so the texture runs through the mark` },
     ]);
   } finally {
     document.body.classList.remove('ferien-hatch');

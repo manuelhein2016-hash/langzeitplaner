@@ -34,12 +34,23 @@
 //   3a  governing pub fields    `pub.level`, `pub.coEdit`, `pub.alive`, `_born`. Reads 0, 1 and
 //                               2 — the per-space membership gate (§4.2b) runs first, for owner
 //                               AND author, so a stranger's op is never a governance question.
-//   3b  content pub fields      Reads 0, 1, 2 and the FINAL 3a registers.
+//   3b  content pub fields      Reads 0, 1, 2 and the FINAL 3a registers — ALL THREE governing
+//                               ones (`pub.level`, `pub.coEdit`, `pub.alive`), which is the set
+//                               `store.familyCoEditLevelOf` reads on the author side. It used
+//                               to read two of the three; see `REJECT_REASONS.NOT_ALIVE`.
 //
-// A stage-3b op's admissibility therefore depends on the *final* `pub.coEdit` / `pub.level`,
-// which means revoking co-edit retroactively withdraws every co-editor write to that entity.
-// That is not an accident of this implementation — it is what "reading only the final values"
-// means, and it is the only reading that converges. It is called out again at stage 3b.
+// A stage-3b op's admissibility therefore depends on the *final* `pub.coEdit` / `pub.level` /
+// `pub.alive`, which means revoking co-edit — or downgrading the level, or deleting the entry —
+// retroactively withdraws every co-editor write to that entity. That is not an accident of this
+// implementation: it is what "reading only the final values" means, and it is the only reading
+// that converges. It is called out again at stage 3b.
+//
+// AND THE STORE HAS TO APPLY IT, which is the half that was missing. `store.applyRemote` used
+// this fold as an ARRIVAL GATE and `store.registers()` was the log's plain LWW fold, so a
+// withdrawal reached only the ops that had not landed yet — two honest Macs, one op set, two
+// boards (`tests/fleet/e9-attack-diverge.test.js`). `store.registers()` now subtracts this
+// fold's verdict from the log's own map and carries the argument for why the store was the
+// wrong side rather than the prose. Nothing in THIS file changed for it.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // OWNERSHIP IS STRUCTURAL (ADR 001 §4.4, §12.3 — risk R10)
@@ -72,7 +83,7 @@
 //      without any of them consulting anything. PROVES: no op sequence, at any stamp, in any
 //      arrival order, moves an entity to another owner (property P9); no non-owner writes a
 //      governing register (stage 3a); no co-editor writes at all unless the OWNER's own
-//      `pub.coEdit` and `pub.level` say so on their final values (stage 3b); no content above the
+//      `pub.coEdit`, `pub.level` and `pub.alive` say so on their final values (stage 3b); no content above the
 //      folded level survives, whoever sealed it (stage 3c); and — E9 — nobody outside the space
 //      writes into it at all (§4.2b). DOES NOT PROVE: that the hostile op was never SENT, never
 //      stored, or never seen by a device running modified code. Enforcement is by convergence,
@@ -186,6 +197,31 @@ export const REJECT_REASONS = Object.freeze({
   NO_COEDIT: 'noCoEdit',
   /** `pub.level` is not 'geteilt' on that entity's FINAL registers. Co-editing needs Geteilt. */
   NOT_GETEILT: 'notGeteilt',
+  /**
+   * `pub.alive` is `false` on that entity's FINAL registers: the owner deleted it (18.6), and a
+   * co-editor may not write to a corpse.
+   *
+   * THE THIRD GOVERNING REGISTER, AND WHY ITS ABSENCE WAS A HOLE (E9-A §1i). `pub.level`,
+   * `pub.coEdit` AND `pub.alive` are the three registers `fieldSpec` marks `gov: true` for a
+   * family kind, and `store.familyCoEditLevelOf` — the AUTHOR side, the predicate `interact.js`
+   * asks before it offers the gesture — reads all three. Stage 3b read two. So the honest client
+   * refused a co-edit of a deleted entry and the receiving side, which is the only side that
+   * decides anything (D7 layer 2), refused nothing: a patched build wrote `pub.text` onto a dead
+   * entity and every honest device folded it. The owner's own 18.6 restore then brought the
+   * entry back carrying somebody else's post-mortem text, and 17.6 attributed it to HIM, because
+   * his `pub.alive: true` is the newest register on the entity.
+   *
+   * IT IS READ THE SAME WAY THE OTHER TWO ARE — off the FINAL stage-3a registers — so it carries
+   * the same retroactivity: a deletion withdraws every co-editor write to that entity, and a
+   * restore (`pub.alive: true`) gives them back, on every device, in any arrival order. That is
+   * the same order-independence argument stated at stage 3b, not a new one.
+   *
+   * `false` AND ONLY `false`. An ABSENT `pub.alive` is not a deletion — meaning is never inferred
+   * from a missing field (ADR 004's own rule, and ADR 001 §5's `renderable` says it again) — and
+   * `familyCoEditLevelOf` compares against `false` for exactly that reason. A `null` (the
+   * withdrawal escape) is likewise not `false`.
+   */
+  NOT_ALIVE: 'notAlive',
   /**
    * The author — or the entity's structural OWNER — is not a current member OF THE SPACE THE OP
    * WAS SEALED INTO (§4.2b). Membership is per space, not the union `currentMembers` publishes:
@@ -1230,13 +1266,24 @@ export function foldAuthorized(ops, ctx) {
   // "Both predicates read only FAMILY registers (`pub.coEdit`, `pub.level`) — never the owner's
   // truth `visibility`/`coEdit`, which a peer does not have and could never evaluate."
   //
-  // Because the predicate reads the FINAL value, an owner who revokes co-edit retroactively
-  // withdraws every co-editor write to that entity, at every stamp, on every device. That is the
-  // price of order-independence and it is deliberate: the alternative — admitting a write
-  // because of a grant that was later withdrawn — makes admissibility depend on which op the
-  // folding device saw first, which is precisely the divergence this fold exists to prevent.
+  // Because the predicate reads the FINAL value, an owner who revokes co-edit — or downgrades
+  // the level, or deletes the entry — retroactively withdraws every co-editor write to that
+  // entity, at every stamp, on every device. That is the price of order-independence and it is
+  // deliberate: the alternative — admitting a write because of a grant that was later withdrawn
+  // — makes admissibility depend on which op the folding device saw first, which is precisely
+  // the divergence this fold exists to prevent.
+  //
+  // "ON EVERY DEVICE" IS A CLAIM ABOUT THE STORE, NOT ONLY ABOUT THIS FUNCTION, and for one
+  // release it was false: `store.registers()` was the log's plain LWW fold and this verdict
+  // reached only the ops that had not been appended yet. It is true again because
+  // `store.registers()` subtracts this fold's verdict — see the essay there, and
+  // `tests/fleet/e9-attack-diverge.test.js` §2a–§2h, which measure it end to end on real Macs.
   for (const op of forStage3b) {
     const kind = parseEntityKey(op.e).kind;
+    // ALL THREE GOVERNING REGISTERS, in the order `store.familyCoEditLevelOf` reads them, because
+    // the author side and the receiving side asking different questions is what E9-A §1i was.
+    // `pub.alive` is the one that used to be missing here; see `REJECT_REASONS.NOT_ALIVE`.
+    if (registerValue(govRegs, op.e, 'pub.alive') === false) { reject(op, STAGES[3], REJECT_REASONS.NOT_ALIVE); continue; }
     if (registerValue(govRegs, op.e, 'pub.coEdit') !== true) { reject(op, STAGES[3], REJECT_REASONS.NO_COEDIT); continue; }
     if (registerValue(govRegs, op.e, 'pub.level') !== 'geteilt') { reject(op, STAGES[3], REJECT_REASONS.NOT_GETEILT); continue; }
     // The membership question is asked ONCE, at the top of 3a, and it is asked per space

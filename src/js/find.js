@@ -122,11 +122,30 @@ function run(qRaw, keepCursor = false) {
     hits.push(n);
   }
   // A bar's stripe should light up with its label, not only the chip.
-  for (const n of [...hits]) {
+  //
+  // ═══ ONE PASS OVER THE STRIPES, NOT ONE PASS PER HIT (LZP-1007) ════════════
+  // This was `document.querySelectorAll('.board .bar[data-bar-id="…"]')` INSIDE
+  // the loop — a full-document attribute-selector scan per matching bar, so the
+  // cost was O(hits × nodes on the board). On a solo board that is invisible: a
+  // handful of bars, 1 975 nodes. On the 8-member fixture it is 135 bar labels
+  // against 4 195 nodes, and it is paid on EVERY KEYSTROKE, because `run()` is
+  // the input handler. Measured on that fixture (`e8-density-perf.dom.js` §E1),
+  // a one-letter query — the widest possible hit set, which is exactly what the
+  // FIRST keystroke of every search is — cost 25.4 ms, half of it here.
+  //
+  // The stripes are indexed once instead. Same nodes, same classes, same order;
+  // the only thing that changes is that the board is walked once rather than
+  // once per hit. `cssEsc` is no longer needed on this path at all, which also
+  // removes a bar id's ability to reach a CSS selector parser.
+  const stripes = new Map();
+  for (const b of document.querySelectorAll('.board .bar[data-bar-id]')) {
+    const id = b.dataset.barId;
+    const list = stripes.get(id);
+    if (list) list.push(b); else stripes.set(id, [b]);
+  }
+  for (const n of hits) {
     if (!n.dataset.barId) continue;
-    document
-      .querySelectorAll(`.board .bar[data-bar-id="${cssEsc(n.dataset.barId)}"]`)
-      .forEach((b) => b.classList.add('hit'));
+    for (const b of stripes.get(n.dataset.barId) || []) b.classList.add('hit');
   }
 
   // 14.2 [Could] — hits in rolled-out history, listed as clickable results.

@@ -45,6 +45,16 @@
   --head-h: 26px;
   --pad-h: 62px;
 
+  /* ── THE TWO THINGS THAT MAY STAND TO THE RIGHT OF A SENTENCE ─────────────
+     Both used to be OVERLAYS painted on top of the day row; both are now
+     RESERVATIONS the row makes before the text is laid out. Principle 3 — „the
+     user's own entries always win visual priority" — is a statement about
+     paint, and an opaque box over a text node loses it outright. Truncation
+     with an ellipsis does not: v1 already ships that trade (2.5), the full text
+     is one hover away, and the reader can SEE that there is more. */
+  --more-w: 17px;              /* 2.4 — the „+n" badge's fixed box, „+99" wide */
+  --label-keep: 5px;           /* 3.7 — the daylight a yielded bar label leaves her last glyph */
+
   --font: 'Ubuntu', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
   --mono: 'Ubuntu Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
@@ -226,7 +236,23 @@ body.finding .search-box .kbd { display: none; }
 .day {
   height: var(--row-h); display: flex; align-items: center; position: relative;
   border-bottom: 1px solid var(--line-2); overflow: hidden;
+  /* THE LANE RESERVATION LIVES ON THE ROW, NOT ON `.d-body`.
+     It used to be `.d-body { padding-right: var(--gutter) }`. Moving it here
+     changes no geometry at all — `.d-body`'s text budget was `clientWidth −
+     gutter` and is `clientWidth` now, the same pixels either way — but it makes
+     the row's content box END at the text column, so anything that has to stand
+     to the right of the sentence can be a SIBLING that takes width rather than
+     an overlay that covers it. `.day.claimed .d-more` is the one element that
+     uses that, on the one kind of row where it has to. */
+  padding-right: var(--gutter);
 }
+/* 3.7 — a bar label landed on a row that already carries the user's ink, and has
+   retreated into the lane gutter rather than paint over it (`.bar-label.on-ink`).
+   The row itself does NOT widen its reservation: `layout.js:FAMILY_LAYOUT_COST_PX`
+   publishes `noteTextWidth: 0` and `family-density.dom.js` §4 holds a family
+   board to the SAME geometry as a solo one, and a family carries eight times the
+   bars. The class exists so the „+n" badge can get out of a gutter the label is
+   now standing in — see `.day.claimed .d-more`. */
 .day.void { background: var(--bg-void); border-bottom-color: var(--line-2); }
 .day.we { background: var(--bg-weekend); }
 .day.fer { background: var(--bg-ferien); }
@@ -249,8 +275,28 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
   background: var(--ink-1);
 }
 
+/* ── THE NARROW-COLUMN RECLAIM (v1 story 2.5 at v1's own 92 px minimum) ──────
+   `.d-num` + `.d-wd` are 30 px of FIXED chrome. At the 118 px default that is a
+   quarter of the column and nobody notices; at the 92 px minimum — a shipped
+   setting (`settings.js`), not an edge case — it is a THIRD, and what is left
+   after the 27 px lane gutter is 35 px of line for a sentence that has to carry
+   the family prefix too. Measured: a peer's worst-case note showed TWO
+   characters of „Elternsprechtag Klasse 3b" there.
+
+   So the chrome yields before the sentence does, and it yields exactly where
+   the pressure is: the clamps below are NO-OPS at 114 px and above, so the
+   default board and every v1 characterization row are untouched to the pixel.
+   Below that the weekday letter fades out first (it is the most derivable thing
+   on the row — the column is one month and the weekend is already shaded) and
+   the day number tightens to its own „31" plus 2 px of bearing.
+
+   `print.css` sets its own `.d-num`/`.d-wd` widths per paper size at
+   `body.paper-a4 .d-num` specificity, which outranks these — paper re-metrics
+   itself and must not be re-metricked again by a screen setting. */
 .d-num {
-  width: 17px; flex: none; padding-left: 4px;
+  width: clamp(13px, var(--col-w) - 101px, 17px); flex: none;
+  padding-left: clamp(2px, var(--col-w) - 114px, 4px);
+  overflow: hidden;
   font: 500 9.5px var(--mono); color: var(--ink-3);
   font-variant-numeric: tabular-nums; letter-spacing: -.2px;
 }
@@ -258,11 +304,14 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 .day.today .d-num { color: var(--ink-1); font-weight: 700; }
 .day.hol .d-num { color: #7A6BB5; font-weight: 700; }
 
-.d-wd { width: 13px; flex: none; font: 400 8.5px var(--font); color: var(--ink-2); }
+.d-wd {
+  width: clamp(0px, (var(--col-w) - 104px) * 2, 13px); flex: none; overflow: hidden;
+  font: 400 8.5px var(--font); color: var(--ink-2);
+}
 
 .d-body {
   flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center;
-  padding-right: var(--gutter); gap: 0;
+  gap: 0;
 }
 
 .d-hol {
@@ -315,20 +364,37 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
    be read as the 3 px demoted-holiday dot that sits two elements to its left in
    the same row. Same 3 px as that dot: one dot vocabulary, two meanings kept
    apart by hue rather than by size. */
+/* THE DOT CARRIES ITS OWN GROUND (1k · §A5).
+   „Ferien schraffieren" switches the Ferien layer to a 45° hatch — a 1 px stroke
+   every 5 px. A bare 3 px disc is SMALLER THAN THAT PERIOD: at 5× the dot and
+   the texture are the same order of mark, and the board's only signal that a
+   peer changed something (17.5) has to be told apart from wallpaper. The same
+   is true, less violently, of every ambient shade.
+
+   So the mark is now a 5 px OPAQUE PLATE with the 3 px accent disc and its
+   hairline ring drawn inside it. The plate is one full hatch period across, so
+   the texture stops at the mark's edge instead of running through it, and the
+   dot is read against `--surface` on every row the board can produce.
+
+   IT COSTS THE SAME 5 px. v1's dot was 3 px of disc plus 2 px of margin; this is
+   5 px of box plus none — `PREFIX_COST_PX.neu` is untouched, and so is the
+   1 px of visual bearing the margin used to buy, which the plate's own rim now
+   provides. `closest-side` keeps the three radii proportional, so Komfort's
+   larger dot is the same drawing and not a different one. */
 .note .neu-dot,
 .bar-label .neu-dot {
   display: inline-block; vertical-align: middle;
-  /* 1 px of left bearing so the dot does not touch the weekday column — a text
-     node has natural side bearing and a 3 px disc has none. Taken OUT of the
-     right margin, so the element still costs the 5 px `PREFIX_COST_PX` prices. */
-  width: 3px; height: 3px; margin: 0 1px 0 1px; border-radius: 50%;
-  background: var(--accent-a);
-  box-shadow: 0 0 0 .5px rgba(61, 33, 133, .5);
+  width: 5px; height: 5px; margin: 0; border-radius: 50%;
+  background: radial-gradient(circle closest-side,
+    var(--accent-a) 0 60%,
+    rgba(61, 33, 133, .5) 60% 84%,
+    var(--surface) 84%);
 }
 /* On a bar label the dot sits ON the member's colour, and `--accent-a` against
-   `gruen` or `gold` is two tones of the same lime. The ring inverts so the dot
-   holds on all ten member tones rather than on the eight it happens to suit. */
-.bar-label .neu-dot { box-shadow: 0 0 0 .75px rgba(255, 255, 255, .95); }
+   `gruen` or `gold` is two tones of the same lime. The plate is the same white
+   on both, so the dot holds on all ten member tones rather than on the eight it
+   happens to suit — this is the ring the label used to draw for itself, made
+   part of the mark instead of an exception to it. */
 
 /* 17.2 — the initial chip. Whose is this, answered before what it is.
    8 px so a capital letter still has ~5 px of cap height at 6.5 px type; it is
@@ -435,14 +501,98 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 }
 .note.dragging { opacity: .35; }
 
+/* ── 2.4 · THE „+n" BADGE — it moved OUT of the sentence, not on top of it ────
+   v1 drew this `position:absolute; right: calc(var(--gutter) + 1px)` with an
+   opaque `var(--chip)` fill — a box whose right edge sat ONE PIXEL INSIDE the
+   text column's own content edge. On a solo board that is nearly harmless
+   because most days never overflow. E8 made overflow the normal case (97 % of
+   family day rows carry a badge) and made the number two digits, and the
+   measurement then read: 15.1 px of a 61 px line painted over, INCLUDING the
+   position where WebKit puts the ellipsis — so the reader lost the characters
+   AND the only cue that characters were missing. Stories 2.4 and 2.5 both
+   failed on it.
+
+   IT IS STILL AN OVERLAY, AND THAT IS THE POINT. The obvious fix — make it a
+   flex sibling of `.d-body` — was written first and measured worse: it takes its
+   width out of the note text, a family board carries far more badges than a solo
+   one, and `family-density.dom.js` §4 caught the family board's `.d-body`
+   dropping from 60 px to 42 px against `layout.js:FAMILY_LAYOUT_COST_PX`'s
+   published `noteTextWidth: 0`. So the badge stays out of flow and MOVES
+   INSTEAD: `--gutter − 2px − --more-w` parks it inside the lane gutter, which is
+   board furniture the row already reserved, with 2 px of daylight between its
+   left edge and `.note`'s paint box (`.note` overhangs `.d-body`'s content edge
+   by its 1 px of bleed padding). Every board keeps the geometry it had, and no
+   sentence is under anything.
+
+   WHAT IT NOW CROSSES INSTEAD. At `right: 8px` the badge clears lane 0 and
+   overlaps lanes 1 and 2 where those carry a stripe on this row. That is the
+   right thing to spend: a stripe is a continuous vertical band that reads above
+   and below the 10 px badge, a sentence is not, and this badge is the element
+   that ANNOUNCES lane overflow („n weitere Balken") in the first place. `z-index`
+   puts it above the stripes and below the labels, which is the reading order.
+
+   The fixed `--more-w` box is what makes the parking spot computable without
+   measuring a content-sized box per row. 17 px holds „+99" at 8 px/600. */
 .d-more {
-  position: absolute; right: calc(var(--gutter) + 1px); top: 50%;
-  transform: translateY(-50%);
-  font: 600 8px var(--font); color: var(--ink-2);
-  background: var(--chip); border-radius: 3px; padding: 1px 3px; line-height: 1.1;
-  cursor: pointer;
+  position: absolute; right: calc(var(--gutter) - 2px - var(--more-w)); top: 50%;
+  transform: translateY(-50%); z-index: 3;
+  width: var(--more-w);
+  font: 600 8px var(--font); color: var(--ink-2); text-align: center;
+  background: var(--chip); border-radius: 3px; padding: 1px 0; line-height: 1.1;
+  cursor: pointer; overflow: hidden;
+}
+/* …EXCEPT where a bar label has already retreated into the same gutter. Two
+   17–22 px chips do not fit in 27 px side by side, so on that one kind of row
+   the badge steps INTO the line and takes width the way a flex sibling does —
+   `margin-left: 3px` for the same 2 px of daylight. The sentence truncates with
+   its ellipsis; it is still never covered. This is the only row on the board
+   where the family layer costs a character, and it costs it in the open. */
+.day.claimed .d-more {
+  position: static; transform: none; z-index: auto;
+  flex: none; margin-left: 3px;
+}
+/* ── 17.5 · THE BADGE THAT IS HIDING A CHANGE ────────────────────────────────
+   „Jede Änderung ist bemerkbar." A peer change that the capacity rule could not
+   give a line to has no `.note` to carry a „neu" dot, so the „+n" badge is the
+   only mark left on that row — and until this rule the badge looked identical
+   whether it hid a change or four unchanged entries. `board.js` sets the class
+   from `layout.js:day.overflowNew`, which counts `foreign && isNew` and
+   therefore inherits §7.2's two suppressions unchanged: a downgrade never
+   counts, a deletion has nothing to count.
+
+   WHY AN UNDERLINE AND NOT THE DOT. The 17.5 mark elsewhere is a 5 px lime
+   plate, and there is nowhere to put one here: the badge is a FIXED 17 px box
+   („+99" at 8 px/600 fills it), and a corner dot would land on the second digit
+   — the same „a mark over the reader's text" defect this pass spent itself
+   closing. So the accent goes where the box has room and the glyphs do not
+   reach: a 2 px rule along the bottom edge, below the cap height of „+9", drawn
+   as a BACKGROUND so it is not a box, adds no child node to the row's collision
+   audit, and costs `layout.js:PREFIX_COST_PX` nothing.
+
+   It says „at least one of these is new" and no more than that; the count is in
+   the hover, because a digit at this size would not be readable (2.5). And it
+   is quiet by construction — it appears only on the minority of rows that are
+   actually holding a change (32 of 219 on the 8-member fixture).
+
+   It survives `@media print`'s `background: transparent` because this rule is
+   (0,2,0) against that rule's (0,1,0), which is wanted: on paper the badge is
+   the ONLY thing standing for the entries it hides, so the tell matters more
+   there, not less. */
+.d-more.has-new {
+  background-image: linear-gradient(var(--accent-a), var(--accent-a));
+  background-repeat: no-repeat;
+  background-position: left bottom;
+  background-size: 100% 2px;
 }
 .d-more:hover { background: var(--ink-1); color: #fff; }
+/* The hover state repaints the plate, so the tell has to be restated on it —
+   otherwise pointing at the badge is the one gesture that hides what it says. */
+.d-more.has-new:hover {
+  background-image: linear-gradient(var(--accent-a), var(--accent-a));
+  background-repeat: no-repeat;
+  background-position: left bottom;
+  background-size: 100% 2px;
+}
 
 /* inline editor */
 .inline-edit {
@@ -498,6 +648,44 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 }
 .bar-label.selected { box-shadow: 0 0 0 1.5px var(--ink-1); }
 .bar-label .cue { opacity: .85; }
+
+/* ── 3.7 · THE LABEL YIELDS TO INK IT WOULD OTHERWISE BURY ────────────────────
+   DESIGN-DECISIONS §C promises „the chip lands on empty space rather than
+   covering the user's own ink". The scan in `layout.js` tries for that and, on a
+   solo board, mostly gets it. On the 8-member fixture 99 % of day rows carry
+   ink, so there IS no empty row to land on: measured, 98 of 142 labels were
+   painted over an entry's text, 46 of them over the OWNER'S own, and 955 px of
+   her sentences were underneath an opaque 66 px chip. Solo was not clean either
+   — 3 of 35.
+
+   The scan cannot fix this; when every row is inked there is nowhere to move to.
+   What is left is a priority question, and principle 3 answers it: HER INK WINS —
+   „when something must be sacrificed, it is never her sentence." So the label
+   retreats into the LANE GUTTER, which is board furniture and already reserved,
+   and pays for itself out of that instead of out of her line. Her sentence loses
+   nothing at all: not a pixel of width, and not a pixel of paint.
+
+   IT IS NOT A RESERVATION, DELIBERATELY. Making the row wider on the right would
+   also stop the overprint, and it is what a first pass did — but a family board
+   carries eight times the bars, so the cost would land on a family board and not
+   on a solo one, and `layout.js:FAMILY_LAYOUT_COST_PX` publishes
+   `noteTextWidth: 0` while `family-density.dom.js` §4 measures a family board
+   against a solo one and holds them identical. Retreating costs neither board
+   anything, so both stay true. (Measured with the reservation: `.d-body` went
+   60 px solo → 42 px family on the same day. §4 caught it.)
+
+   `right: 2px` — the column edge, not the label's own lane — is set by
+   `board.js` on the same branch, because a 22 px chip hung one lane-gap inboard
+   of lane 2 would still have its left half in the text column. `usedLabelRows`
+   guarantees at most one label per row per column, so nothing collides there.
+
+   WHAT A YIELDED LABEL STILL SAYS: its colour — which is how a stripe identifies
+   itself everywhere else on this board — its ↑ continuation cue, its „neu" dot,
+   its owner's initial chip, its exposure badge, and as much of the name as the
+   gutter holds. The full name is on hover and in the day popover, both of which
+   v1 already ships. A label on an ink-FREE row is untouched and keeps all 66 px:
+   this rule fires only where the alternative was burying a sentence. */
+.bar-label.on-ink { max-width: calc(var(--gutter) - var(--label-keep)); }
 
 /* 16.7 — the Belegt BAR, viewer side. The stripe keeps the owner's colour and
    its full length, because duration and owner are the disclosure; only the
@@ -657,6 +845,9 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
     --dens-num: 11px;      /* 9.5  → the day number */
     --dens-chip: 9.5px;    /* 8    → the initial chip / exposure badge box */
     --dens-chip-type: 7.5px; /* 6.5 → the letter inside the chip */
+    /* the „+n" box holds 9.5 px type now, so it grows by the same 7/6 — a badge
+       that stayed 17 px would clip „+99" at Komfort and only at Komfort */
+    --more-w: 20px;        /* 17   → the „+n" badge box */
   }
 
   /* the two fixed boxes ahead of the text */
@@ -677,8 +868,12 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
     width: var(--dens-chip); height: var(--dens-chip);
     font-size: var(--dens-chip-type); line-height: var(--dens-chip);
   }
+  /* 5 × 7/6 = 5.83 — the plated dot of §A5, at Komfort's own scale. The drawing
+     is proportional (`closest-side`), so this is the same mark and not a
+     second one; Komfort therefore IMPROVES the dot rather than merely
+     enlarging its footprint. */
   body.density-komfort .note .neu-dot,
-  body.density-komfort .bar-label .neu-dot { width: 3.5px; height: 3.5px; }
+  body.density-komfort .bar-label .neu-dot { width: 6px; height: 6px; }
   body.density-komfort .note .exp,
   body.density-komfort .bar-label .exp { width: 8px; height: 8px; }
   /* the COVERAGE channel keeps its ratio: 3/7 of the box was Belegt, so 3.5/8 is */
