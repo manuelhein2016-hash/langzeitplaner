@@ -8,7 +8,7 @@
 // `layout.js` and `board.js` are unchanged for solo mode. Everything v2 adds is ADDITIVE on the
 // entry objects (ADR 001 §8.4), which is why a v1 build still loads a v2 board.
 //
-// FOUR THINGS IN HERE ARE LOAD-BEARING AND EASY TO BREAK. Each is commented where it happens.
+// FIVE THINGS IN HERE ARE LOAD-BEARING AND EASY TO BREAK. Each is commented where it happens.
 //
 // 1. THE PROMOTION ASYMMETRY (ADR 004 §4.1, property P7c). For my own entries I read the TRUTH
 //    registers and then promote a co-editor's `pub.*` write — but NEVER my own `pub.*` writes.
@@ -36,6 +36,17 @@
 //    reference-repair pass (step 7) must not touch them, and neither must the category filter.
 //    Routing a foreign entry through `categoryVisible(undefined)` would answer "visible" by v1's
 //    dangling-reference rule; correct by accident is not good enough for a privacy control.
+//
+// 5. THE BAR'S INTERVAL IS REPAIRED ONLY WHERE IT WAS FOLDED, NEVER WHERE IT WAS AUTHORED
+//    (E9-D §4c-b, ADR 001 §5 step 7's second clause). `pub.startDate` and `pub.endDate` are two
+//    registers with two stamps and two independent per-field LWW winners, so a co-edited bar has
+//    a value NO SINGLE FIELD OWNS and two ordered drags converge to an inverted pair that draws
+//    zero segments. `repairInterval()` collapses that pair onto its later-stamped edge — a pure
+//    function of the register map, idempotent, and it never rewrites the log. It is gated on the
+//    interval having been FOLDED from the family registers, because a bar whose two edges are my
+//    own truth is a single-writer pair with no race in it, v1 renders that one degenerately
+//    rather than repairing it, and the v1 characterization oracle says so in two places
+//    (`tests/tier1/layout.test.js:913`, `tests/attack/round6-coercion.test.js` R6-9c).
 //
 // WHAT THIS FILE DOES NOT DO. There is no incremental applier (ADR 001 §5.1): `materialize()` is
 // a full rebuild and there is deliberately no second code path guarded by an equivalence test,
@@ -129,6 +140,7 @@ export const PREF_ENTITY = 'pref:app';
 /** @typedef {Map<string, Map<string, Register>>} RegisterMap */
 
 const EMPTY = new Map();
+const EMPTY_SET = new Set();
 
 /** @param {RegisterMap} regs @param {string} e @returns {Map<string, Register>} never null */
 const cellsOf = (regs, e) => (regs && regs.get(e)) || EMPTY;
@@ -224,12 +236,19 @@ export const PROMOTABLE = Object.freeze(
  * @param {Map<string, Register>} cells
  * @param {string} kind          key into FIELDS
  * @param {(f:string)=>string} rename
+ * `by` IS THE PROVENANCE MAP: projected field name → the register that produced its value. It
+ * exists for exactly one reader, `repairInterval()`, which has to compare the STAMPS of the two
+ * edges of a bar and not merely their values. It is built here rather than re-derived later
+ * because re-deriving it for one of my own entries would mean a second implementation of
+ * promotion, and this file's whole argument is that there is only ever one (§2, `promote`).
+ *
  * @param {string} id            the v1 `id` token for this entry — always the FIRST key
- * @returns {{fields:Object, used:Register[]}}
+ * @returns {{fields:Object, used:Register[], by:Map<string,Register>}}
  */
 function projectCells(cells, kind, rename, id) {
   const fields = { id };
   const used = [];
+  const by = new Map();
   // The iteration order is `FIELDS[kind]`'s DECLARATION order, never the register map's.
   // Map iteration order is op-ARRIVAL order: projecting in it would give two devices holding
   // identical registers different key orders in the same entry, and `board.json` is
@@ -238,10 +257,12 @@ function projectCells(cells, kind, rename, id) {
   for (const field of FIELD_ORDER[kind] || []) {
     const reg = cells.get(field);
     if (!carries(reg)) continue;
-    fields[rename(field)] = reg.value;
+    const name = rename(field);
+    fields[name] = reg.value;
     used.push(reg);
+    by.set(name, reg);
   }
-  return { fields, used };
+  return { fields, used, by };
 }
 
 /** Declared field names per kind, wildcards dropped — the canonical projection order. */
@@ -269,15 +290,24 @@ const FIELD_ORDER = Object.freeze(Object.fromEntries(
  * because ADR 004 §4.1 requires it to; the CODE does not, because a second implementation of the
  * correctness heart is a second thing to get wrong.
  *
+ * `by` and the returned set are the PROVENANCE half, and they are kept here rather than
+ * reconstructed because this is the one place that knows which register actually won. The set
+ * names the truth fields whose projected value came from the FAMILY side, which is precisely the
+ * condition under which a bar's interval is a folded value rather than an authored one — see
+ * `repairInterval()`.
+ *
  * @param {Object} fields   the truth projection, mutated in place (a fresh object we own)
  * @param {Register[]} used the truth registers that produced it, appended to
+ * @param {Map<string, Register>} by  provenance, updated in place
  * @param {Map<string, Register>} truthCells
  * @param {Map<string, Register>} pubCells
  * @param {string} truthKind 'note' | 'bar'
  * @param {string|null} me
+ * @returns {Set<string>} the truth fields this call took from a `pub.*` register
  */
-function promote(fields, used, truthCells, pubCells, truthKind, me) {
-  if (withdrawnByOther(pubCells, me)) return;        // ← story 18.3. See withdrawnByOther().
+function promote(fields, used, by, truthCells, pubCells, truthKind, me) {
+  const promoted = new Set();
+  if (withdrawnByOther(pubCells, me)) return promoted;  // ← story 18.3. See withdrawnByOther().
   for (const [pubField, truthField] of Object.entries(PROMOTABLE[truthKind])) {
     const t = truthCells.get(truthField);
     const p = pubCells.get(pubField);
@@ -286,9 +316,11 @@ function promote(fields, used, truthCells, pubCells, truthKind, me) {
     // that ADR 001 §5.1 rejects for the materializer itself.
     const winner = promoteRegister(t, p, me);
     if (winner === undefined || winner === t) continue;  // the truth stood; step 1 emitted it
+    promoted.add(truthField);
     if (carries(winner)) {
       fields[truthField] = winner.value;
       used.push(winner);
+      by.set(truthField, winner);
       continue;
     }
     // The co-editor's write wins AND it is `null` — an explicit CLEAR, not an absence. `null` is
@@ -304,9 +336,93 @@ function promote(fields, used, truthCells, pubCells, truthKind, me) {
     // The admin unshare, which also writes nulls, never reaches here — `withdrawnByOther` above
     // returned early — so this cannot blank the owner's own note (INV-R3).
     delete fields[truthField];
+    by.delete(truthField);
     const i = used.indexOf(t);
     if (i >= 0) used.splice(i, 1);   // and it must stop claiming 17.6's „geändert" line
   }
+  return promoted;
+}
+
+/**
+ * ── ADR 001 §5 STEP 7, SECOND CLAUSE: THE BAR'S INTERVAL, REPAIRED IN THE PROJECTION ─────────
+ *
+ * > A bar whose folded `startDate` is after its folded `endDate` projects with its interval
+ * > repaired from the LATER-STAMPED of the two registers: that edge is the one the family most
+ * > recently agreed to move, and the other follows it.
+ *
+ * THE DEFECT IT CLOSES (E9-D §4c-b, `tests/fleet/e9-attack-restore.test.js`). `pub.startDate` and
+ * `pub.endDate` are two registers with two stamps and two independent per-field LWW winners, so a
+ * co-edited bar carries a value NO SINGLE FIELD OWNS. Mama pulls the right edge in to 1 Nov —
+ * ordered against the 5 Okt start she can see. Oma, who has not pulled her write yet, pushes the
+ * left edge out to 1 Mrz — ordered against the 30 Jun end HE can see. Both gestures are legal
+ * where they are made, per-field LWW gives each of them exactly the field they asked for, and the
+ * bar converges to `start 2027-03-01 / end 2026-11-01`. `buildBoard` then emits ZERO segments and
+ * the family holiday bar leaves every board in the family — while still sitting in `state.bars`
+ * and surviving a reload. **Nobody's write was displaced, so 18.5 correctly tells nobody
+ * anything** (`registers.js:displacedBy` answers `null` for both authors), which is what makes it
+ * silent.
+ *
+ * WHY IT IS HERE AND NOT IN A DOOR. `store.js:2124 _intervalStaysOrdered` closed the half a door
+ * can honestly promise: it declines a gesture that would invert the bar THIS MAC CAN SEE. It
+ * cannot close this half, and no author-side predicate anywhere can, because neither author holds
+ * the other's write. The convergent half has to be a PROJECTION INVARIANT for the same reason the
+ * dangling-category repair below is one: it is a pure function of the register map, so every
+ * device computes the same answer with nothing to synchronise; it is idempotent (after the repair
+ * `start === end`, so it does not fire again); and it repairs an unrenderable entry rather than
+ * dropping it. **It never rewrites the log** — both co-editors' ops stand untouched, and either
+ * of them dragging an edge through the shipped door still wins the register outright (§4c-c).
+ *
+ * WHY *COLLAPSE ONTO THE LATER EDGE*, AND NOT A SWAP. A swap — projecting `[end, start]` — draws
+ * the bar across `2026-11-01 → 2027-03-01`, which is exactly the span BOTH authors just excluded:
+ * Mama said it ends on 1 Nov and Oma said it starts on 1 Mrz. That is a third answer neither of
+ * them wrote, invented by the app, which is the very thing §4c set out to stop. Collapsing onto
+ * the later-stamped edge invents nothing: it is per-field LWW applied to the one value no single
+ * field owns, so there is no second conflict policy in the product to learn, and the bar lands
+ * where the most recent gesture put a finger. It draws, it is one day long, its 17.6 attribution
+ * names the author of that later write, and any drag repairs it for good.
+ *
+ * THE TIE IS REACHABLE AND IT IS NOT A DEGENERATE CASE. One op can write both edges: a whole-bar
+ * drag of an already-inverted bar does exactly that (§4c-c), and the door deliberately allows it.
+ * Then both registers carry the same stamp and the same opId, `cmpWrites` falls through to its
+ * value key — and because the precondition of this whole function is `start > end`, and
+ * `valueKey` prefixes strings with a constant, `cmpWrites` answers "start is later" every time.
+ * So a single-op inverted write anchors on the LEFT edge, which is what makes dragging a broken
+ * bar behave exactly like dragging the one-day bar the user can actually see.
+ *
+ * ── AND THE USER IS NOT TOLD. THAT IS A DECISION, NOT AN OMISSION. ────────────────────────────
+ *
+ * 18.5's notice fires for "the person whose in-flight edit lost", and here nobody lost: both
+ * registers stand, both authors' fields are exactly what they wrote, and `displacedBy` has
+ * nothing to report. The repair is a DISPLAY-TIME clamp on an inconsistent pair, not a write —
+ * Mama's `pub.endDate` is still `2026-11-01` in every register map and in the log, and it becomes
+ * the visible end again the moment anybody moves an edge. Telling her "your edit lost" would be
+ * false. Inventing a second notice — "this bar was repaired automatically" — would be a conflict
+ * surface for a conflict nobody experienced, on a board Principle 10 says is not a messenger and
+ * whose only conflict UI, by design, is 18.5's one line. What the board says instead is what it
+ * already says about every change: the bar is THERE, it is where the last gesture left an edge,
+ * and 17.6's attribution line names who moved it and when. Boring, which is the requirement.
+ *
+ * @param {Object} fields  the projected entry, mutated in place (a fresh object we own)
+ * @param {Map<string,Register>} by  provenance from `projectCells` / `promote`
+ * @returns {boolean} whether the interval was repaired
+ */
+function repairInterval(fields, by) {
+  const s = fields.startDate;
+  const e = fields.endDate;
+  // A half-published bar has no interval to invert, and a non-string edge is a coerced or
+  // hand-edited value the v1 oracle renders verbatim (R6-9b/R6-9d). Neither is this rule's
+  // business — `_intervalStaysOrdered` declines to judge exactly the same two shapes.
+  if (typeof s !== 'string' || typeof e !== 'string') return false;
+  if (s <= e) return false;                          // ISO dates compare lexicographically
+  const rs = by.get('startDate');
+  const re = by.get('endDate');
+  // Within this file both registers exist whenever both values do — `by` is written wherever
+  // `fields` is. A caller that hands in a candidate built some other way still gets a repair
+  // rather than an invisible bar, and it is still a deterministic function of what was passed.
+  const startIsLater = rs && re ? cmpWrites(rs, re) > 0 : !!rs;
+  if (startIsLater) fields.endDate = s;
+  else fields.startDate = e;
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -421,12 +537,34 @@ function ownCandidate(regs, key, parsed, ctx) {
   const truthCells = cellsOf(regs, key);
   if (truthCells.size === 0) return null;
 
-  const { fields, used } = projectCells(truthCells, truthKind, (f) => (f === '_alive' ? 'alive' : f), parsed.id);
+  const { fields, used, by } = projectCells(truthCells, truthKind, (f) => (f === '_alive' ? 'alive' : f), parsed.id);
 
   const me = ctx.me || null;
   const fkey = me && ctx.familySpaceId ? familyKeyFor(key, me) : null;
   const pubCells = fkey ? cellsOf(regs, fkey) : EMPTY;
-  if (pubCells.size > 0) promote(fields, used, truthCells, pubCells, truthKind, me);
+  const promoted = pubCells.size > 0
+    ? promote(fields, used, by, truthCells, pubCells, truthKind, me)
+    : EMPTY_SET;
+
+  // ADR 001 §5 step 7, second clause — and ON MY OWN BAR IT IS GATED ON THE FOLD, which is the
+  // whole difference between repairing a race and rewriting a file.
+  //
+  // A bar whose two edges are both my own truth registers is a SINGLE-WRITER pair: one device,
+  // one order of writes, and `interact.js:263/288-289` normalises every gesture that could invert
+  // it, so v1 can only ever have stored `startDate <= endDate` (pinned by
+  // `tests/tier1/layout.test.js:906`). An inverted own bar therefore did not come from a race —
+  // it came from a hand-edited or imported `board.json`, and v1's answer to that file is to draw
+  // it degenerately and repair nothing (`layout.test.js:913`, negative `rows`). That answer is
+  // the v1 characterization ORACLE, `tests/attack/round6-coercion.test.js` R6-9c asserts v2 paints
+  // it segment-for-segment identically, and this file may not quietly overrule either.
+  //
+  // The moment ONE edge is promoted from a co-editor's `pub.*` write, the pair stops being
+  // authored and starts being FOLDED — two registers, two stamps, two independent LWW winners,
+  // and the ordering between them enforced by nothing. That is the race, and it is the only
+  // thing this repair is for.
+  if (truthKind === 'bar' && (promoted.has('startDate') || promoted.has('endDate'))) {
+    repairInterval(fields, by);
+  }
 
   const pubLevelReg = pubCells.get('pub.level');
   const level = carries(pubLevelReg) ? pubLevelReg.value : null;
@@ -468,7 +606,11 @@ function foreignCandidate(regs, key, parsed, ctx) {
   const cells = cellsOf(regs, key);
   if (cells.size === 0) return null;
 
-  const { fields, used } = projectCells(cells, parsed.kind, displayName, key);
+  const { fields, used, by } = projectCells(cells, parsed.kind, displayName, key);
+  // ADR 001 §5 step 7, second clause. Every edge of a FOREIGN bar is a `pub.*` register by
+  // construction — a viewer holds nothing else (ADR 004 §4.2) — so the interval is folded, never
+  // authored, and the gate the own side needs is satisfied here by the entity kind itself.
+  if (parsed.kind === 'fbar') repairInterval(fields, by);
   const owner = parsed.owner;
   const rec = memberRecord(ctx, owner);
   const level = typeof fields.level === 'string' ? fields.level : null;
@@ -836,6 +978,14 @@ export function materialize(regs, ctx = {}) {
   // Step 5 — the deterministic sorts. See the header: these are user-visible, not cosmetic.
   const sortedCategories = sortCategories(categories);
 
+  // Step 7 has TWO clauses and only the first one is here. The second — a folded bar interval
+  // that runs backwards is repaired onto its later-stamped edge (E9-D §4c-b) — is
+  // `repairInterval()`, and it runs inside the candidate builders because it needs the STAMPS of
+  // the two edges, which for one of my own entries are only known where promotion happened.
+  // Hoisting it up here would mean re-deriving which register won, i.e. a second implementation
+  // of the promotion asymmetry, and §5.1's argument against a second code path applies to that
+  // with full force. Same shape, same guarantees: pure, idempotent, never rewrites the log.
+  //
   // Step 7 — reference repair as a PROJECTION INVARIANT, not a mutation (ADR 001 §5 step 7).
   // v1 does this once, at load (`store.js:82-88`); v2 does it on every projection, so it is
   // idempotent and never rewrites the log. That matters because "create note in category X"

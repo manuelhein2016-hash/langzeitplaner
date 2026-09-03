@@ -722,6 +722,64 @@ export function membersUIState() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
+// 5b. WHAT A SECOND FAMILY SURFACE MAY BORROW FROM HERE — and why it is three functions
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Story 18.3's moderation list (`family/familysettings.js`) has to say WHOSE entry each row is.
+// It could have read `store.registers()` itself and drawn its own coloured circle, and then the
+// product would have had TWO answers to "what colour is Mama" and TWO chip geometries — which is
+// the exact failure this file's header opens by refusing ("two modules would be two readers, and
+// the failure mode of two readers is a legend chip and a settings row disagreeing about somebody's
+// colour, which is unfalsifiable at a glance").
+//
+// So the borrowing is explicit and it is narrow: the SAME chip node, the SAME name, and the SAME
+// register map this module read. Nothing here is new state and nothing here writes.
+//
+// ⚠ `membersRegisters()` IS THE MAP THE MEMBER SURFACES READ, INCLUDING THE TEST PORT'S. That is
+// the point of it: a moderation list built over `store.registers()` while the member list was
+// built over an injected map would name owners the list has never heard of.
+
+/**
+ * The 16 px chip for one member — the same object as the legend's and as 17.2's on the board.
+ *
+ * A member id the circle does not know renders as the NEUTRAL chip (`·`, no colour), exactly as
+ * D9's pre-wrap row does. It is never a guessed tone, and it is never an error: an entry whose
+ * owner has been removed (20.2) is precisely this case, and the moderation list must still be
+ * able to draw the row.
+ *
+ * @param {string} memberId @param {ReturnType<membersUIState>} [view]
+ * @returns {HTMLElement}
+ */
+export function memberChipFor(memberId, view = membersUIState()) {
+  ensureCss();
+  const id = typeof memberId === 'string' ? memberId : '';
+  const row = view.members.find((r) => r.memberId === id) || null;
+  return chipNode(row || {
+    memberId: id, displayName: null, colorRef: null, initial: '·', alive: true, hidden: false,
+  }, { interactive: false });
+}
+
+/**
+ * The display name one member has published, or `null` while it is still ciphertext (D9).
+ * `null` and not „—": the caller decides how to render an absence, and this module already owns
+ * the one dash it renders (`MEMBERS_COPY.waitingNoName`).
+ * @param {string} memberId @param {ReturnType<membersUIState>} [view] @returns {string|null}
+ */
+export function memberNameFor(memberId, view = membersUIState()) {
+  const row = view.members.find((r) => r.memberId === memberId) || null;
+  return row && row.displayName ? row.displayName : null;
+}
+
+/** The RegisterMap the member surfaces read — the mounted port's, or the live store's. */
+export function membersRegisters() {
+  if (port && typeof port.registers === 'function') return port.registers();
+  return typeof store.registers === 'function' ? store.registers() : null;
+}
+
+/** This module's stylesheet, for a family surface that draws a `.member-chip` of its own. */
+export const ensureMembersCss = () => ensureCss();
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
 // 6. „Familie" in the settings sheet — 15.4 and 15.6
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 

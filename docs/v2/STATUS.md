@@ -1,6 +1,92 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-03 · **Stopped at:** **THE DENSITY / CO-EDITOR INTEGRATION PASS** — four
+**Last session:** 2026-09-03 · **Stopped at:** **THE SHELL TRANSPORT INTEGRATION (LZP-1002)** —
+the family was demonstrated in the app we actually ship, not in a browser. Full record:
+`docs/v2/SHELL-VERIFICATION.md`; findings in `FINDINGS.md` §19.
+
+---
+
+## THE HEADLINE: `chooseTransport()` returns **`bridge`** in the shipped app, and the bridge carries bytes
+
+```
+npm test 2180/2180 · test:property 101/101 · test:attack 970/970
+test:server 944/944 · test:fleet 398/398 · test:dom 867 pass / 3 fail (49 files)
+
+node scripts/shell-family-e2e.mjs   26 launches of the shipped .app · 77 rows · 0 required failed
+node scripts/shell-ssrf.mjs         29 launches of the shipped .app · 38 rows · 0 failed
+```
+
+The three tier-2 reds are **the same three the previous pass left** — §A4's 9 px ink floor (PO
+ruling), §E1's 60 fps frame (needs an incremental `renderBoard`), §E3's saturated poster (spec
+decision). None of them is this pass's and none of them moved.
+
+**Five separate instances of the shipped `.app`** — each with its own bundle identifier, its own
+WebKit store and therefore its own device identity, its own Keychain items and its own data
+directory — formed one Familienkreis against a real relay: create → invite → join → key delivery →
+**a Geteilt entry crossing** → the founder leaving → **a co-signed removal in a founder-less
+circle, rotating the keys epoch 6 → 7** → the removed Mac refused → solo's zero requests. Every
+byte through `invoke('sync_request')`. `WIRE.fetch` empty in every phase of every run.
+
+### The second half of the conformance finding, which nobody had named
+
+`net.js:718` returning `bridge` while neither shell implemented `sync_request` was the reported
+gap. The unreported one: **only `family/engine.js` ever asked `chooseTransport`.**
+`createjoin.js` and `mount.js` built six transports with `createFetchTransport` unconditionally,
+and a `fetch` inside the shell is CSP-blocked — so **creating a Familienkreis in the shipped app
+could not have worked**, co-signature screen and all. All six now ask. And `sync_request` refuses
+everything until `set_shell_pref: "sync_enabled"` is pushed, which **nothing pushed**;
+`familysettings.js#armShellSync` pushes it now.
+
+### The SSRF surface, attacked from the page that would do it
+
+38 rows, 29 launches. Every address the page can name is refused **by the shell**, with no HTTP
+answer: a different host, `http://`, six non-http schemes, localhost in six spellings, five
+private ranges, four link-local addresses (`169.254.169.254` included), three LAN name shapes.
+Redirects off-origin, same-origin and 307 are all `redirect_refused`. A 12 MiB flood is cut in
+~12 ms. A stall times out at 15.99 s. No cookie is kept. **There is no `origin` argument.** The
+origin validator was swept with 28 launches, one per value, four accepted as the control.
+
+A real leak closed on the way: an unpinned `URLSession` was handing the relay this Mac's macOS
+build and the user's language preferences on every sync. Now `LangzeitPlaner` and `*`, confirmed
+by a hostile relay reading it back off the wire.
+
+### ⚠ TWO FINDINGS, AND THE FIRST IS WORSE THAN THE PROBLEM THIS PASS SOLVED
+
+- **F-SHELL-1 · CRITICAL — the family layer terminally refuses peer attestations, and every launch
+  makes it worse.** A Mac's refusal ledger grew **0 → 6 → 13 → 25** across four launches; once a
+  peer's `member.set{dev.*}` op is refused the cursor is released past it and that peer's entries
+  can never be admitted again. `selfAttest` re-signs on every launch and ECDSA is randomised, so
+  the blob is a different string; `buildAttestOpen` keys on the exact string; `authz.js` answers
+  `BAD_ATTESTATION`, **terminally**. Reproduced on demand: running the settle loop twice instead
+  of once took the demonstration from "the entry crosses to both peers" to "to neither".
+  **Not a transport defect** — the same bytes reach the other peers through the same bridge.
+  Cheapest fix is a severity change: park it, do not refuse it. **Measured over five consecutive
+  runs: the Geteilt entry crossed in 4 of 5; the founder received a joiner's entry in 0 of 5.**
+  Everything else in the demonstration was green 5 of 5.
+- **F-SHELL-2 · MEDIUM — a leave leaves no in-log trace**, so `eligibleCosigners` returns 2 in a
+  founder-less two-member circle and T5-M3's stranded sentence never fires in the state it was
+  written for. The person meets the 403 instead of the paragraph.
+
+### The 51 conditional stories
+
+F15–F22. **31 are now unconditional** — 15.1–15.6, 16.1/16.2/16.3/16.5, 18.1, 19.1–19.4, 20.2,
+20.3, 20.5, 20.6, 21.1/21.2/21.4/21.5, and the eight F22 updater stories which were never
+conditional in this way. **20 remain**: co-editing (18.2/18.5/18.6), the admin unshare (18.3 —
+blocked by F-SHELL-1), pairing (19.5), rename/revoke/transfer (20.1), delete the circle (20.4),
+Belegt crossing (16.7), and the board-rendering stories that involve no relay at all. The
+per-story table is `SHELL-VERIFICATION.md` §10.
+
+### Owed after this pass
+
+F-SHELL-1 · F-SHELL-2 · the 20 still-conditional stories · `SYNC_ORIGIN_BUILTIN` is still `""` so
+no TLS round trip has ever been made · the Rust half has never been compiled · CI must decide
+whether 56 app launches belong in `test:dom`. Details in `FINDINGS.md` §19g.
+
+---
+
+# Previous session — 2026-09-03
+
+**Stopped at:** **THE DENSITY / CO-EDITOR INTEGRATION PASS** — four
 parallel fixers merged, the one collision between two of them resolved, two regressions this round
 introduced closed, and everything re-measured. Full record: `FINDINGS.md` §17.
 
@@ -336,9 +422,11 @@ founder_removal_needs_second_key`.
 `belegt-render.dom.js` §7 and `dom-rendering.dom.js` 7.2, both reproduced identically in a pristine
 `git archive HEAD` copy of `81b793d` and both in E8-owned files.
 
-**Owed:** a co-signature UI (`adminpanel.js` / `leavedelete.js` mint no `adminProof`, so the honest
-two-key paths have a working relay and no screen), and the transfer-certificate chain that would
-upgrade the founder anchor to a real admin rule. FINDINGS §13f.
+**Owed:** ~~a co-signature UI~~ — **CLOSED 2026-09-03 by LZP-1002**: the screen exists
+(`leavedelete.js#openCosignRequest` / `#openCosignSign`) and has been driven end to end in the
+shipped `.app` in a founder-less circle, `authorizedBy=admin_proof`, epoch 6 → 7
+(`SHELL-VERIFICATION.md` §4). Still owed: the transfer-certificate chain that would upgrade the
+founder anchor to a real admin rule. FINDINGS §13f.
 
 ---
 

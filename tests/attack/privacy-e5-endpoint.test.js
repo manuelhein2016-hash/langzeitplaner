@@ -148,11 +148,9 @@ describe('§2 · what the transport tells the platform, and what it does with an
     // url it asked for, and refuses `redirected: true` for a shell that reports the fact without
     // the address. Both are refused BEFORE the body is parsed.
     //
-    // WHAT IS STILL OWED, AND WHY THE FIELD IS OPTIONAL. Neither shell implements `sync_request`
-    // yet, so no build in the world can send the field; requiring it today would refuse every
-    // reply in `tests/tier1/platform-net.test.js` rather than any real one. The last row below
-    // pins that as a deliberate, dated half-measure rather than an oversight — the day either
-    // shell ships the command, `reply.url` becomes required and this row grows one assertion.
+    // WHAT LANDED SINCE (LZP-1002). Both shells now implement `sync_request` and both put the
+    // final URL on every reply, so the field is no longer optional: an OMISSION is refused the
+    // same way a MISMATCH is. The row below, which used to pin the half-measure, is inverted.
     // ═══════════════════════════════════════════════════════════════════════════════════════
     const mk = (reply) => createBridgeTransport({
       origin: 'https://relay.test', deviceShort: 'CHFBZPVRBG6M14TJ',
@@ -192,33 +190,60 @@ describe('§2 · what the transport tells the platform, and what it does with an
     }
   });
 
-  test('SUCCEEDED (reduced) — a bridge reply that omits `url` is still accepted, because no shell sends one yet', async () => {
-    // THE REMAINING HALF OF P-5, PINNED SO IT CANNOT BE FORGOTTEN. The check above catches a
-    // MISMATCH and not an OMISSION, which means a shell that simply never sends the field
-    // disables it silently — exactly the shape of defence this suite exists to distrust.
+  test('FAILED (closed) — a bridge reply that omits `url` is REFUSED, now that both shells send one', async () => {
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    // THE OTHER HALF OF P-5, CLOSED. **Inverted, not deleted.**
     //
-    // It is a half-measure with a stated deadline rather than the finished state: `sync_request`
-    // is implemented by NEITHER shell (`net.js` §6, owed to E1), so requiring the field today
-    // would refuse every reply in `tests/tier1/platform-net.test.js` and no real one. This row
-    // is the receipt. The day either shell ships the command, `reply.url` becomes required in
-    // `createBridgeTransport`, the tier-1 replies grow one field, and this row inverts.
-    const t = createBridgeTransport({
+    // WHAT IT WAS. The check above caught a MISMATCH and not an OMISSION, so a shell that simply
+    // never sent the field disabled it silently — exactly the shape of defence this suite exists
+    // to distrust. It was a half-measure with a stated deadline: `sync_request` was implemented
+    // by NEITHER shell, so requiring the field would have refused every reply in
+    // `tests/tier1/platform-net.test.js` and no real one.
+    //
+    // WHAT CHANGED. LZP-1002 shipped the command in both shells. `shell-macos/main.swift`'s
+    // `SyncRequestDelegate.urlSession(_:task:didCompleteWithError:)` puts
+    // `http.url?.absoluteString` on the answer, and `src-tauri/src/lib.rs` mirrors it. There is
+    // now a build in the world that sends the field, so the deadline has passed and
+    // `reply.url` is REQUIRED. A quiet shell is a blocked shell.
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    const mk = (reply) => createBridgeTransport({
       origin: 'https://relay.test', deviceShort: 'CHFBZPVRBG6M14TJ',
       sign: async () => new Uint8Array(64), clientVersion: '2.0.0', subtle: S,
       now: () => 1787836800000, random: (n) => new Uint8Array(n),
-      invoke: async () => ({ status: 200, headers: {}, body: '{}' }),
+      invoke: async () => reply,
     });
-    assert.deepEqual(await t.request('GET', '/api/v1/meta'), { status: 200, headers: {}, json: {} });
 
-    // The shell contract that has to grow the field is written down, in the file that will be
-    // read when somebody finally writes the Swift. If this line moves, the command moved with it.
+    // The omission — the case that used to succeed.
+    await assert.rejects(
+      () => mk({ status: 200, headers: {}, body: '{}' }).request('GET', '/api/v1/meta'),
+      (e) => e instanceof NetError && e.kind === 'blocked' && /without naming the URL/.test(e.message),
+      'a bridge reply that names no URL was accepted — P-5 has been reverted');
+    // …and `null` / `''` are omissions too, not "close enough".
+    for (const bad of [null, '', 0, {}]) {
+      await assert.rejects(
+        () => mk({ status: 200, headers: {}, body: '{}', url: bad }).request('GET', '/api/v1/meta'),
+        (e) => e instanceof NetError && e.kind === 'blocked', `url: ${JSON.stringify(bad)}`);
+    }
+    // THE HONEST-PATH CONTROL. Without this the row would pass on a transport that refused
+    // every reply, which proves nothing about the check.
+    assert.deepEqual(
+      await mk({ status: 200, headers: {}, body: '{}', url: 'https://relay.test/api/v1/meta' })
+        .request('GET', '/api/v1/meta'),
+      { status: 200, headers: {}, json: {} });
+
+    // The contract is still written down in the file the Swift and the Rust were written from.
     const bridge = repoFile('src/js/platform/net.js');
     assert.match(bridge, /body: String, url: String/,
       'the sync_request contract no longer promises a final url — P-5 cannot be closed without it');
-    // The deadline, in the file, not only in this comment. When this sentence goes, the field
-    // becomes required and this row inverts.
-    assert.match(bridge, /neither shell implements `sync_request` yet/,
-      'a shell now implements sync_request — make `reply.url` REQUIRED and invert this row');
+    // The deadline sentence is GONE, and its absence is the receipt that this row inverted.
+    assert.equal(/neither shell implements `sync_request` yet/.test(bridge), false,
+      'net.js still says no shell implements sync_request, but this row assumes one does');
+    // BOTH shells, held to the same promise: each must name the URL on the way back.
+    const swift = repoFile('shell-macos/main.swift');
+    assert.match(swift, /"url": finalURL/, 'the Swift shell no longer names the final URL');
+    assert.match(swift, /completionHandler\(nil\)/, 'the Swift shell no longer refuses redirects');
+    const rust = repoFile('src-tauri/src/lib.rs');
+    assert.match(rust, /"url"/, 'the Rust shell no longer names the final URL');
   });
 
   test('FAILED — an HTML error page is a bad_response, not a parsed anything', async () => {

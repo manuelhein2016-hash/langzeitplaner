@@ -48,6 +48,10 @@ import {
 import {
   pathToPrefix, staticPathToPrefix, dynamicDoorsFrom, reachableFrom,
 } from '../helpers/importgraph.js';
+// §5's scanner blanks comments and string literals with the SAME function `netscope.js` uses, so
+// the two gates cannot disagree about what counts as code — `netscope.js`'s own header gives the
+// reason, and it applies twice over to a rule about who may call something.
+import { stripCommentsAndStrings } from '../helpers/purity.js';
 import {
   PATH_RE, PATH_PREFIX, normalizeOrigin, isLoopbackHost, createBridgeTransport, NetError,
 } from '../../src/js/platform/net.js';
@@ -342,5 +346,266 @@ describe('the scanner finds what it claims to find', () => {
     assert.equal(hits.length, 1, 'the planted call site was not reported');
     assert.equal(hits[0].ident, 'fetch');
     assert.equal(hits[0].file, 'src/js/store.js');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// §5. THE AMENDMENT — 21.5's ONE exception, and the only thing that can trigger it
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// ██ WHAT CHANGED, WHO CHANGED IT, AND WHY THIS SECTION IS NOT A RELAXATION ██
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// OLD (story 21.5, and the sentence at the top of this file):
+//
+//   > "in solo mode the app makes zero network requests; with a Familienkreis it talks to
+//    exactly one sync endpoint and nothing else."
+//
+// NEW (story 21.5 as amended, decided by the PO on 2026-09-03 · ADR 003 §7.5 · D10):
+//
+//   > "in solo mode the app makes zero UNREQUESTED network requests — the only request a solo
+//    copy can originate is the one a human asks for, by pressing „Senden" on the Rückmeldung
+//    screen; with a Familienkreis it talks to exactly one sync endpoint and nothing else."
+//
+// LZP-1009 made „Rückmeldung senden" the first network request a solo copy of this app can ever
+// make. The measured property therefore had to move, and **amending a measured property is
+// exactly the quiet erosion a conformance sweep hunts for** — B-14 caught gate 1 being vacuous
+// the same way. So the amendment is not a softer sentence; it is a NARROWER one, and this
+// section is what makes it narrower:
+//
+//   the old wording bounded a COUNT (zero).
+//   the new wording bounds an ORIGINATOR (a human press, and nothing else).
+//
+// A count is checked by looking; an originator is checked by construction, and that is the whole
+// design of §5. **The failure mode this section exists for is not a second endpoint — §2c of
+// `tests/attack/e10-network-scope.test.js` counts those. It is a SECOND CALLER**: one
+// `setInterval` "so a stuck report retries", one `window.addEventListener('online', …)` "so it
+// goes out when the wifi comes back", one `unhandledrejection` handler that files a report by
+// itself — and a solo Mac is sending unattended, with every endpoint gate still green, because
+// each of those on its own looked like a courtesy.
+//
+// THAT IS A REGRESSION AND §5d IS THE ROW THAT DETECTS IT. It is run, not reasoned: four
+// automatic callers are planted in the real module's real source and each must be named.
+//
+// The two structural facts that make this checkable at all, both owned by `feedback/port.js`:
+//   · the sender is a PORT — nothing under `src/js/feedback/` can open a socket (§1 covers that),
+//     so the only way to send is to hold the port;
+//   · the only way to hold it is `feedbackPort()`, and §5a bounds who may import that.
+
+const FEEDBACK_PORT = 'src/js/feedback/port.js';
+const THE_SCREEN = 'src/js/feedback/ui.js';
+
+/** Resolve a relative specifier against a repo-relative module path. Pure string work. */
+function resolveRel(fromRel, spec) {
+  if (!spec.startsWith('.')) return null;
+  const parts = fromRel.split('/').slice(0, -1);
+  for (const seg of spec.split('/')) {
+    if (seg === '.' || seg === '') continue;
+    if (seg === '..') parts.pop();
+    else parts.push(seg);
+  }
+  return parts.join('/');
+}
+
+/**
+ * Every shipped module that imports `feedback/port.js`, with the names it takes from it.
+ * Comments are stripped first, so the binding written out verbatim in `port.js`'s own header
+ * (it is a docblock, not an edge) is not counted as an importer.
+ */
+function portImporters() {
+  const out = [];
+  for (const f of shippedFiles()) {
+    const code = f.src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    for (const m of code.matchAll(/import\s*(\{[^}]*\})?\s*from?\s*(['"])([^'"]+)\2/g)) {
+      if (resolveRel(f.rel, m[3]) !== FEEDBACK_PORT) continue;
+      const names = (m[1] || '').replace(/[{}]/g, '').split(',')
+        .map((n) => n.trim().split(/\s+as\s+/)[0].trim()).filter(Boolean);
+      out.push({ file: f.rel, names });
+    }
+  }
+  return out;
+}
+
+/** The enclosing named function of a line, found by walking backwards. */
+function enclosingFn(lines, i) {
+  for (let j = i; j >= 0; j--) {
+    const m = lines[j].match(/^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)/)
+      || lines[j].match(/^\s*(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?\(/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/**
+ * ██ THE SCANNER THE AMENDMENT RESTS ON ██
+ *
+ * Every way the injected sender can be reached in one module, and what pulls the trigger.
+ * Returns one row per CALL SITE of the function that invokes `port.send`, classified `human`
+ * when a click/keyboard listener is what calls it and `automatic` otherwise — a timer, a network
+ * or lifecycle event, an error handler, or a bare top-level call.
+ *
+ * Deliberately classifies "anything I do not recognise as a human gesture" as AUTOMATIC, so a
+ * novel trigger fails loudly rather than passing quietly. That is the direction this gate has to
+ * fail in: `netscope.js`'s own header records what happens when a matcher stops matching.
+ */
+function sendOriginators(src) {
+  // TWO VIEWS OF THE SAME LINE NUMBERS, and the split is the whole subtlety of this function.
+  //
+  // DETECTION runs on the blanked source, for `netscope.js`'s reason: a `.send(` named in a
+  // comment or inside a string is not a call, and a gate that goes red on prose gets loosened
+  // until it matches nothing. CLASSIFICATION runs on the RAW line, because the thing that says
+  // whether a caller is a person IS a string literal — `addEventListener('click', …)` — and the
+  // blanker had already eaten it. The first draft of this scanner classified the product's one
+  // real human press as AUTOMATIC for exactly that reason.
+  //
+  // `stripCommentsAndStrings` replaces characters in place and preserves newlines, so the two
+  // arrays are index-aligned; `netscope.js:scanSource` depends on the same property.
+  const raw = src.split('\n');
+  const lines = stripCommentsAndStrings(src).split('\n');
+  const senders = new Set();
+  lines.forEach((l, i) => {
+    if (/\.\s*send\s*\(/.test(l)) {
+      const fn = enclosingFn(lines, i);
+      if (fn) senders.add(fn);
+    }
+  });
+  const HUMAN = /addEventListener\s*\(\s*['"](?:click|keydown|keypress|keyup|submit|change)['"]|\bonclick\b/;
+  const rows = [];
+  for (const fn of senders) {
+    const def = new RegExp(`^\\s*(?:export\\s+)?(?:async\\s+)?(?:function\\s+${fn}\\b|const\\s+${fn}\\s*=)`);
+    lines.forEach((l, i) => {
+      if (def.test(l)) return;
+      // A REFERENCE IS A CALLER. `\\b${fn}\\s*\\(` was the first form of this line and M-crash
+      // (§5d) killed it: `setTimeout(autoReport, 0)` and `addEventListener('online', autoReport)`
+      // dispatch the function without ever writing a `(` after its name, which is precisely the
+      // shape an "…and retry it in the background" patch takes. The mutant found that, not a
+      // review.
+      if (!new RegExp(`\\b${fn}\\b`).test(l)) return;
+      rows.push({ fn, line: i + 1, kind: HUMAN.test(raw[i]) ? 'human' : 'automatic', text: raw[i].trim() });
+    });
+  }
+  return rows;
+}
+
+describe('the amendment — the one exception is a human press, and it stays one', () => {
+  test('§5a · only the Rückmeldung SCREEN can obtain the sender; everyone else may only bind it', () => {
+    // The structural half. `port.js` exports a setter (`setFeedbackPort`), a boolean (`canSend`),
+    // a constant (`FEEDBACK_PATH`) and ONE getter — `feedbackPort()`, which is the only way to
+    // reach `send` at all. A module that imports the setter is a BINDER (`family/mount.js` owes
+    // exactly that line — E10-1009-A) and can originate nothing. A module that imports the
+    // GETTER can send, and there may be exactly one of those.
+    const importers = portImporters();
+    assert.ok(importers.length > 0, 'nothing imports the port at all — the feature is gone');
+    const holders = importers.filter((i) => i.names.includes('feedbackPort')).map((i) => i.file);
+    assert.deepEqual(holders, [THE_SCREEN],
+      'a second module can now obtain the feedback sender. 21.5 as amended permits ONE originator, '
+      + 'and it is the screen with the „Senden" button on it.');
+    for (const i of importers) {
+      for (const n of i.names) {
+        assert.ok(['setFeedbackPort', 'feedbackPort', 'canSend', 'FEEDBACK_PATH'].includes(n),
+          `${i.file} imports ${n} from the port — the port grew an export nothing here knows about`);
+      }
+    }
+  });
+
+  test('§5b · the sender has exactly ONE originator in the whole shipped tree, and it is a click', () => {
+    // THE AMENDED PROPERTY, MEASURED. Not "the button works" — that is tier 2's. This is: across
+    // every module the product ships, the number of places from which a report can be dispatched
+    // is one, and the thing that dispatches it is a person's finger.
+    const found = [];
+    for (const f of shippedFiles()) {
+      for (const r of sendOriginators(f.src)) found.push({ file: f.rel, ...r });
+    }
+    const automatic = found.filter((r) => r.kind === 'automatic');
+    assert.deepEqual(
+      automatic.map((r) => `${r.file}:${r.line} ${r.fn}() — ${r.text}`), [],
+      'SOMETHING OTHER THAN A HUMAN CAN NOW ORIGINATE A REQUEST. That is the regression story '
+      + '21.5 was amended to forbid, not the thing the amendment permits.');
+    assert.equal(found.length, 1, `${found.length} originators, expected 1:\n`
+      + found.map((r) => `  ${r.file}:${r.line} ${r.fn}() [${r.kind}]`).join('\n'));
+    assert.equal(found[0].file, THE_SCREEN);
+    assert.equal(found[0].kind, 'human');
+    assert.match(found[0].text, /addEventListener\(\s*'click'/);
+  });
+
+  test('§5c · the module that DOES listen to the machine cannot reach the sender', () => {
+    // `feedback/events.js` is the one module in this subsystem that attaches listeners nobody
+    // pressed — `error` and `unhandledrejection`, so that the breadcrumb list in a report is
+    // real. That is the single most plausible place a future "…and file it automatically" lands,
+    // and it is one import away from being able to. It must not have that import.
+    const events = shippedFiles().find((f) => f.rel === 'src/js/feedback/events.js');
+    assert.ok(events, 'feedback/events.js was not scanned');
+    assert.match(events.src, /addEventListener\('(?:error|unhandledrejection)'/,
+      'events.js no longer listens for anything — this row is now watching nothing');
+    assert.deepEqual(
+      portImporters().filter((i) => i.file === 'src/js/feedback/events.js'), [],
+      'the automatic-event collector can now reach the sender');
+    // And the general form, over the whole tree: no timer and no lifecycle event names the
+    // dispatcher. This is belt-and-braces against a caller §5b's enclosing-function walk misses.
+    const bad = [];
+    for (const f of shippedFiles()) {
+      stripCommentsAndStrings(f.src).split('\n').forEach((l, i) => {
+        if (/\b(?:setInterval|setTimeout|requestIdleCallback|queueMicrotask)\s*\([^)]*\bdoSend\b/.test(l)
+          || /addEventListener\s*\(\s*['"](?:online|offline|visibilitychange|load|DOMContentLoaded|beforeunload|unload|pagehide|error|unhandledrejection)['"][^)]*\bdoSend\b/.test(l)) {
+          bad.push(`${f.rel}:${i + 1} ${l.trim()}`);
+        }
+      });
+    }
+    assert.deepEqual(bad, [], 'a timer or a lifecycle event dispatches a report:\n' + bad.join('\n'));
+  });
+
+  test('§5d · ARMED — four automatic callers, planted in the real module, and each is named', () => {
+    // THE MUTANTS, RUN RATHER THAN REASONED. Without this row §5b is green the day `.send(`
+    // stops matching, or the day `enclosingFn` returns null for the real shape of the file — and
+    // green is what it looked like when it worked.
+    const screen = shippedFiles().find((f) => f.rel === THE_SCREEN);
+    assert.ok(screen, 'the Rückmeldung screen was not scanned');
+
+    // The honest-path control FIRST: the real file, unmutated, yields exactly the one human row.
+    const honest = sendOriginators(screen.src);
+    assert.equal(honest.length, 1, 'the control moved — §5b is measuring something else now');
+    assert.equal(honest[0].kind, 'human');
+
+    const MUTANTS = [
+      ['M-retry     ', '  setInterval(() => doSend(btn, st), 60000);'],
+      ['M-online    ', "  window.addEventListener('online', () => doSend(btn, st));"],
+      ['M-onload    ', "  document.addEventListener('DOMContentLoaded', () => doSend(btn, st));"],
+      ['M-crash     ', '  function autoReport() { const p = feedbackPort(); return p.send({ v: 1 }); }\n'
+                       + '  setTimeout(autoReport, 0);'],
+    ];
+    for (const [name, line] of MUTANTS) {
+      const rows = sendOriginators(`${screen.src}\n${line}\n`);
+      const auto = rows.filter((r) => r.kind === 'automatic');
+      assert.ok(auto.length >= 1, `${name}: the scanner did not report an automatic caller`);
+      assert.equal(rows.filter((r) => r.kind === 'human').length, 1,
+        `${name}: the human row disappeared — the mutant broke the scanner instead of tripping it`);
+    }
+
+    // And the other direction, so the classifier is not simply calling everything automatic: a
+    // SECOND human press is still a human row. (It would fail §5b's count-of-one, which is the
+    // right row to fail — one screen, one button.)
+    const second = sendOriginators(`${screen.src}\n  extra.addEventListener('click', () => doSend(btn, st));\n`);
+    assert.equal(second.filter((r) => r.kind === 'automatic').length, 0,
+      'a click listener is being classified as automatic — the gate would cry wolf and be deleted');
+    assert.equal(second.length, 2);
+  });
+
+  test('§5e · the amendment is on the SCREEN, not only in the ADR, and in both languages', () => {
+    // A property amended in a document and not in the product is the erosion with an extra step.
+    // The Datenschutz section (21.3, LZP-1001) is where a person reads what this app does on a
+    // network, so the exception has to be stated there — as a CONDITION on a press, in both
+    // languages — or the amended promise is one this product does not actually make.
+    const settings = shippedFiles().find((f) => f.rel === 'src/js/settings.js');
+    assert.ok(settings, 'settings.js was not scanned');
+    assert.match(settings.src, /Von allein sendet dieses Programm nichts/,
+      'the German Datenschutz copy no longer says the app originates nothing by itself');
+    assert.match(settings.src, /On its own this program sends nothing/,
+      'the English Datenschutz copy no longer says it');
+    assert.match(settings.src, /nur, wenn du sie auslöst/, 'the German no longer states the condition');
+    assert.match(settings.src, /only when you trigger it/, 'the English no longer states the condition');
+    // A1: v1's wording survives as the SCOPED guarantee, so the solo paragraph must still be
+    // about solo mode and must not have quietly become a paragraph about family mode.
+    assert.match(settings.src, /Solange du keinen Familienkreis nutzt, verlässt kein Eintrag diesen Mac/);
   });
 });

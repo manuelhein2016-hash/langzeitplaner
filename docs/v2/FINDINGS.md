@@ -3705,10 +3705,15 @@ Recorded because they are the reason mutation testing is worth its cost.
 1. **The T5-M1a residual** — an in-request transfer-certificate chain anchored at
    `founderMemberId`, so the relay can verify the *current admin* and not only the founder.
    ADR 003 §3.7, `AUTH_INTERFACE_GAPS` E2-L1b.
-2. **A co-signature UI.** `adminpanel.js` and `leavedelete.js` mint no `adminProof`, so the honest
-   two-key paths — deleting a circle with more than one member row, and removing the founder —
-   have a working relay and no screen. `tests/tier2/family-admin.dom.js` stubs the relay and is
-   blind to this.
+2. **A co-signature UI. — CLOSED 2026-09-03 (LZP-1002 integration).** It read: *"`adminpanel.js`
+   and `leavedelete.js` mint no `adminProof`, so the honest two-key paths — deleting a circle with
+   more than one member row, and removing the founder — have a working relay and no screen."*
+   The screen exists (`leavedelete.js#openCosignRequest` / `#openCosignSign`, 43 rows in
+   `tests/tier2/cosign.dom.js`) and it has now been driven **end to end in the shipped `.app`, in
+   a genuinely founder-less circle**: the relay refused with
+   `founder_gone_every_removal_needs_second_key`, a second instance co-signed with its own
+   `RK_sig`, and the spent proof came back `authorizedBy=admin_proof` with the epoch rotating
+   6 → 7. `docs/v2/SHELL-VERIFICATION.md` §4.
 3. **ADR 002 §8.5a's remaining residual.** No device can prove that an epoch minted by *somebody
    else* reached a third party in openable form. Closing it needs a way for a member to report "I
    cannot open epoch e" → ADR 003 + `server/core/handlers/keys.js`.
@@ -3936,10 +3941,16 @@ being hypothetical. **Recommend promoting C2 out of WP-9 into the next work pack
 ### 15f. Owed after E9
 
 1. **The co-editor's ⌘Z** — §15d. `core/undo.js` + a PO call.
-2. **An admin-unshare button.** `family/unshare.js` is complete and tested and **no UI calls it**;
-   the demonstration drives `adminUnshareOp` directly. Still owes `family/createjoin.js`'s genesis
-   admin link (`UNSHARE_BLOCKERS.NO_ADMIN_CHAIN`) — the same dependency `removal.js` reports.
-   Owner: `family/adminpanel.js`, `family/createjoin.js`.
+2. **An admin-unshare button. — CLOSED 2026-09-03, with a caveat.** It read: *"`family/unshare.js`
+   is complete and tested and **no UI calls it**."* It has a caller:
+   `familysettings.js#buildModerationSection` („Einträge im Familienkreis"), 26 rows in
+   `tests/tier2/unshare-ui.dom.js`, and `tests/property/sync-domains.test.js` S5b measured the
+   module moving from absent to present (69 → 70 reachable). `createjoin.js:320` emits the genesis
+   `claimAdmin`, so `NO_ADMIN_CHAIN` no longer fires on a circle this build creates.
+   **The caveat:** driving the button end to end in the shipped shell — the admin moderating a
+   foreign entry that actually crossed — is blocked intermittently by **F-SHELL-1** (§19b), which
+   is an attestation-admission defect and not this button's.
+   `docs/v2/SHELL-VERIFICATION.md` §9, §10.
 3. **`REJECT_REASONS.NOT_MEMBER` is not in `store.js:CURABLE_REFUSALS`**, so such an op is dropped
    rather than parked. Pre-existing for stage 3b; §4.2b widens the surface to the owner. Bounded in
    practice (member records carry strictly lower `seq` than any content op referencing them, so the
@@ -3997,13 +4008,26 @@ moves a cursor — and they are not joined. **Owner: `store.js`, a parallel work
 row is green while the defect exists and says: *if it goes red the story was probably wired —
 invert it, do not repair it.*
 
-**E10-2 · LZP-1009 (the feedback button) is OWED, and its absence is now load-bearing.** The PO's
-new ticket did not land: no module, no bridge command, no relay route, no copy, no processor named.
-Tasks 4 and 5 of the E10 integration were attacks on its payload and had no subject. Recorded as
-**eight rows that go red the day it lands** rather than as a sentence — §2a–§2e and §1a/§1d of
-`e10-network-scope.test.js`, plus §3a/§3b for the screenshot half. **When 1009 is built it is a
-third network job and a second remote host**, so it needs those rows inverted *and* a Datenschutz
-sentence naming a third processor (LZP-1001, also owed).
+**E10-2 · LZP-1009 (the feedback button) is OWED, and its absence is now load-bearing.**
+~~The PO's new ticket did not land~~ — **CLOSED 2026-09-03 by LZP-1009. See §18 below**, which
+records what landed, the two of the eight rows that *did not go red on their own*, and the one
+line that is still owed. The original text follows because the shape of the prediction is worth
+keeping beside what actually happened:
+
+> The PO's new ticket did not land: no module, no bridge command, no relay route, no copy, no
+> processor named. Tasks 4 and 5 of the E10 integration were attacks on its payload and had no
+> subject. Recorded as **eight rows that go red the day it lands** rather than as a sentence —
+> §2a–§2e and §1a/§1d of `e10-network-scope.test.js`, plus §3a/§3b for the screenshot half.
+> **When 1009 is built it is a third network job and a second remote host**, so it needs those
+> rows inverted *and* a Datenschutz sentence naming a third processor (LZP-1001, also owed).
+
+**Two of those predictions were wrong, and the errors are instructive.** 1009 is **not** a third
+network job and **not** a second remote host: it is a POST to the sync relay's own origin, over
+the transport that already exists, so §1a, §1d, §1g, §2b and §2e are all still green *for the
+right reasons* and 21.5's exception count is unchanged at two. What it does add is one PATH on the
+one origin, which §2c and §2d now bound. The Datenschutz sentence (LZP-1001) is still owed, and
+what it owes is smaller than predicted: not a third processor, one more thing the existing one
+receives.
 
 **E10-3 · "solo mode makes zero network requests" is false as literally written, and the copy has
 not caught up.** The *board* makes zero, measured six ways. The *shell* makes one — the update
@@ -4338,3 +4362,377 @@ Privat entry, after all of the above") and E9-B §2c („no `geteiltOnly` regist
 8. **`adr/001-op-log.md` §5 step 5** still says array order decides the capacity slice. It decides
    it *below* the prefix now; the bullet should name `layout.js:orderForCapacity` the way it
    already names `assignLanes`.
+
+---
+
+## 18. LZP-1009 — „Rückmeldung senden" (2026-09-03)
+
+**Opened by the ticket that built it.** E10 measured this feature's absence in eight places
+(§16, E10-2). It has landed; the eight rows are inverted or still green for their own reasons, and
+the three rows below are what building it turned up.
+
+### 18a. Defects found and closed by this ticket
+
+| id | severity | what | the row that dies |
+|---|---|---|---|
+| **E10-1009-C** | MEDIUM | **A redaction box was drawn at the text's INTRINSIC width, not its painted width.** `.bar-label` is `max-width: 66px; overflow: hidden`, and a `Range` reports what the text *would* occupy — 90 px for „Kur in Bad Wörishofen". The box was therefore 24 px wider than the chip and painted solid ink across board the label does not cover, so the picture showed a layout that does not exist. Not a leak (it over-covers), but the opposite of "layout bugs stay visible": it invents one. Closed by clipping each line box to its host when the host's own computed `overflow` is not `visible` — the condition the engine itself uses, so a genuine `overflow: visible` spill is still shown. | `tests/tier2/feedback.dom.js` "a redaction box sits where the bar label was" |
+| **E10-1009-D** | LOW | **`Palette` stored index 0 unquantised.** `add()` quantises to 5 bits per channel before looking a colour up, so the paper white stored raw never matched itself and every element painted in the background colour took a second, near-identical slot — spending the 256 indexed entries twice as fast on a tinted board. | `tests/tier1/feedback.test.js` §2g |
+| **E10-1009-E** | MEDIUM *(a defect in a TEST, and the most useful one)* | **Searching a PNG's file bytes for a leaked string is not a detector.** IDAT is DEFLATE and DEFLATE Huffman-codes its literals, so a needle sitting plainly in the pixel buffer appears nowhere in the file. The image half of the payload grep was green over an image it could not have inspected. Closed by inflating the IDAT — with `node:zlib` in tier 1, with the engine's own `DecompressionStream` in tier 2 — and searching the raster, plus a fifth needle spelling (UTF-8 bytes read back as latin-1, which is what a byte plane actually holds). | `tests/tier1/feedback.test.js` §5e, `tests/attack/e10-outbound-payload.test.js` §4c |
+
+### 18b. ⚠ E10-1009-B — two of the eight red-on-arrival rows never went red
+
+**Severity: MEDIUM, and it is a finding about the gates rather than about the feature.**
+
+`e10-network-scope.test.js` §2a and §3a were written to redden "the day 1009 lands". The whole
+feature shipped and **both stayed green**, neither because its claim still held:
+
+- **§2a** matched `/\bfeedback\b/i` against code with comments and strings blanked. Seven modules
+  under `src/js/feedback/` spell themselves `openFeedback`, `setFeedbackPort`, `feedbackPort`,
+  `initFeedback` — and `\bfeedback\b` matches **none** of them, because there is no word boundary
+  inside `setFeedbackPort`. The import specifier naming the directory is a string, and strings are
+  blanked. **Measured: 0 hits over the shipped tree with the whole sender in it.**
+- **§3a** looked for `canvas`, `getContext`, `toDataURL`, `toBlob`, `getImageData`,
+  `OffscreenCanvas`, `createImageBitmap`, `getDisplayMedia`, `html2canvas`. The delivered renderer
+  uses **not one of them** — it is a hand-written indexed-PNG encoder over a `Uint8Array`, which is
+  the entire point of it — so the scanner found nothing while the product gained the ability to
+  draw.
+
+This is exactly the failure `network-scope.test.js`'s own header names: *"it goes green the day its
+regex stops matching anything, and nobody notices, because green is what it looked like when it
+worked."* The gates did not rot — they were **never able to see the shape the feature actually
+took**. Both are now inverted to claims checkable by CONSTRUCTION rather than by vocabulary: §2a
+enumerates the FILES allowed to mention the subsystem (its own directory, plus one seam line in
+`settings.js`), and §3c enumerates the CALL SITES of `encodePng` (exactly one). §3d is new and is
+the claim the old §3a was reaching for: **there is no glyph path anywhere in the product** — no
+`fillText`, `strokeText`, `measureText`, `drawImage`, `FontFace`, `foreignObject` or
+`XMLSerializer`, and the raster's whole mutator surface is `fillRect` and `strokeRect`.
+
+### 18c. E10-1009-A — the sender has no binder *(OPEN, LOW)*
+
+`src/js/feedback/port.js` holds `setFeedbackPort(...)` and **nothing calls it**, so `canSend()` is
+false on every Mac and „Senden" is disabled. The one line that closes it belongs to
+`src/js/family/mount.js` — the only module that holds a transport and the only one behind ADR 003
+§7 gate 2's single dynamic door — which a parallel workflow owns. The binding is written out
+verbatim in `port.js`'s header and `tests/tier1/feedback.test.js` §6 pins the contract, so it
+cannot land wrong.
+
+**Why LOW.** The screen degrades honestly rather than failing: the preview renders, the payload is
+built, and the two fallbacks LZP-1009 requires anyway — „In die Zwischenablage kopieren" and
+„Als Datei sichern" — are on the screen *before* any send is attempted, because "the relay being
+unreachable is itself worth reporting". A solo tester has no relay to send to in any case, so for
+her the fallbacks are not a degraded path, they are the path. Verified end to end in the real
+browser by performing that one line by hand: the report reached the real relay, which wrote it to
+disk with zero board strings in either file.
+
+### 18d. What the endpoint proves, and what it does not
+
+`POST /api/v1/feedback` cannot require membership — a report is most needed when the family space
+is broken, and a solo tester has no server relationship at all. Its credential is a **self-attested
+device signature**, verified for real (a presented signature that does not verify is a 401), and
+`handlers/feedback.js` states in `PROVES` / `PROVES_NOT` on the wire what that buys:
+
+> **PROVES** — two reports carrying this same self-minted public key were signed by the same
+> private key.
+> **PROVES NOT** — that the key belongs to a member, to a device this server has ever registered,
+> or to a person. It is self-minted client-side and never enrolled, so a fresh one costs one
+> keypair. **The rate limit (`feedbackReport`) and the size cap (`bytesPerFeedback`) are the
+> controls; the signature is a thread, not a gate.**
+
+The signature is also **optional**, which is the same argument one step further: the report that
+says „mein Schlüsselbund ist kaputt" is written by a Mac that cannot sign, and refusing it would
+refuse the report the endpoint exists for.
+
+### 18e. Owed after this pass
+
+1. **`family/mount.js`** — the one binding line, E10-1009-A above.
+2. **Call sites for `noteEvent`.** The ring buffer is real, bounded and tested, and the only thing
+   currently writing to it is its own error tap. `renderBoard`'s timing, `drag:commit` refusals and
+   `sync: n ops applied` are the three LZP-1009 names, and all three live in files this ticket does
+   not own (`board.js`, `interact.js`, `sync/`). Each is one call.
+3. **LZP-1001's Datenschutz sentence** — now one line smaller than E10-2 predicted: the relay
+   receives reports too, and they contain no entry text. Not a third processor.
+4. **A production `feedbackSink`.** `server/dev-server.mjs` writes two files beside the store;
+   `server/adapters/vercel.js` has no sink, so the route answers **501** there — honestly, rather
+   than accepting a report and dropping it. RUNBOOK owes the deployment step.
+
+---
+
+## 19. LZP-1002 — THE SHELL TRANSPORT INTEGRATION (2026-09-03)
+
+**Full record: `docs/v2/SHELL-VERIFICATION.md`.** This section is the findings half.
+
+The question the pass existed to answer — *does the family work in the app we ship, rather than in
+a browser?* — has an answer, and it is **`chooseTransport()` returns `bridge` in the shipped app,
+and the bridge carries bytes**: five separate instances of the shipped `.app` formed one
+Familienkreis over `sync_request`, with zero `fetch` calls anywhere. It also has two findings that
+are more important than the answer.
+
+### 19a. The conformance finding had a second half nobody had named
+
+`net.js:718` returning `bridge` while `sync_request` existed in neither shell was the reported
+gap. The unreported one: **only `family/engine.js` ever asked `chooseTransport`.**
+`family/createjoin.js` and `family/mount.js` built **six** transports with
+`createFetchTransport` unconditionally — create, join, redeem, the anonymous adopt, the pairing
+transport, and the one `adminpanel.js`/`leavedelete.js` borrow through `circleTransport`.
+
+A `fetch` inside the shell is blocked by `default-src 'self'`
+(`tests/tier2/shell-bridge.dom.js`: *"an outbound fetch is actually blocked, not merely
+discouraged"*). So even with `sync_request` shipped, **creating a Familienkreis in the shipped app
+could not have worked**, and neither could the co-signature screen that had just been built on top
+of it. All six now go through `chooseTransport`.
+
+The same shape one layer up: `sync_request` refuses everything until
+`set_shell_pref: "sync_enabled"` is pushed, it defaults to false, and **nothing pushed it**. A
+shipped shell would have refused every sync even with a relay configured and a circle joined.
+`familysettings.js#armShellSync` pushes it now.
+
+**The lesson, and it is the same one E6-1 taught from the far side:** a gate that is enforced in
+one place and consulted in six is a gate that is off in five of them. `chooseTransport`'s docblock
+had said *"a caller that reads `'fetch'` in the shipped shell has found a bug in gate 3"* — and
+nobody had read it, because most callers never asked.
+
+### 19b. FINDING F-SHELL-1 · CRITICAL · the family layer terminally refuses peer attestations, and every launch makes it worse
+
+**Not a transport defect. It is the thing that stops the family working, and it is transport-blind.**
+
+A Mac in a Familienkreis accumulates `badAttestation` refusals. Measured on the founder across
+four launches, its refusal ledger read **0 → 6 → 13 → 25**. Once a peer's `member.set{dev.<short>}`
+op has been refused, ADR 003 §8.2 has released the cursor past it and it can never be fetched
+again — so that peer's device is permanently unattested on this Mac, every entry it authors parks
+`unattestedDevice`, is retried five times, and is given up on.
+
+The mechanism is written in the product's own words, in `family/engine.js#publishMyAttestation`:
+
+> *"`selfAttest` re-signs on every launch and ECDSA is randomised, so the blob this launch minted
+> is a DIFFERENT STRING from the one already in the log even though both attest the same six
+> fields and both verify under the same recovery key."*
+
+`platform/device-identity.js#buildAttestOpen` keys its verified map on the **exact blob string**,
+and the only blobs it can pre-verify are the ones the relay's roster carries — the **first** blob
+each device registered. Any later blob is unverifiable by every peer, `core/authz.js` stage 0a
+answers `BAD_ATTESTATION`, and **the refusal is terminal**.
+
+**Reproduced on demand:** running the demonstration's settle loop twice instead of once took it
+from *"the entry crosses to both peers"* to *"the entry crosses to neither"*. Not a flaky test —
+the defect, on a dial.
+
+**The cheapest fix is a severity change, not a redesign.** Refusing an unverifiable attestation
+`badAttestation` (terminal, cursor released) is the wrong verdict; `unattestedDevice` (parked,
+re-judged when one arrives) is the right one, and the park machinery already exists and already
+has a reaper (`store.unparkAttested`, L-3). The structural fix is either to verify an unknown blob
+on demand, or to publish the blob the relay already holds for this device rather than a freshly
+minted one.
+
+Owner: `src/js/core/authz.js` · `src/js/platform/device-identity.js` · `src/js/family/engine.js`.
+
+### 19c. FINDING F-SHELL-2 · MEDIUM · a leave leaves no trace, so the stranded sentence never fires
+
+T5-M3's caveat — *"if this circle shrinks to two people and the person who created it is no longer
+among them, nobody can remove anybody any more"* — is met **before it bites** by
+`createAdminPort#eligibleCosigners` returning 0, which makes the sheet say so instead of sending a
+request.
+
+In a real founder-less two-member circle it returned **2**. `eligibleCosigners` counts from this
+Mac's own member list — the folded family log, correctly, because that is the list the sheet shows
+— and a **removal** writes `member.set{_alive:false}` into that log while a **leave does not**:
+`POST /members/leave` is a relay call and the leaver is not there afterwards to author anything.
+
+So in the one state the sentence was written for, the person meets
+`403 founder_gone_every_removal_needs_second_key` instead of the paragraph that explains it. The
+403 is at least readable — `leavedelete.js#proofDemand` reads it and the co-signature sheet opens
+— so this is a copy-reachability defect, not a lockout. Fix: intersect the log's member list with
+the roster's `removedAt` column, which `sync/keys.js#roster` already fetches.
+
+Owner: `src/js/family/adminpanel.js` · `src/js/family/removal.js`.
+
+### 19d. What was attacked and held
+
+The SSRF surface is new and it is the most dangerous thing in the product: a bridge command
+performing HTTP from the **native process**, outside the CSP, the navigation delegate and the
+`app://` sandbox, reachable from the least trusted component in the system.
+
+**38 rows over 29 launches of the shipped `.app`, all green.** Every address the page can name — a
+different host, `http://`, `file:`/`app:`/`ftp:`/`javascript:`/`data:`/`smb:`, localhost in six
+spellings, five private ranges, four link-local addresses, three LAN name shapes — is refused **by
+the shell**, with no HTTP answer. An off-origin redirect, a same-origin redirect and a 307 are all
+`redirect_refused`. A 12 MiB flood is cut in ~12 ms; an announced 64 MiB is refused on the
+response header. A stalled relay times out at 15.99 s. A cookie is not kept. Smuggled headers
+refuse the whole request rather than being dropped. And **there is no `origin` argument** —
+passing one changes nothing.
+
+The origin validator was swept with **28 launches, one per candidate value**, four of them
+accepted so the sweep has a control. `isPrivateOrLocalSyncHost` is deliberately blunter than "no
+private ranges": every IP literal is refused, v4 and v6, **including a perfectly routable public
+one**, because a relay is a NAME.
+
+**A real leak was found and closed on the way.** An unpinned `URLSession` was adding
+`User-Agent: LangzeitPlaner/1.0.0 CFNetwork/3860.700.1 Darwin/25.6.0` — this Mac's macOS build —
+and `Accept-Language: en-US,en;q=0.9` — the user's language preferences — to every sync. Signed by
+nobody, in neither ADR 003 §2 nor `server-metadata.md`'s inventory. The hostile relay's own log
+now reads `["LangzeitPlaner"]` and `["*"]`.
+
+### 19e. The redaction boundary held a sixth time
+
+A native process that speaks HTTP is a new surface with three new places bytes could surface:
+stdout, the reply's `detail` field, and the pref file. Four static rows
+(`tests/tier1/headless-shell.test.js`) and one runtime row (`tests/tier2/shell-ssrf.dom.js` §10)
+close all three: nothing in the sync section prints, the body is never interpolated into any
+string, `sync.json` holds `["enabled": enabled]` and nothing else, `sync_status`'s keys are
+exactly five, and a marker planted in the body, the URL and a header appears in **no** reply over
+six request paths. The existing 102 boundary rows are unchanged and green.
+
+### 19f. Inverted, and closed
+
+- **FINDING P-5's shell half.** `reply.url` is now **REQUIRED** in `createBridgeTransport`; both
+  shells send it. `tests/attack/privacy-e5-endpoint.test.js` §2 inverted from
+  *"SUCCEEDED (reduced) — a bridge reply that omits `url` is still accepted"* to
+  *"FAILED (closed) — … is REFUSED"*, with an honest-path control and a row that fails if either
+  shell stops naming the URL.
+- **ADR 003 §7 gate 3 is no longer OWED.** The paragraph asking the navigation delegate to
+  *"permit exactly the one sync origin"* is a **loosening** and was not built; the ADR is amended
+  to the shape that ships, and a tier-1 row fails the build if anyone implements it as originally
+  written.
+- **Swift ↔ Rust parity is gated, not reviewed.** `helper-hygiene.js` gained `SHELL_RUST` /
+  `rustSource()` and two tier-1 rows now hold the two shells to the same refusal vocabulary and
+  the same seven checks by name. The Rust half is still uncompiled (no `cargo`, PLAN.md R8) and
+  the `reqwest` line it needs is now in `Cargo.toml`, held by a row.
+
+### 19g. Owed after this pass
+
+1. **F-SHELL-1** (19b) — the one that stops the family working.
+2. **F-SHELL-2** (19c).
+3. **The remaining conditional stories** — `SHELL-VERIFICATION.md` §10 lists all 51 and which 31
+   are now unconditional. Co-editing (18.2/18.5/18.6), pairing (19.5), the remaining admin verbs
+   (20.1, 20.4) and Belegt-crossing (16.7) have still never run over the bridge.
+4. **`SYNC_ORIGIN_BUILTIN` is `""`** and every shipped build therefore refuses locally. No TLS
+   round trip has ever been made — the https-only rule is proven by refusal, not by success.
+5. **The Rust half has never been compiled.**
+6. **CI** — the two drivers are 56 app launches and are not in `npm run test:dom`. Both tier-2
+   files skip visibly when their driver has not configured them.
+
+---
+
+## 20. LZP-1001 + LZP-1002 — the Datenschutz section, and 21.5 amended (2026-09-03)
+
+Run after LZP-1009, which is why it exists in this order: 1009 made „Rückmeldung senden" the first
+network request a solo copy of this app can make, and a story that says *zero* was false from that
+commit. Full record: `docs/v2/E10-VERIFICATION.md` §10–§12.
+
+### 20a. THE AMENDMENT — recorded as a decision, not as a diff
+
+**Amending a measured property is exactly the quiet erosion a conformance sweep hunts for.**
+`judge:conformance` B-14 caught ADR 003 §7 gate 1 being *vacuously* true by the same mechanism, so
+this one is written down three times with the decider named: **ADR 003 §7.5**, **DESIGN-DECISIONS
+D10**, and the front-matter *Amended* row of ADR 003.
+
+- **OLD:** "in solo mode the app makes zero network requests; with a Familienkreis it talks to
+  exactly one sync endpoint and nothing else."
+- **NEW:** "in solo mode the app makes zero **unrequested** network requests — the only request a
+  solo copy can originate is the one a human asks for, by pressing „Senden" on the Rückmeldung
+  screen (LZP-1009); with a Familienkreis it talks to exactly one sync endpoint and nothing else."
+- **DECIDED BY:** the **PO**, 2026-09-03. The alternative — family-only feedback — refuses the
+  report from the only tester who has no Familienkreis, i.e. the person the feature is for.
+
+**It is narrower, not softer.** Old bound: a **count** (zero), measurable only over sessions
+somebody scripted. New bound: an **originator** (a human press), a property of the source tree,
+checkable by construction — and the property that actually fails when the exception widens.
+`tests/tier1/network-scope.test.js` §5, five rows, measured at HEAD: **1 originator, `human`,
+`src/js/feedback/ui.js:245`, trigger `addEventListener('click', …)`**, over **78** shipped modules.
+
+**The exception may not widen**, and §5b/§5c are the rows that detect it. The shape to expect is
+not a second endpoint (§2c of the E10 sweep counts those) — it is a second **caller**: a retry
+timer, an `online` listener, an `unhandledrejection` handler that files by itself. Each is a
+courtesy alone; together they are an unattended solo Mac sending with every endpoint gate still
+green.
+
+### 20b. Two defects found in rows this ticket wrote — by mutants, not by review
+
+- **E10-1002-A (MEDIUM, in a test)** — §5b's caller regex was `\b<fn>\s*\(`. Mutant **M4**
+  (`setTimeout(autoReport, 0)`) survived it: a function dispatched **by reference** never writes a
+  `(` after its name, and reference-dispatch is precisely the shape a background-retry patch
+  takes. Now `\b<fn>\b`.
+- **E10-1002-B (MEDIUM, in a test)** — tier 2 §5b asserted only that E10-B7's regex matched the
+  union of the product's copy. It stayed **green** under mutant **M8**, which removed R1's
+  sentence — because the regex's `nicht verschlüsselt` alternative matches the **Privat**
+  paragraph, a sentence about family ops with nothing to do with a backup file. **Green for an
+  unrelated reason** is the exact rot §2a and §3a of the E10 sweep died of, reproduced inside a row
+  written to invert one of them. The inversion is now **located**: it must match inside
+  `DATENSCHUTZ[lang].backupBody`, and the false positive is asserted and named so it is not
+  rediscovered.
+- **E10-1002-C (LOW, in a test, found before the mutants)** — §5b's classifier read the
+  **stripped** source, in which `addEventListener('click', …)` has had its literal blanked, so the
+  product's one real human press was classified **automatic**. Detection now runs on stripped
+  source, classification on the raw line; the arrays are index-aligned because
+  `stripCommentsAndStrings` preserves newlines.
+
+### 20c. R1 — the copy half closed, and R1-b opened in the same breath
+
+LZP-1003's **R1**: a stolen backup yields the whole board in the clear, with no passphrase. The
+true sentence is now in the Datenschutz copy in both languages — „ohne Passwort lesbar, auch bei
+einer Sicherung MIT Passwort. Das Passwort schützt die Schlüssel, nicht die Einträge … es macht
+sie nicht unlesbar." — and D8's key-loss consequence sits beside it, naming the three parties who
+cannot recover the data.
+
+**R1-b (LOW, honest bookkeeping).** `tests/attack/e10-crypto-backup.test.js` E10-B7 names itself
+as the assertion to invert when such a sentence is added. It scans `[EXPORT_SHEET_COPY, README,
+LIMITS]` — three exports of `src/js/crypto/backup.js`, **a file this ticket does not own** (ONE
+OWNER PER FILE). The inversion is therefore in `tests/tier2/datenschutz.dom.js` §5b instead, run
+against the same matcher, and **E10-B7 remains green over a narrower object than the product**.
+Owner: whoever next opens `crypto/backup.js`. Closing it is two edits — the sentence in
+`EXPORT_SHEET_COPY.withPassword`, and flipping E10-B7's `assert.equal(…, false)` to `true`; my
+tier-2 §5b's third assertion goes red the moment that lands and tells them so by name.
+
+### 20d. LZP-1001 — what the Datenschutz section says, and what it deliberately does not
+
+`src/js/settings.js`, a top-level section of ⚙ drawn on **every** launch. 24 blocks · 5 234
+characters of German · 4 546 of English · screenshotted in the real browser in both languages.
+Sentence-by-sentence provenance in `E10-VERIFICATION.md` §11.
+
+Three deliberate refusals, each held by a row:
+
+1. **No URL is printed.** §1g of the E10 sweep says the one remote URL in the product is still
+   `OWNER-PLACEHOLDER`; a privacy page naming a host that does not exist is worse than one naming
+   the company. `datenschutz.dom.js` §2e fails if a URL appears — which also stops
+   `e10-network-scope.test.js` §2e acquiring its first exception inside a privacy paragraph.
+2. **No „wird nach einer Stunde gelöscht".** RUNBOOK §7.2 forbids it in so many words: `RateBucket`
+   is never swept and its key holds an IP. The copy says „unbefristet … bis sie jemand von Hand
+   löscht", and §2d bans the comfortable phrasing while requiring the true one.
+3. **No marketing and no survey vocabulary** (21.3's own "informed, not marketed"; Principle 9).
+   §4a's ban list is paired with a length assertion over the same text, so it is not satisfiable by
+   an empty section — mutant **M7** (drop `data-ds`) kills 14 of 19 rows including §4a, which is
+   the proof that the pairing works.
+
+**D11 — the section is NOT inside „Familienkreis", and A10 says it should be.** Built A10's way it
+is drawn by `family/mount.js` — the one dynamic door — and is therefore **invisible on a solo
+install**, to exactly the reader whose backup file three of its paragraphs are about. Recorded as a
+decision rather than a slip.
+
+### 20e. Two documents this pass made stale, and neither is mine
+
+Both carry the line *"the 21.3 Datenschutz section is not in the product (`Frankfurt`, `Vercel`,
+`Prisma` appear nowhere in `src/`)"* as the reason the story was open. Those three words are now in
+`src/js/settings.js` and the line is false:
+
+- `docs/v2/RELEASE-CHECKLIST.md` line 173
+- `docs/v2/MOM-TEST.md` line 523
+- `docs/v2/RUNBOOK.md` line 171 and §7's heading — *"until LZP-1001 puts that on a screen, **you
+  are the Datenschutz page**"* — which no longer applies, and §7.3's item 2 (*"the Datenschutz text
+  must name the release host as a second remote"*), which is now **done** in the form §1g permits:
+  the operator is named (GitHub), the host is not, because there is not yet a real one.
+
+Not edited here — one owner per file, and RUNBOOK/RELEASE are LZP-1008's. **No test asserts the
+absence of those words in `src/`**, so nothing goes red; the staleness is in prose only, and this
+is the register entry that says so.
+
+### 20f. Owed after this pass
+
+1. **R1-b** (20c) — `crypto/backup.js`'s own strings, and E10-B7 inverted in place.
+2. **The three stale documents** (20e).
+3. **E10-1009-A** — `family/mount.js` still owes its `setFeedbackPort(...)` line. Until it lands
+   `canSend()` is false and „Senden" is disabled with the reason on screen. §5a of the tier-1 gate
+   is written to accept that binder when it arrives: a module importing the **setter** is a binder
+   and is allowed; a module importing `feedbackPort()` is an originator and is not.
+4. **A production `feedbackSink`.** Vercel answers 501 today, honestly.
+5. **The retention sentence is written to change with the code, not before it.** The day the
+   `RateBucket` sweep exists, `DATENSCHUTZ.*.retentionBody` changes in the **same commit** — RUNBOOK
+   §7.2's rule, and `datenschutz.dom.js` §2d is what fails if the copy moves first.

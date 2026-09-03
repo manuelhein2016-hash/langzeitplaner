@@ -92,6 +92,10 @@ export const LIMITS = Object.freeze({
   pairTtlMs: 180000,
   bytesPerPairBox: 8192,
   epochRotationsPerMemberHour: 20,
+  // ── LZP-1009, on the FIRST commit of the route (E10-L1, E10-L2, E10-L3) ────
+  feedbackPerIpHour: 5,
+  bytesPerFeedback: 262144,
+  charsPerFeedbackText: 4000,
 });
 
 /**
@@ -253,6 +257,74 @@ export const LIMIT_EXTENSIONS = Object.freeze([
       'path. Keyed on the MEMBER and not on the space: a per-space ladder budget would let one ' +
       'hostile member spend the circle\'s whole allowance and 429 the honest admin trying to ' +
       'rotate her out, which is the denial being closed, re-created as the fix.',
+  }),
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // LZP-1009 — the feedback route, budgeted ON THE COMMIT THAT ADDS IT.
+  //
+  // This table's own history is the argument. Twice a route landed with a `why` instead of a
+  // rule — `createSpace` (E2-203-6) and `rotateEpoch` (T2-E1) — and both times the `why` was a
+  // true sentence whose conclusion did not follow. Both were unauthenticated-in-effect routes on
+  // a free-tier database. `POST /feedback` is a third, with a WEAKER gate than either: its
+  // credential is a self-minted key that this server never enrolled, so it identifies nobody and
+  // cannot be revoked. There is therefore no version of this route that shipped unmetered.
+  Object.freeze({
+    tag: 'E10-L1',
+    name: 'feedbackPerIpHour',
+    value: 5,
+    adr: 'ADR 003 §6.1 amendment owed — 5 reports per IP per hour (LZP-1009)',
+    reason:
+      'THE ONLY REAL CONTROL ON THIS ROUTE, and it is worth saying why the obvious alternative ' +
+      'is not one. `handlers/feedback.js` verifies a `device.pub` signature, and that signature ' +
+      'proves CONTINUITY and nothing else (its `PROVES` / `PROVES_NOT`): the key is minted on ' +
+      'the client and never registered, so a device-keyed bucket would hand an attacker a fresh ' +
+      'budget for the price of one keypair — which is not a limiter, it is a formality. IP is ' +
+      'the only identity present that costs anything to change, exactly as for `inviteRedeem`. ' +
+      'PRE-AUTH, because the expensive part of an unauthenticated request is the P-256 verify ' +
+      'and a flood must be refused above it. ' +
+      'WHY FIVE. A person reporting a bug writes one report. Five in an hour is a bad afternoon ' +
+      'with a bad bug — the honest ceiling — and it is deliberately below `invitesPerIpHour` ' +
+      '(10), because a redemption at least ends in a Member row somebody wanted and a report ' +
+      'ends in prose somebody has to read. ' +
+      'WHAT IT DOES NOT CLOSE, stated so nobody reads a limiter as a repair: a household behind ' +
+      'one NAT shares this bucket, so a family of four that all hit the same bug on the same ' +
+      'afternoon can 429 each other. That is a real cost and it is the right trade at this size ' +
+      '— the failure is "try again later, or save it as a file", and both fallbacks are on the ' +
+      'preview screen before the first attempt (`src/js/feedback/ui.js`). The alternative, a ' +
+      'per-key budget, is not a tighter rule; it is no rule.',
+  }),
+  Object.freeze({
+    tag: 'E10-L2',
+    name: 'bytesPerFeedback',
+    value: 262144,
+    adr: 'neither ADR — a payload cap invented by LZP-1009 and recorded here',
+    reason:
+      'REJECT, NEVER TRUNCATE — and the cap is a PRIVACY control before it is an abuse control. ' +
+      'The preview screen shows the person the exact text and the exact image that will leave ' +
+      'her Mac and promises her that this, and nothing else, is what goes. A server that ' +
+      'silently truncated would make that promise false in the one direction she cannot check, ' +
+      'so the refusal is a 413 naming the cap and the client says „schreib etwas kürzer" rather ' +
+      'than sending less than it showed her. ' +
+      'WHY 256 KB. The image is the bulk and it is not a screenshot: `src/js/feedback/redact.js` ' +
+      'renders geometry into an INDEXED PNG with no glyphs, and a full 12-month board measures ' +
+      'about 17 KB. 256 KB is fifteen times the real thing — room for a board nobody has drawn ' +
+      'yet — and it is one sixteenth of `bytesPerRequest`, so this cap binds first and the ' +
+      'transport cap is never the one a person meets. ' +
+      'MEASURED FROM THE ENCODED LENGTH before any base64 decode, for `envelopeBytes`\' reason: ' +
+      'the point of a cap is to refuse the work.',
+  }),
+  Object.freeze({
+    tag: 'E10-L3',
+    name: 'charsPerFeedbackText',
+    value: 4000,
+    adr: 'neither ADR — a payload cap invented by LZP-1009 and recorded here',
+    reason:
+      'The free-text half of E10-L2, separate because the two fail differently and the person ' +
+      'needs to be told which one she hit. 4000 CODE POINTS — not UTF-16 units, so a report with ' +
+      'emoji in it is not refused at half the advertised length and the number in the 413 is the ' +
+      'number the client showed her. Four thousand characters is about two pages; a bug report ' +
+      'longer than that is a conversation, and this endpoint deliberately has no reply channel ' +
+      'for one (Principle 10 — the board is not a messenger, and neither is this).',
   }),
 ]);
 
@@ -550,6 +622,16 @@ export const RATE_RULES = Object.freeze({
     limit: 'epochRotationsPerMemberHour', windowMs: HOUR, identity: 'member', phase: 'post-auth',
     adr: 'ADR 003 §6.1 amendment owed — 20 rotations per member per hour (T2-E1 / E2-L9)',
   }),
+
+  // ── LZP-1009, added by the commit that adds the route (E10-L1) ─────────────
+  // `ip` and `pre-auth` are both forced rather than chosen: the route has no other identity —
+  // its `device.pub` is self-minted and never enrolled, so keying on it would be keying on a
+  // value the caller reissues at will — and the P-256 verify it would otherwise gate is the
+  // expensive part of an unauthenticated request.
+  feedbackReport: Object.freeze({
+    limit: 'feedbackPerIpHour', windowMs: HOUR, identity: 'ip', phase: 'pre-auth',
+    adr: 'ADR 003 §6.1 amendment owed — 5 reports per IP per hour (LZP-1009 / E10-L1)',
+  }),
 });
 
 /** Rule names, frozen, so a typo is a 500 at composition rather than a silently absent limiter. */
@@ -686,6 +768,14 @@ export const RATE_COVERAGE = Object.freeze({
   createInvite: cov([], [], AUTHED_REASON('any current member may issue one (E2-203-2: the server cannot check "admin"); bounded instead by MAX_OPEN_INVITES = 20 per space, which bounds what volume here could actually buy — redeemable memberships, not table rows')),
   revokeInvite: cov([], [], AUTHED_REASON('one column write in the caller\'s own space')),
   openInvites: cov([], [], AUTHED_REASON('read-only, space-scoped')),
+  // ── LZP-1009 — the one route on this relay that is not part of the sync protocol ───────────
+  // Declared `pre` and charged by the handler itself, because `withLimits` is not composed
+  // (integration decision 1 in `handlers/index.js`). `handlers/feedback.js` calls
+  // `enforceFor(req, ctx, 'feedbackReport', null)` as its FIRST statement — above the shape
+  // check and above the signature verify — and `tests/server/feedback.test.js` §5 asserts the
+  // ordering by handing it a body that would fail three later checks and watching it 429 anyway.
+  feedback: cov(['feedbackReport'], [], null),
+
   leaveSpace: cov([], [], AUTHED_REASON('self-only, idempotent')),
   transferAdmin: cov([], [], AUTHED_REASON('mirrors the in-log chain and is never authoritative (ADR 006 §9)')),
 });

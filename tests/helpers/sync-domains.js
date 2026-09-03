@@ -116,6 +116,19 @@ export const OPEN_FINDINGS = deep({
     + 'chain.js) and exactly one was DELETED — `client.js`, LZP-501\'s superseded engine, which '
     + 'was the only importer of the other four and the whole reason they looked dead. '
     + '→ tests/attack/privacy-e5-silence.test.js §5, now inverted.',
+  'E10-1009-A': 'OPEN · LOW · **the feedback sender has no binder.** `src/js/feedback/port.js` '
+    + 'holds `setFeedbackPort(...)`, and nothing calls it, so `canSend()` is false on every Mac '
+    + 'and „Senden" is disabled. The one line that closes it belongs to `family/mount.js` — the '
+    + 'only module that holds a transport and the only one behind ADR 003 §7 gate 2\'s single '
+    + 'dynamic door — which LZP-1009 does not own (ONE OWNER PER FILE; a parallel workflow has '
+    + 'it). The binding is written out verbatim in `port.js`\'s header so it cannot land wrong, '
+    + 'and `tests/tier1/feedback.test.js` §6 pins the contract it must satisfy. '
+    + 'WHY THIS IS LOW AND NOT HIGH: the screen degrades HONESTLY rather than failing. The '
+    + 'preview still renders, the payload is still built, and the two fallbacks LZP-1009 requires '
+    + 'anyway — „In die Zwischenablage kopieren" and „Als Datei sichern" — are on the screen '
+    + 'BEFORE any send is attempted, because "the relay being unreachable is itself worth '
+    + 'reporting". A solo tester with no Familienkreis has no relay to send to in any case, so '
+    + 'for her the fallbacks are not a degraded path, they are the path.',
   'F-8': 'CLOSED · was MEDIUM · `store.warnings` had no consumer. `family/syncstatus.js` now '
     + 'subscribes and `sync/status.js` enumerates the channel. See L-5 for the half of this that '
     + 'the closure itself got wrong.',
@@ -860,6 +873,51 @@ export const S5 = deep([
     + 'and `tests/tier1/network-scope.test.js` §2 gate 2 refuses exactly that. The port is `null` '
     + 'until a circle exists and is set back to `null` when one is left (20.3).'),
   MOD('src/js/family/syncstatus.js', 'live'),
+  MOD('src/js/family/unshare.js', 'live',
+    'Story 18.3 / ADR 004 §5 — THE ADMIN UNSHARE, and the third module in three rounds to ship '
+    + 'complete, tested and with no caller. It was on disk for a whole round after E9 (§15f item '
+    + '2: "`family/unshare.js` is complete and tested and no UI calls it; the demonstration drives '
+    + '`adminUnshareOp` directly"), and this walk was correctly silent about it, because an '
+    + 'unmounted module is not a shipped one — the same order dependency `family/conflict.js` and '
+    + '`family/sharing.js` each had one round earlier. `live` since '
+    + '`family/familysettings.js#buildModerationSection` — the moderation list in ⚙ → „Einträge im '
+    + 'Familienkreis", drawn only on the Mac the folded admin chain names — calls '
+    + '`createUnshare().run(entityKey)`. It mints no patch (the bytes are `core/project.js`\'s '
+    + '`adminUnshareOp`), no admin chain (`createjoin.js` still owes the genesis link, which is '
+    + 'why `UNSHARE_BLOCKERS.NO_ADMIN_CHAIN` exists) and no notification of any kind '
+    + '(Principle 9). The still-better affordance — the same call from a foreign entry\'s popover '
+    + '— is owed by `popover.js`/`board.js` and is a second caller, not a replacement.'),
+  MOD('src/js/feedback/copy.js', 'live'),
+  MOD('src/js/feedback/events.js', 'live'),
+  MOD('src/js/feedback/geometry.js', 'live'),
+  MOD('src/js/feedback/png.js', 'live'),
+  MOD('src/js/feedback/port.js', 'defence',
+    'LZP-1009 — THE SEAM THROUGH WHICH A REPORT LEAVES, AND NOTHING BINDS IT YET. The module is '
+    + 'REACHABLE (`feedback/ui.js` reads `feedbackPort()` and `canSend()` on every press), so the '
+    + 'row is not P-4\'s "reachable from nothing". What is missing is the one line that supplies '
+    + 'a sender, and it belongs to a file this ticket does not own: `family/mount.js` — the only '
+    + 'module in the product that holds a transport and is behind ADR 003 §7 gate 2\'s single '
+    + 'dynamic door. The binding is written out verbatim in `port.js`\'s header. '
+    + 'THE ROLE IS `defence` FOR THE USUAL REASON: closing this row means WIRING the file, and '
+    + 'deleting it instead would close the row while making the product worse — `feedback/` would '
+    + 'then have to import `platform/net.js` itself, which is a SECOND dynamic door out of the '
+    + 'boot graph and the exact defect `tests/tier1/network-scope.test.js` §2 exists to catch. '
+    + 'UNTIL IT LANDS THE FEATURE IS HONEST RATHER THAN BROKEN: `canSend()` is false, „Senden" is '
+    + 'disabled, and the screen says so in German („Dieser Mac kennt keine Gegenstelle …") beside '
+    + 'the two fallbacks — copy to clipboard and save to file — which LZP-1009 requires anyway '
+    + 'because "the relay being unreachable is itself worth reporting". '
+    + '⚠ `openFinding` IS NULL AND THE ROLE STAYS `defence`, which is the distinction these two '
+    + 'fields exist to keep apart — the same call `core/project.js` records one screen down. S5 '
+    + 'asks "is this module REACHABLE?" and the answer is yes: `feedback/ui.js` reads '
+    + '`feedbackPort()` and `canSend()` on every press, so this is not P-4\'s "reachable from '
+    + 'nothing". `role: defence` asks something else — "would deleting this file turn the row '
+    + 'green while making the product worse?" — and for this seam the answer is permanently yes. '
+    + 'The open work (E10-1009-A, documented above) is the BINDER, which is not a question S5 '
+    + 'poses, and pinning it here would make this row read STALE the moment it is measured.',
+    null),
+  MOD('src/js/feedback/redact.js', 'live'),
+  MOD('src/js/feedback/report.js', 'live'),
+  MOD('src/js/feedback/ui.js', 'live'),
   MOD('src/js/ferien.js', 'live'),
   MOD('src/js/find.js', 'live'),
   MOD('src/js/firstrun.js', 'live'),
@@ -954,5 +1012,5 @@ export const DOMAINS = deep({
 
 /** Counts, so a truncated file is a loud failure rather than a quiet one. */
 export const DOMAIN_SIZES = deep({
-  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 69,
+  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 78,   // S5 70 -> 78: LZP-1009's src/js/feedback/
 });

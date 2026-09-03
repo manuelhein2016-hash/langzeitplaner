@@ -123,8 +123,15 @@ import {
 import { membersUIState } from './membersui.js';
 import {
   confirmRemoveMember, confirmLeaveCircle, confirmDeleteSpace, confirmTransferAdmin,
+  openCosignSign, COSIGN_COPY,
 } from './leavedelete.js';
 import { afterRemove } from './removal.js';
+import { b64u } from '../core/b64.js';
+import { chooseKeyStore } from '../platform/keystore.js';
+import { openDeviceIdentity } from '../platform/device-identity.js';
+import { signBytes, KEYSTORE_IDS } from '../crypto/identity.js';
+
+const TE = new TextEncoder();
 
 /** Whichever of a `{de, en}` pair the sheet is currently speaking. */
 const say = (pair) => (getLang() === 'en' ? pair.en : pair.de);
@@ -287,6 +294,30 @@ const DEFAULT_PORTS = Object.freeze({
   reload: () => globalThis.location?.reload?.(),
   /** @returns {Promise<{request:Function}>} a transport signed by this Mac's device key */
   arm: (origin) => circleTransport(origin),
+  /**
+   * **THE ONLY PORT THAT TOUCHES A RECOVERY KEY, and it reads — it never mints.**
+   *
+   * ADR 003 §3.7's co-signature is a signature under `Member.recoveryPubSig`, so the co-signing
+   * Mac has to open `RK_sig`. `circleTransport()` deliberately hands back only the transport
+   * (`createjoin.js`: "adminpanel.js needs a signed transport and nothing else"), so this is the
+   * one place that opens the identity itself.
+   *
+   * `ks.get(recSig)` runs FIRST and a null answer refuses before `openDeviceIdentity` is called,
+   * because that function MINTS when the store is empty (ADR 002 §2.4 restricts key generation to
+   * the family opt-in moment, and pressing „Mitunterschreiben" is not that moment). On a Mac that
+   * is in a circle the record is always there; on one that is not, the section this button lives
+   * in never renders. The guard is for the third case — a key store that has been cleared under a
+   * live circle — where the honest answer is „dieser Mac hat keinen Schlüssel" and not a brand-new
+   * identity nobody has ever heard of.
+   *
+   * @returns {Promise<Object|null>} what `openDeviceIdentity` returns, or null when there is no key
+   */
+  openRecovery: async () => {
+    const { store: ks, kind: custody } = chooseKeyStore({ invoke: ports.invoke() });
+    const have = await ks.get(KEYSTORE_IDS.recSig);
+    if (!have) return null;
+    return openDeviceIdentity(ks, { today: ports.today(), custody, allowMemoryCustody: false });
+  },
   /** The circle, and the members, from the two modules that own them. */
   circle: () => familyCircle(),
   members: () => membersUIState(),
@@ -388,6 +419,83 @@ export function createAdminPort(circle) {
     spaceId,
     spaceName: () => (ports.circle()?.name || circle.name || ''),
 
+    // ── the co-signature's four collaborators (ADR 003 §3.7) ────────────────────────────────
+    //
+    // They are on the AdminPort rather than inside `leavedelete.js` for the reason every other
+    // seam in this pair is drawn that way: that file owns the copy and the sheets, this one owns
+    // the network, the key store and the member list. A sheet that reached for a Keychain would
+    // be a sheet a test could not drive.
+
+    /**
+     * This Mac's member id — the `presenter` in the signed bytes.
+     *
+     * It is `CIRCLE_PREFS.member`, which `createjoin.js` writes from `id.forStore.memberId` at
+     * create and at join, so it is the same value the relay resolves from the authenticated
+     * device. `coSign` asserts the two still agree rather than trusting that sentence.
+     */
+    myMemberId: () => circle.memberId || '',
+
+    /** The clipboard, as the sheets' one convenience. Never load-bearing — the block is on screen. */
+    copy: (text) => ports.clipboard(text),
+
+    /**
+     * A member's name out of THIS Mac's own member list — the log every member decrypts
+     * identically. Never out of a pasted block: a name in text somebody else wrote is a name
+     * somebody else chose for the person you are about to act against.
+     */
+    nameOf: (memberId) => {
+      const view = ports.members();
+      const rows = (view && view.supported ? view.members : []) || [];
+      const m = rows.find((r) => r.memberId === memberId);
+      return m && m.displayName ? m.displayName : '';
+    },
+
+    /**
+     * How many live members could co-sign an act against `targetId` — everyone alive who is
+     * neither me nor the target. `null` when this Mac's member view is not mounted and the answer
+     * is genuinely UNKNOWN.
+     *
+     * The difference matters exactly once, and it is the T5-M3 caveat: **zero** is the
+     * founder-less two-member circle, where the rule is unsatisfiable and the honest sentence is
+     * „hier lässt sich niemand mehr entfernen". Reporting an unknown count as zero would tell a
+     * five-person family it was stuck, so it is `null` and the sheet offers the request anyway.
+     *
+     * @param {string|null} targetId the member being removed, or null for `space.delete`
+     */
+    eligibleCosigners: (targetId) => {
+      const view = ports.members();
+      if (!view || !view.supported) return null;
+      const me = circle.memberId || '';
+      return (view.members || []).filter((m) => m.alive !== false
+        && m.memberId !== me && m.memberId !== targetId).length;
+    },
+
+    /**
+     * Sign `lzp/admin/2 …` with THIS Mac's own recovery key.
+     *
+     * The one crypto call in the co-signature flow, and everything about it is deliberately
+     * narrow: it takes a finished string (built by `leavedelete.js#adminProofString`, which
+     * mirrors `server/core/auth.js`), it signs, and it returns the two fields the relay's
+     * `adminProof` object has. It cannot be asked to sign for anybody else, because the only
+     * private key it can reach is the one in this Mac's key store.
+     *
+     * @param {string} signedString @returns {Promise<{by:string, sig:string}>}
+     */
+    async coSign(signedString) {
+      const id = await ports.openRecovery();
+      if (!id || !id.recovery || !id.recovery.recSig) {
+        throw new Error('cosign: this Mac holds no recovery key');
+      }
+      // A Mac whose prefs name one member and whose keys are another's would mint a proof over
+      // bytes the relay never assembles — a `401 bad_signature` and a phone call to work out why.
+      // Loud here instead.
+      if (circle.memberId && id.forStore.memberId !== circle.memberId) {
+        throw new Error(`cosign: this Mac's keys belong to ${id.forStore.memberId}, its circle says ${circle.memberId}`);
+      }
+      const sig = await signBytes(id.recovery.recSig.privateKey, TE.encode(signedString));
+      return { by: id.forStore.memberId, sig: b64u(sig) };
+    },
+
     /** 15.5 — the open invites of this circle: un-redeemed, un-revoked, un-expired. */
     async openInvites() {
       const body = await call(origin, 'GET', '/api/v1/invites/open', { spaceId }, undefined);
@@ -423,8 +531,15 @@ export function createAdminPort(circle) {
      * geklappt": the member IS out, the relay said so, and `afterRemove` answers with a verdict
      * instead of an exception for exactly that reason.
      */
-    async removeMember(memberId) {
-      const res = await call(origin, 'POST', '/api/v1/members/remove', undefined, { spaceId, memberId });
+    async removeMember(memberId, proof) {
+      // ⚠ **THE BODY CARRIES THE SIGNATURE AND NEVER THE PRESENTER.** `adminProof` is `{by, sig}`
+      // and nothing else: the relay assembles `act`, `spaceId`, `target`, `epoch` and `presenter`
+      // out of values it already holds (`handlers/lifecycle.js` — "note what is NOT read from the
+      // body"), and a presenter in a body field would be a claim it had to trust. The proof is
+      // OMITTED rather than sent as null when there is none, so an ordinary removal is still the
+      // two-key body it always was.
+      const body = proof ? { spaceId, memberId, adminProof: { by: proof.by, sig: proof.sig } } : { spaceId, memberId };
+      const res = await call(origin, 'POST', '/api/v1/members/remove', undefined, body);
       if (typeof ports.afterRemove === 'function') {
         try {
           const outcome = await ports.afterRemove(res);
@@ -510,8 +625,16 @@ export function createAdminPort(circle) {
      * NAME, which is the only one of the two they can read, and `confirmDeleteSpace` checked it.
      * This is the machine half of the same confirmation.
      */
-    async deleteSpace() {
-      const res = await call(origin, 'POST', `/api/v1/spaces/${spaceId}/delete`, undefined, { confirm: spaceId });
+    async deleteSpace(proof) {
+      // The second key, same shape as the removal's. `handlers/lifecycle.js` requires it whenever
+      // the space has ever had more than one member row — which is every real Familienkreis, so
+      // the un-proofed call below is the FIRST half of the flow and not the honest path: it is
+      // what earns the 403 that names the terms. Only a `psp_` personal space, or a circle nobody
+      // ever joined, is deleted without one.
+      const body = proof
+        ? { confirm: spaceId, adminProof: { by: proof.by, sig: proof.sig } }
+        : { confirm: spaceId };
+      const res = await call(origin, 'POST', `/api/v1/spaces/${spaceId}/delete`, undefined, body);
       await forgetCircle();
       return res;
     },
@@ -777,6 +900,23 @@ function buildMemberList(body, rows, port, isAdmin, api, l) {
   if (rows.length <= 1) body.appendChild(hint(say(ADMIN_COPY.onlyYou)));
   // 20.5, in the one place the opposite would otherwise be assumed.
   body.appendChild(hint(say(ADMIN_COPY.cannotSee)));
+
+  // ── „Mitunterschrift geben" (ADR 003 §3.7) ─────────────────────────────────────────────────
+  //
+  // **Every member's, not the admin's.** The whole point of the second key is that it belongs to
+  // somebody who is not the person asking, and in a founder-less circle the person asking is
+  // usually not the admin either — the relay has no role column and the gate is a two-ROW rule.
+  // Hiding this behind `isAdmin` would leave the one control that makes the gate satisfiable
+  // reachable only by the seat the gate does not know about.
+  //
+  // It sits under the member list because that is where a person looks when somebody phones and
+  // says „kannst du das mitunterschreiben?" — and it opens a sheet rather than growing a field
+  // here, so a settings section that draws no text input for a non-admin still draws none.
+  const cosign = el('button', 'btn-ghost admin-cosign', say(COSIGN_COPY.signEntry));
+  cosign.type = 'button';
+  cosign.style.cssText = 'height:24px;padding:0 9px;font:500 11px var(--font);margin:2px 0 4px';
+  cosign.addEventListener('click', () => openCosignSign({ port }));
+  body.appendChild(cosign);
 }
 
 // ── invites (15.2, 15.5) ─────────────────────────────────────────────────────────────────────
@@ -936,6 +1076,7 @@ function buildDangerZone(body, circle, port, rows, isAdmin, api, l) {
 
   // 20.3 — everybody's, the admin included. An admin who cannot leave is a person the product has
   // trapped; the confirmation tells them the seat is about to be empty (`leavedelete.js`).
+  const live = rows.filter((m) => !m.removed).length;
   const leave = el('button', 'btn-ghost btn-danger', say(ADMIN_COPY.leave));
   leave.type = 'button';
   leave.className = 'btn-ghost btn-danger admin-leave';
@@ -943,7 +1084,12 @@ function buildDangerZone(body, circle, port, rows, isAdmin, api, l) {
     port,
     spaceName: circle.name || '',
     isAdmin,
-    lastOneOut: rows.filter((m) => !m.removed).length <= 1,
+    lastOneOut: live <= 1,
+    // THE T5-M3 CAVEAT, MET BEFORE IT BITES. Leaving a circle of three leaves two behind, and a
+    // founder-less pair cannot remove anybody — only leave. Said at the moment the person is
+    // about to CAUSE that state, and phrased as a condition, because this Mac cannot know
+    // whether the founder is still in the circle (the relay does not publish `founderMemberId`).
+    leavesTwoBehind: live === 3,
     onDone: () => api.close(),
   }));
   acts.appendChild(leave);
@@ -959,4 +1105,17 @@ function buildDangerZone(body, circle, port, rows, isAdmin, api, l) {
     acts.appendChild(del);
   }
   body.appendChild(acts);
+
+  // ── the caveat, standing, in the circle small enough to fall into it ───────────────────────
+  //
+  // Once `Space.founderMemberId` no longer names a live member, EVERY removal needs a second
+  // member row (T5-M3) — and in a two-member circle the only possible co-signer is the target,
+  // so the rule cannot be satisfied at all. This Mac cannot tell whether that has already
+  // happened; what it can see is the size of the circle, which is the half that makes it bite.
+  //
+  // At TWO, because that is the size at which the rule becomes unsatisfiable. A healthy circle of
+  // four is not warned about a state it is two departures away from — a caveat shown to everybody
+  // is a caveat nobody reads, and the person one step away meets it on the leave confirmation
+  // instead (`LIFECYCLE_COPY.leave.leavesTwoBehind`).
+  if (live <= 2) body.appendChild(hint(say(COSIGN_COPY.strandNote)));
 }

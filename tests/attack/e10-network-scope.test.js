@@ -73,6 +73,12 @@ import {
 import { PATH_RE, assertReachable, NetError } from '../../src/js/platform/net.js';
 import { createUpdater, DAILY_MS } from '../../src/js/platform/updater.js';
 import { ROUTES, API_PREFIX } from '../../server/core/router.js';
+// LZP-1009's client half, imported so §2 and §3 assert against the SHIPPED feature rather than
+// against a description of it.
+import { FEEDBACK_PATH } from '../../src/js/feedback/port.js';
+import { Raster, encodePng, EMITTED_CHUNKS } from '../../src/js/feedback/png.js';
+import { collectPrimitives, assertNumericOnly } from '../../src/js/feedback/geometry.js';
+import { renderRedactedBoard } from '../../src/js/feedback/redact.js';
 
 const swift = () => shellSource('shell-macos/main.swift');
 
@@ -241,40 +247,104 @@ describe('§1 · 21.5 — every socket in the product, and who is allowed to ope
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §2 · LZP-1009 — THE FEEDBACK PATH DOES NOT EXIST
+// §2 · LZP-1009 — THE FEEDBACK PATH, NOW THAT IT EXISTS
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// E10's new ticket asked for a feedback button that sends a report — text plus a redacted
-// screenshot — to a remote. It was not delivered: no module, no bridge command, no route, no
-// copy, no Datenschutz sentence naming a third processor (21.3 / LZP-1001, also not delivered).
+// ██ INVERTED 2026-09-03, WHEN LZP-1009 LANDED. ██
 //
-// A report saying "it is missing" rots in a week. These rows do not: each one asserts the
-// ABSENCE, so the day 1009 lands the suite goes red at the exact place where the exception count
-// widens, and the person landing it has to come here and INVERT the row rather than discover
-// later that 21.5 quietly became "two endpoints and a screenshot".
+// This section used to measure the ABSENCE of a feedback path in five places, each written so
+// that "the day 1009 lands the suite goes red at the exact place where the exception count
+// widens". The feature has landed, so the rows have been INVERTED — the file's own instruction,
+// in its own capitals — rather than repaired, deleted, or relaxed. Each one now asserts the
+// BOUND that the delivered feature must stay inside, and each is still the row that reddens if
+// the exception count widens again.
 //
-// ⚠ INVERT, DO NOT REPAIR. If a row in §2 or §3 goes red, the feature arrived. Every one of them
-// is written so that its inverted form is the assertion the feature needs.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// ⚠ TWO OF THESE ROWS DID NOT GO RED ON THEIR OWN, AND THAT IS A FINDING ABOUT THE ROWS
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// §2a and §3a were both still GREEN after the whole feature shipped. Neither was green because
+// its claim still held:
+//
+//   · **§2a** matched `/\bfeedback\b/i` against code with comments and strings blanked. A
+//     subsystem of seven modules under `src/js/feedback/` spells itself `openFeedback`,
+//     `setFeedbackPort`, `feedbackPort`, `initFeedback` — and **`\bfeedback\b` matches none of
+//     them**, because there is no word boundary inside `setFeedbackPort`. The import specifier
+//     that names the directory is a string, and strings are blanked. Measured: **0 hits** over
+//     the shipped tree with the sender in it.
+//   · **§3a** looked for `canvas`, `getContext`, `toDataURL`, `toBlob`, `getImageData`,
+//     `OffscreenCanvas`, `createImageBitmap`, `getDisplayMedia`, `html2canvas`. The delivered
+//     renderer uses **none of them** — it is a hand-written indexed-PNG encoder over a byte
+//     array (`src/js/feedback/png.js`), which is the whole point of it — so the scanner had
+//     nothing to find while the product had gained the ability to draw.
+//
+// Both are the exact failure mode this file warns about in its own header: *"it goes green the
+// day its regex stops matching anything, and nobody notices, because green is what it looked
+// like when it worked."* The gates did not rot; they were **never able** to see the shape the
+// feature actually took. Recorded as finding **E10-1009-B**, and the inverted rows below are
+// written to be checkable by CONSTRUCTION — an allowlist of files and an enumeration of call
+// sites — rather than by a word that a future author's naming may or may not contain.
 
-describe('§2 · the outbound path LZP-1009 would add — measured as absent', () => {
-  test('§2a · no shipped module is a feedback sender', () => {
-    // `diagnostics` is DELIBERATELY NOT in this list. It is the name of a local introspection
-    // method on nine shipped modules (`store.diagnostics()`, `lot.diagnostics()`, …), it is read
-    // by the settings sheet and by `sync/status.js`, and none of it leaves the Mac. Including it
-    // would give this row thirty permanent hits and it would be deleted within a week — which is
-    // the failure mode a gate like this actually dies of. §2e is the compensating claim: whatever
-    // any of them returns, there is no remote host in the shipped tree to send it to.
-    const suspicious = /\b(feedback|rueckmeldung|telemetry|analytics|crashReport|sentry|bugsnag|sendBeacon)\b/i;
-    const hits = [];
+describe('§2 · the outbound path LZP-1009 adds — bounded, not absent', () => {
+  test('§2a · the feedback sender is CONFINED to src/js/feedback/ plus one seam line', () => {
+    // INVERTED. The old row said "no shipped module is a feedback sender" and it could not see
+    // the one that landed (see this section's header). The property that replaces it is one a
+    // regex cannot miss: **which FILES may participate at all**.
+    //
+    // `src/js/feedback/*` is the subsystem. `src/js/settings.js` is the ONE other file allowed to
+    // mention it, and only to draw the Hilfe section — Principle 10's "it is never a floating
+    // button on the board" is exactly a claim about the set of files that may open this screen,
+    // so a set is what is asserted. A mention in `board.js`, `main.js` or `boot.js` reddens here.
+    const ALLOWED_DIR = 'src/js/feedback/';
+    const SEAM = 'src/js/settings.js';
+    const mentions = /feedback/i;
+    const outside = [];
     for (const f of shippedFiles()) {
-      // Code only. The word may appear in a design note — this file's own subject is discussed in
-      // `net.js`'s header — and prose is not a sender.
-      const code = stripCommentsAndStrings(f.src);
-      code.split('\n').forEach((line, i) => { if (suspicious.test(line)) hits.push(`${f.rel}:${i + 1} ${line.trim()}`); });
+      if (f.rel.startsWith(ALLOWED_DIR)) continue;
+      // Comments and strings INCLUDED this time, deliberately: an import specifier is a string,
+      // and "which file imports the feedback tree" is the whole question. The old row blanked
+      // them and that is half of why it saw nothing.
+      f.src.split('\n').forEach((line, i) => {
+        if (mentions.test(line)) outside.push(`${f.rel}:${i + 1} ${line.trim().slice(0, 90)}`);
+      });
     }
-    assert.deepEqual(hits, [],
-      'INVERT ME — a feedback/telemetry path exists in src/js/ and 21.5 now has a third exception:\n'
-      + hits.join('\n'));
+    const files = [...new Set(outside.map((h) => h.split(':')[0]))];
+    assert.deepEqual(files, [SEAM],
+      'the feedback path is referenced outside its own directory and the one settings seam.\n'
+      + 'Principle 10: it lives in Einstellungen/Hilfe and is NEVER a button on the board:\n'
+      + outside.join('\n'));
+    // and the seam really is a seam: it draws a section and binds an environment, and it does
+    // not send anything, because settings.js has no transport and must never acquire one.
+    const seamSrc = shippedFiles().find((f) => f.rel === SEAM).src;
+    assert.match(seamSrc, /buildHelpSection\(body, api\)/, 'the seam does not draw the Hilfe section');
+    // CODE ONLY for this half. The seam's own comment EXPLAINS that the sender is a port bound by
+    // whoever holds a transport, and a scanner that counted that sentence would be a scanner
+    // nobody could write an explanation past. (It tripped on its own docblock the first time.)
+    const seamCode = stripCommentsAndStrings(seamSrc);
+    assert.equal(/setFeedbackPort|chooseTransport|createBridgeTransport|createFetchTransport/.test(seamCode), false,
+      'settings.js binds or builds a sender — the boot graph must not touch a transport');
+  });
+
+  test('§2a2 · NON-VACUITY — the subsystem exists, and the old scanner could not see it', () => {
+    // The row that keeps §2a honest, and that records WHY the old one failed silently. Without
+    // it, §2a is satisfiable by deleting the feature.
+    const mods = shippedFiles().filter((f) => f.rel.startsWith('src/js/feedback/'));
+    assert.ok(mods.length >= 6, `only ${mods.length} feedback modules — the walker read nothing`);
+    for (const must of ['png.js', 'geometry.js', 'redact.js', 'report.js', 'ui.js', 'port.js', 'events.js']) {
+      assert.ok(mods.some((m) => m.rel.endsWith(must)), `src/js/feedback/${must} is missing`);
+    }
+    // ██ THE MEASUREMENT THAT IS THE FINDING. ██ The OLD scanner, run verbatim over the tree that
+    // now contains the whole subsystem, finds nothing. Kept as a row so nobody re-adopts it.
+    const oldScanner = /\b(feedback|rueckmeldung|telemetry|analytics|crashReport|sentry|bugsnag|sendBeacon)\b/i;
+    const oldHits = [];
+    for (const f of shippedFiles()) {
+      stripCommentsAndStrings(f.src).split('\n').forEach((line) => {
+        if (oldScanner.test(line)) oldHits.push(f.rel);
+      });
+    }
+    assert.deepEqual(oldHits, [],
+      'the old word-boundary scanner now DOES match something — if the naming changed, §2a is '
+      + 'still the row that matters, but this note about E10-1009-B can be simplified');
   });
 
   test('§2b · no bridge command in either shell can send a report', () => {
@@ -292,12 +362,22 @@ describe('§2 · the outbound path LZP-1009 would add — measured as absent', (
       'INVERT ME — a reporting bridge command exists: ' + reporting.join(', '));
   });
 
-  test('§2c · the server speaks no route that would receive one', () => {
+  test('§2c · the relay speaks EXACTLY ONE receiving route, and it is write-only', () => {
+    // INVERTED. The relay has grown a route, which is what the old row was watching for. What
+    // replaces "there is none" is the bound: ONE route, POST, and no way to read a report back.
+    // A `GET /feedback` would make this a store of reports addressable by whoever asks, which is
+    // a different product with a different privacy story.
     const names = ROUTES.map((r) => `${r.method} ${API_PREFIX}${r.pattern}`);
     assert.ok(names.length >= 15, `only ${names.length} routes — the table was not read`);
-    const receiving = names.filter((n) => /feedback|report|telemetry|analytics|log|crash/i.test(n));
-    assert.deepEqual(receiving, [],
-      'INVERT ME — the relay grew a route that receives reports: ' + receiving.join(', '));
+    const receiving = ROUTES.filter((r) => /feedback|report|telemetry|analytics|crash/i.test(r.pattern));
+    assert.deepEqual(receiving.map((r) => `${r.method} ${r.pattern}`), ['POST /feedback'],
+      'the relay\'s reporting surface is no longer exactly one write-only route: '
+      + receiving.map((r) => `${r.method} ${r.pattern}`).join(', '));
+    assert.equal(receiving[0].spaceParam, undefined,
+      'the feedback route names a space — a report could then be joined to a family');
+    // and no OTHER route grew a reporting shape while nobody was looking.
+    const others = names.filter((n) => /log|diagnos/i.test(n));
+    assert.deepEqual(others, [], 'a second reporting route appeared: ' + others.join(', '));
   });
 
   test('§2e · no shipped module names a resolvable remote host', () => {
@@ -307,7 +387,20 @@ describe('§2 · the outbound path LZP-1009 would add — measured as absent', (
     // product could resolve. A feedback endpoint would have to appear here first.
     const named = [];
     for (const f of shippedFiles()) {
-      f.src.split('\n').forEach((line, i) => {
+      // ⚠ BLOCK COMMENTS ARE STRIPPED TOO, which they were not until 2026-09-03.
+      //
+      // The row already stripped `//` comments, for the reason its own header gives: a host named
+      // in PROSE is not a host this product can reach, and a gate that cannot be explained past
+      // is a gate that gets deleted. It did not strip `/* … */`, so a design note in a JSDoc block
+      // counted — and one duly appeared: `src/js/family/createjoin.js` gained a docblock quoting
+      // `https://github.com/OWNER/REPO/releases/…` as an EXAMPLE OF WHAT A RELAY ADDRESS IS NOT,
+      // which is the opposite of a leak and reddened this row anyway.
+      //
+      // Completing the strip is faithful to the row's intent rather than a relaxation of it: the
+      // claim is and remains "no shipped module NAMES a resolvable remote host **in code**", and
+      // §2e2 below is the control that proves a real literal is still caught.
+      const noBlocks = f.src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+      noBlocks.split('\n').forEach((line, i) => {
         const code = line.replace(/(^|[^:])\/\/.*$/, '$1');
         for (const m of code.matchAll(/['"`](https?:\/\/[^'"`\s]*)/g)) {
           const rest = m[1].replace(/^https?:\/\//, '');
@@ -325,35 +418,85 @@ describe('§2 · the outbound path LZP-1009 would add — measured as absent', (
       + 'net.js\'s header applies; if it is anything else, 21.5 has a new exception:\n' + named.join('\n'));
   });
 
-  test('§2d · and the page could not reach one if it existed — the path is refused', () => {
-    // The three doors are shut independently: no sender, no command, no route. This is the
-    // fourth: even a sender that existed could not use the product's one call site, because
-    // `/api/v1/feedback` is a path the relay does not route and `/feedback` is a path the
-    // transport refuses. LZP-1009 cannot land as a one-line change anywhere.
-    assert.throws(() => assertReachable('https://relay.example.com', '/feedback', ''),
-      (e) => e instanceof NetError && e.kind === 'blocked');
-    assert.equal(ROUTES.some((r) => r.pattern === '/feedback'), false);
+  test('§2e2 · ARMED — a real remote literal in CODE is still caught', () => {
+    // The control §2e's comment-stripping owes. Without it, "no module names a remote host" is
+    // satisfiable by a stripper that blanks the whole file. Each of these is shown to the SAME
+    // matcher §2e runs, and each must be seen; the last two must not, because prose is not code.
+    const scan = (src) => {
+      const noBlocks = src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+      const out = [];
+      noBlocks.split('\n').forEach((line) => {
+        const code = line.replace(/(^|[^:])\/\/.*$/, '$1');
+        for (const m of code.matchAll(/['"`](https?:\/\/[^'"`\s]*)/g)) {
+          const host = m[1].replace(/^https?:\/\//, '').split(/[/?#]/)[0];
+          const benign = host === '' || host === 'www.w3.org' || /[<>…]/.test(host)
+            || /^(?:127\.|localhost|\[::1\]|user:pass@host)/.test(host);
+          if (!benign) out.push(m[1]);
+        }
+      });
+      return out;
+    };
+    assert.deepEqual(scan('const SINK = "https://feedback.example.com/v1/report";'),
+      ['https://feedback.example.com/v1/report'], 'a real feedback host in code was NOT caught');
+    assert.deepEqual(scan('await post(`https://telemetry.example.net/collect`);'),
+      ['https://telemetry.example.net/collect'], 'a template literal host was not caught');
+    assert.deepEqual(scan('/* the release link is https://github.com/OWNER/REPO/releases/… */'), [],
+      'a host named in a BLOCK comment is counted — the strip did not happen');
+    assert.deepEqual(scan('// see https://vercel.com/docs for the region'), [],
+      'a host named in a line comment is counted');
+  });
+
+  test('§2d · the ONE new path is reachable and every look-alike is still refused', () => {
+    // INVERTED, and this is the row that shows how narrowly the surface widened. The transport's
+    // one call site now accepts exactly one more path than it did — `/api/v1/feedback` — and
+    // every neighbouring spelling that an attacker or a bug would produce is refused by name,
+    // before a byte leaves the process.
+    assert.equal(PATH_RE.test(FEEDBACK_PATH), true,
+      'the shipped feedback path is refused by the transport — the feature cannot work');
+    assert.equal(FEEDBACK_PATH, `${API_PREFIX}/feedback`, 'the client and the router disagree');
+    assert.doesNotThrow(() => assertReachable('https://relay.example.com', FEEDBACK_PATH, ''));
+    for (const p of ['/feedback', '/api/v1/../feedback', '/api/feedback', '/api/v2/feedback',
+      '/api/v1/feedback/../ops', '/api/v1/./feedback', 'https://elsewhere.example/api/v1/feedback']) {
+      assert.throws(() => assertReachable('https://relay.example.com', p, ''),
+        (e) => e instanceof NetError, `${p} was not refused by the one call site`);
+    }
+    // The path widened by ONE. `PATH_RE` itself did not change: it always admitted any
+    // `/api/v1/<word>`, and what bounds the surface is the ROUTE TABLE, which §2c counts.
+    assert.equal(ROUTES.filter((r) => r.pattern === '/feedback').length, 1);
   });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §3 · NO IMAGE EXISTS ANYWHERE ON ANY PATH
+// §3 · THE ONE IMAGE PATH, AND THE GLYPH CAPABILITY IT DOES NOT HAVE
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// E10 was asked to prove that a feedback screenshot is redacted *by not drawing* — that a
-// full-fidelity image of the board never exists anywhere on the path, not even for a moment in
-// memory before being blurred.
+// ██ INVERTED 2026-09-03, WHEN LZP-1009 LANDED. ██
 //
-// That claim cannot be verified, and the reason is the strongest possible form of it: **the
-// product cannot draw an image at all.** There is no canvas, no `toDataURL`, no `toBlob`, no
-// `OffscreenCanvas`, no `getDisplayMedia`, and neither shell can take a screenshot. A
-// full-fidelity image does not exist on the path because no image does.
+// This section used to say: *"the claim cannot be verified, because the product cannot draw."*
+// That was the strongest available form of the answer while the product had no image primitive
+// at all, and it came with its own instruction — *"the row to INVERT the day the screenshot half
+// of 1009 arrives, at which point 'produced by not drawing' becomes a claim with something to be
+// false about, and this row becomes: the only image-producing call site is the redacted
+// renderer."* This is that day, and that is the row §3a now is.
 //
-// That is a real measurement and it is the one to INVERT the day the screenshot half of 1009
-// arrives — at which point "produced by not drawing" becomes a claim with something to be false
-// about, and this row becomes "the only image-producing call site is the redacted renderer".
+// ⚠ §3a DID NOT GO RED WHEN THE FEATURE LANDED. Its scanner looks for `canvas`, `getContext`,
+// `toDataURL`, `toBlob`, `getImageData`, `OffscreenCanvas`, `createImageBitmap`,
+// `getDisplayMedia` and `html2canvas`, and the delivered renderer uses **not one of them**: it is
+// a hand-written indexed-PNG encoder over a `Uint8Array` (`src/js/feedback/png.js`). So the
+// product learned to draw and the row that was watching for it stayed green. Finding
+// **E10-1009-B**; the same shape as §2a's, and the reason both inverted rows below are written
+// as enumerations of CALL SITES rather than as searches for a vocabulary.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// AND THE CLAIM ITSELF IS NOW STRONGER THAN "WE REDACTED IT"
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// "Redact by not drawing, never by obscuring" is verifiable here because the encoder **has no
+// glyph path to disable**. Its only mutators are `fillRect` and `strokeRect`; it has no font, no
+// text measurement, no image input and no compositing source. A full-fidelity board image does
+// not exist on this path — not for a moment, not before a blur — because the widest thing that
+// ever exists is a list of rectangles.
 
-describe('§3 · the redacted-screenshot claim, measured from the other end', () => {
+describe('§3 · the redacted image: one producer, and it cannot draw a letter', () => {
   const IMAGE_PRIMITIVES = [
     { name: 'canvas element', re: /createElement\s*\(\s*canvas|OffscreenCanvas|getContext\s*\(/i },
     { name: 'toDataURL', re: /\btoDataURL\b/ },
@@ -364,21 +507,39 @@ describe('§3 · the redacted-screenshot claim, measured from the other end', ()
     { name: 'html2canvas', re: /\bhtml2canvas\b|\bdomToImage\b/ },
   ];
 
-  test('§3a · src/js/ contains no image-producing primitive of any kind', () => {
+  /** Every way a glyph could reach a pixel. None of these exists anywhere in the product. */
+  const GLYPH_PRIMITIVES = [
+    { name: 'fillText', re: /\bfillText\b/ },
+    { name: 'strokeText', re: /\bstrokeText\b/ },
+    { name: 'measureText', re: /\bmeasureText\b/ },
+    { name: 'drawImage', re: /\bdrawImage\b/ },
+    { name: 'FontFace', re: /\bFontFace\b|\bloadFont\b/ },
+    { name: 'SVG foreignObject', re: /\bforeignObject\b/ },
+    { name: 'XMLSerializer', re: /\bXMLSerializer\b|\bserializeToString\b/ },
+  ];
+
+  test('§3a · the product STILL has no capture primitive — the browser image APIs are unused', () => {
+    // Half of the old row survives verbatim and is worth keeping: the delivered renderer did NOT
+    // reach for a canvas, and it must never. A canvas is one `fillText` and one `drawImage` away
+    // from a full-fidelity board, which is the thing that must not exist even for a moment.
     const hits = [];
     for (const f of shippedFiles()) {
       const code = stripCommentsAndStrings(f.src);
       code.split('\n').forEach((line, i) => {
-        for (const p of IMAGE_PRIMITIVES) if (p.re.test(line)) hits.push(`${f.rel}:${i + 1} ${p.name}`);
+        for (const pr of IMAGE_PRIMITIVES) if (pr.re.test(line)) hits.push(`${f.rel}:${i + 1} ${pr.name}`);
       });
     }
     assert.deepEqual(hits, [],
-      'INVERT ME — the product can now produce an image. The claim "the redacted PNG was produced '
-      + 'by not drawing" is now falsifiable and must be tested rather than reported as vacuous:\n'
+      'the product reached for a browser image API. LZP-1009 renders by rasterising rectangles '
+      + 'precisely so that no surface exists which could also draw text or composite a capture:\n'
       + hits.join('\n'));
   });
 
-  test('§3b · neither shell can take a screenshot', () => {
+  test('§3b · neither shell can take a screenshot — unchanged, and now load-bearing', () => {
+    // This row never was about LZP-1009's absence; it is about the shells. It stays green, and
+    // the feature makes it MORE important rather than less: the picture in a report is produced
+    // by re-rendering geometry, and a shell that could capture the screen would offer a second,
+    // unredacted way to make one.
     const CAPTURE = /CGWindowListCreateImage|CGDisplayCreateImage|CGDisplayStream|SCScreenshotManager|SCStream|ScreenCaptureKit|NSBitmapImageRep|screencapture|takeSnapshot|WKSnapshotConfiguration|screenshots?::/;
     const hits = [];
     for (const shell of SHELLS) {
@@ -387,20 +548,106 @@ describe('§3 · the redacted-screenshot claim, measured from the other end', ()
         if (CAPTURE.test(code)) hits.push(`${shell.name}:${i + 1} ${code.trim().slice(0, 80)}`);
       });
     }
-    assert.deepEqual(hits, [], 'INVERT ME — a shell can capture the screen:\n' + hits.join('\n'));
+    assert.deepEqual(hits, [], 'a shell can capture the screen:\n' + hits.join('\n'));
   });
 
-  test('§3c · ARMED — both scanners catch what they claim to catch', () => {
-    // Shown a positive of each shape, so a green §3a/§3b is a fact about the product and not
-    // about a regex that stopped matching.
-    const planted = 'const png = board.getContext("2d").canvas.toDataURL("image/png");';
-    assert.ok(IMAGE_PRIMITIVES.some((p) => p.re.test(planted)), 'the image scanner missed a canvas');
-    assert.ok(/CGWindowListCreateImage/.test('let img = CGWindowListCreateImage(rect, .optionAll, 0, [])'),
-      'the capture scanner is not a matcher');
-    // and the file walk really walks: the scanners above ran over the whole shipped tree.
+  test('§3c · ██ THE ONLY IMAGE-PRODUCING CALL SITE IS THE REDACTED RENDERER ██', () => {
+    // The row the old §3a asked to become. `encodePng` is the one function in the product that
+    // can produce image bytes, and this enumerates every file that calls it. Two: the encoder's
+    // own module, and `redact.js` — which runs `assertNumericOnly` over its input first, so the
+    // only thing that can reach the encoder is a list of numbers.
+    const callers = [];
+    for (const f of shippedFiles()) {
+      // The DEFINITION is not a call site. `png.js` declares `export function encodePng(` and
+      // would otherwise report itself, which would make the row read "two producers" over a
+      // product that has one — and a row that is wrong in the safe direction gets relaxed by the
+      // next person rather than read.
+      const code = stripCommentsAndStrings(f.src).replace(/\bfunction\s+encodePng\s*\(/g, '');
+      if (/\bencodePng\s*\(/.test(code)) callers.push(f.rel);
+    }
+    assert.deepEqual(callers.sort(), ['src/js/feedback/redact.js'],
+      'something other than the redacted renderer produces an image: ' + callers.join(', '));
+    // and the ONE caller guards its input before a pixel is written.
+    const redact = shippedFiles().find((f) => f.rel === 'src/js/feedback/redact.js').src;
+    const guardAt = redact.indexOf('assertNumericOnly(prims)');
+    const drawAt = redact.indexOf('new Raster(');
+    assert.ok(guardAt > 0 && drawAt > guardAt,
+      'the numeric guard does not run BEFORE the raster is built — a text field could be drawn');
+  });
+
+  test('§3d · ██ THERE IS NO GLYPH PATH ANYWHERE IN THE PRODUCT ██', () => {
+    // "Produced by not drawing" as a claim about a CAPABILITY rather than about a filter. The
+    // encoder has no way to put a letter on a pixel, and neither does anything else that ships.
+    const hits = [];
+    for (const f of shippedFiles()) {
+      const code = stripCommentsAndStrings(f.src);
+      code.split('\n').forEach((line, i) => {
+        for (const pr of GLYPH_PRIMITIVES) if (pr.re.test(line)) hits.push(`${f.rel}:${i + 1} ${pr.name}`);
+      });
+    }
+    assert.deepEqual(hits, [],
+      'the product can now rasterise text. "The redacted image was produced by not drawing" is no '
+      + 'longer a claim about a capability the code lacks:\n' + hits.join('\n'));
+    // and the raster's whole mutator surface is two rectangle calls.
+    const mutators = Object.getOwnPropertyNames(Raster.prototype).filter((n) => n !== 'constructor');
+    assert.deepEqual(mutators.sort(), ['fillRect', 'strokeRect'],
+      'the raster grew a third primitive: ' + mutators.join(', '));
+  });
+
+  test('§3e · the walker hands the encoder NUMBERS, and the guard refuses anything else', () => {
+    // The join between §3c and §3d: the encoder cannot draw text, and the thing that feeds it
+    // cannot supply any. A primitive carrying a label stops the report rather than encoding it.
+    assert.throws(
+      () => assertNumericOnly([{ role: 'bar', x: 0, y: 0, w: 1, h: 1, fill: 0, stroke: 0, label: 'Kur in Bad Wörishofen' }]),
+      /only role and six numbers/,
+      'the production guard accepts a primitive carrying text');
+    const src = collectPrimitives.toString();
+    for (const forbidden of ['textContent', 'innerText', 'innerHTML', 'nodeValue', 'getAttribute']) {
+      assert.equal(new RegExp(`\\b${forbidden}\\b`).test(src), false,
+        `the geometry walker calls ${forbidden} — it can read the board's text`);
+    }
+  });
+
+  test('§3f · the encoder emits no text-bearing chunk, so a caption cannot be added later', () => {
+    assert.deepEqual([...EMITTED_CHUNKS], ['IHDR', 'PLTE', 'IDAT', 'IEND']);
+    for (const t of ['tEXt', 'iTXt', 'zTXt']) assert.equal(EMITTED_CHUNKS.includes(t), false);
+    const png = encodePng(new Raster(4, 4, 0), [[255, 255, 255]]);
+    const asText = Array.from(png, (b) => String.fromCharCode(b)).join('');
+    for (const t of ['tEXt', 'iTXt', 'zTXt', 'tIME']) {
+      assert.equal(asText.includes(t), false, `the encoder emitted a ${t} chunk`);
+    }
+  });
+
+  test('§3g · ARMED — every scanner in this section catches what it claims to', () => {
+    // Shown a positive of each shape, so a green §3a/§3b/§3d is a fact about the product and not
+    // about a regex that stopped matching. This is the row whose ABSENCE let the old §3a sit
+    // green over a shipped renderer — it armed the image scanner and never armed a glyph one.
+    assert.ok(IMAGE_PRIMITIVES.some((pr) => pr.re.test('board.getContext("2d").canvas.toDataURL("image/png")')));
+    assert.ok(GLYPH_PRIMITIVES.some((pr) => pr.re.test('ctx.fillText(entry.label, x, y);')),
+      'the glyph scanner would not see a fillText');
+    assert.ok(GLYPH_PRIMITIVES.some((pr) => pr.re.test('new XMLSerializer().serializeToString(svg)')),
+      'the glyph scanner would not see the SVG-to-image trick');
+    assert.ok(/CGWindowListCreateImage/.test('let img = CGWindowListCreateImage(rect, .optionAll, 0, [])'));
     const files = shippedFiles();
     assert.ok(files.length > 40, `only ${files.length} shipped files scanned`);
-    assert.ok(files.some((f) => f.rel === 'src/js/print.js'), 'print.js — the one renderer that COULD have drawn — was not scanned');
+    assert.ok(files.some((f) => f.rel === 'src/js/print.js'), 'print.js was not scanned');
+    assert.ok(files.some((f) => f.rel === 'src/js/feedback/png.js'), 'the ENCODER itself was not scanned');
+  });
+
+  test('§3h · and the real renderer, end to end, produces a bounded PNG from a real walk', () => {
+    // Non-vacuity for the whole section: the rows above are all "it cannot", and the feature has
+    // to also work. A tiny board is walked through the SHIPPED collector and the SHIPPED encoder.
+    const box = { left: 0, top: 0, width: 200, height: 100 };
+    const node = { box: { left: 10, top: 10, width: 80, height: 12 } };
+    const root = { box, querySelectorAll: (sel) => (sel === '.bar' ? [node] : []) };
+    const out = renderRedactedBoard(root, {
+      rects: (n) => (n === root ? box : n.box),
+      style: () => ({ backgroundColor: 'rgb(255,255,255)', borderTopColor: 'rgb(0,0,0)', color: 'rgb(0,0,0)' }),
+      lineBoxes: () => [],
+    });
+    assert.equal(out.w, 200);
+    assert.ok(out.bytes.length > 50 && out.bytes.length < 262144);
+    assert.deepEqual([...out.bytes.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
   });
 });
 

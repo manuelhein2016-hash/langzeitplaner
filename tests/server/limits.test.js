@@ -126,7 +126,9 @@ test('every deviation from LIMITS_SHAPE is recorded, with a reason, and nothing 
   const recorded = LIMIT_EXTENSIONS.map((e) => e.name).sort();
   assert.deepEqual(extra, recorded, 'a limit was added or removed without a LIMIT_EXTENSIONS row');
   for (const e of LIMIT_EXTENSIONS) {
-    assert.match(e.tag, /^E2-L\d+$/);
+    // E2-L* is LZP-205's namespace; E10-L* is LZP-1009's. The epic prefix is part of the tag so
+    // that a reader who finds `E10-L1` in a 429 body knows which epic to go and read.
+    assert.match(e.tag, /^E(?:2|10)-L\d+$/);
     assert.equal(LIMITS[e.name], e.value, `${e.tag}: the recorded value is not the shipped one`);
     assert.ok(e.adr && e.adr.length > 5, `${e.tag} names no ADR clause`);
     assert.ok(e.reason && e.reason.length > 80, `${e.tag} has no stated reason`);

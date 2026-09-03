@@ -30,6 +30,14 @@ serde_json = "1"
 # accessibility class (`WhenUnlockedThisDeviceOnly`) that shell-macos/main.swift
 # sets explicitly and this crate's convenience API does not expose.
 security-framework = "3"
+# LZP-1002 · ADR 003 §7 gate 3 — the Rust half of `sync_request` (see `syncPerform` in
+# src/lib.rs). `tauri-plugin-updater` already pulls `reqwest` in for its own HTTPS GET, so this
+# adds no new TLS stack; `default-features = false` + `rustls-tls` keeps it off the system
+# OpenSSL and makes the build reproducible. `redirect(Policy::none())` is set at client
+# construction — FINDING P-5's shell half, mirroring `SyncRequestDelegate` in main.swift.
+# UNVERIFIED: no cargo on the machine this was written on (PLAN.md risk R8). The Swift half of
+# the same contract IS verified end to end — docs/v2/SHELL-VERIFICATION.md.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [profile.release]
 codegen-units = 1

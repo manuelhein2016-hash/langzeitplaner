@@ -302,6 +302,87 @@ loses the backup** — there is no reset, by design (Section 3's Option-B trade)
 > says „DIES IST DEIN SCHLÜSSEL" across the top. **Two paths with two stated guarantees** is the
 > shape that argument permits, and `LIMITS.board` carries both sentences in both languages.
 
+## D10 — story 21.5 is amended: "zero requests" becomes "zero UNREQUESTED requests"
+
+**Decided by the PO, 2026-09-03.** Recorded here and in `docs/v2/adr/003-sync-protocol.md` §7.5,
+because **amending a measured property is exactly the quiet erosion a conformance sweep hunts
+for** and it must not be findable only as a diff.
+
+**The old wording**, story 21.5, superseding v1's 13.4:
+
+> "Network scope, replacing 13.4: **in solo mode the app makes zero network requests**; with a
+> Familienkreis it talks to exactly one sync endpoint and nothing else. The v1 property survives
+> as a scoped guarantee."
+
+**The new wording**, story 21.5 as amended:
+
+> "Network scope, replacing 13.4: **in solo mode the app makes zero *unrequested* network
+> requests — the only request a solo copy can originate is the one a human asks for, by pressing
+> „Senden" on the Rückmeldung screen (LZP-1009)**; with a Familienkreis it talks to exactly one
+> sync endpoint and nothing else. The v1 property survives as a scoped guarantee."
+
+**Why.** LZP-1009 puts „Rückmeldung senden" in Einstellungen, and Einstellungen is in the boot
+graph of every launch. That makes the feedback POST the **first network request a solo copy of
+this app can ever make**, and 21.5's "zero" was false from the commit that landed it. Two honest
+options: amend the story, or make the feature family-only. The second refuses the report from the
+only tester who has no Familienkreis — the person the feature exists for, and the person whose
+report will say „ich komme nicht mehr rein". The PO chose to amend.
+
+**What the amendment buys back, and it is not nothing.** The old promise bounded a **count**
+(zero). A count is only ever measured over the sessions somebody thought to script, and it goes
+green over a session nobody ran. The new promise bounds an **originator** — a human press, and
+nothing else — which is a property of the source tree and is checkable by construction:
+
+- `src/js/feedback/port.js` exports one getter, `feedbackPort()`, and it is the only way to reach
+  `send`. **Exactly one module may import it**, and it is the screen with the button on it.
+  Everyone else — including `family/mount.js`, which owes the binding line (E10-1009-A) — may
+  import the **setter** and can therefore bind a sender but never fire one.
+- `tests/tier1/network-scope.test.js` §5 measures it over all **78** shipped modules: **1
+  originator, `human`, `src/js/feedback/ui.js:245`, triggered by `addEventListener('click', …)`**.
+- §5d is armed by four planted automatic callers (`setInterval`, `online`, `DOMContentLoaded`, a
+  `setTimeout`'d `autoReport`) plus an honest-path control and a second-human-press control.
+
+**██ THE EXCEPTION MAY NOT WIDEN. ██** A *second automatic* caller of the feedback path is a
+regression against this decision, not an extension of it. The shapes to expect are all courtesies:
+a retry timer, an `online` listener "so it goes out when the wifi is back", an
+`unhandledrejection` handler that files a report by itself. Each looks harmless alone; together
+they are an unattended solo Mac sending, **with every endpoint gate still green**, because none of
+them adds an endpoint. §5b is the row that goes red; §5c is the row that keeps
+`feedback/events.js` — the module that already listens to `error` and `unhandledrejection` — one
+import short of being able to.
+
+**What did not change.** Not a third network job, not a second remote host: the exception is a
+POST to the sync relay's **own origin** over the **existing transport**. ADR 003 §7's four gates
+are untouched, the CSP diff is still empty, and the native-socket exception count is still **two**
+(sync, update). What is new is a third thing a human can ask for over the first of them.
+
+**A1 is unaffected.** *"v1's wording may remain true for solo mode and should be quoted that way
+in about/marketing copy."* On its own the app still does nothing, and the Datenschutz copy (D11)
+states it in that scoped form rather than as an absolute.
+
+## D11 — the Datenschutz section is a section of its own, not part of „Familienkreis"
+
+**Built 2026-09-03, LZP-1001, story 21.3 · amendment A10 places it differently and this is the
+deviation.** A10 says *"Settings gains a Familie section: … Datenschutz text (21.3) …"*. Built
+that way, the section is drawn by `family/mount.js` — the one dynamically imported door — and is
+therefore **invisible on a solo install**, which never loads it.
+
+Three of the section's paragraphs are true and load-bearing on exactly that Mac:
+
+1. „Ohne Familienkreis spricht dieser Mac mit niemandem", with D10's exception named;
+2. the backup file — **R1**: the entries in an exported backup are readable without the password;
+3. D8's consequence — lose every Mac and the password and **nobody** can recover the data.
+
+A solo tester is also the reader most likely to be carrying a backup file around and least likely
+to have been told what is in it. So the section is drawn on every launch, from `settings.js`, and
+each family-specific paragraph names its condition in its first clause („Mit Familienkreis: …").
+Held by `tests/tier2/datenschutz.dom.js` §1a, which opens the **real** settings sheet on a Mac
+with no space.
+
+The copy itself lives in `settings.js` beside the code that draws it and **not** in `i18n.js`, for
+the reason `feedback/copy.js` gives one section down: these are promises, not labels, and a person
+changing the thing a sentence describes should see the sentence in the same diff.
+
 ## D9 — invites do NOT carry wrapped keys
 
 The tighter of the two options, chosen deliberately. A leaked invite email is **never**

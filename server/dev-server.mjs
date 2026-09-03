@@ -56,6 +56,7 @@
 
 import http from 'node:http';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ROUTE_NAMES, matchRoute } from './core/router.js';
@@ -127,6 +128,30 @@ async function main() {
     // object, so `route` here is a ROUTE NAME (`pairGet`), never `req.path`. That distinction is
     // the difference between a log line and a copy of the pairing rendezvous id.
     log: createLog((line) => console.log(line)),
+    // LZP-1009 · CTX_EXTENSIONS `feedbackSink` — THE DESTINATION IS SERVER CONFIGURATION.
+    //
+    // `handlers/feedback.js` has no `to:` field and refuses a body that carries one, because a
+    // payload-specified recipient is an open relay for spam. Where a report actually goes is
+    // therefore decided HERE, by the host, and the dev host's answer is the simplest honest one:
+    // two files on disk beside the store, named by arrival time.
+    //
+    // ⚠ IT IS A DIRECTORY, NOT A TABLE. Nothing about a report may enter `ctx.store` — if it did
+    // it would sync, and feedback about the family would appear on the family's board (Principle
+    // 10). The handler is proved not to reach the store at all (`tests/server/feedback.test.js`
+    // §4 runs it against a store whose every other property throws), and this is the other half:
+    // the sink the handler is handed cannot write one either, because it is `fs`.
+    //
+    // Absent, the route answers 501 rather than accepting a report and dropping it — the preview
+    // screen told her exactly what would be sent, and "sent" has to mean sent.
+    feedbackSink: async (r) => {
+      const outDir = path.join(dir, 'feedback');
+      await fsp.mkdir(outDir, { recursive: true });
+      const stamp = new Date(r.at).toISOString().replace(/[:.]/g, '-');
+      await fsp.writeFile(path.join(outDir, `${stamp}.txt`), r.report, 'utf8');
+      if (r.image) await fsp.writeFile(path.join(outDir, `${stamp}.png`), r.image);
+      console.log(`[feedback] ${stamp} · ${r.signed ? 'signed' : 'unsigned'} · `
+        + `${r.report.length} chars · ${r.image ? r.image.length : 0} image bytes · ${outDir}`);
+    },
     limits,
   };
 

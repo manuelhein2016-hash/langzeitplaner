@@ -47,6 +47,7 @@ import { createInvite, redeemInvite, revokeInvite, openInvites } from './invites
 import { registerDevice, adoptDevice, revokeDevice } from './devices.js';
 import { pairOffer, pairGet, pairAnswer, pairDeliver } from './pair.js';
 import { removeMember, leaveSpace, transferAdmin, renameSpace, deleteSpace } from './lifecycle.js';
+import { sendFeedback, CTX_EXTENSIONS as FEEDBACK_CTX } from './feedback.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. The registry — one line per route, in `router.js`'s own order
@@ -94,6 +95,11 @@ export const handlers = Object.freeze({
   pairGet,
   pairAnswer,
   pairDeliver,
+
+  // LZP-1009. The function is named for what it does (`sendFeedback`); `handlers/feedback.js`
+  // also exports it under the ROUTE's name, which is what lets `blindness.test.js` §8 check this
+  // binding against that file's export the way it checks the other twenty-three.
+  feedback: sendFeedback,
 });
 
 /**
@@ -116,6 +122,7 @@ export const HANDLER_OWNERS = Object.freeze({
   removeMember: 'handlers/lifecycle.js', leaveSpace: 'handlers/lifecycle.js',
   transferAdmin: 'handlers/lifecycle.js', renameSpace: 'handlers/lifecycle.js',
   deleteSpace: 'handlers/lifecycle.js',
+  feedback: 'handlers/feedback.js',
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -155,6 +162,11 @@ export const REQUIRED_CTX = Object.freeze([
     absent: 'auth.js falls back to globalThis.crypto.subtle, which exists in Node and on Vercel',
     optional: true,
   }),
+  // LZP-1009 declares its own ctx member rather than having this list grow a name nobody can
+  // trace back to a handler. Spread from `handlers/feedback.js` so the two cannot disagree about
+  // what a host must supply — `tests/server/feedback.test.js` §6 asserts the spread really
+  // happened, which a hand-copied entry would pass while drifting.
+  ...FEEDBACK_CTX,
 ]);
 
 /** The non-optional subset, as plain names. */

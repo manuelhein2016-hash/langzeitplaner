@@ -92,7 +92,7 @@ cd <scratch> && ./tests/run-dom-tests.sh tests/tier2/e8-density-*.dom.js
 | **LZP-905** | 18.6 deletions propagate | **VERIFIED-HERE** — §4.4. |
 | **LZP-808** | 17.7 Komfort density | **VERIFIED-HERE**, recommendation **ship** — §7. |
 | — | co-editor's own ⌘Z | **OWED** — rule U6 excludes family entities from undo. §8.1. |
-| — | an admin-unshare *button* | **OWED** — `family/unshare.js` has no UI caller. §8.2. |
+| — | an admin-unshare *button* | **CLOSED 2026-09-03 (LZP-1002)** — the caller is `familysettings.js#buildModerationSection` („Einträge im Familienkreis"), 26 rows in `tests/tier2/unshare-ui.dom.js`; `sync-domains.test.js` S5b measured the module moving from absent to present. Driving it end to end in the shipped shell is blocked intermittently by **F-SHELL-1** (`FINDINGS.md` §19b), which is not this button's defect. |
 | — | `NOT_MEMBER` is not curable | **OWED** — §8.3. |
 | — | attack rows A3b/A3c, C2/C2b/C3 | **OWED to WP-9** — and C2's priority rises, §8.4. |
 

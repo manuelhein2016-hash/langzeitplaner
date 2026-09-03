@@ -8,6 +8,7 @@
 | **Stories** | 15.2–15.6, 19.1, 19.2, 19.3, 19.4, 19.6, 20.1–20.4, 21.1, 21.3, 21.4, 21.5, 22.7 |
 | **Depends on** | ADR 001 (op-log), ADR 002 (crypto) |
 | **Amended** | 2026-08-29 (E2↔E3 seam) — **§3 and §5.1 are amended so that this ADR and ADR 002 describe ONE wire.** Family key rotation could not be performed by any client over the endpoints below, and both sides' suites were green because neither ever put one side's output into the other's input. `POST /spaces/:id/epoch`'s body is stated exactly (§3.5); `GET /spaces/:id/keys` gains **`senderKexPubRaw`**, which ADR 002 §4.2 step 6 has required since 2026-08-28 and no column carried; `GET /spaces/:id/members` publishes **`device.attestation`**, the roster ADR 002 §4.2 step 6 already specified; `KeyWrap` gains a relay-stamped **`senderDeviceId`**; and `device.attestation` has ONE encoding on every write path — the blob string — verified on `POST /spaces` as it always was on `POST /devices`. §5.1's model block was also stale in four places and is refreshed against `server/prisma/schema.prisma`, which is the authority. Findings **E2E3-1 … E2E3-8**. |
+| **Amended** | 2026-09-03 (LZP-1002) — **§7 is amended: story 21.5's "in solo mode the app makes zero network requests" becomes "zero UNREQUESTED network requests", with LZP-1009's Rückmeldung as the single named exception. Decided by the PO on 2026-09-03.** Both wordings are quoted in **§7.5**, together with why the new one is a *narrower* promise (it bounds an ORIGINATOR rather than a COUNT) and which test holds it (`tests/tier1/network-scope.test.js` §5 — 1 originator, human, at HEAD). §7 gate 1's *"OWED, not held"* note from 2026-08-27 is **closed** in the same pass: 78 shipped modules scanned, 0 network identifiers outside `platform/net.js`. §7 gates 1–4 are otherwise unchanged. Mirrored as decision **D10** in `DESIGN-DECISIONS.md`. |
 
 > **The one-sentence protocol.** Devices push signed, padded, end-to-end-encrypted envelopes to a
 > per-space append-only log and pull everything after a cursor; the server assigns sequence
@@ -1059,9 +1060,16 @@ serialiser and fails on any other identifier reaching it. (21.3, 21.4)
 
 ---
 
-## 7. Solo mode makes zero requests — four independent gates (21.5, LZP-1002)
+## 7. Solo mode makes zero UNREQUESTED requests — four independent gates (21.5, LZP-1002)
 
 A promise this central does not rest on one `if`.
+
+> **This heading changed on 2026-09-03 and the old one is not lost: §7.5 quotes it, quotes the
+> new wording beside it, and says who decided.** It read *"Solo mode makes zero requests"* until
+> LZP-1009 shipped „Rückmeldung senden" into Einstellungen. Read §7.5 before reading the four
+> gates — it is the section that says what the word *unrequested* is doing, and which test holds
+> it. The four gates themselves are **unchanged**; the exception is a POST to the relay's own
+> origin over the transport gate 1 already bounds.
 
 1. **One call site.** `src/js/platform/net.js` is the **only** module in the tree that calls
    `fetch`. `tests/tier1/network-scope.test.js` greps all of `src/js/` for `fetch(`,
@@ -1078,20 +1086,127 @@ A promise this central does not rest on one `if`.
    > is **blocked**, not merely unused). This gate is ~20 lines and it is the one that would have
    > caught `src/js/platform/updater.js` arriving unscanned — see finding **F-9**. Recorded by
    > `judge:conformance` B-14.
+   >
+   > **CLOSED 2026-09-03 by LZP-1002.** Both files exist and the gate is held rather than owed:
+   > `tests/tier1/network-scope.test.js` walks the tree it names — **78** shipped `.js` files
+   > under `src/js/`, `platform/` and the DOM layer included — and reports **0** network
+   > identifiers outside `platform/net.js`, which itself contains exactly **1** (`fetch`). §4 of
+   > that file is the non-vacuity half B-14 asked for: the scanner is shown a planted call site
+   > in every spelling, and one planted in a real shipped file, and must name each.
 2. **Never loaded.** `net.js` and the whole of `src/js/sync/` are reached only through a dynamic
    `await import()` gated on `store.state._v2.spaces.personal || store.state._v2.spaces.family`.
    In solo mode the modules are never evaluated, so there is no code path to a request even under
    a bug elsewhere.
 3. **The shell enforces it.** `WKNavigationDelegate` / `WKURLSchemeHandler` in
-   `shell-macos/main.swift` rejects every request whose scheme is not `app://` unless the shell
-   has been told (`set_shell_pref: "sync_enabled"`) that a space exists — and then permits exactly
-   the one sync origin. **This gate survives a JS bug**, which no test-only assertion does.
+   `shell-macos/main.swift` rejects every request whose scheme is not `app://` (plus `about:`),
+   **always, in every mode** — and the pinned-origin bridge command `sync_request` is the gate
+   that `set_shell_pref: "sync_enabled"` opens. **This gate survives a JS bug**, which no
+   test-only assertion does.
+
+   > **Amended 2026-09-03 by LZP-1002 — this paragraph used to say the delegate "permits exactly
+   > the one sync origin" once `sync_enabled` is set. That was a LOOSENING and it was not built.**
+   > The page never opens the socket: `net.js`'s header works the 21.5 ↔ 22.3 tension out and
+   > lands on *the native shell process performs the request; the page does not* — which is why
+   > the CSP diff for family mode is empty (gate 4 does not move either). Opening the navigation
+   > delegate to the relay origin would therefore buy **nothing** and cost the one gate that
+   > survives a JS bug: page script could then navigate to, and pull subresources from, a remote
+   > host, in the one state (family mode) where this Mac has something to leak.
+   >
+   > **Gate 3 as built:** the navigation delegate stays shut — `app://` + `about:`, forever — and
+   > `sync_request` (`shell-macos/main.swift`, mirrored in `src-tauri/src/lib.rs`) is the gate.
+   > It refuses unless `sync_enabled` is set, it **pins** the origin from build configuration
+   > rather than accepting one from the page, it rebuilds the URL and requires byte equality, it
+   > follows no redirect, and it opens no `URLSession` until every check has passed. The
+   > reasoning is written out above `sync_request` in `main.swift`;
+   > `tests/tier1/headless-shell.test.js` fails the build if anyone builds the paragraph as it
+   > was originally written. **Gate 3 is no longer OWED** — see `docs/v2/SHELL-VERIFICATION.md`.
 4. **CSP.** `src-tauri/tauri.conf.json` → `connect-src 'self' ipc: http://ipc.localhost https://<sync-host>`
    and nothing else, mirrored as a `Content-Security-Policy` meta in `index.html` for the Swift
    shell.
 
 LZP-1002 asserts (1) by grep, (2) by a `fetch` spy over a full scripted solo session **including
 first run**, (3) by the shell's own `--test` run, and (4) by reading the shipped config.
+
+**Measured 2026-09-03 in the shipped `.app`** (`docs/v2/SHELL-VERIFICATION.md`): a full solo
+session inside WKWebView — first run, board edits, settings, print preview — makes **zero**
+`sync_request` calls and **zero** `fetch` calls, and with `sync_enabled` off the command refuses
+at check 1, before a name is resolved or a session allocated.
+
+---
+
+### 7.5 ██ THE AMENDMENT — "zero requests" becomes "zero UNREQUESTED requests" ██
+
+*(added 2026-09-03 by LZP-1002. **Decided by the PO on 2026-09-03.** This is a change to a
+MEASURED property and it is recorded as a decision with a name on it rather than as a diff.)*
+
+**Old wording — story 21.5, and §7's own title above it, until today:**
+
+> "Network scope, replacing 13.4: **in solo mode the app makes zero network requests**; with a
+> Familienkreis it talks to exactly one sync endpoint and nothing else. The v1 property survives
+> as a scoped guarantee."
+
+**New wording — story 21.5 as amended:**
+
+> "Network scope, replacing 13.4: **in solo mode the app makes zero *unrequested* network
+> requests — the only request a solo copy can originate is the one a human asks for, by pressing
+> „Senden" on the Rückmeldung screen (LZP-1009)**; with a Familienkreis it talks to exactly one
+> sync endpoint and nothing else. The v1 property survives as a scoped guarantee."
+
+**Who decided, and what they were told.** The PO, on 2026-09-03, presented with the fact and the
+cost: LZP-1009 ships „Rückmeldung senden" in Einstellungen, and Einstellungen is in the boot graph
+of every launch. That makes the feedback POST **the first network request a solo copy of this app
+can ever make**, and 21.5's "zero" was false the moment that ticket landed. The two honest
+options were (a) amend the story, or (b) make the feature family-only — which would refuse the
+report from the only tester who has no Familienkreis, i.e. the person the feature is for. The PO
+chose (a).
+
+**Why this is a NARROWER promise and not a softer one — and this paragraph is the whole point.**
+Amending a measured property is exactly the quiet erosion a conformance sweep hunts for; `judge:
+conformance` B-14 caught gate 1 above being *vacuously* true by the same mechanism, and the
+correction is the same shape. So the amendment does not weaken the bound, it **changes what is
+bounded**:
+
+| | bounds | checked by |
+|---|---|---|
+| old | a **count** — zero | looking at a session, and green over any session nobody scripted |
+| new | an **originator** — a human press, and nothing else | construction: who may hold the sender, and what calls it |
+
+A count can only ever be measured over the sessions somebody thought to run. An originator is a
+property of the source tree, and it is the property that actually fails when the exception widens.
+
+**██ THE EXCEPTION MAY NOT WIDEN, AND THAT IS THE ROW TO WATCH. ██** A *second* automatic caller
+of the feedback path is a regression against this section — one `setInterval` "so a stuck report
+retries", one `addEventListener('online', …)` "so it goes out when the wifi is back", one
+`unhandledrejection` handler that files a report by itself. Each of those on its own reads as a
+courtesy; together they are a solo Mac sending unattended, **with every endpoint gate in this
+document still green**, because none of them adds an endpoint.
+
+`tests/tier1/network-scope.test.js` **§5** is the gate:
+
+| row | what it holds |
+|---|---|
+| §5a | only `src/js/feedback/ui.js` may import `feedbackPort()` — the sole way to reach `send`. Everyone else (`family/mount.js`, when it lands E10-1009-A) may import the **setter** and can therefore bind but not originate |
+| §5b | across all **78** shipped modules the sender has **exactly one** originator, and its trigger is `addEventListener('click', …)` |
+| §5c | `feedback/events.js` — the one module that listens to the machine (`error`, `unhandledrejection`) — cannot reach the sender at all; and no timer or lifecycle event anywhere names the dispatcher |
+| §5d | **ARMED**, run rather than reasoned: four automatic callers planted in the real module's real source (`setInterval`, `online`, `DOMContentLoaded`, a `setTimeout`'d `autoReport`), each named; plus an honest-path control and a second-human-press control so the classifier is not simply calling everything automatic |
+| §5e | the amended promise is **on the screen** and in both languages, not only in this ADR |
+
+Measured at HEAD: **1 originator, human, `src/js/feedback/ui.js:245`.**
+
+**What did NOT change, and why the rest of this section still reads as written.** The exception is
+a POST to the **sync relay's own origin** over the **existing transport** — not a third network
+job and not a second remote host. Gates 1, 2, 3 and 4 above are untouched: there is still exactly
+one `fetch` call site (`platform/net.js`, 78 files scanned, 0 hits elsewhere), still no static
+path from the boot graph to it, still exactly one dynamic door (`family/mount.js`), and the CSP
+diff is still empty. `tests/attack/e10-network-scope.test.js` §1a/§1d/§1g/§2b/§2e stay green **for
+the reasons they were written**, and 21.5's native-socket exception count is still **two**
+(sync, update). What is new is a *third* thing a human can ask for over the first of them.
+
+**A1 is unaffected.** *"v1's wording may remain true for solo mode and should be quoted that way
+in about/marketing copy"* — v1's wording is about what the app does on its own, and on its own it
+still does nothing. The Datenschutz copy (21.3, LZP-1001, `src/js/settings.js`) states it in
+exactly that scoped form: „Von allein sendet dieses Programm nichts." / "On its own this program
+sends nothing." — with the exception named in the sentence before it, conditional on a press.
 
 ---
 

@@ -1225,10 +1225,19 @@ describe('S5 · module reachability', () => {
     // an unmounted module is not a shipped one. It became visible at the E9 integration, when
     // `family/mount.js#mountCircleSurfaces` called `installConflictNotice`. `family/unshare.js`
     // (LZP-903) is the same shape one round behind — on disk, invisible to this walk, and it will
-    // appear here the moment `family/adminpanel.js` grows the 18.3 control. That absence is
-    // recorded as OWED in `docs/v2/E9-VERIFICATION.md`, and this row is what will notice.
-    assert.equal(enumerated.length, 69,
-      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 69. If a module `
+    // appear here the moment a screen grows the 18.3 control. That absence was recorded as OWED in
+    // `docs/v2/E9-VERIFICATION.md`, and this row is what noticed.
+    // 69 → 70: `family/unshare.js`, and THE ROW MOVED EXACTLY AS PREDICTED — the walk found it the
+    // moment `family/familysettings.js#buildModerationSection` called `createUnshare().run()`. The
+    // control landed in the settings sheet rather than in `adminpanel.js`; what this row measures
+    // is reachability, not which file supplies the caller.
+    // 70 → 78: LZP-1009's `src/js/feedback/` — eight modules, reached STATICALLY from
+    // `settings.js`. Static and not behind the dynamic door on purpose: the tree imports nothing
+    // that can open a socket (its sender is a port), so a static edge costs gate 2 nothing, while
+    // a dynamic `import()` here WOULD be a second door out of the eagerly-evaluated graph — the
+    // defect `tests/tier1/network-scope.test.js` §2 names in so many words.
+    assert.equal(enumerated.length, 78,
+      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 78. If a module `
       + 'was added or deleted, add or delete its row rather than changing this number alone.');
   });
 
@@ -1263,9 +1272,19 @@ describe('S5 · module reachability', () => {
     // `store.familyLevelOf` (barrier 4) on the one path that seals a family op. `role: defence`
     // asks something else — "would deleting this file make the product worse while turning this
     // row green?" — and for a choke point the answer is permanently yes.
+    //
+    // `feedback/port.js` joined the list with LZP-1009 and is the same shape as `core/project.js`
+    // was for one round: the module is REACHABLE (the Rückmeldung screen reads it on every press)
+    // and NOTHING BINDS A SENDER, because the one line that would belongs to `family/mount.js` —
+    // a file that ticket does not own. Deleting it to make the row green would force
+    // `src/js/feedback/` to import `platform/net.js` itself, which is a SECOND dynamic door out
+    // of the boot graph and the exact defect `tests/tier1/network-scope.test.js` §2 catches. So
+    // it is a `defence` with a named wiring job: finding E10-1009-A.
     assert.deepEqual(defences, [
       'src/js/core/project.js',
-      'src/js/crypto/backup.js', 'src/js/crypto/probe.js', 'src/js/sync/chain.js',
+      'src/js/crypto/backup.js', 'src/js/crypto/probe.js',
+      'src/js/feedback/port.js',
+      'src/js/sync/chain.js',
       'src/js/sync/cursor.js', 'src/js/sync/outbox.js',
     ]);
     const dead = S5.filter((e) => e.expect.role === 'dead').map((e) => e.value).sort();

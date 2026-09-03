@@ -141,7 +141,11 @@ test('§1 `assertCtx` names what is missing, one member at a time', () => {
   }
   // The optional ones really are optional — a host that omits `log` must still boot.
   const optional = REQUIRED_CTX.filter((c) => c.optional).map((c) => c.name);
-  assert.deepEqual([...optional].sort(), ['log', 'subtle']);
+  // `feedbackSink` (LZP-1009) is optional on purpose and the reason is in `handlers/feedback.js`
+  // CTX_EXTENSIONS: a relay that has not configured a destination answers 501, HONESTLY, rather
+  // than accepting a report and dropping it. A required member would instead stop the whole
+  // server from booting over a route no family needs to sync.
+  assert.deepEqual([...optional].sort(), ['feedbackSink', 'log', 'subtle']);
   assert.doesNotThrow(() => assertCtx(full));
 });
 

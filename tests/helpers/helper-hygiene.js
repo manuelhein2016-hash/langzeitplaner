@@ -68,6 +68,58 @@ export function shellSource() {
   return readFileSync(SHELL_SWIFT, 'utf8');
 }
 
+// ── LZP-1002 · the OTHER shell ───────────────────────────────────────────────
+//
+// `sync_request` is one contract with two implementations (`src/js/platform/net.js` §6). The
+// Swift half is verified end to end in the shipped `.app`; the Rust half has never been compiled
+// — there is no `cargo` on this machine (PLAN.md risk R8) — so the only thing that can hold the
+// two together is a source-level row, and a source-level row needs the source.
+//
+// Exported HERE rather than read ad hoc in a test for the reason every other path in this file is
+// exported: one definition of where the file is, so a move breaks one line instead of six.
+export const SHELL_RUST = fileURLToPath(new URL('../../src-tauri/src/lib.rs', import.meta.url));
+
+export function rustSource() {
+  return readFileSync(SHELL_RUST, 'utf8');
+}
+
+/**
+ * The Tauri crate manifest. Here rather than read ad hoc in a test because `suite-integrity.js`
+ * forbids a tier-1 file from importing `node:fs` at all — reading repo files is a HELPER's job,
+ * and that rule is what keeps "no test reaches outside the repo" checkable by grep.
+ */
+export const CARGO_TOML = fileURLToPath(new URL('../../src-tauri/Cargo.toml', import.meta.url));
+
+export function cargoManifest() {
+  return readFileSync(CARGO_TOML, 'utf8');
+}
+
+/**
+ * Every `SyncRefusal` name the Swift shell can answer with. The refusal vocabulary is the ONE
+ * thing a test cannot tell the two shells apart by — that is the design (`net.js` §6: one
+ * contract, two shells) — so it is the right thing to hold them to.
+ * @param {string} src
+ * @returns {string[]} sorted, deduplicated
+ */
+export function swiftRefusalNames(src = shellSource()) {
+  const block = src.slice(src.indexOf('enum SyncRefusal'));
+  const body = block.slice(0, block.indexOf('\n}'));
+  return [...new Set([...body.matchAll(/=\s*"([a-z0-9_]+)"/g)].map((m) => m[1]))].sort();
+}
+
+/**
+ * The same vocabulary as the Rust shell spells it — `pub const NAME: &str = "…";` inside
+ * `mod sync_refusal`.
+ * @param {string} src
+ * @returns {string[]} sorted, deduplicated
+ */
+export function rustRefusalNames(src = rustSource()) {
+  const i = src.indexOf('mod sync_refusal');
+  if (i < 0) return [];
+  const body = src.slice(i, src.indexOf('\n}', i));
+  return [...new Set([...body.matchAll(/&str\s*=\s*"([a-z0-9_]+)"/g)].map((m) => m[1]))].sort();
+}
+
 /** Lines that present UI, with whether each is guarded by `isHeadless`. */
 export function presentationSites(src = shellSource()) {
   const lines = src.split('\n');

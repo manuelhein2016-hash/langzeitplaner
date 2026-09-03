@@ -99,7 +99,7 @@ import { store } from '../store.js';
 import { PALETTE, colorOf, paletteName } from '../palette.js';
 import { b64u, crockNormalize, crock32, CROCKFORD_ALPHABET } from '../core/b64.js';
 import { spaceId as mintSpaceId } from '../core/ids.js';
-import { createFetchTransport, normalizeOrigin, insecureOriginMessage, NetError } from '../platform/net.js';
+import { chooseTransport, normalizeOrigin, insecureOriginMessage, NetError } from '../platform/net.js';
 import { chooseKeyStore } from '../platform/keystore.js';
 import { openDeviceIdentity, selfAttest, IdentityUnavailableError } from '../platform/device-identity.js';
 import { exportRawPublic, signBytes, importKexPublic } from '../crypto/identity.js';
@@ -180,15 +180,33 @@ const DEFAULT_PORTS = Object.freeze({
   schedule: (ms, fn) => setTimeout(fn, ms),
   unschedule: (h) => clearTimeout(h),
   invoke: () => globalThis.window?.__TAURI__?.core?.invoke,
-  transport: (origin, deviceShort, sign) => createFetchTransport({
-    origin,
-    deviceShort,
-    sign,
-    clientVersion: CLIENT_V,
-    now: () => Date.now(),
-    schedule: (ms, fn) => setTimeout(fn, ms),
-    unschedule: (h) => clearTimeout(h),
-  }),
+  // ── LZP-1002 · THE SHELL IS THE TRANSPORT HERE TOO ────────────────────────────────────────
+  //
+  // This port used to call `createFetchTransport` UNCONDITIONALLY, and that made every circle
+  // operation this file owns — create, join, redeem, and everything `circleTransport()` hands to
+  // `adminpanel.js` / `leavedelete.js` — reach for `fetch` inside the shipped shell, where
+  // `default-src 'self'` blocks it (`tests/tier2/shell-bridge.dom.js`: "an outbound fetch is
+  // actually blocked, not merely discouraged"). `engine.js` asked `chooseTransport`; this file
+  // did not, so the conformance finding had a second half: even with `sync_request` implemented,
+  // **creating a Familienkreis in the shipped app could not work.**
+  //
+  // `chooseTransport` is the ONE decision, made in `net.js` and made once. `invoke` is read
+  // through `ports.invoke()` so an injected port (tier 1 and tier 2 both inject one) still
+  // chooses the same way a real shell does.
+  transport: (origin, deviceShort, sign) => {
+    const picked = chooseTransport({
+      origin,
+      deviceShort,
+      sign,
+      clientVersion: CLIENT_V,
+      now: () => Date.now(),
+      schedule: (ms, fn) => setTimeout(fn, ms),
+      unschedule: (h) => clearTimeout(h),
+      invoke: ports.invoke(),
+    });
+    lastTransportKind = picked.kind;
+    return picked.transport;
+  },
   /** The durable device identity, minted on the click and never at render. */
   openIdentity: async (today, invoke) => {
     const { store: ks, kind: custody } = chooseKeyStore({ invoke });
@@ -202,6 +220,20 @@ const DEFAULT_PORTS = Object.freeze({
 });
 
 let ports = { ...DEFAULT_PORTS };
+
+/**
+ * Which transport the LAST circle operation actually used — `'bridge'` or `'fetch'`.
+ *
+ * `chooseTransport`'s own docblock says it: *"a caller that reads `'fetch'` in the shipped shell
+ * has found a bug in gate 3."* This getter is how a test in a REAL shell reads it, rather than
+ * inferring it from the absence of a `fetch` call. `null` until something has been transported.
+ * @returns {'bridge'|'fetch'|null}
+ */
+export function lastCircleTransportKind() {
+  return lastTransportKind;
+}
+
+let lastTransportKind = null;
 
 /**
  * Mount (or, with no arguments, reset) the create/join flows.
@@ -338,19 +370,120 @@ async function rememberCircle(patch) {
 // 4. The code — display, parsing, generation, derivation
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+// ── 4.0 the damage a code survives on the way here, and the damage that hides a word ─────────
+//
+// LZP-1006 measured the join path by running THIS parser over the e-mail the product actually
+// sends (`docs/v2/email/*`, `scripts/mom-test-probe.mjs`). Three defects came back, and all
+// three had the same cause: the parser guessed. Every rule below exists to stop it guessing,
+// and the rule it is replaced with is written next to it.
+//
+// D9 is untouched by all of this. An invitation carries an address and a code; neither is key
+// material, nothing here reads or derives any, and no sentence this file produces says whether
+// a code was ever minted. Refusals talk about the PASTE — the text on screen — and nothing else.
+
+/**
+ * Characters that get INSIDE a code without being visible: a soft hyphen from a line wrap, the
+ * zero-width space an HTML mail uses to allow a break, a BOM from a copied text file.
+ *
+ * They are DROPPED rather than treated as separators, because a line wrap inserts them in the
+ * middle of a group as readily as between two. Measured as probe rows H11 and H12, both of which
+ * were „no code found, no visible reason" — the honest failure that a person cannot act on,
+ * because the thing that broke it does not exist on her screen.
+ */
+const CODE_INVISIBLE = /[\u00AD\u200B\u200C\u200D\u2060\uFEFF]/g;
+
+/**
+ * Everything a mail client, a phone keyboard or macOS text substitution puts where the hyphen
+ * was: the en dash, the em dash, the non-breaking hyphen, the minus sign. Folded TO a hyphen.
+ *
+ * This is not a guess about intent. Crockford's alphabet contains no dash of any kind
+ * (`CROCKFORD_ALPHABET` is `0-9` and `A-Z` less I, L, O and U), so a dash inside a code can only
+ * ever have been a separator. Probe rows H09 and H10.
+ */
+const CODE_DASHLIKE = /[\u2010-\u2015\u2043\u2212]/g;
+
+/** Spaces `crockNormalize` does not know about — thin, narrow no-break, ideographic. */
+const CODE_ODD_SPACE = /[\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/**
+ * The three foldings above, applied in one place so that the shape test, the token scanner and
+ * `formatInviteCode` cannot disagree about what a separator is. Two answers to "what did she
+ * type" is the bug `deriveInvite` warns about three functions down.
+ *
+ * @param {*} s @returns {string}
+ */
+function foldPasteDamage(s) {
+  return String(s ?? '')
+    .replace(CODE_INVISIBLE, '')
+    .replace(CODE_DASHLIKE, '-')
+    .replace(CODE_ODD_SPACE, ' ');
+}
+
+/**
+ * A token in the paste: letters, digits and hyphens, plus the damage above so a broken code
+ * arrives here in one piece instead of as three fragments.
+ */
+const TOKEN_RE = /[0-9A-Za-z\-\u2010-\u2015\u2043\u2212\u00AD\u200B-\u200D\u2060\uFEFF]+/g;
+
+/**
+ * THE SHAPE A MINTED CODE HAS, derived from `INVITE_UI` so it cannot drift away from
+ * `newInviteCode`: three groups of four, hyphen-separated. `XXXX-XXXX-XXXX`.
+ *
+ * This one regular expression is the whole of defect E-1's fix, and it is worth saying why it
+ * works when the check it joins does not. `codeToken` asks "does this token normalise to twelve
+ * Crockford characters", and its comment argues that prose therefore cannot win. A German
+ * hyphenated compound can:
+ *
+ *     „Mail-Anbieter"  →  crockNormalize  →  MA11ANB1ETER   — twelve, all legal, one hyphen
+ *
+ * and it stands in the shipped German invitation ABOVE the code, in the sentence about mail
+ * providers stripping .dmg files. First match won, so a stranger who pasted the whole e-mail got
+ * `MA11-ANB1-ETER` in the field, an enabled button, and then — from the relay — a sentence
+ * blaming her for mistyping a character she never typed.
+ *
+ * What separates the word from the code is not the alphabet, it is the GROUPING: „Mail-Anbieter"
+ * is four and eight, and a minted code is four and four and four. So a token in the canonical
+ * grouping is a STRONG candidate and may win a sentence; anything else that merely normalises to
+ * twelve is a WEAK candidate and may not, because „Installation" (1NSTA11AT10N) and
+ * „Applications" (APP11CAT10NS) are twelve legal characters too, and both are in these e-mails.
+ */
+const CANONICAL_CODE_RE = (() => {
+  const g = INVITE_UI.codeGroup;
+  const groups = INVITE_UI.codeChars / g;
+  return new RegExp(`^[0-9A-Za-z]{${g}}(?:-[0-9A-Za-z]{${g}}){${groups - 1}}$`);
+})();
+
+/**
+ * The words an invitation uses to introduce the code, German first. A candidate that follows one
+ * of these within `LABEL_WINDOW` characters is ANCHORED and beats everything else, including a
+ * canonical-shaped decoy — because the sender said, in words, which one it is.
+ *
+ * This is what makes the shipped e-mail work without editing the e-mail: its code sits under the
+ * heading „DEIN EINLADUNGSCODE" / „YOUR INVITATION CODE".
+ */
+const CODE_LABEL_RE = /(einladungs-?code|beitrittscode|invitations?-?code|invite[\s-]*code|\bcode\b)/gi;
+
+/** The words an invitation uses to introduce the relay. Same job, for the address. */
+const ORIGIN_LABEL_RE = /(serveradresse|sync-?adresse|\bserver\b|\brelay\b)/gi;
+
+/** How far after a label a value may stand and still count as introduced by it. */
+const LABEL_WINDOW = 120;
+
 /**
  * `XXXX-XXXX-XXXX` from anything a human has typed or pasted so far.
  *
  * `crockNormalize` is imported rather than re-implemented for the reason `pairingui.js` gives at
  * length: it folds case and maps I/L → 1 and O → 0 and deliberately does NOT map `U`, and two
  * spellings of "what did the user type" would be two answers the derivation cannot both accept.
+ * `foldPasteDamage` runs FIRST and is additive: it removes characters Crockford has no opinion
+ * about, and it never invents one.
  *
  * @param {string} raw @returns {string}
  */
 export function formatInviteCode(raw) {
   let norm;
   try {
-    norm = crockNormalize(String(raw ?? ''));
+    norm = crockNormalize(foldPasteDamage(raw));
   } catch {
     return '';
   }
@@ -378,13 +511,87 @@ export const inviteCodeChars = (formatted) => String(formatted ?? '').split('-')
 function codeToken(raw) {
   let norm;
   try {
-    norm = crockNormalize(String(raw ?? ''));
+    norm = crockNormalize(foldPasteDamage(raw));
   } catch {
     return null;
   }
   if (norm.length !== INVITE_UI.codeChars) return null;
   for (const ch of norm) if (!CROCKFORD_ALPHABET.includes(ch)) return null;
   return norm;
+}
+
+/** True when `at` follows an occurrence of `label` closely enough to have been introduced by it. */
+function isAnchored(text, labelRe, at) {
+  labelRe.lastIndex = 0;
+  for (const m of text.matchAll(labelRe)) {
+    const end = m.index + m[0].length;
+    if (at > end && at - end <= LABEL_WINDOW) return true;
+  }
+  return false;
+}
+
+/** Trailing punctuation that ends a sentence rather than an address. Defect E-3. */
+const URL_TAIL_RE = /[.,;:!?\u2026)\]}>"'\u00AB\u00BB\u2018\u2019\u201A\u201B\u201C\u201D\u201E\u2039\u203A]+$/;
+const URL_RE = /https?:\/\/[^\s"'<>]+/gi;
+
+/**
+ * Every URL in the paste, and — for each — whether it is an ADDRESS or a LINK TO SOMETHING.
+ *
+ * DEFECT E-2, AND THE RULE THAT REPLACES THE GUESS. The parser used to take the first URL it
+ * found. The shipped invitation contains exactly one URL and it is the GitHub Releases fallback
+ * for providers that strip `.dmg`, so a stranger who pasted the whole e-mail was told, in a
+ * reassuring green sentence, „Server aus der Einladung übernommen: https://github.com". A join
+ * flow that silently points at the wrong host is the worst failure available here, because it
+ * looks like it worked, and the refusal arrives one screen later wearing „Keine Verbindung zum
+ * Server" — which blames the network for a host nobody ever sent.
+ *
+ * The rule: **a relay address is a bare origin.** Scheme, host, optional port, and nothing
+ * after it. That is what `invitationText` writes, it is what `normalizeOrigin` will accept
+ * downstream, and it is what the release link is NOT — `https://github.com/OWNER/REPO/releases/…`
+ * carries a path, and `new URL(...).origin` used to throw that path away, destroying the only
+ * evidence that this was a download link and not a server.
+ *
+ * DEFECT E-3 is the tail trim. `[^\s"'<>]+` stops at whitespace, ASCII quotes and angle brackets
+ * and at NOTHING ELSE, so a German sentence ending in the address yielded a host with a full stop
+ * welded on — accepted by `new URL`, accepted by `normalizeOrigin`, and resolving to nothing.
+ * A German closing quote was worse: it went through IDNA and became `vercel.xn--app-5o0a`.
+ *
+ * @param {string} text
+ * @returns {{origin:string|null, issue:null|'not_an_address'|'ambiguous', spans:{from:number,to:number}[]}}
+ */
+function readPastedOrigin(text) {
+  const spans = [];
+  const bare = [];
+  let sawUrl = false;
+  for (const m of text.matchAll(URL_RE)) {
+    spans.push({ from: m.index, to: m.index + m[0].length });
+    sawUrl = true;
+    const trimmed = m[0].replace(URL_TAIL_RE, '');
+    let u;
+    try {
+      u = new URL(trimmed);
+    } catch {
+      continue;
+    }
+    // Everything below is "is this an address", not "is this reachable". `normalizeOrigin` in
+    // `platform/net.js` still gets the last word, including the http:// sentence.
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;
+    if (u.username || u.password) continue;
+    if (u.search || u.hash) continue;
+    if (u.pathname && u.pathname !== '/') continue;
+    bare.push({ origin: u.origin, at: m.index });
+  }
+  const distinct = [...new Set(bare.map((b) => b.origin))];
+  if (distinct.length === 1) return { origin: distinct[0], issue: null, spans };
+  if (distinct.length > 1) {
+    // Two addresses and no way to tell which is the relay — unless one of them was introduced by
+    // the word „Server". Refuse rather than take the first, which is the habit that produced E-2.
+    const anchored = bare.filter((b) => isAnchored(text, ORIGIN_LABEL_RE, b.at));
+    const anchoredDistinct = [...new Set(anchored.map((b) => b.origin))];
+    if (anchoredDistinct.length === 1) return { origin: anchoredDistinct[0], issue: null, spans };
+    return { origin: null, issue: 'ambiguous', spans };
+  }
+  return { origin: null, issue: sawUrl ? 'not_an_address' : null, spans };
 }
 
 /**
@@ -403,64 +610,171 @@ function codeToken(raw) {
  *
  * D9 is untouched: an invitation carries an address and a code, and neither is key material.
  *
- * THE THREE CASES, IN THE ORDER THEY ARE TRIED, because getting this wrong is the difference
- * between a field that works and a field that eats what somebody is typing into it:
+ * THE ORDER, AND WHY EACH STEP IS ALLOWED TO WIN. Every step below either has direct evidence or
+ * refuses; none of them takes the first thing that fits, which is what the three measured
+ * defects all were.
  *
- *   1. a whole invitation — several words. A token shaped `XXXX-XXXX-XXXX` wins, then any token
- *      that IS twelve Crockford characters. Prose loses, because a word is not a token that
- *      normalises to exactly twelve.
- *   2. a bare code, pasted or typed to the end — one token, and it is a code.
- *   3. a code being typed — one token and not yet twelve characters. It is passed through the
- *      formatter so the groups appear as she types, and it is NOT discarded.
+ *   0. THE FIELD HOLDS NOTHING BUT A CODE. However she spaced it, whatever case, dashes of any
+ *      kind. There is nothing else in the field to be wrong about.
+ *   1. A CANDIDATE THE SENDER LABELLED. „Dein Einladungscode" and then the code. The words are
+ *      the evidence, and they beat a decoy of the right shape standing somewhere else.
+ *   2. EXACTLY ONE CANDIDATE IN THE CANONICAL GROUPING. `XXXX-XXXX-XXXX` — a shape German prose
+ *      does not accidentally produce, unlike „Mail-Anbieter" (4-8) or „Installation" (12).
+ *   3. SEVERAL, DISAGREEING → REFUSE, and say so. `found: 'ambiguous'`.
+ *   4. A CODE BEING TYPED — one token, not yet twelve. Passed through the formatter so the
+ *      groups appear as she types, and NOT discarded.
+ *   5. Prose with nothing in it that is a code. `found: 'none'`, and the caller must leave the
+ *      text she pasted exactly where it is.
+ *
+ * A twelve-character WORD never wins on its own. That is the whole of E-1: the only ways past
+ * this function are "the field is the code", "the sender named it", and "it is written the way a
+ * minted code is written". Everything else is refused out loud.
  *
  * `found` is what the caller needs to decide whether it may rewrite the field:
- * `'code'` a whole code was recognised · `'partial'` one unfinished token · `'none'` prose, and
- * the text must be left alone.
+ * `'code'` a whole code was recognised · `'partial'` one unfinished token · `'ambiguous'` more
+ * than one thing that could be a code · `'none'` prose, and the text must be left alone.
+ * `codeIssue` and `originIssue` say WHY a refusal happened, so the screen can name the line she
+ * should copy instead of shrugging.
  *
- * @param {string} raw @returns {{code:string, origin:string|null, found:'code'|'partial'|'none'}}
+ * @param {string} raw
+ * @returns {{code:string, origin:string|null, found:'code'|'partial'|'none'|'ambiguous',
+ *            codeIssue:null|'ambiguous'|'absent', originIssue:null|'not_an_address'|'ambiguous'}}
  */
 export function parseInvitePaste(raw) {
   const text = String(raw ?? '');
-  let origin = null;
-  const url = text.match(/https?:\/\/[^\s"'<>]+/i);
-  if (url) {
-    try {
-      origin = new URL(url[0]).origin;
-    } catch {
-      origin = null;
-    }
-  }
-  // The code is read from what is left after the URL, so a `https://…/ABCDEFGHJKMN` path
-  // segment can never be mistaken for the code.
-  const rest = url ? text.replace(url[0], ' ') : text;
-  const hit = (c) => ({ code: formatInviteCode(c), origin, found: 'code' });
+  const originRead = readPastedOrigin(text);
+  const origin = originRead.origin;
+  const originIssue = originRead.issue;
 
-  // Case 0 — the field holds nothing but the code, however the sender spaced it out.
-  // `crockNormalize` strips `-`, space, non-breaking space and tab, which is exactly the set of
-  // things people put between the groups.
+  // The code is read from what is left after EVERY URL — not just the first one, as before — so
+  // a `https://…/ABCDEFGHJKMN` path segment can never be mistaken for the code.
+  let rest = text;
+  for (const s of [...originRead.spans].sort((a, b) => b.from - a.from)) {
+    rest = rest.slice(0, s.from) + ' ' + rest.slice(s.to);
+  }
+
+  const done = (c, found = 'code') => ({
+    code: formatInviteCode(c), origin, found, codeIssue: null, originIssue,
+  });
+  const refuse = (found, codeIssue) => ({ code: '', origin, found, codeIssue, originIssue });
+
+  // Step 0 — the field holds nothing but the code, however the sender spaced it out.
+  // `crockNormalize` strips `-`, space, non-breaking space and tab, and `foldPasteDamage` has
+  // already removed the invisible damage and folded the dashes, which is the whole set of things
+  // that end up between the groups.
   const whole = codeToken(rest);
-  if (whole) return hit(whole);
+  if (whole) return done(whole);
 
-  const tokens = rest.split(/[^0-9A-Za-z-]+/).filter(Boolean);
-  // Case 1a — the canonical shape inside a sentence. Preferred over a bare twelve-letter word.
-  for (const tok of tokens) {
-    if (!tok.includes('-')) continue;
-    const c = codeToken(tok);
-    if (c) return hit(c);
+  /** @type {{code:string, strong:boolean, at:number}[]} */
+  const candidates = [];
+  let tokenCount = 0;
+  let firstToken = '';
+  for (const m of rest.matchAll(TOKEN_RE)) {
+    tokenCount += 1;
+    if (tokenCount === 1) firstToken = m[0];
+    const c = codeToken(m[0]);
+    if (!c) continue;
+    candidates.push({ code: c, strong: CANONICAL_CODE_RE.test(foldPasteDamage(m[0])), at: m.index });
   }
-  // Case 1b — twelve Crockford characters standing on their own inside a sentence.
-  for (const tok of tokens) {
-    const c = codeToken(tok);
-    if (c) return hit(c);
+
+  // Step 1 — the sender said which one it is.
+  const anchored = candidates.filter((c) => isAnchored(rest, CODE_LABEL_RE, c.at));
+  const anchoredCodes = [...new Set(anchored.map((c) => c.code))];
+  if (anchoredCodes.length === 1) return done(anchoredCodes[0]);
+  if (anchoredCodes.length > 1) return refuse('ambiguous', 'ambiguous');
+
+  // Step 2 and 3 — the canonical grouping, and only when it is unanimous.
+  const strong = [...new Set(candidates.filter((c) => c.strong).map((c) => c.code))];
+  if (strong.length === 1) return done(strong[0]);
+  if (strong.length > 1) return refuse('ambiguous', 'ambiguous');
+
+  // Step 4 — one token and it is not finished yet. Passed through the formatter so the groups
+  // appear as she types, and never discarded. A twelve-character WORD cannot reach here with a
+  // complete code, because step 0 would have taken it if it were alone in the field.
+  if (tokenCount <= 1) {
+    const partial = formatInviteCode(firstToken);
+    if (partial) return { code: partial, origin, found: 'partial', codeIssue: null, originIssue };
+    // Nothing usable at all — e.g. the field holds only a URL. Reporting `partial` with an empty
+    // code here used to make the join screen BLANK what she had just pasted, because `'partial'`
+    // is the caller's permission to rewrite the field.
+    return refuse('none', 'absent');
   }
-  // Case 2 — one token and it is not finished yet. Passed through the formatter so the groups
-  // appear as she types, and never discarded.
-  if (tokens.length <= 1) {
-    return { code: formatInviteCode(tokens[0] || ''), origin, found: 'partial' };
-  }
-  // Case 3 — prose with no code in it. The truthful answer is "no code", and the caller must
+
+  // Step 5 — prose with no code in it. The truthful answer is "no code", and the caller must
   // leave the text on screen alone.
-  return { code: '', origin, found: 'none' };
+  return refuse('none', candidates.length ? 'ambiguous' : 'absent');
+}
+
+/**
+ * What to say when the paste was refused — German first, and it names the line to copy.
+ *
+ * The Mom test's premise is a stranger, one e-mail and nobody to ask. „Der Code ist noch nicht
+ * vollständig" is true and useless in that room: it describes the field, not the next move. Each
+ * sentence below ends with something she can do with the e-mail she is holding.
+ *
+ * These sentences deliberately live here and not in `i18n.js`: they are refusals about the TEXT
+ * IN THE FIELD, they are new with this fix, and `say()` is the same local pattern
+ * `insecureOriginMessage` already uses two sections down. Promoting them into the table is a
+ * strict improvement and belongs to whoever owns that file.
+ *
+ * D9: not one of them says whether a code exists, existed, or expired. They are about the paste.
+ *
+ * @param {{found:string, codeIssue:string|null, originIssue:string|null}} parsed
+ * @returns {string|null}
+ */
+export function pasteRefusalSentence(parsed) {
+  if (!parsed) return null;
+  if (parsed.found === 'ambiguous' || parsed.codeIssue === 'ambiguous') {
+    return say({
+      de: 'In dem eingefügten Text steht mehr als eine Zeichenfolge, die wie ein Code aussieht — '
+        + 'geraten wird hier nichts. Kopiere bitte nur die eine Zeile unter „Dein '
+        + 'Einladungscode": vier Zeichen, Bindestrich, vier Zeichen, Bindestrich, vier Zeichen.',
+      en: 'The pasted text holds more than one thing that could be a code, and this screen does '
+        + 'not guess. Copy just the single line under "Your invitation code": four characters, '
+        + 'a hyphen, four characters, a hyphen, four characters.',
+    });
+  }
+  if (parsed.found === 'none' && parsed.codeIssue === 'absent') {
+    return say({
+      de: 'In dem eingefügten Text ist kein Einladungscode zu finden. In der E-Mail steht er '
+        + 'unter „Dein Einladungscode" — eine eigene Zeile aus zwölf Zeichen, in drei Vierer'
+        + 'gruppen. Kopiere bitte genau diese Zeile.',
+      en: 'There is no invitation code in the pasted text. In the e-mail it is under "Your '
+        + 'invitation code" — one line of twelve characters in three groups of four. Copy that '
+        + 'line.',
+    });
+  }
+  return null;
+}
+
+/**
+ * What to say when the paste carried a URL and it was not an address. Kept apart from the code
+ * sentence because they can be true at the same time and she should not read a paragraph.
+ *
+ * @param {{originIssue:string|null}} parsed
+ * @returns {string|null}
+ */
+export function pasteOriginSentence(parsed) {
+  if (!parsed) return null;
+  if (parsed.originIssue === 'not_an_address') {
+    return say({
+      de: 'Der Link in der Einladung führt zum Herunterladen der App, nicht zum Server. Eine '
+        + 'Serveradresse ist kurz und hat nichts hinter dem Namen — falls in der E-Mail keine '
+        + 'steht, frag kurz nach und trag sie unten ein.',
+      en: 'The link in the invitation points at the app download, not at the server. A server '
+        + 'address is short and has nothing after the host name — if the e-mail carries none, '
+        + 'ask for it and put it in the field below.',
+    });
+  }
+  if (parsed.originIssue === 'ambiguous') {
+    return say({
+      de: 'In der Einladung stehen mehrere Adressen. Welche davon der Server ist, kann dieser '
+        + 'Bildschirm nicht raten — trag die Serveradresse bitte unten ein.',
+      en: 'The invitation carries several addresses, and this screen will not guess which one is '
+        + 'the server. Put the server address in the field below.',
+    });
+  }
+  return null;
 }
 
 /**
@@ -890,6 +1204,8 @@ export function circleScreenState() {
     keysPending: view.keysPending,
     notice: view.notice,
     problem: view.problem,
+    rawPaste: view.rawPaste,
+    pasteIssue: view.pasteIssue ? { ...view.pasteIssue } : null,
   });
 }
 
@@ -919,6 +1235,10 @@ export function openCircleScreen({ screen } = {}) {
     origin: typeof s[CIRCLE_PREFS.origin] === 'string' ? s[CIRCLE_PREFS.origin] : '',
     originFromPaste: false,
     code: '',
+    /** The text of a paste this screen refused to read, kept so a re-render cannot delete it. */
+    rawPaste: '',
+    /** What the last parse refused and why — `{code, origin, found}`, all null on a clean read. */
+    pasteIssue: { code: null, origin: null, found: 'none' },
     circleName: '',
     displayName: '',
     colorRef: PALETTE[0].ref,
@@ -1343,7 +1663,9 @@ function renderJoinForm() {
   paste.type = 'text';
   paste.id = 'circle-code-in';
   paste.className = 'circle-paste';
-  paste.value = view.code;
+  // `view.code` when the parse understood something, and otherwise the text she actually pasted
+  // — which is the evidence the refusal sentence asks her to look at. Never blank.
+  paste.value = view.code || view.rawPaste || '';
   paste.placeholder = t('circleCodePlaceholder');
   paste.autocomplete = 'off';
   paste.spellcheck = false;
@@ -1361,7 +1683,13 @@ function renderJoinForm() {
   // sanitises it. Parse that. `input` stays as it is for typing, where there are no newlines to
   // lose. Found by pasting a whole invitation into the real field in a real browser; the tier-2
   // test exercised the pure function, which passes either way.
-  const readFrom = (raw) => {
+  //
+  // REFUSING OUT LOUD (LZP-1006). A parser that guesses produced all three measured defects, so
+  // this one refuses — and a silent refusal is only half the repair. `deliberate` is true for the
+  // `paste` event, which is a gesture somebody made on purpose and therefore a moment where a
+  // sentence is wanted; it is false while she is TYPING, where a red line under a half-finished
+  // code would be a lie about a code that is simply not finished yet.
+  const readFrom = (raw, deliberate = false) => {
     const parsed = parseInvitePaste(raw);
     const changedOrigin = parsed.origin && parsed.origin !== view.origin;
     view.code = parsed.code;
@@ -1369,23 +1697,44 @@ function renderJoinForm() {
       view.origin = parsed.origin;
       view.originFromPaste = true;
     }
+    // What the parse refused and why, kept for `submitJoin`: the button is pressed one or two
+    // moves later, and „Der Code ist noch nicht vollständig" is the wrong sentence for a paste
+    // that held three things shaped like a code.
+    view.pasteIssue = { code: parsed.codeIssue, origin: parsed.originIssue, found: parsed.found };
     // NORMALISE IN PLACE — but never take away text this function did not understand. `found`
     // is exactly that permission: a whole code becomes the code, an unfinished token gets its
     // groups, and prose is left as it was written. Silently emptying a field somebody is typing
-    // into is the worst thing a "helpful" input can do.
-    if (parsed.found !== 'none' && paste.value !== parsed.code) paste.value = parsed.code;
+    // into is the worst thing a "helpful" input can do. `'ambiguous'` joins `'none'` on the
+    // leave-it-alone side for the same reason: the text she pasted is the evidence she needs in
+    // order to act on the sentence she is about to read.
+    const mayRewrite = parsed.found === 'code' || parsed.found === 'partial';
+    // Her text, kept on `view` and not only in the DOM node. A refusal re-renders, `render()`
+    // rebuilds this input from `view`, and a field that is rebuilt from `view.code` alone would
+    // DELETE the paste at the exact moment a sentence appears asking her to look at it.
+    view.rawPaste = mayRewrite ? '' : String(raw ?? '');
+    if (mayRewrite) paste.value = parsed.code;
+    else if (!paste.value) paste.value = view.rawPaste;
+    let loud = false;
+    if (deliberate) {
+      const sentence = pasteRefusalSentence(parsed) || pasteOriginSentence(parsed);
+      if (sentence) { view.problem = sentence; loud = true; }
+      else if (view.problem) { view.problem = null; loud = true; }
+    }
     // Re-render only when something structural changed, so the caret does not jump while she is
     // still typing the last group.
-    if (changedOrigin) render();
+    if (changedOrigin || loud) {
+      render();
+      const again = document.getElementById('circle-code-in');
+      if (again) again.focus();
+    }
   };
   const readPaste = () => readFrom(paste.value);
   paste.addEventListener('input', readPaste);
   paste.addEventListener('paste', (e) => {
     const raw = e.clipboardData && e.clipboardData.getData('text');
-    if (!raw) { setTimeout(readPaste, 0); return; }   // no clipboard access: the old path
+    if (!raw) { setTimeout(() => readFrom(paste.value, true), 0); return; }  // no clipboard access
     e.preventDefault();                                // we are writing the field ourselves
-    readFrom(raw);
-    if (!paste.value) paste.value = raw;               // understood nothing: leave her text alone
+    readFrom(raw, true);
   });
   b.appendChild(labelled('circle-code-in', t('circleCodeInputLabel'), paste,
     view.originFromPaste ? t('circleCodeFromPaste', view.origin) : null));
@@ -1416,8 +1765,22 @@ async function submitJoin() {
   if (view.busy) return;
   view.problem = null;
   const display = view.displayName.trim();
-  if (inviteCodeChars(view.code).length !== INVITE_UI.codeChars) { fail(t('circleNeedCode')); return; }
-  if (!view.origin) { fail(t('circleNeedRelayForJoin')); return; }
+  // THE REFUSAL SENTENCE IS THE PRODUCT HERE (LZP-1006). `circleNeedCode` — „Der Code ist noch
+  // nicht vollständig — es sind zwölf Zeichen" — is true of a code being typed and useless to a
+  // stranger who has just pasted a whole e-mail: it describes the field and not the next move.
+  // When the parse REFUSED, say what it refused and which line of the e-mail to copy instead.
+  // None of these sentences says whether a code exists or ever existed (D9).
+  if (inviteCodeChars(view.code).length !== INVITE_UI.codeChars) {
+    fail(pasteRefusalSentence(view.pasteIssue && {
+      found: view.pasteIssue.found, codeIssue: view.pasteIssue.code, originIssue: null,
+    }) || t('circleNeedCode'));
+    return;
+  }
+  if (!view.origin) {
+    fail(pasteOriginSentence(view.pasteIssue && { originIssue: view.pasteIssue.origin })
+      || t('circleNeedRelayForJoin'));
+    return;
+  }
   try {
     normalizeOrigin(view.origin);
   } catch (e) {

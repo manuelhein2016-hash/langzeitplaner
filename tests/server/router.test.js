@@ -21,7 +21,13 @@ const req = (method, path, extra) => ({ method, path, query: {}, headers: {}, bo
 // ── the table ────────────────────────────────────────────────────────────────
 
 test('the route table is exactly ADR 003 §3, with unique names and no duplicate (method, path)', () => {
-  assert.equal(ROUTES.length, 23, 'ADR 003 §3 lists 23 endpoints');
+  // 23 from ADR 003 §3, plus ONE that is not a sync endpoint at all: `POST /feedback`
+  // (LZP-1009). It is counted separately in the message rather than folded into the number,
+  // because "ADR 003 §3 lists 23" is still the true sentence about the ADR and this row is the
+  // place a reader learns that the shipped surface is 23 + 1.
+  assert.equal(ROUTES.length, 24, 'ADR 003 §3 lists 23 endpoints, plus LZP-1009 POST /feedback');
+  assert.equal(ROUTES.filter((r) => r.pattern.startsWith('/feedback')).length, 1,
+    'the feedback surface is exactly one route; a second one would be the read-back it must not have');
   assert.equal(new Set(ROUTE_NAMES).size, ROUTE_NAMES.length, 'duplicate handler names');
   const pairs = ROUTES.map((r) => `${r.method} ${r.pattern}`);
   assert.equal(new Set(pairs).size, pairs.length, 'two routes claim the same method and path');
@@ -41,7 +47,13 @@ test('every space-scoped route names where its space id comes from', () => {
   }
   const unscoped = ROUTE_NAMES.filter((n) => !(n in SPACE_SCOPED));
   assert.deepEqual(unscoped.sort(), [
-    'adoptDevice', 'createSpace', 'meta', 'pairAnswer', 'pairDeliver', 'pairGet', 'pairOffer',
+    'adoptDevice', 'createSpace',
+    // LZP-1009. Unscoped because it names NO space — not because its space check was forgotten,
+    // which is the reading this list exists to make impossible. `handlers/feedback.js` is handed
+    // no space id and has no way to obtain one, and that is what makes "a report can never reach
+    // the family's board" a structural fact rather than a careful omission.
+    'feedback',
+    'meta', 'pairAnswer', 'pairDeliver', 'pairGet', 'pairOffer',
     'redeemInvite', 'registerDevice', 'revokeDevice',
   ], 'a route left out of SPACE_SCOPED skips the membership check — this list is the review surface');
 });

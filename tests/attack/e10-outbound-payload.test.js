@@ -45,6 +45,7 @@
 // looking for things that legitimately ARE sent, and requires it to find every one of them.
 
 import { test, describe, before } from 'node:test';
+import zlib from 'node:zlib';
 import assert from 'node:assert/strict';
 
 import '../helpers/env.js';
@@ -451,26 +452,187 @@ describe('§3 · the same bar over every transport shape that ships', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// §4 · WHAT THIS ROUND DOES NOT CLOSE
+// §4 · THE HALF THAT WAS OWED — NOW PAID
 // ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// ██ INVERTED 2026-09-03, WHEN LZP-1009 LANDED. ██
+//
+// §4a used to read: *"there was no feedback payload to grep, and that is the finding."* Its job
+// was to keep two facts joined to this file so that *"whoever lands 1009 finds the rig above —
+// the fixture board, the three spellings, the positive control — and points it at their new
+// payload instead of writing a weaker one."*
+//
+// This is that pointing. The rig is unchanged: same `flatten`, same `found`, same `NEEDLE`, same
+// `SHARED_LABEL`. What is new is a second subject — the feedback report — driven through the
+// SHIPPED builder and the SHIPPED redacted renderer, and pushed over the SAME bridge the four
+// sections above measured.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// ██ ONE THING THE RIG COULD NOT DO, AND HAD TO LEARN ██
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// `flatten` reads `url + method + headers + body`, and the feedback payload's body carries a
+// **base64url PNG**. Its `spellings()` covers that: a b64u'd needle is one of the three. But a
+// needle that survived into the PIXEL PLANE is neither the raw string nor its b64u spelling — it
+// is UTF-8 bytes inside a DEFLATE stream, and DEFLATE Huffman-codes its literals, so it appears
+// nowhere in the body verbatim. §4c therefore inflates the image and greps the raster. This was
+// found by `tests/tier1/feedback.test.js` §5e going red, and it is the difference between a real
+// measurement and a green nothing.
 
-describe('§4 · the half of the commissioned attack that is still owed', () => {
-  test('§4a · there was no feedback payload to grep, and that is the finding', () => {
-    // Stated as a row rather than as a sentence in a report, because a row is what a reader of a
-    // green suite sees. The commissioned attack was "drive the feedback button against a real
-    // fixture board and grep the whole outbound payload, text and image bytes". §1–§3 did the
-    // first half of that sentence over the transport that exists. The second half — a payload
-    // assembled by a feedback feature, and image bytes — has no subject:
-    //
-    //   · `e10-network-scope.test.js` §2 measures the absence of the feature in four places.
-    //   · `e10-network-scope.test.js` §3 measures that the product cannot produce an image AT
-    //     ALL, so "the redacted PNG was produced by not drawing" is vacuous rather than verified.
-    //
-    // This row's job is to keep those two facts joined to this file, so that whoever lands 1009
-    // finds the rig above — the fixture board, the three spellings, the positive control — and
-    // points it at their new payload instead of writing a weaker one.
-    assert.ok(Object.keys(NEEDLE).length === 5, 'the fixture the feedback payload should be greped against');
-    assert.ok(typeof flatten === 'function' && typeof found === 'function',
-      'the two functions LZP-1009 must reuse: flatten the whole payload, search three spellings');
+describe('§4 · the fifth round, extended to LZP-1009\'s payload', () => {
+  /** The shipped client half. Imported here and nowhere above: §1–§3 predate it. */
+  async function feedbackPayload() {
+    const { renderRedactedBoard } = await import('../../src/js/feedback/redact.js');
+    const { buildReport, wireBody } = await import('../../src/js/feedback/report.js');
+    const { noteEvent, clearEvents } = await import('../../src/js/feedback/events.js');
+    clearEvents();
+    noteEvent('render', { ms: 51 }, 1787836800000);
+    noteEvent('refusal', { op: 'drag:commit', code: 'not_owner' }, 1787836800100);
+    noteEvent('error', { name: 'KeyStoreUnavailableError' }, 1787836800200);
+
+    // A board carrying EVERY needle §1 uses, in the places a real board carries them, walked by
+    // the shipped collector through its injected readers.
+    const mk = (cls, text, box) => ({ cls, text, box });
+    const nodes = [
+      mk('col', null, { left: 0, top: 0, width: 96, height: 800 }),
+      mk('note', NEEDLE.privatNote, { left: 4, top: 26, width: 88, height: 11 }),
+      mk('bar', null, { left: 4, top: 300, width: 88, height: 14 }),
+      mk('bar-label', NEEDLE.privatBar, { left: 6, top: 302, width: 84, height: 10 }),
+      mk('chip', NEEDLE.category, { left: 86, top: 26, width: 8, height: 8 }),
+      mk('pad-label', `${NEEDLE.diagnosis} ${NEEDLE.scratch}`, { left: 102, top: 4, width: 196, height: 10 }),
+      mk('bar-label', SHARED_LABEL, { left: 6, top: 340, width: 84, height: 10 }),
+    ];
+    const root = {
+      box: { left: 0, top: 0, width: 1180, height: 840 },
+      querySelectorAll(sel) {
+        const wanted = sel.split(',').map((x) => x.trim().replace(/^\./, '').split('.'));
+        return nodes.filter((n) => wanted.some((w) => w.every((part) => n.cls.split(' ').includes(part))));
+      },
+    };
+    const image = renderRedactedBoard(root, {
+      rects: (n) => (n === root ? root.box : n.box),
+      style: () => ({ backgroundColor: 'rgb(247,247,244)', borderTopColor: 'rgb(190,190,190)', color: 'rgb(32,32,36)' }),
+      lineBoxes: (n) => (n.text ? [{ left: n.box.left, top: n.box.top, width: n.box.width, height: n.box.height }] : []),
+    });
+    const built = buildReport({
+      text: 'Beim Ziehen springt der Balken eine Woche zurück.',
+      lang: 'de', appVersion: '2.0.0', build: '1041', system: 'macOS 15.2',
+      screen: 'board', spaceKind: 'family', now: 1787836800300, image,
+    });
+    return { body: wireBody(built, null), built, image, boardText: nodes.map((n) => n.text || '').join('\n') };
+  }
+
+  test('§4a · the report crosses the SAME bridge and carries no needle, in any spelling', async () => {
+    const { body } = await feedbackPayload();
+    const crossed = [];
+    const t = createBridgeTransport({
+      ...rig.deps,
+      invoke: async (cmd, args) => {
+        crossed.push(args);
+        return { status: 202, headers: {}, body: '{"ok":true}', url: args.url, redirected: false };
+      },
+    });
+    await t.request('POST', '/api/v1/feedback', {}, body);
+    const hay = flatten(crossed[0]);
+    for (const [name, needle] of Object.entries(NEEDLE)) {
+      assert.deepEqual(found(hay, needle), [],
+        `${name} crossed the bridge in a FEEDBACK report: ${JSON.stringify(needle)}`);
+    }
+    // The shared label is on the board too and is equally absent: a Geteilt entry is family
+    // business, and a report goes to the developer.
+    assert.deepEqual(found(hay, SHARED_LABEL), [], 'a Geteilt label reached the feedback payload');
+    // and the bridge still hands the shell FOUR fields — §1e's claim, on the new path.
+    assert.deepEqual(Object.keys(crossed[0]).sort(), ['body', 'headers', 'method', 'url']);
   });
+
+  test('§4b · the POSITIVE CONTROL on the new payload — the search finds what IS sent', async () => {
+    const { body } = await feedbackPayload();
+    const crossed = [];
+    const t = createBridgeTransport({
+      ...rig.deps,
+      invoke: async (cmd, args) => { crossed.push(args); return { status: 202, headers: {}, body: '{}', url: args.url, redirected: false }; },
+    });
+    await t.request('POST', '/api/v1/feedback', {}, body);
+    const hay = flatten(crossed[0]);
+    for (const [what, s2] of Object.entries({
+      'her own sentence': 'Beim Ziehen springt der Balken eine Woche zur',
+      'the app version': '2.0.0',
+      'the endpoint path': '/api/v1/feedback',
+      'the structural event': 'KeyStoreUnavailableError',
+      'the refusal code': 'not_owner',
+    })) {
+      assert.ok(found(hay, s2).length > 0, `the search did not find ${what} — §4a proves nothing`);
+    }
+  });
+
+  test('§4c · ██ THE PIXEL PLANE, INFLATED AND GREPPED ██', async () => {
+    // The half a body search structurally cannot reach. The image is base64url in the body and
+    // DEFLATE inside that, so a needle drawn into the raster is invisible to every spelling
+    // `flatten` knows. It is decompressed with `node:zlib` — a decoder this project did not
+    // write — and the raster itself is searched, one latin-1 character per byte.
+    const { image, boardText } = await feedbackPayload();
+    const raster = inflateIdat(image.bytes);
+    assert.ok(raster.length > 1000, 'the image carries no pixel data — this row measures nothing');
+    let plane = '';
+    for (const b of raster) plane += String.fromCharCode(b);
+    for (const [name, needle] of Object.entries(NEEDLE)) {
+      const utf8 = [...new TextEncoder().encode(needle)].map((b) => String.fromCharCode(b)).join('');
+      assert.equal(plane.includes(utf8), false, `${name} is IN THE PIXELS of the redacted image`);
+      assert.equal(plane.includes(needle), false, `${name} is in the pixels in its UTF-16 spelling`);
+    }
+    // NON-VACUITY, both halves: the needles really were on the fixture board, and the search
+    // really can find a byte run in an inflated raster.
+    for (const needle of Object.values(NEEDLE)) {
+      assert.ok(boardText.includes(needle), 'a needle was never on the fixture board');
+    }
+    const planted = new Uint8Array(raster.length);
+    planted.set(new TextEncoder().encode(NEEDLE.privatBar), 0);
+    let plantedPlane = '';
+    for (const b of planted) plantedPlane += String.fromCharCode(b);
+    const utf8Bar = [...new TextEncoder().encode(NEEDLE.privatBar)].map((b) => String.fromCharCode(b)).join('');
+    assert.ok(plantedPlane.includes(utf8Bar), 'the plane search cannot find a needle that IS there');
+  });
+
+  test('§4d · the payload has no recipient, and the relay refuses one — not an open relay', async () => {
+    const { body } = await feedbackPayload();
+    assert.deepEqual(Object.keys(body).sort(), ['image', 'report', 'v'],
+      'the client payload grew a field; if it is a recipient, this endpoint is an open relay');
+    // and the far end refuses one even if a hostile client sends it. Driven through the SHIPPED
+    // router, so this is the real refusal and not a description of one.
+    const { createHandlers } = await import('../../server/core/handlers/index.js');
+    const { memoryStore } = await import('../../server/adapters/memory.js');
+    const { toResponse } = await import('../../server/core/errors.js');
+    const route = createHandlers();
+    const ctx = {
+      store: memoryStore(), now: () => 1787836800000, random: (n) => new Uint8Array(n),
+      sha256: async (b) => new Uint8Array(await S.digest('SHA-256', b)),
+      auth: async () => { throw new Error('feedback must not authenticate'); },
+      assertMember: async () => { throw new Error('feedback must not check membership'); },
+      feedbackSink: async () => {},
+    };
+    const send = async (b) => {
+      try {
+        return await route(ctx, {
+          method: 'POST', path: '/api/v1/feedback', query: {},
+          headers: { 'x-lzp-protocol': '1', 'x-real-ip': '203.0.113.9' },
+          body: b, rawBody: new TextEncoder().encode(JSON.stringify(b)),
+        });
+      } catch (e) { return toResponse(e); }
+    };
+    assert.equal((await send({ ...body, to: 'mallory@example.com' })).status, 400);
+    assert.equal((await send(body)).status, 202, 'the honest payload was refused');
+  });
+
+  /** Every IDAT of a PNG, concatenated and inflated. */
+  function inflateIdat(png) {
+    const dv = new DataView(png.buffer, png.byteOffset, png.byteLength);
+    const parts = [];
+    let off = 8;
+    while (off + 12 <= png.length) {
+      const len = dv.getUint32(off);
+      const type = String.fromCharCode(...png.subarray(off + 4, off + 8));
+      if (type === 'IDAT') parts.push(Buffer.from(png.subarray(off + 8, off + 8 + len)));
+      off += 12 + len;
+    }
+    return parts.length ? new Uint8Array(zlib.inflateSync(Buffer.concat(parts))) : new Uint8Array(0);
+  }
 });

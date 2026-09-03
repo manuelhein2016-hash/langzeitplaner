@@ -26,6 +26,12 @@ let APP_HOST = "localhost"
 //   --scratch <dir>         where the bridge's files — board.json, snapshots.json,
 //                           ops.jsonl, checkpoint.json — go in a headless run
 //                           (default: a per-mode temp dir)
+//   --sync-origin <origin>  LZP-1002: the ONE origin `sync_request` may address in a
+//                           headless run. Gated on isHeadless exactly like
+//                           --updater-manifest-url, and it is the only way a loopback
+//                           origin (node server/dev-server.mjs) is ever reachable.
+//                           Absent — which is every normal launch — means no origin is
+//                           configured and every sync_request is refused locally.
 //
 // Both headless modes are HERMETIC: every bridge write is redirected into a
 // scratch directory, so a test run can never reach the user's real board. That
@@ -665,6 +671,608 @@ func updaterDownload(version: String, urlString: String, signature: String, expe
     }.resume()
 }
 
+// ── LZP-1002 · `sync_request` — THE SHELL IS THE TRANSPORT (ADR 003 §7 gate 3) ────────────────
+//
+// `src/js/platform/net.js` §6 publishes the contract and `chooseTransport()` picks the BRIDGE
+// whenever a shell `invoke` exists — which, inside this app, is always. Until this section
+// existed the command it named was implemented by neither shell, so every family feature that
+// "passed" had passed on `createFetchTransport` in a browser. This is that gap, closed.
+//
+//   sync_request({ url, method, headers, body })
+//       → { status: Int, headers: {…lower-cased…}, body: String, url: String, redirected: false }
+//       → { error: "offline" | "timeout" | "blocked" | "transport", reason: String }
+//
+// The reply is a DICTIONARY, not the JSON string the four updater commands use. That is not
+// drift: `createBridgeTransport` reads `reply.status` / `reply.headers` / `reply.body` off an
+// object, and the Tauri half returns a `serde_json::Value` object for the same reason. One
+// contract, two shells, and it is net.js §6 that is the contract.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHY THIS IS THE MOST DANGEROUS FUNCTION IN THE SHELL, AND WHAT MAKES IT SAFE
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A bridge command that accepted an arbitrary URL from the web view would be an **SSRF
+// primitive**: page script — or anything that ever gets to run as page script — could reach the
+// user's router at `http://192.168.1.1/`, a `localhost` admin port, `169.254.169.254`, an
+// `smb://` share, a `file://` path, or any origin at all, FROM A NATIVE PROCESS and therefore
+// outside every rule the WebView applies to itself (the CSP, the navigation delegate, the
+// custom-scheme sandbox). The web view is the least trusted part of this system: it renders the
+// user's own text, it is where a future XSS lands, and it is the only part an attacker who has
+// nothing else can already influence.
+//
+// So the shell **PINS the origin; it does not accept one.** The web view may name a PATH. It
+// cannot name a host, a scheme or a port — those come from shell configuration, and the request
+// is rebuilt from the pinned origin rather than from the string the page sent. There is no
+// argument to this command that changes WHERE it goes.
+//
+// The rest, in the order the checks run:
+//
+//   1. `sync_enabled` must be on. It is a shell pref, defaulting to FALSE, written only by
+//      `set_shell_pref` at the family opt-in moment — ADR 003 §7 gate 3's own switch.
+//   2. An origin must be configured, and it must be `https:` to a public DNS name. No IP
+//      literal of ANY kind (which is a superset of "no private ranges" — 10/8, 172.16/12,
+//      192.168/16, 127/8, 169.254/16, 100.64/10 and every IPv6 literal are refused by the same
+//      rule), no `.local`/`.lan`/`.internal`/`.home.arpa`, no single-label LAN name, no
+//      loopback — **even if configuration named one.**
+//   3. The URL the page sent must re-serialise, byte for byte, to `pinned + path + ?query`.
+//      A path is `/api/v1/…` in the narrow shape `PATH_RE` allows and nothing else.
+//   4. GET or POST. Headers off a four-name allowlist, printable-ASCII values only, so the page
+//      cannot smuggle a `Cookie`, a `Host` or a header-injection newline.
+//   5. A 4 MiB request cap and an 8 MiB response cap, both enforced as the bytes move.
+//   6. No redirect is followed — `willPerformHTTPRedirection` answers `nil` and the reply is
+//      `blocked`. `URLSession` follows redirects by default; refusing takes this delegate. This
+//      is FINDING P-5's shell half: a signed request replayed at a destination the relay chose
+//      is exactly what "nothing else may be reachable" has to prevent, and the reply carries the
+//      final URL so `createBridgeTransport` can check it rather than trust this comment.
+//   7. An ephemeral session with no cookie jar, no credential storage and no cache. This
+//      transport carries a signed request and NOTHING ambient.
+//
+// **SOLO MODE MAKES ZERO REQUESTS, AND THAT IS A PROPERTY OF THE ORDER ABOVE.** Steps 1 and 2
+// are pure, local and cheap; no `URLSession` object exists until step 7. With `sync_enabled` off
+// — or with no origin configured, which is every build shipped so far — this command refuses
+// without a socket, without a DNS lookup, and without allocating a session.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE ADR IS WRONG HERE, AND THIS IS THE AMENDMENT (ADR 003 §7 gate 3)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// §7 gate 3 reads: *"`WKNavigationDelegate` / `WKURLSchemeHandler` … rejects every request whose
+// scheme is not `app://` unless the shell has been told (`set_shell_pref: "sync_enabled"`) that
+// a space exists — **and then permits exactly the one sync origin**."*
+//
+// The second half is a **loosening, and it must not be built.** The page does not open the
+// socket — net.js's header works that out in full and lands on "the native shell process
+// performs the request; the page does not", which is why the CSP diff for family mode is empty.
+// Opening the navigation delegate to the relay origin would therefore buy nothing and cost the
+// one gate that survives a JS bug: it would let page script navigate to, and pull subresources
+// from, a remote host — the precise thing `default-src 'self'` plus this delegate exist to stop,
+// and it would do it in the ONE state (family mode) where the machine has something to leak.
+//
+// So gate 3 as built is: **the navigation delegate stays shut — `app://` and `about:`, forever
+// — and the pinned-origin bridge command below is the gate.** `sync_enabled` is real and is
+// this section's first check. `docs/v2/adr/003-sync-protocol.md` §7 is amended to match.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHAT THIS DOES NOT DEFEND AGAINST, STATED RATHER THAN IMPLIED
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A configured DNS NAME that RESOLVES to a private address (`relay.example.org → 10.0.0.5`) is
+// not caught: the checks are on the name, and pinning the resolved address would need a custom
+// resolver and would still race the one `URLSession` performs. The exposure is bounded by who
+// chooses the name — it is shell configuration, never a page parameter, so reaching it requires
+// control of the build, at which point the relay is already the attacker's. Recorded, not fixed.
+
+/// PLACEHOLDER, and it is checked at runtime rather than hoped about. ADR 003 §1 names
+/// `https://<vercel-app>.vercel.app`; no such app exists (net.js's CSP note, reason 2: "there is
+/// no host to allowlist"). Empty means every `sync_request` is refused locally — which is the
+/// correct behaviour for a build with nowhere to sync to, and it is why `--sync-origin` below
+/// exists for the headless suites.
+let SYNC_ORIGIN_BUILTIN = ""
+
+let SYNC_PREFS_FILE = "sync.json"
+
+/// EVERY path this command may address, mirroring `net.js`'s `PATH_PREFIX`/`PATH_RE`.
+let SYNC_PATH_PREFIX = "/api/v1/"
+
+/// `net.js`'s `DEFAULT_TIMEOUT_MS`. A request that has not answered in this long is a failure,
+/// not a hang — ADR 003 §8.2's backoff counts a timeout as a transport error.
+let SYNC_TIMEOUT_SECONDS: TimeInterval = 15
+
+/// `net.js`'s `MAX_REQUEST_BYTES` (ADR 003 §6.1). The server refuses a larger body, the client
+/// refuses to build one, and the shell refuses to carry one.
+let SYNC_MAX_REQUEST_BYTES = 4 * 1024 * 1024
+
+/// A pull of 500 envelopes is the largest honest answer (ADR 003 §3.2). 8 MiB is headroom and
+/// still a bound: without one, a hostile or broken relay decides how much memory this process
+/// allocates.
+let SYNC_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+
+/// The FIVE headers `buildRequest` emits, and nothing else may be set by the page. `Cookie`,
+/// `Host`, `Origin`, `Referer` and every `X-Forwarded-*` are absent from this list on purpose.
+let SYNC_HEADER_ALLOWLIST: Set<String> = [
+    "x-lzp-protocol", "x-lzp-client", "authorization", "content-type",
+]
+
+let SYNC_MAX_HEADER_VALUE_BYTES = 8 * 1024
+
+/// Every local refusal, named. All of them reach JavaScript as `error: "blocked"` — the only
+/// vocabulary `createBridgeTransport` accepts — with the name as `reason`, so a test and a
+/// human can tell which rule fired without the page being able to branch on it.
+enum SyncRefusal: String, Error {
+    case syncDisabled          = "sync_disabled"
+    case noOriginConfigured    = "no_origin_configured"
+    case originNotHttps        = "origin_is_not_https"
+    case originIsLocal         = "origin_host_is_local_private_or_an_ip_literal"
+    case originShape           = "origin_is_not_scheme_host_port"
+    case urlUnparsable         = "url_did_not_parse"
+    case urlOffOrigin          = "url_is_not_the_pinned_origin"
+    case urlPath               = "url_path_is_not_an_api_v1_path"
+    case urlQuery              = "url_query_carries_forbidden_characters"
+    case urlFragment           = "url_carries_a_fragment"
+    case urlNotCanonical       = "url_is_not_the_canonical_rebuild"
+    case badMethod             = "method_is_neither_get_nor_post"
+    case headerNotAllowed      = "header_is_not_on_the_allowlist"
+    case headerValue           = "header_value_is_not_printable_ascii"
+    case bodyOnGet             = "a_get_carries_no_body"
+    case requestTooLarge       = "request_body_exceeds_the_cap"
+}
+
+/// The sync switch, ADR 003 §7 gate 3. Deliberately NOT in board.json and not in updater.json:
+/// one file, one question, and `dataFile()` routes it through the headless scratch guard like
+/// everything else. Defaults to FALSE — a fresh install is solo, and solo makes zero requests.
+struct SyncPrefs {
+    var enabled = false
+
+    static func load() -> SyncPrefs {
+        var p = SyncPrefs()
+        guard let txt = readIfExists(dataFile(SYNC_PREFS_FILE)),
+              let d = txt.data(using: .utf8),
+              let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any]
+        else { return p }
+        if let v = o["enabled"] as? Bool { p.enabled = v }
+        return p
+    }
+
+    func save() {
+        let o: [String: Any] = ["enabled": enabled]
+        if let d = try? JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted]),
+           let s = String(data: d, encoding: .utf8) {
+            try? writeAtomic(dataFile(SYNC_PREFS_FILE), s)
+        }
+    }
+}
+
+/// The configured origin, and the ONE headless override — gated exactly like
+/// `--updater-manifest-url`, and for the same reason. `tests/run-dom-tests.sh` does not pass it,
+/// so the ordinary tier-2 run exercises the REFUSAL path; the end-to-end run against
+/// `node server/dev-server.mjs` passes `--sync-origin http://127.0.0.1:8787` and is the only way
+/// a loopback origin is ever reachable. A production build that honoured this flag would let
+/// anything that can start the app choose where the board is sent.
+func syncOriginSetting() -> String {
+    if isHeadless, let o = argValue("--sync-origin") { return o }
+    // The same override as an environment variable, gated identically. `tests/run-dom-tests.sh`
+    // owns its own command line and passes no sync flags, but it INHERITS the environment — so
+    // `LZP_SYNC_ORIGIN=http://127.0.0.1:8787 npm run test:dom` runs the whole tier-2 suite,
+    // §3 red team and §4 round trip included, with no edit to any script.
+    if isHeadless, let e = ProcessInfo.processInfo.environment["LZP_SYNC_ORIGIN"], !e.isEmpty {
+        return e
+    }
+    return SYNC_ORIGIN_BUILTIN
+}
+
+/// Is this host THIS MACHINE? The Swift half of `net.js`'s `isLoopbackHost`, written over a
+/// `URLComponents.host` rather than a raw string for the same reason: the parser has already
+/// lower-cased it, punycoded any unicode and bracketed an IPv6 literal, so a remote host cannot
+/// be dressed as a loopback one by spelling it differently.
+///
+/// `127.0.0.0/8` and not `127.0.0.1` alone: the whole /8 is loopback and `node
+/// server/dev-server.mjs` may bind anywhere in it. `*.localhost` because RFC 6761 §6.3 reserves
+/// the whole name.
+func isLoopbackSyncHost(_ hostname: String) -> Bool {
+    let h = hostname.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    if h == "localhost" || h.hasSuffix(".localhost") { return true }
+    if h == "::1" || h == "0:0:0:0:0:0:0:1" { return true }
+    let parts = h.split(separator: ".", omittingEmptySubsequences: false)
+    guard parts.count == 4, parts[0] == "127" else { return false }
+    return parts.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) && (Int($0) ?? 999) <= 255 }
+}
+
+/// Is this host on this machine, this LAN, or otherwise not a public relay?
+///
+/// Written over a `URLComponents.host` — already lower-cased by the parser for ASCII and
+/// punycoded for unicode — and deliberately BLUNT: every IP literal is refused, v4 and v6 alike,
+/// rather than a list of private ranges that has to stay complete. `10.0.0.1`, `192.168.1.1`,
+/// `172.20.0.1`, `169.254.169.254`, `100.64.0.1`, `127.0.0.1`, `[::1]`, `[fd00::1]` and a
+/// perfectly public `93.184.216.34` all fail the same way, because a relay is a NAME and an
+/// origin spelled as an address is a misconfiguration whichever address it is.
+func isPrivateOrLocalSyncHost(_ host: String) -> Bool {
+    let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    if h.isEmpty { return true }
+    if isLoopbackSyncHost(host) { return true }
+    // Any IPv6 literal — `::1`, `fe80::…` (link-local), `fc00::/7` (unique-local) and the rest.
+    if h.contains(":") { return true }
+    // Any IPv4 literal.
+    let parts = h.split(separator: ".", omittingEmptySubsequences: false)
+    if parts.count == 4 && parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) { return true }
+    // mDNS and the reserved LAN suffixes, plus any single-label name — `router`, `nas`, `printer`
+    // resolve on the local network and nowhere else.
+    for suffix in [".local", ".localhost", ".lan", ".internal", ".home.arpa", ".intranet"] {
+        if h.hasSuffix(suffix) { return true }
+    }
+    if !h.contains(".") { return true }
+    if h.hasSuffix(".") { return true }   // an FQDN's trailing dot would not compare equal
+    return false
+}
+
+/// Normalise the CONFIGURED origin to `scheme://host[:port]`, or say which rule refused it.
+///
+/// The single exception is a headless run with `--sync-origin` at a loopback host over `http:`
+/// — `node server/dev-server.mjs`, which binds loopback only and is where the end-to-end
+/// demonstration runs. `net.js`'s `normalizeOrigin` carves the same hole for the same host for
+/// the same reason (finding P-7: "a loopback host is this Mac talking to itself, there is no
+/// wire to tap"), and here it is narrower still, because it is unreachable in a normal launch.
+func normalizeSyncOrigin(_ raw: String) -> Result<String, SyncRefusal> {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty { return .failure(.noOriginConfigured) }
+    guard let c = URLComponents(string: trimmed),
+          let schemeRaw = c.scheme, let hostRaw = c.host, !hostRaw.isEmpty
+    else { return .failure(.originShape) }
+    guard c.user == nil, c.password == nil, c.query == nil, c.fragment == nil,
+          c.path.isEmpty || c.path == "/"
+    else { return .failure(.originShape) }
+
+    let scheme = schemeRaw.lowercased()
+    let host = hostRaw.lowercased()
+    let devLoopback = isHeadless && scheme == "http" && isLoopbackSyncHost(host)
+    if !devLoopback {
+        guard scheme == "https" else { return .failure(.originNotHttps) }
+        guard !isPrivateOrLocalSyncHost(host) else { return .failure(.originIsLocal) }
+    }
+    let port = c.port.map { ":\($0)" } ?? ""
+    return .success("\(scheme)://\(host)\(port)")
+}
+
+/// The pinned origin for this run, or the refusal that stands in its place.
+func pinnedSyncOrigin() -> Result<String, SyncRefusal> {
+    normalizeSyncOrigin(syncOriginSetting())
+}
+
+/// `net.js`'s `PATH_RE`, hand-rolled: `/api/v1` followed by one or more segments of
+/// `[A-Za-z0-9._~-]` that do not begin with a dot. Nothing here can carry a scheme, a host, a
+/// `..`, a query or a fragment.
+func syncPathIsWellFormed(_ path: String) -> Bool {
+    guard path.hasPrefix(SYNC_PATH_PREFIX), !path.contains("..") else { return false }
+    let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+    // "" / "api" / "v1" / at least one more
+    guard segments.count >= 4, segments[0].isEmpty, segments[1] == "api", segments[2] == "v1"
+    else { return false }
+    let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~-")
+    for seg in segments.dropFirst(3) {
+        if seg.isEmpty || seg.hasPrefix(".") { return false }
+        if !seg.allSatisfy({ allowed.contains($0) }) { return false }
+    }
+    return true
+}
+
+/// What `canonicalQuery()` can produce: `encodeURIComponent` output joined by `=` and `&`.
+func syncQueryIsWellFormed(_ query: String) -> Bool {
+    let allowed = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~!*'()%=&")
+    return !query.isEmpty && query.allSatisfy { allowed.contains($0) }
+}
+
+/// The URL this request is allowed to have, rebuilt from the PINNED origin — never from the
+/// string the page sent — and then required to equal that string byte for byte.
+///
+/// This is `assertReachable`'s discipline on the far side of the bridge: build it, and require
+/// the thing that came in to be what would have been built. A page that sends
+/// `https://relay.test@evil.example/api/v1/ops`, `https://relay.test:443/api/v1/ops` (when the
+/// pin has no port), `HTTPS://RELAY.TEST/…`, a `//evil/` path, a `..`, a fragment or a
+/// double-encoded segment does not get a "close enough" — it gets `blocked`.
+func syncCanonicalURL(_ raw: String, pinned: String) -> Result<URL, SyncRefusal> {
+    guard let c = URLComponents(string: raw), let schemeRaw = c.scheme, let hostRaw = c.host
+    else { return .failure(.urlUnparsable) }
+    guard c.user == nil, c.password == nil else { return .failure(.urlOffOrigin) }
+    guard c.fragment == nil else { return .failure(.urlFragment) }
+
+    let port = c.port.map { ":\($0)" } ?? ""
+    let origin = "\(schemeRaw.lowercased())://\(hostRaw.lowercased())\(port)"
+    guard origin == pinned else { return .failure(.urlOffOrigin) }
+
+    let path = c.percentEncodedPath
+    guard syncPathIsWellFormed(path) else { return .failure(.urlPath) }
+    if let q = c.percentEncodedQuery, !syncQueryIsWellFormed(q) { return .failure(.urlQuery) }
+
+    let rebuilt = pinned + path + (c.percentEncodedQuery.map { "?" + $0 } ?? "")
+    guard rebuilt == raw, let url = URL(string: rebuilt) else { return .failure(.urlNotCanonical) }
+    return .success(url)
+}
+
+/// Everything a `sync_request` is, decided before a socket exists.
+struct SyncPlan {
+    let request: URLRequest
+    let url: String
+}
+
+/// The whole gate, in one pure function. Nothing here opens a socket, resolves a name or
+/// allocates a `URLSession` — that is what makes "solo mode makes zero requests" a property of
+/// the code rather than a promise about it, and it is why `syncPerform` below is unreachable
+/// except through a `.success` from here.
+func syncPreflight(_ args: [String: Any]) -> Result<SyncPlan, SyncRefusal> {
+    // 1 — the switch. ADR 003 §7 gate 3.
+    guard SyncPrefs.load().enabled else { return .failure(.syncDisabled) }
+    // 2 — the pin. Configuration, never a parameter: there is no `args["origin"]` in this file.
+    let pinned: String
+    switch pinnedSyncOrigin() {
+    case .failure(let why): return .failure(why)
+    case .success(let o): pinned = o
+    }
+    // 3 — the address.
+    guard let rawURL = args["url"] as? String else { return .failure(.urlUnparsable) }
+    let url: URL
+    switch syncCanonicalURL(rawURL, pinned: pinned) {
+    case .failure(let why): return .failure(why)
+    case .success(let u): url = u
+    }
+    // 4 — the method.
+    let method = (args["method"] as? String ?? "").uppercased()
+    guard method == "GET" || method == "POST" else { return .failure(.badMethod) }
+
+    // 5 — the body.
+    let bodyText = args["body"] as? String ?? ""
+    if method == "GET" && !bodyText.isEmpty { return .failure(.bodyOnGet) }
+    let bodyData = Data(bodyText.utf8)
+    if bodyData.count > SYNC_MAX_REQUEST_BYTES { return .failure(.requestTooLarge) }
+
+    var req = URLRequest(url: url)
+    req.httpMethod = method
+    // No cookies on the request, whatever the session might think it has.
+    req.httpShouldHandleCookies = false
+
+    // ── THE HEADERS URLSession ADDS FOR FREE, PINNED ─────────────────────────────────────────
+    //
+    // Measured against a loopback relay that echoes what it receives: `URLSession` adds
+    // `User-Agent: LangzeitPlaner/1.0.0 CFNetwork/3860.700.1 Darwin/25.6.0` and
+    // `Accept-Language: en-US,en;q=0.9` of its own accord. Neither is in ADR 003 §2, neither is
+    // signed, and `docs/v2/server-metadata.md` §2/§5 does not list either — so the relay was
+    // being told this Mac's macOS build and the user's LANGUAGE PREFERENCES on every single sync,
+    // for free, from a transport whose whole claim is that it carries a signed request and
+    // nothing ambient.
+    //
+    // The version already travels, once, in `X-LZP-Client`, where the protocol puts it. So the
+    // agent is a constant and the language is `*` — "any", which is true and says nothing.
+    // `Accept-Encoding` is deliberately LEFT ALONE: overriding it turns off URLSession's
+    // transparent decompression, and a compressed body we then fail to decode is a worse bug than
+    // the one byte of information it carries.
+    req.setValue("LangzeitPlaner", forHTTPHeaderField: "User-Agent")
+    req.setValue("application/json", forHTTPHeaderField: "Accept")
+    req.setValue("*", forHTTPHeaderField: "Accept-Language")
+    req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+    req.timeoutInterval = SYNC_TIMEOUT_SECONDS
+    if !bodyData.isEmpty { req.httpBody = bodyData }
+
+    // 6 — the headers. Allowlisted by name, printable ASCII by value. A newline in a value is a
+    // header-injection attempt and a `Cookie` is ambient authority; neither gets past this loop.
+    for (k, v) in (args["headers"] as? [String: Any] ?? [:]) {
+        let name = k.lowercased()
+        guard SYNC_HEADER_ALLOWLIST.contains(name) else { return .failure(.headerNotAllowed) }
+        guard let value = v as? String, !value.isEmpty,
+              value.utf8.count <= SYNC_MAX_HEADER_VALUE_BYTES,
+              value.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value < 0x7F })
+        else { return .failure(.headerValue) }
+        req.setValue(value, forHTTPHeaderField: k)
+    }
+    return .success(SyncPlan(request: req, url: url.absoluteString))
+}
+
+/// One request's delegate: refuses redirects, caps the response as it arrives, and answers
+/// exactly once.
+///
+/// `URLSession` follows redirects unless a delegate says otherwise — that is FINDING P-5's whole
+/// mechanism, and the reason this class exists rather than a `dataTask(with:completionHandler:)`
+/// one-liner. A 30x is not followed and not reported as an answer: it is `blocked`, because a
+/// signed request replayed at a destination the relay chose is the attack.
+final class SyncRequestDelegate: NSObject, URLSessionDataDelegate {
+    private let expectedURL: String
+    private let finish: ([String: Any]) -> Void
+    private var buffer = Data()
+    private var redirected = false
+    private var overCap = false
+    private var answered = false
+
+    init(expectedURL: String, finish: @escaping ([String: Any]) -> Void) {
+        self.expectedURL = expectedURL
+        self.finish = finish
+    }
+
+    private func answer(_ o: [String: Any]) {
+        guard !answered else { return }
+        answered = true
+        DispatchQueue.main.async { self.finish(o) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        redirected = true
+        completionHandler(nil)   // do not follow. Not to another host, not to another path.
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if response.expectedContentLength > Int64(SYNC_MAX_RESPONSE_BYTES) {
+            overCap = true
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if buffer.count + data.count > SYNC_MAX_RESPONSE_BYTES {
+            overCap = true
+            dataTask.cancel()
+            return
+        }
+        buffer.append(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        defer { session.finishTasksAndInvalidate() }
+
+        if redirected {
+            answer(["error": "blocked", "reason": "redirect_refused"])
+            return
+        }
+        if overCap {
+            answer(["error": "transport", "reason": "response_exceeds_the_cap"])
+            return
+        }
+        if let error = error as? URLError {
+            answer(["error": syncErrorKind(error), "reason": "urlerror_\(error.code.rawValue)",
+                    "detail": error.localizedDescription])
+            return
+        }
+        if let error = error {
+            answer(["error": "transport", "reason": "unknown", "detail": error.localizedDescription])
+            return
+        }
+        guard let http = task.response as? HTTPURLResponse else {
+            answer(["error": "transport", "reason": "not_an_http_response"])
+            return
+        }
+        // The bytes came from here. `createBridgeTransport` refuses a reply whose `url` is not
+        // the one it asked for, so this field is the checkable half of "no redirects".
+        let finalURL = http.url?.absoluteString ?? expectedURL
+        var headers: [String: String] = [:]
+        for (k, v) in http.allHeaderFields {
+            headers[String(describing: k).lowercased()] = String(describing: v)
+        }
+        guard let text = String(data: buffer, encoding: .utf8) else {
+            answer(["error": "transport", "reason": "response_was_not_utf8"])
+            return
+        }
+        answer([
+            "status": http.statusCode,
+            "headers": headers,
+            "body": text,
+            "url": finalURL,
+            "redirected": false,
+        ])
+    }
+}
+
+/// A `URLError` in the vocabulary `createBridgeTransport` accepts. "Offline" and "timeout" are
+/// separated because ADR 003 §8.2's backoff treats them differently and the settings sheet says
+/// different sentences for them (19.3).
+func syncErrorKind(_ e: URLError) -> String {
+    switch e.code {
+    case .timedOut:
+        return "timeout"
+    case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost,
+         .cannotConnectToHost, .dnsLookupFailed, .internationalRoamingOff,
+         .dataNotAllowed, .callIsActive:
+        return "offline"
+    default:
+        return "transport"
+    }
+}
+
+/// Perform the plan. Reachable ONLY from a `.success` of `syncPreflight` — the first line of
+/// this function is already past every gate, which is the point of the split.
+func syncPerform(_ plan: SyncPlan, _ done: @escaping ([String: Any]) -> Void) {
+    // Ephemeral: no cookie jar, no credential store, no disk cache, nothing that outlives the
+    // request. ADR 003 §1 — "no cookies, no sessions, no bearer tokens"; this transport carries
+    // a signed request and nothing ambient.
+    let cfg = URLSessionConfiguration.ephemeral
+    cfg.httpCookieAcceptPolicy = .never
+    cfg.httpShouldSetCookies = false
+    cfg.httpCookieStorage = nil
+    cfg.urlCredentialStorage = nil
+    cfg.urlCache = nil
+    cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+    cfg.timeoutIntervalForRequest = SYNC_TIMEOUT_SECONDS
+    cfg.timeoutIntervalForResource = SYNC_TIMEOUT_SECONDS * 2
+    cfg.httpAdditionalHeaders = [:]
+    cfg.tlsMinimumSupportedProtocolVersion = .TLSv12
+
+    let delegate = SyncRequestDelegate(expectedURL: plan.url, finish: done)
+    let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
+    session.dataTask(with: plan.request).resume()
+}
+
+/// The command. Two lines of control flow, because every decision it makes is above it.
+func syncRequest(_ args: [String: Any], _ done: @escaping ([String: Any]) -> Void) {
+    switch syncPreflight(args) {
+    case .failure(let why):
+        // Refused HERE: no socket, no DNS lookup, no session. Story 21.5's zero-request promise
+        // is this line.
+        done(["error": "blocked", "reason": why.rawValue, "message": syncBlockedMessage()])
+    case .success(let plan):
+        syncPerform(plan, done)
+    }
+}
+
+/// What the settings sheet needs to know, and the sentence a person is shown.
+///
+/// The copy lives HERE for the reason `net.js`'s `insecureOriginMessage()` and `crypto/probe.js`'s
+/// `unavailableMessage()` give: the module that owns the RULE owns the sentence that explains it,
+/// so the two cannot drift, and the UI picks the language. It does not say "error" — nothing has
+/// gone wrong; the app is doing exactly what a solo install is supposed to do.
+///
+/// `origin` is disclosed on purpose. It is not a secret (the page must build URLs against it),
+/// and the page learning it grants nothing: it could already name any URL it liked and the pin
+/// would refuse it. What the disclosure buys is a settings sheet that can show the ONE address
+/// this Mac may talk to instead of asking the user to type one.
+func syncStatus() -> [String: Any] {
+    let prefs = SyncPrefs.load()
+    // `configured` is the RAW setting, refused or not. A build that named something this shell
+    // will not talk to should be able to say what it named — a settings sheet that can only say
+    // "not configured" cannot tell a missing relay from a rejected one.
+    var o: [String: Any] = [
+        "enabled": prefs.enabled,
+        "configured": syncOriginSetting().trimmingCharacters(in: .whitespacesAndNewlines),
+    ]
+    switch pinnedSyncOrigin() {
+    case .success(let origin):
+        o["origin"] = origin
+        o["originConfigured"] = true
+        o["reason"] = NSNull()
+        if !prefs.enabled {
+            o["message"] = [
+                "de": "Sync ist ausgeschaltet. Solange kein Familienkreis besteht, stellt dieser "
+                    + "Mac keine einzige Netzwerkanfrage.",
+                "en": "Sync is off. Until there is a Familienkreis, this Mac makes no network "
+                    + "request at all.",
+            ]
+        }
+    case .failure(let why):
+        o["origin"] = NSNull()
+        o["originConfigured"] = false
+        o["reason"] = why.rawValue
+        o["message"] = [
+            "de": "Diese Version hat keinen Sync-Server hinterlegt. Der Kalender läuft "
+                + "vollständig auf diesem Mac — es wird nichts gesendet und nichts abgerufen.",
+            "en": "This build has no sync server configured. The calendar runs entirely on this "
+                + "Mac — nothing is sent and nothing is fetched.",
+        ]
+    }
+    return o
+}
+
+/// The sentence for a request that was refused because it did not name the pinned origin. The
+/// page cannot cause this in normal operation — `assertReachable` refuses first — so it is the
+/// sentence for the case where something inside the page has gone wrong, and it says what the
+/// shell did rather than what the page did.
+func syncBlockedMessage() -> [String: String] {
+    [
+        "de": "Diese Anfrage ging nicht an den hinterlegten Sync-Server und wurde deshalb gar "
+            + "nicht erst gesendet.",
+        "en": "This request was not addressed to the configured sync server, so it was never sent.",
+    ]
+}
+
 // ── serving the web bundle over a custom scheme ──────────────────────────────
 // A custom scheme (rather than file://) gives the page a real origin, so ES
 // modules load normally — the same reason the browser build needs a dev server.
@@ -1002,6 +1610,28 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
                     restartForUpdate?()
                 }
 
+            // ── LZP-1002 · the sync transport (ADR 003 §7 gate 3, story 21.5) ─
+            //
+            // The command `src/js/platform/net.js` §6 names, and the reason
+            // `chooseTransport()` picking `bridge` in this shell is now a
+            // working path rather than a dead one. Every decision it makes is
+            // in `syncRequest` above; this case exists to hand it the args and
+            // hand back the dictionary. The reply is an OBJECT, not the JSON
+            // string the updater commands use, because that is what
+            // `createBridgeTransport` reads.
+            //
+            // Reachable from any page script, like every bridge command — which
+            // is exactly why the origin is pinned in the shell and not passed
+            // in here.
+            case "sync_request":
+                syncRequest(args) { replyHandler($0, nil) }
+
+            // What the settings sheet needs: is sync on, is an origin
+            // configured, which one, and the sentence to show when it is not.
+            // Read-only; it changes nothing and makes no request.
+            case "sync_status":
+                replyHandler(syncStatus(), nil)
+
             case "print_board":
                 printAction?()
                 replyHandler(NSNull(), nil)
@@ -1086,6 +1716,20 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
                     } catch {
                         replyHandler(nil, "launch_at_login: \(error.localizedDescription)")
                     }
+                case "sync_enabled":
+                    // ADR 003 §7 gate 3's own switch, and the one the web layer
+                    // is REQUIRED to push: `sync_request` refuses everything
+                    // until it is true, so a build in which the family opt-in
+                    // never calls this is a build that makes zero requests.
+                    // Defaults to false and is persisted, so a relaunch of a
+                    // solo install is solo again without asking anyone.
+                    var sp = SyncPrefs.load()
+                    sp.enabled = args["value"] as? Bool ?? false
+                    sp.save()
+                    // NSNull, like every other shell pref, and NOT the new status: the Tauri
+                    // half's `set_shell_pref` returns `Result<(), String>` for all four keys, and
+                    // one contract means one return shape. The status is a separate command.
+                    replyHandler(NSNull(), nil)
                 case "language":
                     relabelMenu?(args["value"] as? String ?? "de")
                     replyHandler(NSNull(), nil)
@@ -1272,13 +1916,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         webView.load(URLRequest(url: URL(string: "\(APP_SCHEME)://\(APP_HOST)/index.html")!))
     }
 
-    /// 13.4 — zero network as an enforced property, not a habit: the web view
-    /// may navigate only within its own bundle scheme.
+    /// 13.4 / story 21.5 — zero network as an enforced property, not a habit:
+    /// the web view may navigate only within its own bundle scheme.
+    ///
+    /// ── THIS GATE DOES NOT OPEN FOR THE SYNC ORIGIN, AND THE ADR IS AMENDED ──
+    ///
+    /// ADR 003 §7 gate 3 says this delegate should permit "exactly the one sync
+    /// origin" once `sync_enabled` is set. That is a LOOSENING and it is not
+    /// built — see the long note above `sync_request`. The page never opens the
+    /// socket (net.js §6: the native process performs the request), so opening
+    /// this delegate would buy nothing and would cost the one gate that
+    /// survives a JS bug, in the one state where the machine has something to
+    /// leak. `sync_enabled` is real; it gates the BRIDGE COMMAND, not this.
+    ///
+    /// The host check is new with the same pass: `BundleSchemeHandler` serves
+    /// from the bundle for any `app://` host, so `app://anything/` was reaching
+    /// the same files under a DIFFERENT ORIGIN — a second origin inside the
+    /// app, with its own localStorage and IndexedDB, one `location =` away.
+    /// One host, one origin.
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        let scheme = navigationAction.request.url?.scheme ?? ""
-        decisionHandler(scheme == APP_SCHEME || scheme == "about" ? .allow : .cancel)
+        let url = navigationAction.request.url
+        let scheme = url?.scheme?.lowercased() ?? ""
+        // `about:blank` carries no host; an `app://` navigation must name ours.
+        let ownBundle = scheme == APP_SCHEME && (url?.host?.lowercased() ?? APP_HOST) == APP_HOST
+        decisionHandler(ownBundle || scheme == "about" ? .allow : .cancel)
     }
 
     /// `LangzeitPlaner --smoke` loads the board headlessly, reports what it

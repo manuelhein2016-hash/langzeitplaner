@@ -642,17 +642,21 @@ export function createFetchTransport(deps) {
 // for. It is four lines and it turns an unverifiable promise into a checked one. `redirected:
 // true` is refused the same way, for a shell that reports the fact without the address.
 //
-// **The check is on a field that MAY be absent, and that is a deliberate half-measure with a
-// deadline, not the finished state.** Neither shell implements `sync_request` yet (below), so
-// there is no build in the world that could send the field; making it mandatory today would
-// refuse every reply in `tests/tier1/platform-net.test.js` rather than any real one. The moment
-// either shell ships the command, `reply.url` becomes REQUIRED here — one `if`, and the tier-1
-// replies grow one field. Until then a mismatch is caught and an omission is not, which is
-// strictly more than the comment that was here before.
+// **`reply.url` IS REQUIRED, and the deadline that made it optional has passed.** It was
+// optional for exactly one reason — no shell implemented `sync_request`, so no build in the
+// world could send the field, and requiring it would have refused every reply in
+// `tests/tier1/platform-net.test.js` rather than any real one. That is no longer true. Both
+// shells implement the command (`shell-macos/main.swift`'s `SyncRequestDelegate`, which puts
+// `http.url?.absoluteString` on every answer; `src-tauri/src/lib.rs`'s mirror of it), both send
+// the field on every reply, and a reply that OMITS it is now refused the same way a reply that
+// names a stranger is. An omission silently disabling the check is the shape of defence this
+// codebase distrusts, and it no longer exists here.
 //
-// **OWED, and reported rather than assumed:** neither shell implements `sync_request` yet. This
-// factory is complete and unit-tested against an injected `invoke`; the two shells are owned
-// elsewhere and the command is a hand-off, not a silent dependency.
+// **LANDED, and demonstrated rather than assumed:** `docs/v2/SHELL-VERIFICATION.md` records the
+// round trip through the shipped `.app` — `chooseTransport()` returning `'bridge'` inside
+// WKWebView, a real sealed op pushed and pulled through `invoke('sync_request')`, and zero
+// `fetch` calls on the wire. The two shells are owned elsewhere; the command is no longer a
+// hand-off.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -699,7 +703,13 @@ export function createBridgeTransport(deps) {
       if (reply.redirected === true) {
         throw new NetError('blocked', 'net: the shell followed a redirect — the signed request was replayed elsewhere');
       }
-      if (reply.url !== undefined && reply.url !== null && reply.url !== req.url) {
+      // REQUIRED, not merely checked-if-present. A shell that omits the field cannot be told
+      // apart from one that followed a redirect and did not say so, so the omission is refused.
+      if (typeof reply.url !== 'string' || reply.url === '') {
+        throw new NetError('blocked',
+          'net: the shell answered without naming the URL the bytes came from');
+      }
+      if (reply.url !== req.url) {
         throw new NetError('blocked',
           `net: the answer came from ${JSON.stringify(String(reply.url))}, not from ${JSON.stringify(req.url)}`);
       }

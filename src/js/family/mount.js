@@ -52,7 +52,7 @@ import { initAdminPanel } from './adminpanel.js';
 import { useSharing, memberNameOf } from '../popover.js';
 import { installConflictNotice } from './conflict.js';
 import * as sharing from './sharing.js';
-import { createFetchTransport } from '../platform/net.js';
+import { chooseTransport } from '../platform/net.js';
 import { exportRawPublic, signBytes } from '../crypto/identity.js';
 import { b64u } from '../core/b64.js';
 
@@ -457,7 +457,7 @@ const currentOrigin = () => String(store.state.settings[FAMILY_PREFS.origin] || 
 
 /**
  * An anonymous transport that is rebuilt per call, because the origin is a field a human is
- * still typing into. Cheap: `createFetchTransport` holds no connection and no state.
+ * still typing into. Cheap: neither transport holds a connection or any state.
  */
 const lazyAnon = () => ({
   request: (...args) => {
@@ -467,10 +467,13 @@ const lazyAnon = () => ({
         new Error('pairing: no server address — fill in „Familienkreis" first'), { code: 'config' }));
     }
     const p = ports();
-    return createFetchTransport({
+    // LZP-1002 — `chooseTransport`, not `createFetchTransport`: in the shipped shell a `fetch`
+    // is blocked by `default-src 'self'`, so an anonymous adopt/redeem that reached for one
+    // could never complete inside the app. Anonymous or signed, the shell is the transport.
+    return chooseTransport({
       anonymous: true, origin, clientVersion: CLIENT_V,
-      now: p.now, schedule: p.schedule, unschedule: p.unschedule,
-    }).request(...args);
+      now: p.now, schedule: p.schedule, unschedule: p.unschedule, invoke: p.invoke,
+    }).transport.request(...args);
   },
 });
 
@@ -515,7 +518,7 @@ async function optIn(origin, hooks) {
   const spaceId = mintSpaceId('personal');
   const armed = await armStoreForOptIn(origin, spaceId, today);
 
-  const transport = createFetchTransport({
+  const { transport } = chooseTransport({
     origin,
     deviceShort: armed.forStore.deviceShort,
     sign: (bytes) => signBytes(armed.identity.devSig.privateKey, bytes),
@@ -523,6 +526,7 @@ async function optIn(origin, hooks) {
     now: p.now,
     schedule: p.schedule,
     unschedule: p.unschedule,
+    invoke: p.invoke,   // LZP-1002 — the shell transports; see lazyAnon above
   });
 
   const spaceKey = await createSpaceKey();
@@ -565,10 +569,10 @@ function makePairingFlow(handle, hooks) {
   return createPairingFlow({
     transport: parts.transport,
     // ANONYMOUS — ADR 002 §6.3 step 4 is performed by a Mac with no identity the relay knows.
-    anonTransport: createFetchTransport({
+    anonTransport: chooseTransport({
       anonymous: true, origin: cfg.origin, clientVersion: '2.0.0',
-      now: p.now, schedule: p.schedule, unschedule: p.unschedule,
-    }),
+      now: p.now, schedule: p.schedule, unschedule: p.unschedule, invoke: p.invoke,
+    }).transport,
     identity: armed.identity,
     recovery: armed.recovery,
     keyring: { personal: { spaceId: cfg.spaceId, epochs: parts.keyring.keysByEpoch(cfg.spaceId) }, family: null },
@@ -654,12 +658,12 @@ async function onPaired(handle, r, hooks) {
     throw new Error(`devices/adopt → ${adopted.status} ${JSON.stringify(adopted.json)}`);
   }
 
-  const signed = createFetchTransport({
+  const { transport: signed } = chooseTransport({
     origin,
     deviceShort: r.identity.deviceShort,
     sign: (bytes) => signBytes(r.identity.devSig.privateKey, bytes),
     clientVersion: CLIENT_V,
-    now: p.now, schedule: p.schedule, unschedule: p.unschedule,
+    now: p.now, schedule: p.schedule, unschedule: p.unschedule, invoke: p.invoke,
   });
   const roster = await signed.request('GET', `/api/v1/spaces/${r.spaceId}/members`, undefined, undefined);
   const kexPubRaw = findPeerKex(roster.json, r.memberId, r.peer.deviceId);

@@ -54,6 +54,18 @@ export const ROUTES = Object.freeze([
   { method: 'GET',  pattern: '/pair/:rid',            name: 'pairGet' },
   { method: 'POST', pattern: '/pair/answer',          name: 'pairAnswer' },
   { method: 'POST', pattern: '/pair/deliver',         name: 'pairDeliver' },
+
+  // ── LZP-1009 · „Rückmeldung senden" ────────────────────────────────────────
+  // The one route here that is not part of the sync protocol, and the only WRITE-ONLY one: there
+  // is no `GET /feedback` and there must not be. A read-back would turn a relay that takes
+  // custody of a report into a relay that STORES reports addressably, and the two are different
+  // products. The absence is asserted, not merely observed — `tests/server/feedback.test.js` §1
+  // enumerates this table for any other row whose pattern begins `/feedback`.
+  //
+  // It is also space-free: it is absent from `SPACE_SCOPED` below because it names no space at
+  // all. That is what makes "a report can never appear on the family's board" structural rather
+  // than careful — the handler is handed no space id and has no way to obtain one.
+  { method: 'POST', pattern: '/feedback',             name: 'feedback' },
 ]);
 
 /** Every handler name the registry may carry. Frozen; a typo is a startup failure, not a 404. */

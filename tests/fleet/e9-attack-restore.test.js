@@ -101,6 +101,33 @@ async function papaBar(C, { startDate, endDate, label }) {
   return { uuid: id, key: familyKey('fbar', C.papa.forStore.memberId, id) };
 }
 
+/**
+ * One Mac's own answer for one bar: the projected entry, and how many segments the SHIPPED
+ * layout paints for it across the twelve visible months. `materialize` + `buildBoard` are the two
+ * halves of "is this entry on the calendar" — an entry can sit in `state.bars` and paint nothing,
+ * which is exactly the defect §4c-b names, so both are measured and neither is inferred.
+ */
+async function barAndSegments(mac, e, today = '2026-10-01') {
+  let out = null;
+  await on(mac, () => {
+    const r = mac.store.registers();
+    const st = materialize(r, {
+      me: mac.forStore.memberId, familySpaceId: mac.store._familySpaceId,
+      ...mac.store._memberCtx(r), defaultSettings: mac.store.state.settings,
+    });
+    const bars = st.bars.filter((b) => b.entityKey === e.key || b.id === e.uuid);
+    let segs = 0;
+    const board = buildBoard(st, { today });
+    for (const col of (board.columns || board.cols || [])) {
+      for (const seg of (col.segments || col.segs || [])) {
+        if (seg.bar && (seg.bar.entityKey === e.key || seg.bar.id === e.uuid)) segs++;
+      }
+    }
+    out = { bars, segs };
+  });
+  return out;
+}
+
 async function papaNote(C, { text, level = 'geteilt', coEdit = true }) {
   const id = newUuid();
   await on(C.papa, async () => {
@@ -226,18 +253,21 @@ describe('E9-D · 18.6, 18.5, and the redaction boundary through the new write p
     assert.ok(segs > 0, `and it DRAWS: ${segs} segment(s), where the finding measured 0`);
   });
 
-  test('§4c-b · SUCCEEDED · two drags that are each ordered where they were made still invert the bar', async () => {
-    // THE RESIDUAL, and it is why `_intervalStaysOrdered` is not the fix. The bar runs from Okt
-    // '26 to Jun '27. Mama pulls the right edge IN to 1 Nov (ordered: 10-05 ≤ 11-01). Oma, who
-    // has not seen that, pushes the left edge OUT to 1 Mrz (ordered against the 2027-06-30 end
-    // HE can still see). Both gestures are legal where they are made
-    // and no author-side predicate anywhere can see otherwise, because neither author holds the
-    // other's write. Per-field LWW then gives each of them the field they asked for — correctly,
-    // and 18.5 correctly tells nobody anything — and the bar starts after it ends.
+  test('§4c-b · CLOSED (inverted) · the two ordered drags still fold to an inverted pair — and the projection repairs it', async () => {
+    // THE RESIDUAL, NOW CLOSED IN THE PROJECTION. The bar runs from Okt '26 to Jun '27. Mama pulls
+    // the right edge IN to 1 Nov (ordered: 10-05 ≤ 11-01). Oma, who has not seen that, pushes the
+    // left edge OUT to 1 Mrz (ordered against the 2027-06-30 end HE can still see). Both gestures
+    // are legal where they are made and no author-side predicate anywhere can see otherwise,
+    // because neither author holds the other's write. Per-field LWW then gives each of them the
+    // field they asked for — correctly, and 18.5 correctly tells nobody anything — and THE
+    // REGISTERS STILL FOLD TO A BAR THAT STARTS AFTER IT ENDS. That half of the row is unchanged
+    // and is asserted below: the fix does not pretend the race went away.
     //
-    // OPEN. The convergent half belongs in `core/materialize.js` as a projection invariant; see
-    // the DISPOSITION at the top of this file. GREEN WHILE THE DEFECT EXISTS — if this row goes
-    // red the defect was probably fixed, so INVERT IT, do not repair it.
+    // What changed is `core/materialize.js:repairInterval` — ADR 001 §5 step 7's second clause,
+    // a PROJECTION INVARIANT beside the dangling-category repair. A folded interval that runs
+    // backwards projects collapsed onto its LATER-STAMPED edge. Pure function of the register
+    // map, idempotent, and it never rewrites the log: both co-editors' ops stand untouched, which
+    // this row measures rather than assumes.
     const e = await papaBar(C, { startDate: '2026-10-05', endDate: '2027-06-30', label: 'Sommerferien' });
     await on(C.papa, () => { C.papa.store.warnings.length = 0; });
 
@@ -253,50 +283,63 @@ describe('E9-D · 18.6, 18.5, and the redaction boundary through the new write p
     });
     await converge(C, [C.papa, C.mama, C.oma]);
 
-    const regs = await regsOf(C.papa, e.key);
-    assert.equal(regs['pub.endDate'], '2026-11-01', 'Mama kept her field');
-    assert.equal(regs['pub.startDate'], '2027-03-01', 'Oma kept his');
-    assert.ok(regs['pub.startDate'] > regs['pub.endDate'],
-      'AND THE BAR STARTS AFTER IT ENDS — a state neither of them wrote, and neither can see');
+    // ── (1) THE RACE IS STILL THERE, AND THE LOG IS UNTOUCHED. This is the non-vacuity of every
+    //    assertion below it: without an inverted fold the repair has nothing to repair.
+    for (const mac of [C.papa, C.mama, C.oma]) {
+      const regs = await regsOf(mac, e.key);
+      assert.equal(regs['pub.endDate'], '2026-11-01', `${mac.tag}: Mama kept her field`);
+      assert.equal(regs['pub.startDate'], '2027-03-01', `${mac.tag}: Oma kept his`);
+      assert.ok(regs['pub.startDate'] > regs['pub.endDate'],
+        `${mac.tag}: the REGISTERS still fold to a bar that starts after it ends — the repair is `
+        + 'in the projection and it did not rewrite one op');
+    }
 
-    let bars = null;
-    let segs = 0;
-    await on(C.papa, () => {
-      const r = C.papa.store.registers();
-      const st = materialize(r, {
-        me: C.papa.forStore.memberId, familySpaceId: C.spaceId,
-        ...C.papa.store._memberCtx(r), defaultSettings: C.papa.store.state.settings,
-      });
-      bars = st.bars.filter((b) => b.entityKey === e.key || b.id === e.uuid);
-      const board = buildBoard(st, { today: '2026-10-01' });
-      for (const col of (board.columns || board.cols || [])) {
-        for (const seg of (col.segments || col.segs || [])) {
-          if (seg.bar && (seg.bar.entityKey === e.key || seg.bar.id === e.uuid)) segs++;
-        }
-      }
-    });
-    assert.equal(bars.length, 1, 'the entry still exists');
-    assert.equal(bars[0].startDate, '2027-03-01');
-    assert.equal(bars[0].endDate, '2026-11-01',
-      'and the OWNER\'s own board reads the inverted pair too — `promoteEntity` promotes the '
-      + 'family write over his truth register, which is 18.2 working exactly as designed');
-    assert.equal(segs, 0,
-      'and it draws NOTHING: zero segments in twelve months. The family holiday bar both of them '
-      + 'were invited to drag is gone from the calendar, silently, for everybody.');
-    // ── RE-CONFIRMED IN A REAL BROWSER, on the shipped board at http://localhost:4173, after
-    //    the §4c door guard landed — because the guard does NOT close this and must not be read
-    //    as if it had. Papa's bar 2026-10-05 → 2027-06-30, then two OWNER-side single-field
-    //    writes (`pub.endDate: 2026-11-01`, then `pub.startDate: 2027-03-01`), each ordered
-    //    against the pair its author could see, delivered in two batches:
-    //      .bar[data-bar-id=<key>]                                  9 → 0
-    //      store.state.bars                                the entry is STILL THERE
-    //      state.bars[…] span                     ['2027-03-01', '2026-11-01'] — inverted
-    //      document.body.innerText.includes('Herbstferien Nordsee')     true → false
-    //      .col                                    12, unchanged — the board does not reflow
-    //    and the shipped door still repairs it (`applyCoEdit({'pub.endDate':'2027-05-01'})`
-    //    → true, 0 → 3 segments), which is §4c-c. Screenshotted before and after, in transcript.
+    // ── (2) …AND THE ENTRY DRAWS. It used to be zero segments on every board in the family.
+    const seen = {};
+    for (const mac of [C.papa, C.mama, C.oma]) {
+      seen[mac.tag] = await barAndSegments(mac, e);
+    }
+    for (const mac of [C.papa, C.mama, C.oma]) {
+      const v = seen[mac.tag];
+      assert.equal(v.bars.length, 1, `${mac.tag}: the entry exists`);
+      assert.equal(v.bars[0].startDate, '2027-03-01',
+        `${mac.tag}: the LATER-STAMPED edge is Oma's start, and it is what the bar is anchored to`);
+      assert.equal(v.bars[0].endDate, '2027-03-01',
+        `${mac.tag}: and the earlier edge follows it — one day, at the last place a hand put an `
+        + 'edge, instead of a span neither of them wrote');
+      assert.ok(v.segs > 0, `${mac.tag}: and it DRAWS: ${v.segs} segment(s), where the finding measured 0`);
+    }
+    assert.equal(seen.papa.segs, 1, `the owner's board paints it once (${seen.papa.segs})`);
 
-    // 18.5 has nothing to say about it, and that is the rule working as written.
+    // ── (3) EVERY MAC AGREES, which is the whole reason this is a projection invariant and not a
+    //    door: Papa reads it through `ownCandidate` + promotion, Mama and Oma through
+    //    `foreignCandidate`, and all three code paths land on the same interval with nothing
+    //    synchronised between them.
+    assert.deepEqual(
+      [seen.mama.bars[0].startDate, seen.mama.bars[0].endDate],
+      [seen.papa.bars[0].startDate, seen.papa.bars[0].endDate],
+      'the viewer and the owner project the same interval');
+    assert.deepEqual(
+      [seen.oma.bars[0].startDate, seen.oma.bars[0].endDate],
+      [seen.papa.bars[0].startDate, seen.papa.bars[0].endDate],
+      'and so does the third Mac');
+
+    // ── (4) IDEMPOTENT. Materializing again over the same registers is a fixed point — the
+    //    repair does not walk the bar one day further on every projection, and `_project()` runs
+    //    on every emit.
+    const again = await barAndSegments(C.papa, e);
+    assert.deepEqual(
+      [again.bars[0].startDate, again.bars[0].endDate],
+      [seen.papa.bars[0].startDate, seen.papa.bars[0].endDate],
+      'a second projection of the same registers is the same interval');
+
+    // ── (5) AND NOBODY IS TOLD. That is a decision, written down in `repairInterval`'s comment
+    //    and re-asserted here so it cannot drift into an accident: 18.5's notice fires for the
+    //    person whose in-flight edit LOST, and per-field LWW displaced neither of them. The repair
+    //    is a display-time clamp on an inconsistent pair, not a write — Mama's `pub.endDate` still
+    //    stands, as (1) measured — so "your edit lost" would be false, and a second notice would
+    //    be a conflict surface for a conflict nobody had, on a board Principle 10 says is not a
+    //    messenger.
     const ask = async (mac, field) => {
       let d = null;
       await on(mac, () => {
@@ -312,6 +355,24 @@ describe('E9-D · 18.6, 18.5, and the redaction boundary through the new write p
       assert.deepEqual(C.papa.store.warnings, [],
         'and the OWNER — whose bar it is, and who wrote neither field — is told nothing at all');
     });
+
+    // ── (6) AND IT IS STILL REPAIRABLE THROUGH THE SHIPPED DOOR, by either edge — the register
+    //    Mama wrote was never touched, so pushing the END back out past the start still wins
+    //    outright, and the invariant then stands aside completely.
+    await on(C.mama, async () => {
+      assert.equal(C.mama.store.applyCoEdit(e.key, { 'pub.endDate': '2027-05-01' }), true,
+        'the door lets her push the end back out — §4c-c, unchanged by the projection repair');
+      await C.mama.engine.syncNow();
+    });
+    await converge(C, [C.papa, C.mama, C.oma]);
+    const repaired = await barAndSegments(C.papa, e);
+    assert.deepEqual([repaired.bars[0].startDate, repaired.bars[0].endDate],
+      ['2027-03-01', '2027-05-01'],
+      'once the pair is ordered again the projection reports it verbatim');
+    assert.ok(repaired.segs >= 3, `and a three-month bar paints three columns (${repaired.segs})`);
+
+    // ── RE-CONFIRMED IN A REAL BROWSER, on the shipped board at http://localhost:4173. See the
+    //    measurement block in the DISPOSITION at the top of this file.
   });
 
   test('§4c-c · the guard refuses to CREATE an inversion, never to live with one', async () => {
@@ -357,6 +418,59 @@ describe('E9-D · 18.6, 18.5, and the redaction boundary through the new write p
     assert.equal(fixed['pub.startDate'], '2027-04-01');
     assert.equal(fixed['pub.endDate'], '2027-05-01');
     assert.ok(fixed['pub.startDate'] <= fixed['pub.endDate'], 'and the bar is ordered again');
+
+    // …and while it WAS inverted, the whole-bar drag behaved like dragging the one-day bar the
+    // user could actually see. One op writes both edges, so the two registers carry the same
+    // stamp and the same opId and `cmpWrites` falls through to its value key — which, given the
+    // repair's own precondition `start > end`, always answers "the start is later". The bar
+    // therefore anchors on its LEFT edge and the drag moves it a month, exactly as it looked.
+    let midway = null;
+    await on(C.papa, () => {
+      const r = C.papa.store.registers();
+      const st = materialize(r, {
+        me: C.papa.forStore.memberId, familySpaceId: C.spaceId,
+        ...C.papa.store._memberCtx(r), defaultSettings: C.papa.store.state.settings,
+      });
+      midway = st.bars.find((b) => b.entityKey === e.key || b.id === e.uuid);
+    });
+    assert.ok(midway, 'the entry is on his board throughout');
+  });
+
+  test('§4c-d · the repair follows the STAMP, not the field name — the same race, the other way round', async () => {
+    // §4c-b run with the two gestures swapped: OMA pushes the left edge out first, and MAMA — who
+    // has not pulled his write — then pulls the right edge in. The fold is the same inverted pair
+    // `start 2027-03-01 / end 2026-11-01`, but now the LATER-stamped register is the END, so the
+    // interval collapses onto HER edge instead of his.
+    //
+    // This is the row that measures the RULE. A repair that always kept the start — or that
+    // compared the two VALUES, which given `start > end` is the same thing — is indistinguishable
+    // from the real one on §4c-b and dies here.
+    const e = await papaBar(C, { startDate: '2026-10-05', endDate: '2027-06-30', label: 'Pfingsten' });
+    await on(C.oma, async () => {
+      assert.equal(C.oma.store.applyCoEdit(e.key, { 'pub.startDate': '2027-03-01' }), true,
+        'ordered against the 2027-06-30 end he can see');
+      await C.oma.engine.syncNow();
+    });
+    await on(C.mama, async () => {
+      assert.equal(C.mama.store.applyCoEdit(e.key, { 'pub.endDate': '2026-11-01' }), true,
+        'ordered against the 10-05 start SHE can still see — she has not pulled his');
+      await C.mama.engine.syncNow();
+    });
+    await converge(C, [C.papa, C.mama, C.oma]);
+
+    const regs = await regsOf(C.papa, e.key);
+    assert.equal(regs['pub.startDate'], '2027-03-01', 'the same inverted pair as §4c-b…');
+    assert.equal(regs['pub.endDate'], '2026-11-01');
+    assert.ok(regs['pub.startDate'] > regs['pub.endDate'], '…and it really is inverted');
+
+    for (const mac of [C.papa, C.mama, C.oma]) {
+      const v = await barAndSegments(mac, e);
+      assert.equal(v.bars.length, 1, `${mac.tag}: the entry exists`);
+      assert.deepEqual([v.bars[0].startDate, v.bars[0].endDate], ['2026-11-01', '2026-11-01'],
+        `${mac.tag}: …but the LATER write is Mama's end, so the bar collapses onto HER edge — `
+        + 'the opposite answer from §4c-b, from the same two values in the other order');
+      assert.ok(v.segs > 0, `${mac.tag}: and it draws: ${v.segs} segment(s)`);
+    }
   });
 
   test('§4d · FAILED · the standing bar: not one byte of a Privat entry, after all of the above', async () => {

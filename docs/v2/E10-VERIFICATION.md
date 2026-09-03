@@ -117,6 +117,12 @@ A1 adds that v1's wording "may remain true for solo mode and should be quoted th
 about/marketing copy." **That permission is the thing this section exists to test, because as
 built it is not quite true, and the gap has a name.**
 
+> **⚠ SUPERSEDED 2026-09-03 by LZP-1002 — read §10b before reading the rest of §3.** The wording
+> quoted above is the OLD one. Story 21.5 now says *"zero **unrequested** network requests"*, with
+> LZP-1009's Rückmeldung as the single named exception; the PO decided that on 2026-09-03 and it
+> is recorded in ADR 003 §7.5 and **D10**. Every measurement in §3b–§3d below still stands and none
+> of them moved — what changed is what the numbers are being held to.
+
 ### 3b. Boot a solo copy and count requests
 
 Three independent measurements, all green, none of them a rewrite of the others:
@@ -344,11 +350,14 @@ does not exist, and a Datenschutz text (LZP-1001) that is not in the product at 
 
 1. **`server/prisma/migrations/` does not exist.** The first deploy creates no tables and
    `check-server-config.mjs` passes anyway. (LZP-1008, RUNBOOK §2.)
-2. **LZP-1001 — the Datenschutz section is not in the product.** „Frankfurt", „Vercel", „Prisma"
-   appear nowhere in `src/`. It is now larger than the ticket says: §3d shows the product contacts
-   **two** remotes, so the copy must name the release host beside the relay, and A1's permission to
-   quote v1's "zero network" wording for solo mode is **not** clean — the update check happens in
-   solo mode too.
+2. ~~**LZP-1001 — the Datenschutz section is not in the product.**~~ **CLOSED 2026-09-03 — see
+   §11.** It is a top-level section of ⚙ on every launch, in both languages: 24 blocks, 5 234
+   characters of German. It names Vercel, Prisma Postgres and **EU/Frankfurt** (D2), enumerates
+   ADR 003 §5.2's inventory, names the **second remote** (the GitHub manifest, no identifier,
+   switchable off, not in the EU), states the retention honestly per RUNBOOK §7.2, and states in
+   both languages that a feedback report is **not** end-to-end encrypted the way an entry is. A1's
+   permission is used in its **scoped** form — „Von allein sendet dieses Programm nichts" — and
+   held by `network-scope.test.js` §5e.
 3. **LZP-1006 — the Mom test itself.** Blocked on a person, and on E-1/E-2/E-3 above being fixed
    first so her afternoon is not spent on known defects. D1 (signing) determines its quality.
 4. **LZP-106's unlock screen** — `gatekeeper_status` is unimplemented in both shells (§6).
@@ -356,19 +365,24 @@ does not exist, and a Datenschutz text (LZP-1001) that is not in the product at 
 
 **Owed, not blocking.**
 
-6. **LZP-1009 — the feedback button.** Not built. When it is: it is a **third** network job and a
-   **second** remote host, so it needs §1a, §1g, §2a–§2e and (if it screenshots) §3a/§3b
-   **inverted**, plus a Datenschutz sentence naming a third processor. The rig in
-   `e10-outbound-payload.test.js` — the fixture board, the three spellings, the positive control —
-   is written to be pointed at the new payload rather than replaced by a weaker one (§4a).
+6. ~~**LZP-1009 — the feedback button.** Not built.~~ **BUILT 2026-09-03, and two of the four
+   predictions in this bullet were WRONG — see §10a.** It is **not** a third network job and
+   **not** a second remote host: it is a POST to the sync relay's own origin over the existing
+   transport, so the native-socket exception count is still **two** and §1a/§1g stay green for the
+   reasons they were written. Only §2c and §2d inverted; §2a and §3a were still green *after the
+   whole feature shipped* and neither was green because its claim held (E10-1009-B). And there is
+   **no third processor** — the sentence the copy actually owed was that a report is **not**
+   end-to-end encrypted, which is larger than the one predicted (§11, §10b).
 7. **E10-1 · story 17.5's „neu" dot never lights.** `core/materialize.js:isNewOf` is correct and
    tested; `store.js:_project` supplies none of `seqOf` / `isNew` / `lastSeenSeq` /
    `levelDecreased`. Both halves exist and are not joined. `store.js` is a parallel workflow's, so
    the fleet row is green while the defect exists and says: *if it goes red, invert it, do not
    repair it.*
-8. **LZP-1003's five residuals**, all priced, none closed: **R1** a stolen backup yields the whole
-   board in the clear (the *board* block is plaintext on both export paths; the copy reads as
-   though the passphrase protects it); **R2** the backup file + passphrase is an unbounded,
+8. **LZP-1003's five residuals**, all priced, **one now half-closed**: **R1** a stolen backup
+   yields the whole board in the clear (the *board* block is plaintext on both export paths; the
+   copy read as though the passphrase protected it) — **the COPY half is closed in the Datenschutz
+   section, §12; the `crypto/backup.js` strings are unchanged and E10-B7 is still green over a
+   narrower object than the product, filed as R1-b**; **R2** the backup file + passphrase is an unbounded,
    undetectable member-cloning primitive, and §8.5's only stated mitigation renders as nothing
    because `family/mount.js#refreshRoster` drops the device count; **R3** epoch poisoning is
    locally correct and unreportable — the honest and hostile cases produce the identical number;
@@ -429,11 +443,13 @@ plaintext never reaches the transport at all. That is a fact about the architect
 
 ## 9. What a reader should NOT conclude from a green E10
 
-- **"Solo mode makes zero network requests" is false as literally written.** The *board* makes
-  zero. The *shell* makes one, once a day at most, only after the user has been told and left the
-  switch on. That is 21.5 ∧ 22.3 resolved the most conservative way available, and it is written
-  out in full in `updater.js`'s header — but the marketing and About copy may not quote v1's
-  sentence unqualified, and LZP-1001 has not written the qualified one.
+- **"Solo mode makes zero network requests" is false as literally written — and the story has
+  been amended rather than left that way.** The *board* makes zero. The *shell* makes one, once a
+  day at most, only after the user has been told and left the switch on; and since LZP-1009 a
+  *human press* can make one more. 21.5 now reads "zero **unrequested** network requests" (PO,
+  2026-09-03 · ADR 003 §7.5 · **D10** · §10b of this document), and LZP-1001 has written the
+  qualified sentence: „Von allein sendet dieses Programm nichts." The marketing and About copy may
+  quote **that**, and not v1's unqualified one.
 - **The census is a name test.** `syncSendEverything` would pass §1a. It bounds jobs, not
   behaviour.
 - **§3's "no image exists" is vacuous truth, not verified redaction.** It is the strongest true
@@ -449,3 +465,233 @@ plaintext never reaches the transport at all. That is a fact about the architect
 - **`test:fleet`'s 397 green rows contain no evidence about `sync_request`**, which is unimplemented
   in both shells; they run the `fetch` shape. The cost is one hop and it is named in three file
   headers and in `traceability.json`.
+
+---
+
+# ADDENDUM — LZP-1001 + LZP-1002, 2026-09-03 (after LZP-1009)
+
+**Tickets:** LZP-1001 (Datenschutz section, 2 pts) · LZP-1002 (network scope audit, 3 pts) ·
+**Stories:** 21.3, 21.4, 21.5 · **Amendments:** A1, A10 · **PO decisions:** D2, D8, **D10 (new)**,
+**D11 (new)** · **Normative:** ADR 003 §5.2, §6.3, **§7 and the new §7.5**
+
+## 10. The amendment — and why it is the section a conformance sweep should read first
+
+§3 above tested story 21.5 as written and §7 item 6 predicted what LZP-1009 would cost it. **Both
+were half right, and the half that was wrong is the one that matters.**
+
+### 10a. What §7 item 6 predicted, and what actually landed
+
+| §7 item 6 said | what shipped |
+|---|---|
+| "a **third** network job" | **No.** A POST to the sync relay's **own origin** over the **existing transport**. The native-socket exception count is still **two** (sync, update) — `e10-network-scope.test.js` §1a is green for the reason it was written |
+| "a **second** remote host" | **No.** No new host, no new literal; §1g still finds exactly one remote URL in the whole product and it is still the `OWNER-PLACEHOLDER` update manifest |
+| "§1a, §1g, §2a–§2e … **inverted**" | Only §2c and §2d inverted. §2a and §3a were **still green after the whole feature shipped, and neither was green because its claim held** — finding E10-1009-B |
+| "a Datenschutz sentence naming a **third processor**" | **No third processor.** One paragraph about a report that is *not end-to-end encrypted*, which is a bigger sentence than the one predicted and a smaller change to the processor list |
+
+**§7 item 2's remaining half is now closed too**: „Frankfurt", „Vercel" and „Prisma" appear in
+`src/js/settings.js`, on a screen, in both languages. `docs/v2/RUNBOOK.md` §7's *"until LZP-1001
+puts that on a screen, **you are the Datenschutz page**"* no longer applies.
+
+### 10b. ██ THE AMENDMENT, VERBATIM ██
+
+Story 21.5's "zero" was **false from the commit that landed LZP-1009**, because „Rückmeldung
+senden" lives in Einstellungen and Einstellungen is in the boot graph of every launch. The story
+is amended. It is written into `docs/v2/adr/003-sync-protocol.md` §7.5 and into
+`DESIGN-DECISIONS.md` **D10**, with both wordings quoted and the decider named, because **amending
+a measured property is exactly the quiet erosion a conformance sweep hunts for** — `judge:
+conformance` B-14 caught gate 1 of the same section being *vacuously* true by the same mechanism.
+
+> **OLD** — story 21.5, and §7's own heading in ADR 003, until 2026-09-03:
+> "Network scope, replacing 13.4: **in solo mode the app makes zero network requests**; with a
+> Familienkreis it talks to exactly one sync endpoint and nothing else. The v1 property survives
+> as a scoped guarantee."
+
+> **NEW** — story 21.5 as amended:
+> "Network scope, replacing 13.4: **in solo mode the app makes zero *unrequested* network requests
+> — the only request a solo copy can originate is the one a human asks for, by pressing „Senden"
+> on the Rückmeldung screen (LZP-1009)**; with a Familienkreis it talks to exactly one sync
+> endpoint and nothing else. The v1 property survives as a scoped guarantee."
+
+> **DECIDED BY:** the **PO**, on **2026-09-03**, presented with the fact and the alternative. The
+> alternative was to make the feature family-only, which refuses the report from the only tester
+> who has no Familienkreis — the person the feature exists for, and the person whose report will
+> say „ich komme nicht mehr rein". The PO chose to amend.
+
+**It is a narrower promise, not a softer one, and this is the whole argument.** The old wording
+bounded a **count** (zero); a count can only ever be measured over sessions somebody thought to
+script, and it goes green over the session nobody ran. The new wording bounds an **originator** —
+a human press, and nothing else — which is a property of the source tree, checkable by
+construction, and the property that actually fails when the exception widens.
+
+### 10c. The measured numbers, on both sides of the amendment
+
+**SOLO — zero, and the exception costs zero until it is pressed.** Measured in the real browser
+(`node dev-server.mjs`, Chrome, both languages, ⚙ opened twice, the whole Datenschutz section
+read):
+
+| measurement | result |
+|---|---|
+| subresources on a solo launch + two settings sessions | **48** |
+| off-origin resources | **0** |
+| `/api/` calls | **0** |
+| resources with `initiatorType` `fetch` or `xmlhttprequest` | **0** |
+| family-graph modules loaded (`crypto/`, `sync/`, `family/`, `platform/net.js`) | **0** |
+| `src/js/feedback/` modules loaded (the price of the exception) | **8** · 93 193 B of pure DOM code that imports nothing which can open a socket |
+
+And in the shipping engine, `tests/tier2/datenschutz.dom.js` **§7** — the measurement this
+addendum adds, because `network-audit.dom.js` §2's solo session never opens ⚙ and therefore said
+nothing about the screen the exception lives on:
+
+| §7 row | result |
+|---|---|
+| §7a · open ⚙ (draws Datenschutz **and** Hilfe), open the Rückmeldung sheet, type, reach the preview with the redacted PNG rendered — spies on all five socket APIs | **0 calls, 0 dispatches** |
+| §7b · press „Senden" once, with a port bound | **1 dispatch, 0 socket calls** (the tree holds a port; it cannot open a socket itself), body has `report`, body has **no `to:`** |
+| §7c · the spy, shown a positive | fires on `fetch` and `WebSocket` |
+
+**SOLO — the source claim.** `tests/tier1/network-scope.test.js`, over the tree it names:
+
+| | measured |
+|---|---|
+| shipped `.js` files under `src/js/` scanned | **78** (`platform/` and the DOM layer included — finding F-9's blind spot) |
+| network identifiers outside `platform/net.js` | **0** |
+| network identifiers inside `platform/net.js` | **1** (`fetch`) |
+| static paths from `boot.js` / `firstrun.js` / `main.js` to `net.js`, `sync/`, `crypto/`, `family/` | **0** |
+| dynamic doors out of the eagerly-evaluated graph | **1** — `main.js → family/mount.js` |
+| **originators of a feedback report, in the whole tree** | **1**, kind `human`, `src/js/feedback/ui.js:245`, trigger `addEventListener('click', …)` |
+
+**FAMILY — one endpoint, and everything else refused by name.** `network-audit.dom.js` §3, in the
+shipping engine, against a transport whose `fetchImpl` records instead of dialling:
+
+| | measured |
+|---|---|
+| the client's whole request surface (ops ×2, spaces, members, pair/offer, devices/adopt) | **6 requests, 6 inside `<origin>/api/v1/`**, 0 outside |
+| second-origin shapes attempted (`OTHER`, protocol-relative, suffix look-alike, traversal, `/api/v2/`, bare `/ops`) | **6 refused**, all `NetError`, **0 reached the socket** |
+| methods other than GET/POST | **6 refused**, `kind: 'blocked'` |
+| a GET carrying a body | refused |
+
+### 10d. ██ THE EXCEPTION MAY NOT WIDEN — and the gate that detects it ██
+
+**The failure mode this ticket is actually defending against is not a second endpoint.**
+`e10-network-scope.test.js` §2c counts endpoints and would catch one. It is a **second CALLER**:
+one `setInterval` "so a stuck report retries", one `addEventListener('online', …)` "so it goes out
+when the wifi comes back", one `unhandledrejection` handler that files a report by itself. Each
+reads as a courtesy on its own; together they are an unattended solo Mac sending, **with every
+endpoint gate in ADR 003 still green**, because none of them adds an endpoint.
+
+`tests/tier1/network-scope.test.js` §5 is the gate. Five rows:
+
+| row | what it holds |
+|---|---|
+| **§5a** | only `src/js/feedback/ui.js` may import `feedbackPort()` — the one way to reach `send`. Everyone else, including `family/mount.js` when it lands E10-1009-A, may import the **setter** and can bind but never fire. Also pins the port's export set, so a new getter cannot arrive unnoticed |
+| **§5b** | across all 78 shipped modules: **1** originator, `human`. Any `automatic` row fails, naming file, line and enclosing function |
+| **§5c** | `feedback/events.js` — the one module that listens to the machine (`error`, `unhandledrejection`) — does not import the port at all; and no timer or lifecycle event anywhere in the tree names the dispatcher |
+| **§5d** | **ARMED**, run rather than reasoned (below) |
+| **§5e** | the amended promise is on the **screen**, in both languages — a property amended in an ADR and not in the product is the erosion with an extra step |
+
+### 10e. Mutants — run, not reasoned
+
+Every one was run against the real tree and reverted; the control was re-run after each. **No
+`git stash`.**
+
+| mutant | planted | row that dies |
+|---|---|---|
+| **M1** | `setInterval(() => doSend(btn, st), 60000)` | §5b, §5d |
+| **M2** | `window.addEventListener('online', () => doSend(btn, st))` | §5b, §5d |
+| **M3** | `document.addEventListener('DOMContentLoaded', () => doSend(btn, st))` | §5b, §5d |
+| **M4** | `function autoReport(){ feedbackPort().send({v:1}) }` + `setTimeout(autoReport, 0)` | §5b, §5d |
+| **M5** *(live, on `feedback/ui.js` itself, then reverted)* | `window.addEventListener("online", () => doSend(null,null))` | §5b **and only** §5b + §5d's control; 18 other rows green |
+| **M6** | the German amendment sentence deleted from the Datenschutz copy | tier 1 §5e **and** tier 2 §3a; 15 other tier-2 rows green |
+| **M7** | `data-ds` dropped from the section's blocks (it still draws) | **14 of 19** tier-2 rows, §4a's absence rows included — which is the point: the ban rows are not satisfiable by an empty screen |
+| **M8** | R1's sentence softened to „auch ohne dein Passwort einsehbar" in both languages | §5a **and** §5b |
+| **control** | the second *human* press | classified `human`, not `automatic` — the gate does not cry wolf |
+
+**M4 and M8 each found a real defect in a row I had just written, and both are recorded rather
+than quietly fixed:**
+
+- **M4** killed the first form of §5b's caller regex, `\b<fn>\s*\(`. `setTimeout(autoReport, 0)`
+  and `addEventListener('online', autoReport)` dispatch a function **without ever writing a `(`
+  after its name** — which is precisely the shape the retry patch takes. A reference is a caller;
+  the regex is now `\b<fn>\b`.
+- **M8** killed the first form of §5b in tier 2. That row asserted only that E10-B7's regex
+  matched the union of the product's copy, and it stayed **green** with R1's sentence removed —
+  because the regex's `nicht verschlüsselt` alternative matches the **Privat** paragraph, a
+  sentence about family ops with nothing to do with a backup file. Green for an unrelated reason
+  is the exact rot §2a and §3a of the E10 sweep died of. The inversion is now **located**: it must
+  match inside `DATENSCHUTZ[lang].backupBody`.
+
+An earlier defect, found before the mutants: §5b's classifier read the **stripped** source, in
+which `addEventListener('click', …)` has had its string literal blanked — so the product's one
+real human press was classified **automatic**. Detection now runs on stripped source (a `.send(`
+in prose is not a call) and classification on the raw line (the thing that says a caller is a
+person *is* a string literal). The two arrays are index-aligned because
+`stripCommentsAndStrings` preserves newlines, which `netscope.js:scanSource` already depends on.
+
+## 11. LZP-1001 — the Datenschutz section
+
+**Where it is:** `src/js/settings.js`, a top-level section of ⚙, drawn on **every** launch,
+between Sicherungen and Hilfe. **24 tagged blocks · 5 234 characters of German · 4 546 of
+English.** Screenshotted in the real browser in both languages.
+
+**A10 says it belongs inside the *Familie* section, and it is not there — decision D11.** Built
+A10's way it is drawn by `family/mount.js`, the one dynamically imported door, and is therefore
+**invisible on a solo install** — to exactly the reader whose backup file it is about, who is also
+the least likely to have been told what is in one. Each family-specific paragraph names its
+condition in its first clause instead. Held by `datenschutz.dom.js` §1a against the **real**
+settings sheet on a Mac with no space.
+
+**What it says, and what document each sentence answers to:**
+
+| block | source of truth |
+|---|---|
+| solo = nothing, with D10's exception named and conditional | story 21.5 as amended · ADR 003 §7.5 |
+| „Privat" is structural, not stronger encryption | ADR 004 — zero family ops, not redacted ones; peers hold no entity key. Six adversary rounds, zero bytes |
+| one relay · Vercel + Prisma Postgres · **EU, Region Frankfurt** | 21.3, decision **D2**, addendum §3/§9 |
+| what the relay *does* see — ids, **the colour**, last-seen, change counts, **256-byte-rounded** sizes, arrival order, IP + app version + clock | ADR 003 **§5.2**'s inventory. §5.2 says the colour "appears verbatim in the Datenschutz copy"; this is that appearance |
+| what it *never* sees, **and the honest limit** — the shape shows THAT, never what | ADR 003 §5.2 · `server-metadata.md` §5 |
+| retention: **„unbefristet"**, IP rows kept until deleted by hand, Vercel's own log under Vercel's terms | RUNBOOK **§7.2** — which forbids „wird nach einer Stunde gelöscht" in so many words. `datenschutz.dom.js` §2d bans that phrasing and requires the true one |
+| the **second remote**: the daily GitHub manifest, no identifier, switchable off, not in the EU | `updater.js`'s 21.5 ↔ 22.3 note · RUNBOOK §7.3 · E1-VERIFICATION §2 |
+| **the report is NOT end-to-end encrypted** — TLS in transit, readable at the far end | `server/core/handlers/feedback.js` |
+| **R1** — the backup's entries are readable without the password | LZP-1003 finding R1 |
+| **D8** — no reset, no account, nobody can recover it | decision D8 |
+| 21.4's closing list — no analytics, trackers, ads, foreign fonts, maps, error reporter | story 21.4 |
+
+**The host is deliberately not printed.** §1g of the E10 sweep says the one remote URL in the
+product is still `OWNER-PLACEHOLDER`; a Datenschutz page naming a host that does not exist is
+worse than one naming the company. `datenschutz.dom.js` §2e fails if a URL ever appears in the
+copy — which also keeps `e10-network-scope.test.js` §2e ("no shipped module names a resolvable
+remote host") from acquiring its first exception in a privacy paragraph.
+
+**It does not market.** §4a bans reassurance vocabulary („100 % sicher", „militärisch",
+"bank-level", "we take your privacy seriously") and, per Principle 9, survey vocabulary
+("bewerten", "survey", "recommend") — each ban paired with a length assertion over the same text,
+so none of them is satisfiable by an empty section. M7 proves that pairing works.
+
+## 12. R1 — the correction, and the row it inverts
+
+**LZP-1003 R1:** a stolen backup yields the whole board in the clear, with no passphrase. `board`
+is plaintext JSON on **both** export paths; D8 only ever covered the identity block. The defect is
+in the **copy** — `README.withIdentity` says „Wer diese Datei und dein Passwort hat, ist du",
+which a reader hears as *both are needed*, and `sealsEntriesToo` says „Auch die Einträge sind
+versiegelt", where „versiegelt" does **integrity's** work in a sentence a non-technical reader
+hears as **confidentiality's**.
+
+The true sentence is now in the Datenschutz copy, in both languages:
+
+> „In einer exportierten Sicherung stehen deine Einträge im Klartext … **ohne Passwort lesbar,
+> auch bei einer Sicherung MIT Passwort. Das Passwort schützt die Schlüssel, nicht die Einträge.**
+> … es macht die Datei fälschungssicher — **es macht sie nicht unlesbar.**"
+
+**██ THE INVERSION, AND THE DEVIATION IN IT. ██** `tests/attack/e10-crypto-backup.test.js` E10-B7
+carries the assertion this inverts — *"No string anywhere in the export sheet, the READMEs or
+LIMITS tells the user that the entries are readable without the password. If one is ever added,
+this assertion is what has to be inverted."* That row scans three exports of
+`src/js/crypto/backup.js`, **a file this ticket does not own** (ONE OWNER PER FILE). So the
+inversion is written in `tests/tier2/datenschutz.dom.js` §5b instead, against the same matcher,
+and the consequence is stated rather than hidden: **E10-B7 is still green over a narrower object
+than the product.** Filed as **R1-b**, FINDINGS §20c, owner: whoever next opens `crypto/backup.js`.
+
+**D8's key-loss consequence** now sits where a person meets it before it matters rather than in a
+support script after: „Es gibt kein Zurücksetzen des Passworts, weil es kein Konto gibt … kann
+niemand deine Daten wiederherstellen — **wir nicht, Vercel nicht, Prisma nicht.**" Naming the
+three parties is what makes it land; a reader who has heard „verschlüsselt" all week assumes a
+company somewhere holds a spare.

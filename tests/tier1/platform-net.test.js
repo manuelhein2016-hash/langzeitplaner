@@ -326,7 +326,10 @@ describe('createBridgeTransport — the page signs, the shell transports', () =>
       now: () => 1787836800123, random: (n) => new Uint8Array(n).fill(3), subtle: S,
       invoke: async (cmd, args) => {
         seen.push({ cmd, args });
-        return { status: 200, headers: { 'X-LZP-Protocol': '1' }, body: '{"accepted":[]}' };
+        // `url` is REQUIRED as of LZP-1002 — both shells send it (FINDING P-5's shell half), so
+        // the transport refuses a reply that omits it. A shell double must answer like a shell.
+        return { status: 200, headers: { 'X-LZP-Protocol': '1' }, body: '{"accepted":[]}',
+                 url: ORIGIN + '/api/v1/ops' };
       },
     });
     const res = await t.request('POST', '/api/v1/ops', {}, { space: 'fsp_9xQ2mR7bL0aZ4tV8wK', ops: [] });
@@ -366,12 +369,24 @@ describe('createBridgeTransport — the page signs, the shell transports', () =>
       (e) => e.kind === 'bad_response');
     await assert.rejects(() => mk({ headers: {}, body: '' }).request('GET', '/api/v1/meta'),
       (e) => e.kind === 'bad_response', 'a reply with no status is not an answer');
+    // LZP-1002 · P-5's shell half, now that both shells send the field: a reply that names no
+    // URL at all is `blocked`, not accepted. Before this, an omission silently disabled the
+    // origin check — a shell that followed a redirect and stayed quiet was indistinguishable
+    // from an honest one.
+    await assert.rejects(
+      () => mk({ status: 200, headers: {}, body: '{}' }).request('GET', '/api/v1/meta'),
+      (e) => e instanceof NetError && e.kind === 'blocked' && /without naming the URL/.test(e.message),
+      'a reply with no `url` was accepted — P-5 has been reverted');
+    // …and the honest shape still goes through.
+    const ok = await mk({ status: 200, headers: {}, body: '{}', url: ORIGIN + '/api/v1/meta' })
+      .request('GET', '/api/v1/meta');
+    assert.deepEqual(ok, { status: 200, headers: {}, json: {} });
   });
 
   test('chooseTransport says WHICH — a shipped shell reporting "fetch" is a gate-3 bug', async () => {
     const d = await device();
     const base = { origin: ORIGIN, deviceShort: d.deviceShort, sign: d.sign, clientVersion: '2.0.3', subtle: S };
-    assert.equal(chooseTransport({ ...base, invoke: async () => ({ status: 200, body: '' }) }).kind, 'bridge');
+    assert.equal(chooseTransport({ ...base, invoke: async () => ({ status: 200, body: '', url: ORIGIN }) }).kind, 'bridge');
     assert.equal(chooseTransport({ ...base, fetchImpl: async () => ({}) }).kind, 'fetch');
   });
 });
