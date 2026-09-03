@@ -1,6 +1,111 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-03 · **Stopped at:** **THE SHELL TRANSPORT INTEGRATION (LZP-1002)** —
+**Last session:** 2026-09-03 · **Stopped at:** **LZP-1001 + LZP-1002 — the Datenschutz section is
+on a screen, and story 21.5 has been amended by the PO rather than quietly outgrown.** Full
+record: `docs/v2/E10-VERIFICATION.md` §10–§12; findings in `FINDINGS.md` §20; the decisions are
+**D10** and **D11** in `DESIGN-DECISIONS.md` and ADR 003 **§7.5**.
+
+---
+
+## THE HEADLINE: 21.5 now bounds an ORIGINATOR, not a count — and it is 1, human
+
+```
+npm test 2185/2185 · test:property 101/101 · test:attack 970/970
+test:server 944/944 · test:fleet 398/398 · test:dom 850 pass / 3 fail (52 files, 35 visible SKIPs)
+```
+
+The three tier-2 reds are **the same three, in the same two files** — `e8-density-legibility`
+§A4 (the 9 px ink floor, PO ruling on `palette.js`), `e8-density-perf` §E1 (the 60 fps frame,
+needs an incremental `renderBoard`) and §E3 (the saturated poster, a spec decision). All three are
+`layout.js` / `app.css` / `palette.js`, a **parallel workflow's**. None moved, none is this pass's.
+
+*(The 35 SKIPs and the `test:dom` total differ from the previous block's 867/49 because the two
+`shell-*` tier-2 files skip visibly unless `node scripts/shell-family-e2e.mjs` /
+`shell-ssrf.mjs` have configured them. Same tree, different driver.)*
+
+### ██ THE AMENDMENT, AND WHY IT IS THE ENTRY THAT MATTERS ██
+
+LZP-1009 made „Rückmeldung senden" **the first network request a solo copy of this app can ever
+make**, so story 21.5's *"zero"* was false from the commit that landed it.
+
+> **OLD:** "in solo mode the app makes zero network requests; with a Familienkreis it talks to
+> exactly one sync endpoint and nothing else."
+>
+> **NEW:** "in solo mode the app makes zero **unrequested** network requests — the only request a
+> solo copy can originate is the one a human asks for, by pressing „Senden" on the Rückmeldung
+> screen (LZP-1009); with a Familienkreis it talks to exactly one sync endpoint and nothing else."
+>
+> **DECIDED BY: the PO, 2026-09-03.** The alternative was family-only feedback, which refuses the
+> report from the only tester who has no Familienkreis.
+
+**Amending a measured property is exactly the quiet erosion a conformance sweep hunts for** —
+B-14 caught ADR 003 §7 gate 1 being *vacuously* true the same way — so it is written down three
+times with the decider named. **And it is a narrower promise, not a softer one:** the old wording
+bounded a **count** (measurable only over sessions somebody scripted); the new one bounds an
+**originator**, which is a property of the source tree.
+
+### The measured 21.5, both sides
+
+| | measured |
+|---|---|
+| shipped `.js` under `src/js/` scanned | **78** |
+| network identifiers outside `platform/net.js` | **0** (inside: **1**, `fetch`) |
+| static paths from the boot graph to `net.js`/`sync/`/`crypto/`/`family/` | **0** · dynamic doors: **1** |
+| **originators of a feedback report, whole tree** | **1**, `human`, `feedback/ui.js:245`, `addEventListener('click', …)` |
+| solo launch in the real browser + two settings sessions | **48** resources · **0** off-origin · **0** `/api/` · **0** fetch/XHR · **0** family modules |
+| the price of the exception on a solo launch | **8** `feedback/` modules, 93 193 B, none of which can open a socket |
+| composing a report to the preview (5 socket spies) | **0 calls, 0 dispatches** |
+| pressing „Senden" once | **1 dispatch, 0 socket calls**, no `to:` |
+| family: the client's whole request surface | **6 requests, 6 inside one origin + `/api/v1/`** · 6 second-origin shapes refused · 6 methods refused · 0 reached the socket |
+
+**The exception may not widen.** `tests/tier1/network-scope.test.js` **§5** is the gate: only
+`feedback/ui.js` may import `feedbackPort()` (everyone else gets the **setter** and can bind but
+not fire); `feedback/events.js` — the module that already listens to `error` and
+`unhandledrejection` — cannot reach the sender at all; and §5d is armed by four planted automatic
+callers plus two controls.
+
+### Also landed
+
+- **LZP-1001 — the Datenschutz section is in the product.** 24 blocks · 5 234 characters of German
+  · 4 546 of English · screenshotted in the real browser in both languages. Names Vercel, Prisma
+  Postgres and **EU/Frankfurt** (D2), enumerates ADR 003 §5.2's inventory including the deliberate
+  plaintext colour, states retention as **„unbefristet"** per RUNBOOK §7.2, names the **second
+  remote** (the GitHub manifest — operator named, host not, because §1g says there is not yet a
+  real one), and says in both languages that a report is **not** end-to-end encrypted the way an
+  entry is.
+- **R1's copy half is closed.** The Datenschutz section says the entries in an exported backup are
+  readable without the password, and D8's key-loss consequence sits beside it naming the three
+  parties who cannot recover the data. **R1-b** is opened in the same breath: E10-B7's row scans
+  `crypto/backup.js`, which this ticket does not own, so it is still green over a narrower object
+  than the product.
+- **ADR 003 §7 gate 1's *"OWED, not held"* note from 2026-08-27 is CLOSED.**
+- **Three defects found in rows this pass wrote**, all by mutants rather than review: a caller
+  regex that missed reference-dispatch (`setTimeout(fn, 0)`), an inversion that was green for an
+  unrelated reason, and a classifier reading blanked strings. `FINDINGS.md` §20b.
+
+### ⚠ Bookkeeping note: this pass's code landed inside somebody else's commit
+
+The shell-transport workflow committed the whole working tree as **`101073b`** while this pass was
+mid-flight, so `src/js/settings.js` (+309), `tests/tier1/network-scope.test.js` (+265),
+`tests/tier2/datenschutz.dom.js` (+534) and the ADR / DESIGN-DECISIONS / FINDINGS /
+E10-VERIFICATION edits are all inside a commit whose message is about `sync_request`. Nothing was
+lost or altered — every count above was re-measured at HEAD after that commit — but a reader
+looking for LZP-1001/1002 in the log will not find them under their own subject. **This block is
+the pointer.** No history was rewritten and nothing was stashed.
+
+### Owed after this pass
+
+**R1-b** (`crypto/backup.js`'s own strings + E10-B7 inverted in place) · **E10-1009-A**
+(`family/mount.js`'s one `setFeedbackPort(…)` line) · a production `feedbackSink` · and **three
+stale documents** that still say the Datenschutz section is not in the product —
+`RELEASE-CHECKLIST.md`:173, `MOM-TEST.md`:523, `RUNBOOK.md`:171 and §7. No test asserts their
+claim, so nothing is red; details and owners in `FINDINGS.md` §20e/§20f.
+
+---
+
+# Previous session — 2026-09-03
+
+**Stopped at:** **THE SHELL TRANSPORT INTEGRATION (LZP-1002)** —
 the family was demonstrated in the app we actually ship, not in a browser. Full record:
 `docs/v2/SHELL-VERIFICATION.md`; findings in `FINDINGS.md` §19.
 
