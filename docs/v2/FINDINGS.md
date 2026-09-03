@@ -4736,3 +4736,138 @@ is the register entry that says so.
 5. **The retention sentence is written to change with the code, not before it.** The day the
    `RateBucket` sweep exists, `DATENSCHUTZ.*.retentionBody` changes in the **same commit** — RUNBOOK
    §7.2's rule, and `datenschutz.dom.js` §2d is what fails if the copy moves first.
+
+---
+
+## 21. THE FINAL INTEGRATION — four parallel passes, and the third half of F-SHELL-1 (2026-09-03)
+
+Full record: `docs/v2/V2-FINAL.md`. This section holds the findings.
+
+### 21a. F-SHELL-1(b) — `store.js#_absorbedAttestOps` had never once run
+
+**Severity: this is why a family did not work in the shipped app.**
+
+`_absorbedAttestOps` was landed by the attestation pass to close the half of F-SHELL-1 that the
+severity split does not reach: a joiner's first launch fixes a checkpoint horizon at its own
+newest op, `_persistOps` ① then skips every line at or below it as "already durable in the
+checkpoint", and the founder's `member.set{dev.<short>}` never reaches `ops.jsonl`. From the next
+launch `foldAuthorized` has no attestation for the founder's device, and every op the founder
+authors parks `unattestedDevice` for ever, curable by nothing.
+
+**The reconstruction was inert.** `foldAuthorized`'s Pass A runs `classifyOp` before any
+attestation condition, and it is not lenient: `core/ops.js:418` requires `op.id` to be a 22-char
+opId and `:445` requires the same of `op.gid`. The method passed `gid: null` always, and for a
+cell with no opId minted `cp_<member>_<name>`. Both are rejected `{stage:'attestation',
+reason:'shape'}` — so every reconstructed op was discarded before it could attest anything.
+
+**Why 5,448 green rows did not see it: nothing exercised it.** The method shipped with no test of
+any kind. It is the exact shape of defect this project's rules exist to prevent, and it got
+through a pass that landed 20 rows and 5 mutants beside it.
+
+**Why the shell run read as flakiness rather than as a defect.** It only bites the Mac whose
+checkpoint happened to absorb the founder's op. Measured from a kept work dir: Mama's Mac had a
+`checkpoint.json` whose horizon was 5 µs after her own first op and which held Papa's
+`dev.AB9ADNDX5TD1C4G7` cell; Oma's Mac had no `checkpoint.json` at all. Same relay, same run.
+Mama parked Papa's entry `unattestedDevice` five times until `sync/family.js#terminal` quarantined
+it and ADR 003 §8.2 released the cursor; Oma read the entry without trouble.
+
+**THE FIX.** The cell's own opId is required, and is also the gid. A register cell is
+`{value, stamp, author, op}` and does not retain the writing op's group, so the true gid is
+unrecoverable — and it need not be recovered: **nothing in `core/authz.js`, `core/registers.js`
+or `core/materialize.js` reads `gid`.** It is the local undo stack's grouping key
+(`core/undo.js`), and a remote op reconstructed for a fold never enters that stack. The op's own
+id satisfies the shape rule and stays deterministic on every Mac holding the cell, which is what
+convergence needs. A cell with no usable opId is skipped rather than given an invented one:
+without an id there is no deterministic identity and a minted one would differ every launch.
+
+**Measured on the captured state of the Mac that failed** (its real `checkpoint.json` +
+`ops.jsonl`, folded in Node): with a verifier installed, admitted ops **0 → 10**, and Papa's
+entry „Omas Geburtstag" appears in Mama's fold. The one op still refused is the admin's unshare,
+`{stage:'content', reason:'notOwner'}` — F-SHELL-3, below.
+
+### 21b. F-SHELL-1(b2) — the reconstruction manufactured envelope splices
+
+`applyRemote` folds `[…reconstructed, …lines, …wellFormed]`, and `wellFormed` is not a line yet.
+So a cell whose op was **in the arriving batch** looked absorbed and was rebuilt beside it: the
+same opId under two different bodies, because the synthesized gid differs from the real one.
+`foldAuthorized` Pass A reads that as **envelope splicing** (ADR 002 §5.1) — it resolves the
+contest by canonical max and records the opId in `splicedIds`. The store then reports tampering
+that never happened, on ops nobody touched. A relay re-serves an op on every cursor reset, so this
+is ordinary and not an edge. Measured in the fleet rig on a replayed batch: 2 reconstructions →
+**2 spliced ids**. `_absorbedAttestOps(arriving)` now counts the arriving batch as live.
+
+### 21c. F-SHELL-4 — a second, identical self-attestation, and a permanent `writeOnce` — **OPEN**
+
+Measured in the shipped app across five acceptance runs. Mama published her own device attestation
+**twice**, in two consecutive launches, for a register ADR 001 §4.0 makes write-once:
+
+| | opId | ts | authored in |
+|---|---|---|---|
+| first | `KHtuA9DtDkRWwYxH99jkdw` | `…156958` | phase 02, her join |
+| second | `luxBkX3rBVObeBqDLJFssA` | `…160800` | phase 06, her next launch |
+
+Same member, same `deviceId`, **the same 545-byte blob**, 3.8 s apart. Both are admissible on
+their face, so §4.0 does what it must — every Mac keeps the minimal claim under `≺` and refuses
+the other `writeOnce`, terminally — and the circle splits on the record: Mama's log names `KHtu…`
+as the writer of her own register, Papa's, Oma's and Opa's name `luxB…`.
+
+**Nothing breaks.** The blobs are byte-identical, the device stays attested either way, and all 26
+phases pass in all five runs. What remains is a permanent, misleading refusal on every peer, on
+every launch — and it is the entire difference between the measured refusal ledger and zero:
+**2 · 2 · 2 · 34 · 2**.
+
+**A hypothesis was built, tested, DISPROVEN and reverted.** The obvious cause is that
+`family/engine.js#publishMyAttestation` reads `store.registers()` — the *authorized* fold — at
+`:629`, 104 lines and one `await` before the roster read installs `attestOpen` at `:733`. A
+`store.ownAttestationBlob()` accessor was written on that hypothesis and wired in. **It is
+false:** `store.js#_noteAuthzVerdict` returns the raw base register map unless there are
+*withdrawals*, and `_withdrawalsOf` names `badAttestation` and `writeOnce` as explicitly not
+withdrawals — the cell is visible with or without a verifier. A mutant reducing the new accessor
+to the old lookup **killed no row**. The change was reverted rather than shipped with a confident
+comment about a mechanism that had been disproven.
+
+**The thread to pull next:** in the failing run Mama's `KHtu…` carried `seq: null` — it **never
+reached the relay** — and her final `ops.jsonl` held only two of her own ops while her board
+carried three notes. Whatever emptied her log between phase 02 and phase 06 is the cause.
+Characterized by `tests/fleet/e11-attest.test.js` §5e, which pins the guard (live line, absorbed
+cell, the constructor's `DECLINED`, and an honest-path control) so the next owner starts from a
+tested guard rather than from nothing. **Owner: `family/engine.js#publishMyAttestation` +
+`store.js#_persistOps`.**
+
+### 21d. F-SHELL-3 confirmed as the only data-loss residual
+
+`unshare-owner (B)` is BLOCKED in **10 of 10** measured runs, before and after this pass. The
+admin's „→ Privat" reaches the owner's Mac as a **deletion** rather than a reversion, and she
+loses her own entry. It is also the single `notOwner` in the residual refusal ledger — refused on
+her Mac, then remembered by L-1 on every later launch, which is the whole of the "2" in four of
+five acceptance runs. **Owner: `src/js/family/sharing.js`.**
+
+### 21e. Three diagnostic bugs that would mislead the next reader
+
+1. `tests/tier2/shell-family-e2e.dom.js:466-471` calls `Object.keys()` on
+   `membersui.membersRegisters()`, which returns a **Map** (`membersui.js:774`), so
+   `REGKEYS`/`DEVREGS`/`MEMREGS` print `[]` unconditionally. They are **not** evidence of an empty
+   register map — this pass nearly chased them.
+2. The same file's line 459 reads `m.attestation` on the member row; ADR 003 §3.6 puts the blob on
+   `m.devices[].attestation`, so `att=` is always `false`.
+3. **`assert.doesNotThrow(() => validateOp(op))` is vacuous.** `core/ops.js#validateOp` returns
+   `{ok:true}` or a rejection object and never throws, so the assertion passes over a malformed
+   op. The first cut of `e11-attest.test.js` §5b made exactly that mistake and survived the mutant
+   that should have killed it; it now asserts `classifyOp(op).status === 'admit'`, which is the
+   gate `foldAuthorized` actually runs.
+
+### 21f. Owed after this pass
+
+1. **F-SHELL-4** (21c) — open, characterized, cause unnamed.
+2. **F-SHELL-3** (21d) — `family/sharing.js`, the only residual that loses data.
+3. **F-SHELL-2** — `family/adminpanel.js` + `family/mount.js`: intersect the log's member list
+   with the roster's `removedAt`. The originally assigned fix was refuted by measurement
+   (`server/core/handlers/lifecycle.js:229` deletes the leaver's ops in the same transaction).
+4. **A `Server:` line in `docs/v2/email/invitation.{de,en}.{txt,html}`** (LZP-108). Until it
+   lands, the Mom test cannot be run at all: she has no relay address and `submitJoin` dead-ends.
+5. **`server/adapters/prisma.js` against the real database** — the migration is verified, the
+   adapter over it is not (§2.5's `store-contract.test.js`).
+6. **`family/mount.js#setFeedbackPort(...)`**, and a production `feedbackSink` (Vercel answers
+   501 today).
+7. **`scripts/shell-family-e2e.mjs`'s stale phase label** — it still prints
+   `BLOCKED (finding F-SHELL-1)` for any attempted phase that fails.

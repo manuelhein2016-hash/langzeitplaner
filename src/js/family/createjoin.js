@@ -454,9 +454,128 @@ const CANONICAL_CODE_RE = (() => {
 })();
 
 /**
+ * DEFECT E-1b — THE GROUPING RULE HAD A DOOR IN IT, AND THE DECOYS WALKED THROUGH.
+ *
+ * `CANONICAL_CODE_RE` above governed the multi-token path only. Step 0 — *"the field holds
+ * nothing but the code"* — asked `codeToken` alone, i.e. "does the whole field normalise to
+ * twelve Crockford characters", and the docblock two functions down asserted that a
+ * twelve-character WORD therefore *"cannot reach here with a complete code, because step 0 would
+ * have taken it if it were alone in the field."* That sentence is the defect, written down as
+ * though it were the fix. Measured against the shipped German invitation, alone in the field:
+ *
+ *     „Mail-Anbieter"   → MA11-ANB1-ETER      found:'code'     — E-1, still winning
+ *     „Installation"    → 1NST-A11A-T10N      found:'code'     — a decoy this file NAMES
+ *     „Applications"    → APP1-1CAT-10NS      found:'code'     — the other one it names
+ *     „Familie Weber"   → FAM1-11EW-EBER      found:'code'     — a circle NAME, on the wrong screen
+ *
+ * Every one of those is the dishonest class: a complete twelve-character code nobody minted, an
+ * enabled „Beitreten", one spent redemption attempt, and then `circleErrInviteInvalid` telling
+ * her she has probably mistyped a character she never typed.
+ *
+ * THE RULE THAT REPLACES IT. The evidence that separates a code alone in a field from a word
+ * alone in a field is the same evidence `CANONICAL_CODE_RE` uses on every other path — the
+ * SEPARATORS — so step 0 asks for it too. Exactly three spellings are a code standing on its own,
+ * and each of them is a thing a person or a mail client actually produces:
+ *
+ *     XXXX-XXXX-XXXX   as minted, as `formatInviteCode` writes it, as the e-mail prints it
+ *     XXXX XXXX XXXX   the same grouping with spaces — a phone keyboard, a re-typed code
+ *     XXXXXXXXXXXX     no separators at all — typed straight through
+ *
+ * „Mail-Anbieter" is four-and-eight, „Familie Weber" is seven-and-five, and neither is any of
+ * the three. They are refused, by name, with the sentence that says which line to copy.
+ *
+ * The three shapes are derived from `INVITE_UI` for `CANONICAL_CODE_RE`'s reason: two answers to
+ * "how is a code written" is the drift `newInviteCode` and this file must never have.
+ */
+const WHOLE_CODE_SHAPES = (() => {
+  const g = INVITE_UI.codeGroup;
+  const n = INVITE_UI.codeChars / g;
+  const grp = `[0-9A-Za-z]{${g}}`;
+  return Object.freeze({
+    /** A separator every `codeGroup` characters. The grouping IS the evidence. */
+    grouped: Object.freeze([
+      new RegExp(`^${grp}(?:-${grp}){${n - 1}}$`),
+      new RegExp(`^${grp}(?: ${grp}){${n - 1}}$`),
+    ]),
+    /** No separator anywhere. See `wholeFieldCode` — this one has to pay for itself. */
+    unbroken: new RegExp(`^[0-9A-Za-z]{${INVITE_UI.codeChars}}$`),
+  });
+})();
+
+/**
+ * True when every character is ALREADY one `crock32` emits — no substitution needed.
+ *
+ * `crockNormalize` maps I and L to 1 and O to 0, which is the right forgiveness for somebody
+ * RETYPING a code off a screen (probe row H08) and the wrong basis for deciding that a word is a
+ * code. A minted code contains no I, L, O or U, because `CROCKFORD_ALPHABET` does not: those
+ * four are excluded exactly so they cannot be confused with 1, 1, 0 and V.
+ *
+ * @param {string} s @returns {boolean}
+ */
+const isAlreadyCrockford = (s) => s.length > 0
+  && [...s.toUpperCase()].every((ch) => CROCKFORD_ALPHABET.includes(ch));
+
+/**
+ * The whole field, read as a code — or `null`, which is a refusal and not a shrug.
+ *
+ * Two normalisations run before the shape test, and both are evidence rather than guesswork:
+ *
+ *   · ` ` and TAB become ordinary spaces. `crockNormalize` already strips both, so without
+ *     this the space-grouped shape would be true of a code from a plain-text mail and false of
+ *     the same code out of an HTML one (probe row H06), which is a difference nobody can see.
+ *
+ *   · **A SEPARATOR THE MAIL CLIENT BROKE A LINE AT is put back together.** Crockford's alphabet
+ *     holds no hyphen (`CROCKFORD_ALPHABET` is `0-9` and `A-Z` less I, L, O and U), so a hyphen
+ *     with whitespace on one side of it can only ever have been a separator that a 72-column
+ *     wrap split. `J17Z-XSXN-⏎7CSQ` is therefore read; `J17Z-XS⏎XN-7CSQ`, where the break fell
+ *     INSIDE a group and there is no separator to prove anything, is refused. That asymmetry is
+ *     the whole difference between reading evidence and guessing, and it is why the second one
+ *     stays refused even though a person can see what she meant.
+ *
+ * `codeToken` still has the last word on the alphabet, so `U` — which `crockNormalize`
+ * deliberately does not map — falls out here and reaches the caller as an unfinished code rather
+ * than as a wrong complete one (probe row H14).
+ *
+ * ── THE UNBROKEN SHAPE HAS TO PAY FOR ITSELF ────────────────────────────────────────────────
+ *
+ * `XXXXXXXXXXXX` carries NO separator evidence at all, and twelve unbroken letters is what an
+ * ordinary word is. Two of them stand in the shipped invitation and this file already names them
+ * as decoys — and both were still winning after the grouping rule landed:
+ *
+ *     „Installation"  → 1NSTA11AT10N   twelve, legal after substitution, found:'code'
+ *     „Applications"  → APP11CAT10NS   twelve, legal after substitution, found:'code'
+ *
+ * Both had to be SUBSTITUTED to get there: I and L became 1, O became 0. A minted code needs no
+ * substitution, because `crock32` never emits I, L, O or U in the first place. So the unbroken
+ * shape is admitted only when the characters are already the ones `crock32` writes — which
+ * `J17ZXSXN7CSQ` is and `INSTALLATION` is not — and the forgiveness for a retyped O or I stays
+ * where there is separator evidence to carry it (H08 is `JI7Z-XSXN-7CSQ`, grouped).
+ *
+ * @param {string} raw @returns {string|null} the 12 canonical characters, or null
+ */
+function wholeFieldCode(raw) {
+  const folded = foldPasteDamage(raw)
+    .replace(/[\u00A0\t]/g, ' ')
+    .replace(/-\s+/g, '-')
+    .replace(/\s+-/g, '-')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!WHOLE_CODE_SHAPES.grouped.some((re) => re.test(folded))) {
+    if (!WHOLE_CODE_SHAPES.unbroken.test(folded)) return null;
+    if (!isAlreadyCrockford(folded)) return null;
+  }
+  return codeToken(folded);
+}
+
+/**
  * The words an invitation uses to introduce the code, German first. A candidate that follows one
  * of these within `LABEL_WINDOW` characters is ANCHORED and beats everything else, including a
  * canonical-shaped decoy — because the sender said, in words, which one it is.
+ *
+ * ⚠ `\bcode\b` MATCHES THE BARE WORD „Code", WHICH THE SHIPPED GERMAN COPY USES TWICE („den
+ * Code einsetzen"). That is intentional and it is also why step 1 admits only candidates that
+ * already carry shape evidence: a label this broad, applied to any twelve-legal-character word
+ * behind it, promoted „Installation" and „Mail-Anbieter" into codes. See defect E-1d at step 1.
  *
  * This is what makes the shipped e-mail work without editing the e-mail: its code sits under the
  * heading „DEIN EINLADUNGSCODE" / „YOUR INVITATION CODE".
@@ -614,21 +733,29 @@ function readPastedOrigin(text) {
  * refuses; none of them takes the first thing that fits, which is what the three measured
  * defects all were.
  *
- *   0. THE FIELD HOLDS NOTHING BUT A CODE. However she spaced it, whatever case, dashes of any
- *      kind. There is nothing else in the field to be wrong about.
+ *   0. THE FIELD HOLDS NOTHING BUT A CODE, WRITTEN AS A CODE IS WRITTEN — `XXXX-XXXX-XXXX`,
+ *      `XXXX XXXX XXXX` or twelve characters unbroken. Whatever case, dashes of any kind, and a
+ *      line the mail client wrapped AT a separator. „Mail-Anbieter" is four-and-eight and is not
+ *      one of the three (`wholeFieldCode`, defect E-1b).
  *   1. A CANDIDATE THE SENDER LABELLED. „Dein Einladungscode" and then the code. The words are
  *      the evidence, and they beat a decoy of the right shape standing somewhere else.
  *   2. EXACTLY ONE CANDIDATE IN THE CANONICAL GROUPING. `XXXX-XXXX-XXXX` — a shape German prose
  *      does not accidentally produce, unlike „Mail-Anbieter" (4-8) or „Installation" (12).
  *   3. SEVERAL, DISAGREEING → REFUSE, and say so. `found: 'ambiguous'`.
- *   4. A CODE BEING TYPED — one token, not yet twelve. Passed through the formatter so the
- *      groups appear as she types, and NOT discarded.
+ *   4. A CODE BEING TYPED — one token, ALONE in the field, and STRICTLY SHORTER than twelve.
+ *      Passed through the formatter so the groups appear as she types, and NOT discarded.
  *   5. Prose with nothing in it that is a code. `found: 'none'`, and the caller must leave the
  *      text she pasted exactly where it is.
  *
- * A twelve-character WORD never wins on its own. That is the whole of E-1: the only ways past
- * this function are "the field is the code", "the sender named it", and "it is written the way a
- * minted code is written". Everything else is refused out loud.
+ * THE INVARIANT, AND IT IS THE WHOLE OF E-1. **This function never answers with twelve
+ * characters unless one of three things is true of the text**: the field was shaped like a code
+ * (step 0), the sender labelled it in words (step 1), or it stood in the canonical grouping
+ * (step 2). Each of those is evidence somebody wrote on purpose. Nothing gets twelve characters
+ * out of an alphabet coincidence — not alone in the field, not truncated from a longer word, and
+ * not as a `'partial'`, which the caller reads as permission to rewrite what she pasted.
+ *
+ * Everything else is refused out loud, with a sentence that names the line of the e-mail to
+ * copy, because the Mom test's premise is one e-mail and nobody to ask.
  *
  * `found` is what the caller needs to decide whether it may rewrite the field:
  * `'code'` a whole code was recognised · `'partial'` one unfinished token · `'ambiguous'` more
@@ -658,14 +785,16 @@ export function parseInvitePaste(raw) {
   });
   const refuse = (found, codeIssue) => ({ code: '', origin, found, codeIssue, originIssue });
 
-  // Step 0 — the field holds nothing but the code, however the sender spaced it out.
-  // `crockNormalize` strips `-`, space, non-breaking space and tab, and `foldPasteDamage` has
-  // already removed the invisible damage and folded the dashes, which is the whole set of things
-  // that end up between the groups.
-  const whole = codeToken(rest);
+  // Step 0 — the field holds nothing but the code, WRITTEN THE WAY A CODE IS WRITTEN.
+  //
+  // `wholeFieldCode` and not `codeToken`: asking only "does the whole field normalise to twelve
+  // Crockford characters" is what let „Mail-Anbieter", „Installation", „Applications" and
+  // „Familie Weber" each become a complete code nobody minted (defect E-1b, in that function's
+  // docblock). The separators are the evidence, and this is where they are read.
+  const whole = wholeFieldCode(rest);
   if (whole) return done(whole);
 
-  /** @type {{code:string, strong:boolean, at:number}[]} */
+  /** @type {{code:string, strong:boolean, plain:boolean, at:number}[]} */
   const candidates = [];
   let tokenCount = 0;
   let firstToken = '';
@@ -674,11 +803,36 @@ export function parseInvitePaste(raw) {
     if (tokenCount === 1) firstToken = m[0];
     const c = codeToken(m[0]);
     if (!c) continue;
-    candidates.push({ code: c, strong: CANONICAL_CODE_RE.test(foldPasteDamage(m[0])), at: m.index });
+    const folded = foldPasteDamage(m[0]);
+    candidates.push({
+      code: c,
+      strong: CANONICAL_CODE_RE.test(folded),
+      // The unbroken tier, and the same bargain `wholeFieldCode` strikes: no separators means
+      // the alphabet has to carry it, so the characters must already be ones `crock32` emits.
+      plain: !folded.includes('-') && isAlreadyCrockford(folded),
+      at: m.index,
+    });
   }
 
-  // Step 1 — the sender said which one it is.
-  const anchored = candidates.filter((c) => isAnchored(rest, CODE_LABEL_RE, c.at));
+  // Step 1 — THE SENDER SAID WHICH ONE IT IS. A label picks BETWEEN candidates; it may not
+  // manufacture one out of prose.
+  //
+  // DEFECT E-1d, found by generating pastes out of the invitation's own vocabulary rather than
+  // by naming decoys. `isAnchored` was applied to every candidate, so any twelve-legal-character
+  // word standing within `LABEL_WINDOW` of „Einladungscode" — or of the bare word „Code", which
+  // `CODE_LABEL_RE` also matches and which the shipped German copy uses twice — was promoted on
+  // the strength of the label alone. It broke in both directions:
+  //
+  //     „Dein Einladungscode steht bei der Installation"   → 1NST-A11A-T10N, complete and wrong
+  //     „…EINLADUNGSCODE\n J17Z-XSXN-7CSQ\n musst Mail-Anbieter" → 'ambiguous', and the REAL
+  //                                                               code is thrown away with it
+  //
+  // The second is the worse one: a decoy standing after the code, inside the window, makes the
+  // correct paste refuse itself. So an anchored candidate must carry its own shape evidence —
+  // the canonical grouping, or an unbroken run that needed no substitution — exactly as steps 0
+  // and 2 require. What the label then decides is WHICH of them, which is all it ever knew.
+  const anchored = candidates.filter((c) => (c.strong || c.plain)
+    && isAnchored(rest, CODE_LABEL_RE, c.at));
   const anchoredCodes = [...new Set(anchored.map((c) => c.code))];
   if (anchoredCodes.length === 1) return done(anchoredCodes[0]);
   if (anchoredCodes.length > 1) return refuse('ambiguous', 'ambiguous');
@@ -688,21 +842,51 @@ export function parseInvitePaste(raw) {
   if (strong.length === 1) return done(strong[0]);
   if (strong.length > 1) return refuse('ambiguous', 'ambiguous');
 
-  // Step 4 — one token and it is not finished yet. Passed through the formatter so the groups
-  // appear as she types, and never discarded. A twelve-character WORD cannot reach here with a
-  // complete code, because step 0 would have taken it if it were alone in the field.
-  if (tokenCount <= 1) {
+  // Step 4 — ONE TOKEN, ALONE IN THE FIELD, AND NOT FINISHED YET. Passed through the formatter
+  // so the groups appear as she types, and never discarded.
+  //
+  // DEFECT E-1c — `'partial'` IS THE CALLER'S PERMISSION TO REWRITE THE FIELD, AND `submitJoin`
+  // ASKS ONLY HOW LONG THE CODE IS. So a `'partial'` that is twelve characters long is a
+  // complete code wearing a different label: the field is rewritten, „Beitreten" lights up, and
+  // the relay is asked to redeem a word. Measured, alone in the field:
+  //
+  //     „Sicherheitsmeldung"  → S1CH-ERHE-1TSM   found:'partial', 12 characters, button enabled
+  //     „Systemeinstellungen" → SYST-EME1-NSTE   the same
+  //     „Serveradresse"       → SERV-ERAD-RESS   the same, from the line ABOVE the address
+  //
+  // in each case because `formatInviteCode` stops at twelve and throws the rest of the word
+  // away. Truncating is a guess about WHICH characters were spurious, and the guess is invisible
+  // to the person: `J177Z-XSXN-7CSQ` — one doubled character in the first group — truncates to
+  // `J177-ZXSX-N7CS`, a complete, wrong, confidently-shown code. A partial may therefore never
+  // reach the full length; anything that does had to come through the shape gate, the label, or
+  // the canonical grouping, all of which are evidence.
+  //
+  // AND THE FIELD MUST HOLD NOTHING ELSE. `rest` has had every URL blanked out of it by the
+  // time it is scanned, so `tokenCount <= 1` was true of „Server: https://…" — one leftover
+  // word — and the screen answered a pasted SERVER LINE by replacing it with `SERV-ER`. The
+  // paste held two things, so it was never one unfinished code; `spans.length` is the half of
+  // "alone in the field" that the blanking had hidden.
+  if (tokenCount === 1 && originRead.spans.length === 0) {
     const partial = formatInviteCode(firstToken);
-    if (partial) return { code: partial, origin, found: 'partial', codeIssue: null, originIssue };
-    // Nothing usable at all — e.g. the field holds only a URL. Reporting `partial` with an empty
-    // code here used to make the join screen BLANK what she had just pasted, because `'partial'`
-    // is the caller's permission to rewrite the field.
+    if (partial && inviteCodeChars(partial).length < INVITE_UI.codeChars) {
+      return { code: partial, origin, found: 'partial', codeIssue: null, originIssue };
+    }
+    // A word, or a code with a character too many. Either way there is no evidence for twelve
+    // particular characters, and the refusal names the line of the e-mail to copy. Reporting
+    // `partial` with an empty code here used to make the join screen BLANK what she had just
+    // pasted, because `'partial'` is the caller's permission to rewrite the field.
     return refuse('none', 'absent');
   }
 
   // Step 5 — prose with no code in it. The truthful answer is "no code", and the caller must
   // leave the text on screen alone.
-  return refuse('none', candidates.length ? 'ambiguous' : 'absent');
+  //
+  // `'ambiguous'` only when it is TRUE. Its sentence says „mehr als eine Zeichenfolge, die wie
+  // ein Code aussieht", and the commonest paste that lands here — the „Manche Mail-Anbieter
+  // filtern .dmg-Dateien heraus" line — carries exactly one decoy. Telling her there are several
+  // sends her looking for a second thing that is not there; `'absent'` names the line to copy.
+  const weak = [...new Set(candidates.map((c) => c.code))];
+  return refuse('none', weak.length > 1 ? 'ambiguous' : 'absent');
 }
 
 /**

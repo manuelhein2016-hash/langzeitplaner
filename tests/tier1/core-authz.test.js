@@ -441,10 +441,42 @@ test('an attestation whose payload deviceShort disagrees with its register name 
   assert.equal(reason(r, forged), REJECT_REASONS.BAD_ATTESTATION);
 });
 
-test('an attestation with a bad signature is rejected', () => {
+test('an attestation with a bad signature is refused — CURABLY when it is self-filed (INVERTED, F-SHELL-1)', () => {
+  // ── INVERTED 2026-09-03, finding F-SHELL-1. ────────────────────────────────────────────────
+  // This row used to read `assert.equal(reason(...), BAD_ATTESTATION)` and its claim was
+  // "a signature that does not verify is TERMINAL". It cannot be, and the reason is not a
+  // preference: `attestationVerifies` is a LOOKUP (`ctx.attestOpen` over the blobs this Mac has
+  // already verified from the roster), so `false` means "forged" OR "I have never been shown
+  // these bytes", and the fold cannot tell them apart. Answering both terminally released the
+  // cursor past a joiner's ONLY attestation op and left that device permanently unattested —
+  // measured in the shipped binary as a founder receiving a joiner's entry in 0 of 5 launches.
+  //
+  // WHAT IS UNCHANGED, and this is the half that matters: the op is still REJECTED, the register
+  // is still not folded, the device is still not attested, and `attestationOf` still refuses it.
+  // Only the reason changes, from a code the store DROPS to a code the store PARKS.
   const forged = attestOp(EVE, D[EVE], S(BASE, 0, D[EVE].short), { sigOver: 'sig:whatever' });
   const r = foldAuthorized([forged], CTX());
-  assert.equal(reason(r, forged), REJECT_REASONS.BAD_ATTESTATION);
+  assert.equal(reason(r, forged), REJECT_REASONS.UNATTESTED_DEVICE,
+    'a self-filed blob this Mac cannot verify is CURABLE — the store parks the line rather than '
+    + 'dropping it past a released cursor');
+  assert.equal(r.admitted.length, 0, 'and it is still not admitted');
+  assert.equal(r.attestationOf(D[EVE].short), null, 'and it is still not a credential');
+  assert.equal(r.regs.has(memberKey(EVE)), false, 'and the register did not land');
+
+  // THE CONTROL, and it is what keeps the inversion honest: the same unverifiable blob filed by
+  // a device that is NOT the one it attests is still TERMINAL. `devOf(op.ts) !== att.deviceShort`
+  // is not the honest self-attestation shape — there is no flow in this product in which one
+  // device files another's — so no later arrival can change the answer.
+  const notSelfFiled = attestOp(EVE, D[EVE], S(BASE, 0, D[MAMA].short),
+    { sigOver: 'sig:whatever', dev: D[EVE].id });
+  const r2 = foldAuthorized([notSelfFiled], CTX());
+  assert.equal(reason(r2, notSelfFiled), REJECT_REASONS.BAD_ATTESTATION);
+
+  // AND THE HONEST-PATH CONTROL: the same op with a signature the verifier accepts is admitted.
+  const honest = attestOp(EVE, D[EVE], S(BASE, 0, D[EVE].short));
+  const r3 = foldAuthorized([honest], CTX());
+  assert.equal(reason(r3, honest), null);
+  assert.equal(r3.admitted.length, 1);
 });
 
 test('a member.set mixing dev.* registers with ordinary fields is refused, not half-applied', () => {
@@ -625,7 +657,11 @@ test('F-10 condition (4): an attestation whose signature does not verify is reje
     }),
   }, { act: EVE, dev: D[EVE].id, ts: S(BASE, 0, D[EVE].short), space: FSP });
   const r = foldAuthorized([forged], CTX());
-  assert.equal(reason(r, forged), REJECT_REASONS.BAD_ATTESTATION);
+  // INVERTED 2026-09-03 (F-SHELL-1) alongside the row above, and for the same reason. Condition
+  // (4) is still enforced — the blob is refused, nothing is admitted, `attestationOf` is null —
+  // but a verifier's `false` is not evidence of forgery, so the refusal is the curable one.
+  assert.equal(reason(r, forged), REJECT_REASONS.UNATTESTED_DEVICE);
+  assert.equal(r.admitted.length, 0);
   assert.equal(r.attestationOf(D[EVE].short), null);
 });
 
@@ -1875,7 +1911,12 @@ test('every declared reason code is actually reachable — except the one that i
   collect(foldAuthorized([noteOp(U1, { text: 'x' }, S(BASE, 0, D[ME].short), { dev: devIdOf('X') })],
     CTX({ myDevices: new Set([D[ME].id]) })));                          // notMyDevice
   collect(foldAuthorized([memberOp(EVE, { displayName: 'E' }, S(BASE, 0, D[EVE].short), { act: EVE })], CTX())); // unattestedDevice
-  collect(foldAuthorized([attestOp(EVE, D[EVE], S(BASE, 0, D[EVE].short), { sigOver: 'nope' })], CTX())); // badAttestation
+  // badAttestation — a STRUCTURAL failure, which after F-SHELL-1 is the whole of what this code
+  // names: the payload's `deviceShort` is not the register name, so no later arrival can make it
+  // agree. (A bad SIGNATURE on a self-filed blob is `unattestedDevice` now — see the inverted row
+  // above — and would no longer reach this code.)
+  collect(foldAuthorized([attestOp(EVE, D[EVE], S(BASE, 0, D[EVE].short),
+    { blobShort: short16('XTRA') })], CTX()));                          // badAttestation
   collect(foldAuthorized([mk('member.set', memberKey(MAMA), {
     [`dev.${D[MAMA].short}`]: attBlob({ memberId: MAMA, deviceId: D[MAMA].id, deviceShort: D[MAMA].short }),
     displayName: 'Mama',

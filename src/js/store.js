@@ -90,7 +90,7 @@ import {
   PERSONAL_PLACEHOLDER, FIELDS, flattenPref, spaceClassOf, PARK_REASONS, OP_KINDS, OpError,
   noteSet, barSet, catSet, padSet, prefSet, buildMutation, mutation,
 } from './core/ops.js';
-import { isMonthKey, noteKey, barKey, catKey, isMemberId, isDeviceId, isSpaceId } from './core/entities.js';
+import { isMonthKey, noteKey, barKey, catKey, isMemberId, isDeviceId, isSpaceId, isOpId } from './core/entities.js';
 import {
   opId as newOpId, groupId as newGid, memberId as mintMemberId, deviceId as mintDeviceId,
   ZERO_DEVICE_SHORT, isDeviceShort,
@@ -105,7 +105,7 @@ import { materialize, stripV2Fields, exportV1JSON } from './core/materialize.js'
 import { createUndoStacks, makeTx, captureImages, shadowContent } from './core/undo.js';
 import { migrateV1, migrateSnapshots, toV1Snapshot } from './core/migrate1to2.js';
 import { planReplaceAll } from './core/replace.js';
-import { foldAuthorized, REJECT_REASONS } from './core/authz.js';
+import { foldAuthorized, REJECT_REASONS, parseAttestationBlob } from './core/authz.js';
 // THE join, and nothing but the join. `registers.js` owns `≺` and the LWW fold; the withdrawal
 // repair in `registers()` re-folds the log's own lines minus the ops the fold withdrew, and it
 // does that with the product's one `applyOp` rather than a second copy of the comparator.
@@ -133,6 +133,9 @@ import {
  * ADR 003 §7 gate 2 requires `sync/` to be unreachable from the boot graph.
  */
 const CURABLE_REFUSALS = new Set([REJECT_REASONS.NOT_MY_DEVICE, REJECT_REASONS.UNATTESTED_DEVICE]);
+
+/** A `dev.<deviceShort>` register name — `core/authz.js#isDevRegisterName`'s own shape. */
+const DEV_REGISTER_NAME = /^dev\.[0-9A-HJKMNP-TV-Z]{16}$/;
 
 /**
  * THE REFUSALS A LATER OP CAN CREATE — the mirror of `CURABLE_REFUSALS`, and the whole input to
@@ -1771,6 +1774,24 @@ class Store {
     // the flag ON and can never turn it on over bytes the quarantine is preserving.
     if (this.ready) {
       this._opsPersisted = this._logMayBeWritten();
+      // ── L-3, ONE PRECONDITION LATER (LZP-1008) ──────────────────────────────────────────────
+      //
+      // `init()` runs the reaper too, and says why: "here is where the two preconditions are
+      // first both true". `_absorbedAttestOps()` adds a THIRD — it needs to know which family
+      // space to stamp a reconstructed op with, and at `init()` time this store does not.
+      //
+      // Without this line a peer's entry that was parked `unattestedDevice` in an EARLIER launch
+      // stays parked for ever, even though the attestation that cures it is sitting in this
+      // Mac's own checkpoint: `sync/family.js#terminal` has released the cursor (ADR 003 §8.2),
+      // so the parked line is the only copy left and `init()` is the only thing that looks at it
+      // — and `init()` looked one moment too early. Measured: the founder's entry crossed to one
+      // peer and not the other, on the same relay, in the same run.
+      //
+      // It is a no-op with nothing parked, and it costs one `parkedOps()` call otherwise.
+      try { this.unparkAttested(); } catch (e) {
+        this._warn(`held ops could not be re-judged on joining the circle (${e.name}: ${e.message}); `
+          + 'they stay parked');
+      }
       this._project();
       this.emit('family-space');
     }
@@ -3717,7 +3738,7 @@ class Store {
   _refoldAuthorized(base) {
     let verdict;
     try {
-      const all = [...this._log.ops({ includeParked: true })];
+      const all = [...this._absorbedAttestOps(), ...this._log.ops({ includeParked: true })];
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
       verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
     } catch (e) {
@@ -4365,7 +4386,7 @@ class Store {
       // fold per remote batch, over a set that is already in memory — and it is paid ONLY when
       // the identity is durable, because in solo mode `_myDevices()` is `null` by design and the
       // second fold would be identical to the first.
-      const all = [...this._log.ops({ includeParked: true }), ...wellFormed];
+      const all = [...this._absorbedAttestOps(wellFormed), ...this._log.ops({ includeParked: true }), ...wellFormed];
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
       verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
     } catch (e) {
@@ -4577,10 +4598,126 @@ class Store {
    *
    * @returns {string[]} the opIds that became live
    */
+  /**
+   * ── F-SHELL-1(b) · THE ATTESTATION OPS THE CHECKPOINT HAS ABSORBED ────────────────────────
+   *
+   * `foldAuthorized` is given `_log.ops()`. A compacted op is no longer a line, so it is not in
+   * that set — `_repairWithdrawn` says so out loud, and treats it as a bounded residual about
+   * REVOCATIONS. For `member.set{dev.*}` it is not bounded and not rare: it is total, and it
+   * fires on the first relaunch of every joiner.
+   *
+   * The mechanism, measured end to end in `scripts/shell-family-e2e.mjs`:
+   *
+   *   · A checkpoint horizon is a LOCAL stamp — `resolveHorizon(…, 'read')` is
+   *     `horizon ?? maxLiveStamp()`, and on a Mac's first launch that is its own last op.
+   *   · A joiner's first launch therefore fixes a horizon NEWER than every op the founder
+   *     authored when the circle was created — the founder created it first, by definition.
+   *   · Those ops then arrive. They are admitted, folded, and projected: STATE is right.
+   *   · `_persistOps` ① skips every line at or below the horizon ("already durable in the
+   *     checkpoint"), which is true of state and false of the OP. The founder's
+   *     `member.set{dev.<short>}` is never written to `ops.jsonl`.
+   *   · On the next launch `_log.ops()` no longer contains it, so stage 0a has no attestation
+   *     for the founder's device and stage 0b refuses EVERY op the founder authors,
+   *     `UNATTESTED_DEVICE`, for ever. The park is correct and the cure can never arrive,
+   *     because the op that would cure it is the one that was dropped.
+   *
+   * This reconstructs those ops from the register cells they wrote. A cell carries
+   * `{value, stamp, author, op}` — the blob, the writing op's `ts`, its `act` and its id — which
+   * is every field stage 0a reads. **Nothing is trusted:** the reconstruction is handed to
+   * `foldAuthorized` as an ordinary op and pays all four of ADR 002 §2.3's conditions again,
+   * including the possession proof (`devOf(op.ts) === att.deviceShort`, which is why `cell.stamp`
+   * and not a fresh stamp) and condition (4)'s signature check under the housing member's
+   * recovery key. A cell that cannot be parsed, or whose op is still a line, contributes nothing.
+   *
+   * It is INERT OUTSIDE A FAMILY CIRCLE, which is what keeps the v1 characterization suite
+   * exactly where it was: `core/ops.js#spaceFor` refuses to build a `member.set` outside a family
+   * space, so a v1 board has no `member:` entity, no `dev.*` cell, and this returns `[]` before
+   * looking at anything.
+   *
+   * THE BOUND is the device register map itself — one op per `(member, device)` — so it does not
+   * grow with the log, with time, or with anything a peer can send.
+   *
+   * @returns {Object[]} ops, or `[]`
+   */
+  _absorbedAttestOps(arriving = null) {
+    if (this._familySpaceId === null) return [];
+    let regs;
+    try { regs = this._log.registers(); } catch { return []; }
+    const live = new Set();
+    for (const op of this._log.ops({ includeParked: true })) live.add(op.id);
+    // ── THE ARRIVING BATCH COUNTS AS LIVE, AND NOT COUNTING IT MANUFACTURED SPLICES ──────────
+    //
+    // `applyRemote` folds `[reconstructed, …lines, …wellFormed]`. `wellFormed` is not a line
+    // yet, so a cell whose op is IN THAT BATCH looked absorbed and was rebuilt beside it — the
+    // same opId twice, with two different bodies, because a register cell does not retain the
+    // writing op's `gid` and the reconstruction has to synthesize one. `foldAuthorized` Pass A
+    // reads exactly that as ENVELOPE SPLICING (ADR 002 §5.1): it resolves the contest by
+    // canonical max, reports the opId in `splicedIds`, and the store records an anomaly that
+    // never happened. Measured in the fleet rig on a replayed batch: 2 reconstructions → 2
+    // spliced ids, on ops nobody had tampered with.
+    //
+    // The relay re-serves an op whenever a cursor is reset, so this is an ordinary Tuesday and
+    // not an edge. One line: if the real op is anywhere in this fold's input, do not synthesize
+    // a copy of it. The repair is for an op that is in NO input at all, which is the only case
+    // it was ever for.
+    if (arriving) for (const op of arriving) if (op && typeof op.id === 'string') live.add(op.id);
+    const out = [];
+    for (const [entity, cells] of regs) {
+      if (typeof entity !== 'string' || !entity.startsWith('member:')) continue;
+      for (const [name, cell] of cells) {
+        if (!DEV_REGISTER_NAME.test(name)) continue;
+        if (!cell || typeof cell.value !== 'string') continue;
+        // Still a line: the fold already has the real op and a second copy would be noise.
+        if (typeof cell.op === 'string' && live.has(cell.op)) continue;
+        if (typeof cell.stamp !== 'string' || typeof cell.author !== 'string') continue;
+        // ── THE OPID IS REQUIRED, AND IT IS ALSO THE GID (LZP-1008, second pass) ────────────
+        //
+        // `classifyOp` runs FIRST, in `foldAuthorized`'s Pass A shape triage, and it is not
+        // lenient: `op.id` must be a 22-char opId (`ops.js:418`) and so must `op.gid`
+        // (`ops.js:445`, "op.gid must be a 22-char GroupId"). The first cut of this method
+        // minted `cp_<member>_<name>` for a missing id and passed `gid: null` always — so
+        // EVERY reconstruction was rejected `{stage:'attestation', reason:'shape'}` before a
+        // single attestation condition ran, and the whole method was inert. Measured in the
+        // shipped app: Mama's Mac held the founder's `dev.*` cell in its checkpoint, rebuilt
+        // the op, threw it away at Pass A, and parked the founder's entry `unattestedDevice`
+        // five times until `sync/family.js#terminal` quarantined it.
+        //
+        // A register cell is `{value, stamp, author, op}` — it does not retain the writing
+        // op's GROUP, so the true gid is not recoverable. It does not have to be: nothing in
+        // `foldAuthorized`, `registers.js` or `materialize.js` reads `gid` at all. It is the
+        // local undo stack's grouping key (`core/undo.js`), and a remote op reconstructed for
+        // a fold never enters that stack. So the gid here has exactly one job — satisfy the
+        // shape rule — and the one value that does it while staying DETERMINISTIC on every
+        // Mac that holds this cell is the op's own id. Two devices reconstructing the same
+        // cell build the same op, byte for byte, which is what convergence needs.
+        //
+        // A cell with no usable opId is SKIPPED rather than given an invented one: without an
+        // id there is no deterministic identity, the fold's own dedupe could not recognise a
+        // second copy, and a minted id would be a different op on every launch.
+        if (!isOpId(cell.op)) continue;
+        const att = parseAttestationBlob(cell.value);
+        if (!att || typeof att.deviceId !== 'string') continue;
+        out.push(Object.freeze({
+          v: 1,
+          id: cell.op,
+          ts: cell.stamp,
+          space: this._familySpaceId,
+          act: cell.author,
+          dev: att.deviceId,
+          gid: cell.op,
+          k: 'member.set',
+          e: entity,
+          f: Object.freeze({ [name]: cell.value }),
+        }));
+      }
+    }
+    return out;
+  }
+
   unparkAttested() {
     const held = this._log.parkedOps({ reason: PARK_REASONS.ATTESTATION });
     if (!held.length) return [];
-    const all = [...this._log.ops({ includeParked: true })];
+    const all = [...this._absorbedAttestOps(), ...this._log.ops({ includeParked: true })];
     let verdict;
     try {
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;

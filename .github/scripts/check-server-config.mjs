@@ -51,6 +51,22 @@ const ARGV = new Set(process.argv.slice(2));
 const DEEP = ARGV.has('--deep');
 const JSON_OUT = ARGV.has('--json');
 
+/**
+ * One spelling for a Postgres type, so the schema side and the migration side can be compared.
+ * `TIMESTAMP(3)` and `timestamp` are the same type; `"SpaceKind"` is the enum SpaceKind.
+ */
+const normType = (t) => String(t).trim()
+  .replace(/^"|"$/g, '')
+  .replace(/\(\s*\d+(?:\s*,\s*\d+)?\s*\)/, '')
+  .trim()
+  .toLowerCase();
+
+/** A comma-separated list of identifiers → an array. Used on both sides of the comparison. */
+const listOf = (s) => String(s).split(',').map((x) => x.trim().replace(/\(.*$/, '')).filter(Boolean);
+
+/** Two column lists are the same constraint when they name the same columns in the same order. */
+const sameCols = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The row ledger.  Every check is a row with an id, because a failure has to be nameable — by a
 // human reading CI output, and by `tests/server/deploy-readiness.test.js`, which mutates the tree
@@ -361,24 +377,97 @@ if (!schemaNeeded) {
     pass('S5', 'server/prisma/schema.prisma', 'no plaintext-shaped column name');
   }
 
-  // Parse models and their columns. A relation field's type is another model, so it is not a
-  // column; that is why the model names are collected first.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // Parse the models into the RELATIONAL SHAPE they demand, not just a list of names.
+  //
+  // The first version of this parser collected column NAMES and nothing else, and M5/M6 below
+  // compared name sets. That is why eleven separate corruptions of the migration set passed the
+  // check — measured, `docs/v2/RUNBOOK.md` §2.4.1. A `@@id` narrowed by one column, a `@@unique`
+  // deleted, `Bytes` degraded to `TEXT`, `onDelete: Cascade` turned into `NO ACTION`: every one
+  // of those leaves the table and column names untouched, and every one of them is a defect that
+  // reaches production silently, because the deploy is green and the client only fails — or
+  // worse, does NOT fail — at the first write.
+  //
+  // So a field carries its type, its nullability and whether it has a default; a model carries
+  // its primary key, its unique constraints, its indexes, and the delete behaviour of each
+  // relation. M9–M16 compare those.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+
+  const enumRe = /^enum\s+(\w+)\s*\{/gm;
+  let m;
+  while ((m = enumRe.exec(code))) schemaEnums.push(m[1]);
+  const enumNames = new Set(schemaEnums);
+
   const modelRe = /^model\s+(\w+)\s*\{([\s\S]*?)^\}/gm;
   const raw = [];
-  let m;
   while ((m = modelRe.exec(code))) raw.push({ name: m[1], body: m[2] });
   const modelNames = new Set(raw.map((r) => r.name));
-  schemaModels = raw.map((r) => ({
-    name: r.name,
-    columns: r.body.split('\n').map((l) => l.trim())
-      .filter((l) => l && !l.startsWith('//') && !l.startsWith('@@') && !l.startsWith('///'))
-      .map((l) => /^(\w+)\s+(\w+)/.exec(l))
-      .filter(Boolean)
-      .filter((f) => !modelNames.has(f[2]))
-      .map((f) => f[1]),
-  }));
-  const enumRe = /^enum\s+(\w+)\s*\{/gm;
-  while ((m = enumRe.exec(code))) schemaEnums.push(m[1]);
+
+  /** Prisma scalar → the Postgres type `prisma migrate` emits for it. */
+  const PG_TYPE = {
+    String: 'text', Boolean: 'boolean', Int: 'integer', BigInt: 'bigint',
+    Float: 'double precision', Decimal: 'decimal', DateTime: 'timestamp',
+    Bytes: 'bytea', Json: 'jsonb',
+  };
+  const cols = listOf;
+
+  schemaModels = raw.map((r) => {
+    const fields = [];
+    const uniques = [];
+    const indexes = [];
+    const fks = [];
+    let pk = null;
+    let nativeTyped = false;
+
+    for (const line0 of r.body.split('\n')) {
+      const line = line0.trim();
+      if (!line || line.startsWith('//')) continue;
+
+      if (line.startsWith('@@')) {
+        let a;
+        if ((a = /^@@id\(\s*\[([^\]]*)\]/.exec(line))) pk = cols(a[1]);
+        else if ((a = /^@@unique\(\s*\[([^\]]*)\]/.exec(line))) uniques.push(cols(a[1]));
+        else if ((a = /^@@index\(\s*\[([^\]]*)\]/.exec(line))) indexes.push(cols(a[1]));
+        continue;
+      }
+
+      const f = /^(\w+)\s+(\w+)(\?)?(\[\])?\s*(.*)$/.exec(line);
+      if (!f) continue;
+      const [, fname, ftype, optional, list, attrs] = f;
+
+      // A relation field's type is another model. It is not a column — but its @relation does
+      // declare a foreign key, and `onDelete` is the whole of the 20.2 purge.
+      if (modelNames.has(ftype)) {
+        const rel = /@relation\(([^)]*)\)/.exec(attrs);
+        if (rel && /fields\s*:/.test(rel[1])) {
+          const fcols = /fields\s*:\s*\[([^\]]*)\]/.exec(rel[1]);
+          const onDel = /onDelete\s*:\s*(\w+)/.exec(rel[1]);
+          fks.push({
+            cols: fcols ? cols(fcols[1]) : [],
+            references: ftype,
+            // Prisma's default for a required relation is RESTRICT; for optional, SET NULL.
+            onDelete: onDel ? onDel[1] : (optional ? 'SetNull' : 'Restrict'),
+          });
+        }
+        continue;
+      }
+      if (list) continue; // a list of a scalar is not a plain column here
+
+      if (/@db\./.test(attrs)) nativeTyped = true;
+      if (/\B@id\b/.test(attrs)) pk = [fname];
+      if (/\B@unique\b/.test(attrs)) uniques.push([fname]);
+
+      fields.push({
+        name: fname,
+        pgType: enumNames.has(ftype) ? ftype.toLowerCase() : (PG_TYPE[ftype] || null),
+        prismaType: ftype,
+        nullable: Boolean(optional),
+        hasDefault: /@default\(/.test(attrs),
+      });
+    }
+
+    return { name: r.name, fields, columns: fields.map((f) => f.name), pk, uniques, indexes, fks, nativeTyped };
+  });
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -434,10 +523,34 @@ if (!schemaNeeded) {
   // The proxy is here because it is the half that runs in CI with no database at all, and it is
   // the half that catches the recurrence this rewrite is guarding against — a schema change
   // committed without the migration that carries it.
-  /** @type {Map<string, Set<string>>} */
+  /**
+   * @type {Map<string, {cols: Map<string,{type:string,notNull:boolean,hasDefault:boolean}>,
+   *                     pk: string[]|null,
+   *                     uniques: Map<string,string[]>,
+   *                     indexes: Map<string,string[]>,
+   *                     fks: Map<string,{cols:string[],onDelete:string}>}>}
+   */
   const tables = new Map();
   const types = new Set();
+  /** Tables an index or constraint names that no CREATE TABLE in the set ever created. */
+  const dangling = new Set();
   let unparsed = 0;
+
+  // `table()` CREATES the entry, and only the two statements that really create a table or a
+  // column may call it. An index or a foreign key must use `tables.get()` and tolerate `undefined`.
+  //
+  // WHY THE DISTINCTION IS LOAD-BEARING: every model here is also the target of an
+  // `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY`. When the FK handler auto-vivified, deleting a
+  // model's whole CREATE TABLE left an EMPTY entry behind, `tables.has(name)` stayed true, M5
+  // passed, and the failure surfaced as M6 ("the schema declares columns no migration creates")
+  // — a true statement that names the wrong defect and sends the reader to the wrong fix.
+  // Measured while building the mutant table in docs/v2/RUNBOOK.md §2.4.1.
+  const table = (n) => {
+    if (!tables.has(n)) tables.set(n, { cols: new Map(), pk: null, uniques: new Map(), indexes: new Map(), fks: new Map() });
+    return tables.get(n);
+  };
+  /** `"a", "b"` → ['a','b'] */
+  const sqlCols = (s) => [...String(s).matchAll(/"(\w+)"/g)].map((x) => x[1]);
 
   for (const d of dirs) {
     const sqlPath = join(MIGRATIONS, d, 'migration.sql');
@@ -457,30 +570,91 @@ if (!schemaNeeded) {
     for (const t of sql.matchAll(/CREATE\s+TYPE\s+"(\w+)"/gi)) types.add(t[1]);
 
     for (const c of sql.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"(\w+)"\s*\(([\s\S]*?)\n\);/gi)) {
-      const cols = new Set();
+      const t = table(c[1]);
       for (const line of c[2].split('\n')) {
-        const col = /^\s*"(\w+)"\s+\S/.exec(line);
-        if (col) cols.add(col[1]);
+        // An inline table constraint, e.g. `CONSTRAINT "Op_pkey" PRIMARY KEY ("spaceId","seq")`.
+        const pkc = /PRIMARY\s+KEY\s*\(([^)]*)\)/i.exec(line);
+        if (pkc) { t.pk = sqlCols(pkc[1]); continue; }
+        const uqc = /CONSTRAINT\s+"(\w+)"\s+UNIQUE\s*\(([^)]*)\)/i.exec(line);
+        if (uqc) { t.uniques.set(uqc[1], sqlCols(uqc[2])); continue; }
+        if (/^\s*(CONSTRAINT|FOREIGN\s+KEY|CHECK)\b/i.test(line)) continue;
+
+        // A column: `"name" TYPE [NOT NULL] [DEFAULT …],`
+        const col = /^\s*"(\w+)"\s+((?:"[\w]+")|(?:\w+(?:\s+PRECISION)?))\s*(\(\s*\d+(?:\s*,\s*\d+)?\s*\))?\s*(.*?),?\s*$/.exec(line);
+        if (!col) continue;
+        const rest = col[4] || '';
+        t.cols.set(col[1], {
+          type: normType(col[2]),
+          notNull: /\bNOT\s+NULL\b/i.test(rest),
+          hasDefault: /\bDEFAULT\b/i.test(rest),
+        });
       }
-      tables.set(c[1], cols);
     }
-    for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"(\w+)"/gi)) {
-      if (!tables.has(a[1])) tables.set(a[1], new Set());
-      tables.get(a[1]).add(a[2]);
+
+    for (const i of sql.matchAll(/CREATE\s+(UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"(\w+)"\s+ON\s+"(\w+)"\s*\(([^)]*)\)/gi)) {
+      const t = tables.get(i[3]);
+      if (!t) { dangling.add(i[3]); continue; }
+      (i[1] ? t.uniques : t.indexes).set(i[2], sqlCols(i[4]));
+    }
+    for (const i of sql.matchAll(/DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?"(\w+)"/gi)) {
+      for (const t of tables.values()) { t.uniques.delete(i[1]); t.indexes.delete(i[1]); }
+    }
+
+    for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+ADD\s+CONSTRAINT\s+"(\w+)"\s+FOREIGN\s+KEY\s*\(([^)]*)\)\s*REFERENCES\s+"(\w+)"[^;]*?;/gi)) {
+      const onDel = /ON\s+DELETE\s+(CASCADE|RESTRICT|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION)/i.exec(a[0]);
+      if (!tables.has(a[1])) { dangling.add(a[1]); continue; }
+      tables.get(a[1]).fks.set(a[2], {
+        cols: sqlCols(a[3]),
+        references: a[4],
+        onDelete: (onDel ? onDel[1] : 'NO ACTION').toUpperCase().replace(/\s+/g, ' '),
+      });
+    }
+    for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+ADD\s+CONSTRAINT\s+"(\w+)"\s+PRIMARY\s+KEY\s*\(([^)]*)\)/gi)) {
+      if (!tables.has(a[1])) { dangling.add(a[1]); continue; }
+      tables.get(a[1]).pk = sqlCols(a[3]);
+    }
+    for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+ADD\s+CONSTRAINT\s+"(\w+)"\s+UNIQUE\s*\(([^)]*)\)/gi)) {
+      if (!tables.has(a[1])) { dangling.add(a[1]); continue; }
+      tables.get(a[1]).uniques.set(a[2], sqlCols(a[3]));
+    }
+    for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?"(\w+)"/gi)) {
+      const t = tables.get(a[1]);
+      if (t) { t.fks.delete(a[2]); t.uniques.delete(a[2]); }
+    }
+
+    for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"(\w+)"\s+((?:"[\w]+")|(?:\w+(?:\s+PRECISION)?))\s*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\))?\s*([^;,]*)/gi)) {
+      table(a[1]).cols.set(a[2], {
+        type: normType(a[3]),
+        notNull: /\bNOT\s+NULL\b/i.test(a[4] || ''),
+        hasDefault: /\bDEFAULT\b/i.test(a[4] || ''),
+      });
     }
     for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?"(\w+)"/gi)) {
-      tables.get(a[1])?.delete(a[2]);
+      tables.get(a[1])?.cols.delete(a[2]);
     }
     for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+RENAME\s+COLUMN\s+"(\w+)"\s+TO\s+"(\w+)"/gi)) {
       const t = tables.get(a[1]);
-      if (t) { t.delete(a[2]); t.add(a[3]); }
+      if (t?.cols.has(a[2])) { t.cols.set(a[3], t.cols.get(a[2])); t.cols.delete(a[2]); }
     }
     for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+RENAME\s+TO\s+"(\w+)"/gi)) {
       if (tables.has(a[1])) { tables.set(a[2], tables.get(a[1])); tables.delete(a[1]); }
     }
-    // Anything that reshapes a table by a route this folder does not model makes the M5/M6
-    // verdict unsound. Say so rather than answer confidently — L2 is the exact check.
-    if (/ALTER\s+TABLE[\s\S]*?(ALTER\s+COLUMN|INHERIT|SET\s+SCHEMA)/i.test(sql)) unparsed++;
+
+    // ALTER COLUMN reshapes a column in place. Model the three forms Prisma emits; anything else
+    // makes the verdict unsound and is counted into `unparsed`.
+    for (const a of sql.matchAll(/ALTER\s+TABLE\s+"(\w+)"\s+ALTER\s+COLUMN\s+"(\w+)"\s+(SET\s+NOT\s+NULL|DROP\s+NOT\s+NULL|SET\s+DEFAULT|DROP\s+DEFAULT|SET\s+DATA\s+TYPE\s+((?:"[\w]+")|(?:\w+(?:\s+PRECISION)?)))/gi)) {
+      const c = tables.get(a[1])?.cols.get(a[2]);
+      if (!c) continue;
+      const op = a[3].toUpperCase();
+      if (op.startsWith('SET NOT NULL')) c.notNull = true;
+      else if (op.startsWith('DROP NOT NULL')) c.notNull = false;
+      else if (op.startsWith('SET DEFAULT')) c.hasDefault = true;
+      else if (op.startsWith('DROP DEFAULT')) c.hasDefault = false;
+      else if (a[4]) c.type = normType(a[4]);
+    }
+    // Anything that reshapes a table by a route this folder does not model makes the M5–M16
+    // verdicts unsound. Say so rather than answer confidently — L2 is the exact check.
+    if (/ALTER\s+TABLE[\s\S]*?\b(INHERIT|SET\s+SCHEMA)\b/i.test(sql)) unparsed++;
   }
 
   if (unparsed > 0) {
@@ -502,9 +676,9 @@ if (!schemaNeeded) {
   // Postgres does not have, and Prisma fails at the first query rather than at the build.
   const missingCols = [];
   for (const model of schemaModels) {
-    const cols = tables.get(model.name);
-    if (!cols) continue; // already reported by M5
-    for (const c of model.columns) if (!cols.has(c)) missingCols.push(`${model.name}.${c}`);
+    const t = tables.get(model.name);
+    if (!t) continue; // already reported by M5
+    for (const c of model.columns) if (!t.cols.has(c)) missingCols.push(`${model.name}.${c}`);
   }
   if (missingTables.length) {
     skip('M6', MIGRATIONS, 'M5 already failed — fix the missing table(s) first');
@@ -523,6 +697,191 @@ if (!schemaNeeded) {
     fail('M7', MIGRATIONS, `no migration creates the enum type(s) ${missingTypes.join(', ')}`);
   } else {
     pass('M7', MIGRATIONS, `all ${schemaEnums.length} enum(s) have a CREATE TYPE`);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //  M9–M16 — THE SHAPE, not the names.
+  //
+  //  M5/M6/M7 above compare NAMES: a model has a table, a field has a column, an enum has a
+  //  type. Eleven distinct corruptions of the migration set pass all three, because none of them
+  //  renames anything — measured and listed in docs/v2/RUNBOOK.md §2.4.1. They are not exotic;
+  //  they are what a hand-edited migration, a bad merge, or a `migrate diff` run against the
+  //  wrong baseline actually produces. Four of them are silent in production, which makes them
+  //  strictly worse than the missing directory this script was rewritten for: that one at least
+  //  failed every query on the first request.
+  //
+  //  Each row below names the invariant it defends and what is lost when it goes.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+  const shapeReady = !missingTables.length && !missingCols.length;
+  const shapeSkip = (id, why) => skip(id, MIGRATIONS, why);
+
+  if (!shapeReady) {
+    for (const id of ['M9', 'M10', 'M11', 'M12', 'M13', 'M14', 'M15', 'M16']) {
+      shapeSkip(id, 'M5/M6 already failed — the table and column set must agree before the shape can be compared');
+    }
+  } else {
+    // ── M9 — PRIMARY KEYS, column for column and in order. ───────────────────────────────────
+    // `KeyWrap.@@id([spaceId, epoch, recipientId, senderDeviceId])` is not a hint. Narrow it by
+    // one column and T5-K3 reopens: one member can overwrite every other depositor's wrap for
+    // every epoch below her own, the relay counts it as coverage because coverage counts ROWS,
+    // and the readers who lose is every future joiner and every A2 recovery. Nothing fails.
+    const pkBad = [];
+    for (const model of schemaModels) {
+      const t = tables.get(model.name);
+      if (!model.pk) continue;
+      if (!t.pk) pkBad.push(`${model.name}: the schema declares a primary key on (${model.pk.join(', ')}) and the migration creates none`);
+      else if (!sameCols(model.pk, t.pk)) pkBad.push(`${model.name}: schema (${model.pk.join(', ')}) vs migration (${t.pk.join(', ')})`);
+    }
+    if (pkBad.length) {
+      fail('M9', MIGRATIONS, `PRIMARY KEY disagrees with the schema — ${pkBad.join('; ')}. A primary key is a CONSTRAINT the handlers rely on for race resolution and write-once (see the KeyWrap and Epoch notes in schema.prisma); a narrowed one is not a slow query, it is a silently different guarantee.`);
+    } else {
+      pass('M9', MIGRATIONS, `all ${schemaModels.filter((s) => s.pk).length} primary key(s) match the schema column-for-column`);
+    }
+
+    // ── M10 — UNIQUE constraints. ────────────────────────────────────────────────────────────
+    // `Op.@@unique([spaceId, opId])` is the idempotency key: it is the whole reason a lost
+    // response costs one retry and never a duplicate entry. `Member.@@unique([spaceId,
+    // colorRef])` is story 15.3. `Device.@@unique([spaceId, deviceShort])` is what makes ADR 003
+    // §2 step 4 resolve to exactly one row. Drop any of them and the relay keeps answering 200.
+    const uqBad = [];
+    for (const model of schemaModels) {
+      const have = [...tables.get(model.name).uniques.values()];
+      for (const want of model.uniques) {
+        if (!have.some((h) => sameCols(want, h))) uqBad.push(`${model.name}(${want.join(', ')})`);
+      }
+    }
+    const uqTotal = schemaModels.reduce((n, s) => n + s.uniques.length, 0);
+    if (uqBad.length) {
+      fail('M10', MIGRATIONS, `the schema declares unique constraint(s) no migration creates: ${uqBad.join(', ')}. Postgres will accept the duplicate rows these forbid, and the handler that assumed uniqueness will not notice — Op(spaceId, opId) is the idempotency key, Member(spaceId, colorRef) is story 15.3, Device(spaceId, deviceShort) is ADR 003 §2 step 4.`);
+    } else {
+      pass('M10', MIGRATIONS, `all ${uqTotal} unique constraint(s) are created by the migration set`);
+    }
+
+    // ── M11 — non-unique indexes. Correctness is not at stake; a table scan on the op log is. ─
+    //
+    // A PRIMARY KEY and a UNIQUE constraint each build a real btree in Postgres, so an @@index
+    // whose columns they already lead is SERVED and must not be reported missing. `Op` is the
+    // case in the tree: `@@id([spaceId, seq])` and `@@index([spaceId, seq])` name the same pair,
+    // and `Op_pkey` alone would answer every query `Op_spaceId_seq_idx` was declared for.
+    const ixBad = [];
+    for (const model of schemaModels) {
+      const t = tables.get(model.name);
+      const have = [...t.indexes.values(), ...t.uniques.values(), ...(t.pk ? [t.pk] : [])];
+      for (const want of model.indexes) {
+        // A btree on (a, b, c) serves a lookup on any LEADING prefix of its columns.
+        if (!have.some((h) => h.length >= want.length && want.every((c, i) => h[i] === c))) {
+          ixBad.push(`${model.name}(${want.join(', ')})`);
+        }
+      }
+    }
+    const ixTotal = schemaModels.reduce((n, s) => n + s.indexes.length, 0);
+    if (ixBad.length) {
+      warn('M11', MIGRATIONS, `the schema declares @@index(es) no migration creates: ${ixBad.join(', ')}. Nothing is incorrect without them; every pull becomes a sequential scan of the op log. A warning, not a failure, because the deploy does work.`);
+    } else {
+      pass('M11', MIGRATIONS, `all ${ixTotal} @@index(es) are created by the migration set`);
+    }
+
+    // ── M12 — COLUMN TYPES. The structural rule in schema.prisma's header lives here. ─────────
+    // "every ciphertext-bearing column below is `Bytes`". A migration that writes TEXT where the
+    // schema says Bytes gives the relay a column that CAN hold a readable string. store-
+    // interface.js refuses a String at the adapter boundary, so this is defence in depth — but
+    // the depth is the point: the addendum §3 claim is about what the database can hold.
+    const typeBad = [];
+    const typeSkipped = [];
+    for (const model of schemaModels) {
+      if (model.nativeTyped) { typeSkipped.push(model.name); continue; }
+      const t = tables.get(model.name);
+      for (const f of model.fields) {
+        if (!f.pgType) { typeSkipped.push(`${model.name}.${f.name}`); continue; }
+        const got = t.cols.get(f.name);
+        if (got && got.type !== f.pgType) typeBad.push(`${model.name}.${f.name}: schema ${f.prismaType} (${f.pgType}) vs migration ${got.type}`);
+      }
+    }
+    if (typeBad.length) {
+      fail('M12', MIGRATIONS, `column type(s) disagree with the schema: ${typeBad.join('; ')}. A Bytes column created as TEXT is a column that can hold a readable note — the relay is blind by structure (schema.prisma header, addendum §3), and the structure is the column type.`);
+    } else if (typeSkipped.length) {
+      warn('M12', MIGRATIONS, `types match everywhere they could be compared; ${typeSkipped.length} field(s)/model(s) use a native @db. type or a type this check does not map (${typeSkipped.slice(0, 5).join(', ')}) and were NOT compared. Run --deep with SHADOW_DATABASE_URL for the exact answer (L2).`);
+    } else {
+      const n = schemaModels.reduce((a, s) => a + s.fields.length, 0);
+      pass('M12', MIGRATIONS, `all ${n} column type(s) match the schema`);
+    }
+
+    // ── M13 — NULLABILITY. `Space.founderMemberId` MUST stay nullable (finding T5-M1a: a null
+    // fails OPEN, and every pre-existing space has no founder recorded). `Member.removedAt` must
+    // stay nullable or a live member cannot be inserted at all.
+    const nullBad = [];
+    for (const model of schemaModels) {
+      const t = tables.get(model.name);
+      for (const f of model.fields) {
+        const got = t.cols.get(f.name);
+        if (!got) continue;
+        if (f.nullable && got.notNull) nullBad.push(`${model.name}.${f.name} is optional in the schema and NOT NULL in the migration`);
+        if (!f.nullable && !got.notNull) nullBad.push(`${model.name}.${f.name} is required in the schema and nullable in the migration`);
+      }
+    }
+    if (nullBad.length) {
+      fail('M13', MIGRATIONS, `nullability disagrees with the schema: ${nullBad.join('; ')}. The first direction refuses rows the client will write; the second lets a null reach a client that has been told it cannot be null.`);
+    } else {
+      pass('M13', MIGRATIONS, 'nullability matches the schema on every column');
+    }
+
+    // ── M14 — DEFAULTS. `Space.nextSeq @default(0)` is ADR 003 §3.3's gapless counter starting
+    // point; without the DEFAULT every space insert that omits it fails on a NOT NULL violation.
+    const defBad = [];
+    for (const model of schemaModels) {
+      const t = tables.get(model.name);
+      for (const f of model.fields) {
+        const got = t.cols.get(f.name);
+        if (got && f.hasDefault && !got.hasDefault) defBad.push(`${model.name}.${f.name}`);
+      }
+    }
+    if (defBad.length) {
+      fail('M14', MIGRATIONS, `the schema gives a @default() to column(s) the migration creates without one: ${defBad.join(', ')}. Prisma omits a defaulted column from the INSERT, so the write fails on a NOT NULL violation at runtime — not at build time.`);
+    } else {
+      pass('M14', MIGRATIONS, 'every @default() in the schema has a DEFAULT in the migration');
+    }
+
+    // ── M15 — FOREIGN KEYS and their ON DELETE. This is the 20.2 purge and the Datenschutz
+    // deletion promise: `onDelete: Cascade` is what makes deleting a Space actually remove its
+    // members, devices, ops, invites, epochs and key wraps. Downgraded to NO ACTION, the DELETE
+    // errors; dropped entirely, the rows are orphaned and the promise is false.
+    const PRISMA_TO_SQL_DELETE = { Cascade: 'CASCADE', Restrict: 'RESTRICT', SetNull: 'SET NULL', SetDefault: 'SET DEFAULT', NoAction: 'NO ACTION' };
+    const fkBad = [];
+    let fkTotal = 0;
+    for (const model of schemaModels) {
+      const have = [...tables.get(model.name).fks.values()];
+      for (const want of model.fks) {
+        fkTotal++;
+        const got = have.find((h) => sameCols(want.cols, h.cols) && h.references === want.references);
+        if (!got) {
+          fkBad.push(`${model.name}(${want.cols.join(', ')}) → ${want.references} has no FOREIGN KEY in the migration`);
+          continue;
+        }
+        const wantDel = PRISMA_TO_SQL_DELETE[want.onDelete] || want.onDelete.toUpperCase();
+        if (got.onDelete !== wantDel) {
+          fkBad.push(`${model.name}(${want.cols.join(', ')}) → ${want.references}: schema says ON DELETE ${wantDel}, migration says ON DELETE ${got.onDelete}`);
+        }
+      }
+    }
+    if (fkBad.length) {
+      fail('M15', MIGRATIONS, `foreign key(s) disagree with the schema: ${fkBad.join('; ')}. onDelete: Cascade is how a space deletion purges its members, devices, ops, invites, epochs and key wraps (story 20.2 and the Datenschutz deletion promise). Without it the DELETE either errors or leaves the rows behind.`);
+    } else {
+      pass('M15', MIGRATIONS, `all ${fkTotal} foreign key(s) match the schema, ON DELETE included`);
+    }
+
+    // ── M16 — REVERSE DRIFT: a table the migrations create that the schema does not declare. ──
+    // The client never selects it, so nothing fails — which is exactly why it survives. A stray
+    // table on the blind relay is a place for readable data to accumulate outside the column set
+    // `tests/server/store-contract.test.js` polices, and outside the Datenschutz inventory
+    // (21.1) that names everything this server can see.
+    const declared = new Set(schemaModels.map((s) => s.name));
+    const stray = [...tables.keys()].filter((t) => !declared.has(t)).sort();
+    if (stray.length) {
+      fail('M16', MIGRATIONS, `the migration set creates table(s) schema.prisma does not declare: ${stray.join(', ')}. Nothing queries them, so nothing fails — but the Datenschutz inventory (story 21.1) enumerates what this relay can see, and a table outside schema.prisma is outside that list and outside tests/server/store-contract.test.js.`);
+    } else {
+      pass('M16', MIGRATIONS, `the migration set creates no table beyond the ${declared.size} the schema declares`);
+    }
   }
 }
 
@@ -555,9 +914,14 @@ if (!schemaNeeded) {
   skip('L1', 'database', 'migrations APPLIED and the adapter REACHABLE are not checkable offline. Run: `cd server && npm ci && DATABASE_URL="…?connection_limit=1" node ../.github/scripts/check-server-config.mjs --deep`');
   skip('L2', 'database', 'schema-vs-migration DRIFT needs a shadow database. Run --deep with SHADOW_DATABASE_URL set to a second, empty database.');
 } else if (!DB_URL) {
+  // BOTH rows, not just L1. The `--deep` branch used to fail L1 and never push an L2 row at all,
+  // so the ledger came back 32 rows instead of 33 with a skip count of ZERO — a check that did
+  // not run, saying nothing. That is rule 2 of this file's own header, broken by this file.
   fail('L1', 'database', '--deep was given but DATABASE_URL is unset. A deep run that silently degrades to a shallow one is the exact failure this rewrite exists to remove.');
+  skip('L2', 'database', 'not reached — L1 has no DATABASE_URL to work from');
 } else if (!has(PRISMA_BIN)) {
   fail('L1', 'database', `--deep needs the Prisma CLI at ${PRISMA_BIN}. Run \`cd server && npm ci\` first.`);
+  skip('L2', 'database', `not reached — the Prisma CLI is absent at ${PRISMA_BIN}`);
 } else {
   const status = runPrisma(['migrate', 'status']);
   const out = `${status.stdout || ''}${status.stderr || ''}`;

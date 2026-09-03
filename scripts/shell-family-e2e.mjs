@@ -193,7 +193,11 @@ function run(tag, input) {
   }
 
   const ok = code === 0 && live.length > 0 && live.every((r) => r.ok);
-  results.push({ tag, phase: spec.phase, ok, rows: live });
+  // THE REFUSAL LEDGER (LZP-1008). `OUT.refused` counts the lines `store.warnings` records
+  // as refused or parked in this launch. It is the number finding F-SHELL-1 was measured
+  // by — 0 → 6 → 13 → 25 over four launches of the founder — and the acceptance bar.
+  results.push({ tag, phase: spec.phase, ok, rows: live,
+    refused: Number.isFinite(out.refused) ? out.refused : null });
 
   const mark = ok ? 'ok  ' : 'NOT OK';
   log(`${mark} ${tag} · ${spec.phase}  (${live.length} row${live.length === 1 ? '' : 's'})`);
@@ -218,21 +222,21 @@ function must(r, what) {
  * A step that is REPORTED rather than required.
  *
  * Exactly one thing in this demonstration is attempted and not required, and it is not a
- * convenience: **finding F-SHELL-1** (`docs/v2/SHELL-VERIFICATION.md`). The founder's Mac
- * accumulates `badAttestation` refusals — its refusal ledger grows 0 → 6 → 13 → 25 across
- * launches — and ends up unable to admit any op a joiner authored, so an entry shared BY a
- * joiner never reaches the admin. That is a family-layer admission defect in `core/authz.js` /
- * `platform/device-identity.js`, not a transport one: the same bytes reach B and C through the
- * same bridge and open correctly there.
+ * convenience: **finding F-SHELL-3** — `unshare-owner (B)`. The admin's „→ Privat" reaches the
+ * owner's Mac as a DELETION rather than as a reversion, so the owner loses her own entry. That is
+ * a defect in `family/sharing.js`'s unshare path; every other hop in this file is required.
  *
- * Marking it `attempt` rather than deleting it keeps the failure VISIBLE in every run, which is
- * what a finding is for. Turning it into `must` would make the whole demonstration red for a
- * reason that has nothing to do with what it demonstrates.
+ * F-SHELL-1 used to live here and no longer does. It was two defects: `selfAttest` re-signing on
+ * every launch (closed in `crypto/identity.js#ensureAttestedDevice`) and the checkpoint absorbing
+ * the attestation op out of `foldAuthorized`'s input (closed in `store.js#_absorbedAttestOps`).
+ *
+ * Marking a step `attempt` rather than deleting it keeps the failure VISIBLE in every run, which
+ * is what a finding is for.
  */
 const attempted = [];
 function attempt(r, what) {
   attempted.push({ what, ok: r.ok });
-  if (!r.ok) log(`#    ⚠ ATTEMPTED, NOT REQUIRED — ${what} did not complete (finding F-SHELL-1)`);
+  if (!r.ok) log(`#    ⚠ ATTEMPTED, NOT REQUIRED — ${what} did not complete`);
   return r.out;
 }
 
@@ -276,13 +280,14 @@ log('# ── 3. the engines settle: the admin delivers the epoch key, D9 clears
 //     anything a joiner has been handed. Only the admin's `keys.deliver()` wraps the current
 //     epoch to their devices, and it can only wrap to devices that already exist — so the admin
 //     settles FIRST, once every joiner exists.
-//   · **Every additional launch makes the circle worse**, which is the measurement behind finding
-//     F-SHELL-1: a Mac's refusal ledger grows on every launch (0 → 6 → 13 → 25 was measured on
-//     the founder over four launches), and once a peer's `member.set{dev.*}` op has been refused,
-//     ADR 003 §8.2 has released the cursor past it and that peer's entries can never be admitted
-//     again. Running this loop twice instead of once took the demonstration from "the entry
-//     crosses to both peers" to "the entry crosses to neither". That is not a flaky test; it is
-//     the defect, reproduced on demand. The invites are minted in launch 1 for the same reason.
+//   · It USED to be that every additional launch made the circle worse — finding F-SHELL-1, whose
+//     measurement was the founder's refusal ledger growing 0 → 6 → 13 → 25 over four launches,
+//     after which ADR 003 §8.2 had released the cursor and that peer's entries could never be
+//     admitted again. Running this loop twice instead of once took the demonstration from "the
+//     entry crosses to both peers" to "the entry crosses to neither". Both halves are closed
+//     (LZP-1008) and the ledger is now printed in the report so a regression is a NUMBER and not
+//     a story. The loop is still minimal because the minimum is what the protocol needs, and the
+//     invites are still minted in launch 1 for the same reason.
 for (const tag of ['A', 'B', 'C', 'D']) {
   must(run(tag, { phase: 'settle', spaceId: SPACE, expectMembers: 4 }), `settle (${tag})`);
 }
@@ -297,14 +302,11 @@ must(run('A', { phase: 'share', spaceId: SPACE, text: SHARED, date: DAY(9) }), '
 // sealed, transported through `sync_request`, and opened there with its text. That is what the
 // conformance audit put in doubt and it is what this step requires.
 //
-// It is required of BOTH peers TOGETHER and of neither peer individually, and that is not a
-// weakened assertion — it is finding **F-SHELL-1** written as a control. Which peer admits the
-// entry is a coin flip: whichever Mac has already refused the sharer's `member.set{dev.*}` op
-// (`badAttestation`, terminal, cursor released past it) can never admit anything that Mac authors
-// again, and which Mac that is depends on launch ordering. Requiring a NAMED peer would make this
-// demonstration red about half the time for a reason that has nothing to do with the transport;
-// requiring neither would hide the defect. Requiring "at least one, and say which failed" does
-// both jobs.
+// It is required of at least one peer and REPORTED for both. That framing was written when
+// F-SHELL-1 made which peer admitted the entry a coin flip; since LZP-1008 both peers admit it on
+// every run measured, and the line printed below says which did. The weaker bar is kept as the
+// bail-out condition so that a regression reads as "the entry reached NEITHER peer" — the
+// sentence that is actually about the product — rather than as an arbitrary named Mac going red.
 const receivers = [];
 for (const tag of ['B', 'C']) {
   // TWO LAUNCHES, because that is what a person does and because `store.init()` re-judges held
@@ -329,14 +331,19 @@ log(`#    the entry crossed to: ${receivers.filter((r) => r.ok).map((r) => r.tag
     : ''));
 
 log('');
-log('# ── 6. the unshare button — ATTEMPTED, and blocked by finding F-SHELL-1 ─────────────');
-// Mama shares one of her own, and the admin tries to moderate it. The admin cannot see it: see
-// `attempt()` above. The 26 rows of `tests/tier2/unshare-ui.dom.js` cover the same button's
-// behaviour in this same shell and are green; what is missing here is only the end-to-end hop.
+log('# ── 6. the entry crosses the OTHER way, and the unshare button ─────────────────────');
+// Mama shares one of her own and the ADMIN receives it. This is the direction finding F-SHELL-1
+// made impossible — `receive (A)` was 0 of 5 in `docs/v2/SHELL-VERIFICATION.md` §9 — and since
+// LZP-1008 closed F-SHELL-1(b) (`store.js#_absorbedAttestOps`) it is REQUIRED, not attempted.
+// It is the acceptance criterion of LZP-1008 in one line: does the founder see a joiner's entry,
+// in the app we ship, on a relaunch.
 const MAMAS = 'Elternabend';
-attempt(run('B', { phase: 'share', spaceId: SPACE, text: MAMAS, date: DAY(14) }), 'share (B)');
-attempt(run('A', { phase: 'receive', spaceId: SPACE, text: MAMAS, date: DAY(14) }), 'receive (A)');
-attempt(run('A', { phase: 'unshare', spaceId: SPACE, text: MAMAS }), 'unshare (A)');
+must(run('B', { phase: 'share', spaceId: SPACE, text: MAMAS, date: DAY(14) }), 'share (B)');
+must(run('A', { phase: 'receive', spaceId: SPACE, text: MAMAS, date: DAY(14) }), 'receive (A)');
+must(run('A', { phase: 'unshare', spaceId: SPACE, text: MAMAS }), 'unshare (A)');
+// STILL ATTEMPTED, and it is NOT F-SHELL-1: the owner's board loses the entry outright instead of
+// reverting it to Privat — tier-2 row §10, owner `family/sharing.js`'s unshare path. See
+// `docs/v2/FINDINGS.md` F-SHELL-3.
 attempt(run('B', { phase: 'unshare-owner', spaceId: SPACE, text: MAMAS }), 'unshare-owner (B)');
 
 log('');
@@ -385,8 +392,14 @@ log('');
 log('# ═════════════════════════════════════════════════════════════════════════════════════');
 log(`# ${launches} launches of the shipped .app · ${totalRows} rows · ${failed.length} phase(s) failed`);
 for (const a of attempted) {
-  log(`# attempted, not required: ${a.what} — ${a.ok ? 'completed' : 'BLOCKED (finding F-SHELL-1)'}`);
+  log(`# attempted, not required: ${a.what} — ${a.ok ? 'completed' : 'BLOCKED'}`);
 }
+const ledger = results.filter((r) => r.refused !== null);
+const ledgerTotal = ledger.reduce((n, r) => n + r.refused, 0);
+log(`# THE REFUSAL LEDGER: ${ledgerTotal} across ${ledger.length} reporting launch(es)`
+  + ` — ${ledger.map((r) => `${r.tag}/${r.phase}:${r.refused}`).join(' ')}`);
+const receivedA = results.find((r) => r.tag === 'A' && r.phase === 'receive');
+log(`# THE FOUNDER RECEIVED A JOINER'S ENTRY: ${receivedA ? (receivedA.ok ? 'YES' : 'NO') : 'not attempted'}`);
 log(`# transport reported by the running family engine: ${settleB.transportKind}`);
 log(`# space ${SPACE} · founder-less removal authorizedBy=${spent.authorizedBy} · `
   + `epoch ${spent.epochBefore} → ${spent.epochAfter}`);

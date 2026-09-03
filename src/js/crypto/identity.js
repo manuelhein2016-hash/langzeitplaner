@@ -720,15 +720,88 @@ export async function ensureRecoveryIdentity(ks, memberId, opts = {}) {
 }
 
 /**
+ * The recovery SIGNING PUBLIC key, derived from the private half we were handed.
+ *
+ * `RECOVERY_KEY_EXTRACTABLE` is `true` — §7.2 requires it, because the pair has to reach the
+ * backup file — so the public point can be read back out of the JWK. `pairing.js#recPublicOf`
+ * does exactly this for the same reason; the copy is here because this file may not import
+ * `pairing.js` (it is the other way round).
+ *
+ * Returns `null` rather than throwing: a caller that cannot derive the public key falls back to
+ * a weaker check, and an engine that refuses the export is not a bug in this process.
+ *
+ * @param {CryptoKey} recSigPriv @param {CryptoPorts} [ports] @returns {Promise<CryptoKey|null>}
+ */
+async function recSigPublicOf(recSigPriv, ports) {
+  try {
+    const S = subtleOf(ports);
+    const jwk = await S.exportKey('jwk', recSigPriv);
+    if (!jwk || typeof jwk.x !== 'string' || typeof jwk.y !== 'string') return null;
+    return await S.importKey(
+      'jwk', { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y, ext: true },
+      SIG, true, [...USAGES.peerSig],
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
  * Mint and self-attest in one call — the shape §6.3 step 8 and §7.3 step 4 both need: a new Mac
  * restores `RK_sig`, mints its OWN non-extractable device keys, and self-attests with the
  * restored recovery key.
+ *
+ * **IDEMPOTENT ACROSS LAUNCHES — finding F-SHELL-1, and this is the root of it.**
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `ensureDeviceIdentity` is idempotent and `buildDeviceAttestation` is a pure function of it, so
+ * the six-field PAYLOAD this call produces is the same on every launch of the same Mac. The
+ * SIGNATURE was not: `attestDevice` is ECDSA and `signBytes`'s own header says it in capitals —
+ * *"WebCrypto ECDSA is non-deterministic in BOTH engines … never use a signature as an
+ * idempotency key"*. So this function minted a **different blob string for an unchanged fact**
+ * every time it ran, and an attestation is not a fact that changes between boots.
+ *
+ * That cost the family layer everything, because the blob string IS the identity of the claim
+ * everywhere downstream: `member:<M> → dev.<short>` is a **write-once register** whose value is
+ * the blob (ADR 001 §4.0, ADR 002 §2.3), `device-identity.js#buildAttestOpen` keys its verified
+ * table on `(memberId, blob)` because the signature is verified over those exact bytes, and the
+ * relay's roster carries the **first** blob each device registered. A second blob for the same
+ * device is therefore a claim no peer can verify, on a register that is already claimed — and
+ * the shell pass measured the consequence as a refusal ledger reading 0 → 6 → 13 → 25 over four
+ * launches of one Mac.
+ *
+ * **The canonicalisation is not the defect.** Keying on the payload instead of the blob would
+ * mean accepting a signature nobody checked, which is the key-injection hole §2.3 exists to
+ * close. The defect is minting a second signature at all, and the smaller system is the one
+ * where the blob is minted ONCE and stored — which is what this does.
+ *
+ * **Where it is stored, and why not in a record of its own.** In `devMeta`, beside the three
+ * fields that already describe this device, as a fourth name (`attest`). `decodeMeta` and
+ * `backup.js#readMeta` both read that record BY NAME, so an extra name is inert — and the record
+ * COUNT does not move, which two suites assert exactly (`crypto-backup.test.js` and
+ * `crypto-member-backup.test.js` both pin `ks.list().length === 6` after an `importBackup`, and
+ * `importBackup` step 6 is a caller of this function).
+ *
+ * **The cache is checked, never trusted.** A stored blob is used only when it parses, when all
+ * six of its fields equal the payload just built from the live key store, and — when the
+ * recovery public key can be derived from the private half we were handed — when its signature
+ * still verifies under it. Anything else re-mints. So a blob left behind by a previous device
+ * identity, a truncated record or a store somebody edited costs one re-mint, never a wrong
+ * claim; and the invariant `engine.js#attestPeer` asserts for a PEER's blob ("the blob this Mac
+ * stores is one the other Mac's `buildAttestOpen` will accept") now holds for our own.
+ *
+ * **A failed write is not fatal.** If the store refuses the `put` the caller still gets a valid,
+ * freshly-minted blob; the only cost is that the next launch mints another one, i.e. exactly
+ * today's behaviour. Bricking a restore on a flaky disk to protect an optimisation would be the
+ * wrong trade — and `authz.js` stage 0a no longer treats the second blob as terminal either.
  *
  * @param {KeyStore} ks
  * @param {string} memberId
  * @param {CryptoKey} recSigPriv
  * @param {{deviceId:string, createdAt:string} & CryptoPorts} opts
- * @returns {Promise<{identity:Identity, attestation:DeviceAttestation, blob:string}>}
+ * @returns {Promise<{identity:Identity, attestation:DeviceAttestation, blob:string, minted:boolean}>}
+ *          `minted` is `false` when the stored blob was reused — the property the fleet rows read.
  */
 export async function ensureAttestedDevice(ks, memberId, recSigPriv, opts) {
   const identity = await ensureDeviceIdentity(ks, memberId, opts);
@@ -738,8 +811,34 @@ export async function ensureAttestedDevice(ks, memberId, recSigPriv, opts) {
     identity.devKex.publicKey,
     opts
   );
+
+  const meta = decodeMeta(await ks.get(KEYSTORE_IDS.devMeta));
+  const stored = meta && typeof meta.attest === 'string' && meta.attest !== '' ? meta.attest : null;
+  if (stored !== null) {
+    // Cheap and pure first, so a mismatched payload never reaches a signature check.
+    const parsed = parseAttestationBlob(stored);
+    if (parsed !== null && ATTESTATION_FIELDS.every((f) => parsed[f] === attestation[f])) {
+      // `recSigPub === null` ⇒ this engine would not hand the public point back. The payload
+      // check above still binds the blob to THIS device's live keys, so the fallback is narrower
+      // than the full check and never wider than no check at all.
+      const recSigPub = await recSigPublicOf(recSigPriv, opts);
+      if (recSigPub === null || (await verifyAttestation(stored, recSigPub, opts)) !== null) {
+        return { identity, attestation, blob: stored, minted: false };
+      }
+    }
+  }
+
   const blob = await attestDevice(attestation, recSigPriv, opts);
-  return { identity, attestation, blob };
+  try {
+    await ks.put(KEYSTORE_IDS.devMeta, canonicalBytes({
+      memberId: identity.memberId,
+      deviceId: identity.deviceId,
+      deviceShort: identity.deviceShort,
+      createdAt: identity.createdAt,
+      attest: blob,
+    }));
+  } catch { /* see "A failed write is not fatal" above — the caller still gets a valid blob */ }
+  return { identity, attestation, blob, minted: true };
 }
 
 function assertKeyStore(ks, who) {

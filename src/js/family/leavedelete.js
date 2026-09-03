@@ -150,6 +150,45 @@
 // `COSIGN_COPY.strandNote` standing in the danger zone of a small circle and adds
 // `leave.leavesTwoBehind` to the leave confirmation — so a person meets it as a plain sentence
 // before she is in it, and not as a 403.
+//
+// ── FINDING F-SHELL-2, AND THE FIX FOR IT THAT CANNOT BE BUILT HERE ──────────────────────────
+//
+// The shell pass (`docs/v2/SHELL-VERIFICATION.md` §5) measured that sentence NOT firing in the
+// one state it was written for: in a real founder-less two-member circle
+// `adminpanel.js#eligibleCosigners` returned **2**, not 0, so the person met
+// `403 founder_gone_every_removal_needs_second_key` instead of the paragraph that explains it.
+// The cause is that `eligibleCosigners` counts from THIS Mac's folded member log — correctly,
+// because that is the list the sheet shows — and a REMOVAL writes `member.set{_alive:false}`
+// into that log while a LEAVE writes nothing.
+//
+// **The obvious repair — have `confirmLeaveCircle` publish `member.set{me}{_alive:false}` just
+// before `port.leaveSpace()` — does not work, and the reason is on the relay, not here.**
+// `POST /api/v1/members/leave` runs `purgeMember`, whose first act is
+//
+//     server/core/handlers/lifecycle.js:229
+//     const purgedOps = … await tx.deleteOpsByDevices(spaceId, own.deviceShorts)
+//
+// — every op authored by the leaver's devices, deleted in the same transaction as the leave,
+// with no filter on op kind (`server/adapters/memory.js:241`, `server/adapters/prisma.js:278`).
+// A departure op published a millisecond earlier is deleted a millisecond later, and
+// `tests/server/lifecycle.test.js` already measures exactly that — the row
+// „20.3 — leaving is self-service, and the last member out deletes the space" seeds `op_m` from
+// Mama's device, has Mama leave, and asserts `purgedOps === 1` and that the ops that survive are
+// `['op_p']`. It is green on both adapters, which is the proof and it is not mine to write.
+// Publishing one from here would be an op every peer would have to pull inside the gap between
+// two calls in the same handler — i.e. a doomed op, which is the failure
+// `family/removal.js#REMOVAL_PATCH` and `core/ops.js#attestMyDevice` both exist to make loud.
+//
+// So the leaver structurally cannot announce her own departure, and the fix belongs where the
+// count is taken. The relay's `removedAt` column is ALREADY on this Mac:
+// `family/mount.js#refreshRoster` reads it off `GET /spaces/:id/members` into `rosterCache` and
+// hands it to `membersui.js` as `port.roster()`. The repair is one intersection inside
+// `adminpanel.js#eligibleCosigners` — a member the log calls alive but the roster stamps
+// `removedAt` is not a co-signer — plus the one line that gives `adminpanel.js` the same roster
+// port `membersui.js` already gets. `core/authz.js` needs NO change: stage 2's SELF branch
+// already admits a member's write to their own record and its `onlyAlive` branch already admits
+// the admin's, so nothing about the fold is in the way. Owner: `src/js/family/adminpanel.js`
+// and `src/js/family/mount.js`. Recorded here because this is the file the next person opens.
 
 import { el, openSheet, toast } from '../ui.js';
 import { t, getLang } from '../i18n.js';

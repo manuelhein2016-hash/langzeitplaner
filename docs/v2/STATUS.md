@@ -1,11 +1,93 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-03 · **Stopped at:** **LZP-1001 + LZP-1002 — the Datenschutz section is
-on a screen, and story 21.5 has been amended by the PO rather than quietly outgrown.** Full
-record: `docs/v2/E10-VERIFICATION.md` §10–§12; findings in `FINDINGS.md` §20; the decisions are
-**D10** and **D11** in `DESIGN-DECISIONS.md` and ADR 003 **§7.5**.
+**Last session:** 2026-09-03 · **Stopped at:** **the final integration — four parallel fix passes
+landed, and a family works in the app we ship, five times out of five.** Full record:
+`docs/v2/V2-FINAL.md`; findings in `FINDINGS.md` §21.
 
 ---
+
+## THE HEADLINE: the founder receives a joiner's entry — 5 of 5, where it was 0 of 5
+
+```
+npm test 2216/2216 · test:property 101/101 · test:attack 970/970
+test:server 998/998 · test:fleet 423/423 · test:dom 902 pass / 3 fail (54 files)
+```
+
+**5 610 green rows, 3 red** — and the three reds are the three named residuals in the same two
+files: `e8-density-legibility` §A4 (the 9 px ink floor, a PO ruling on `palette.js`),
+`e8-density-perf` §E1 (the 60 fps frame) and §E3 (the saturated poster, a spec threshold error
+where 48 % is the mathematical ceiling and the row asks 75 %). None is new.
+
+### The acceptance run — five consecutive runs, 26 launches of the shipped binary each
+
+| Run | Phases failed | Founder received a joiner's entry | Crossed to | Refusal ledger |
+|---|---|---|---|---|
+| 1 | 0 of 26 | **YES** | B and C | 2 |
+| 2 | 0 of 26 | **YES** | B and C | 2 |
+| 3 | 0 of 26 | **YES** | B and C | 2 |
+| 4 | 0 of 26 | **YES** | B and C | 34 |
+| 5 | 0 of 26 | **YES** | B and C | 2 |
+
+Before: **0 of 5**, the entry crossing to one peer in 4 of 5, and the ledger climbing
+0 → 6 → 13 → 25 as the founder relaunched.
+
+**The bar was 5 of 5 with the ledger flat at zero. The first half is met; the second is not.**
+The ledger is two open findings and nothing else — `F-SHELL-3` (the unshare path; the "2" is one
+`notOwner` remembered by L-1) and `F-SHELL-4` (a second, identical self-attestation; the "34").
+Neither is an attestation defect and neither blocks a phase. `FINDINGS.md` §21c, §21d.
+
+### THE DEFECT THIS PASS FOUND: `_absorbedAttestOps` had never once run
+
+The fix that was supposed to close the other half of F-SHELL-1 was **inert**. `foldAuthorized`'s
+Pass A runs `classifyOp` first, and it requires `op.gid` to be a 22-char GroupId; the
+reconstruction passed `gid: null`. Every rebuilt attestation op was discarded
+`{stage:'attestation', reason:'shape'}` before a single attestation condition ran. It shipped with
+**no test of any kind**, which is exactly how 5 448 green rows failed to see it, and it read as
+flakiness in the shell because it only bites the Mac whose checkpoint absorbed the founder's op.
+`FINDINGS.md` §21a.
+
+### The v1 oracle did not move — checked PER FILE, not as a total
+
+Every row of the 11 characterization files added at `328c683`, run at `6268cbe` in a clean
+`git archive` tree and in this tree, compared file by file including nested rows:
+**626 rows (515 tier-1 + 111 tier-2), byte-identical, 0 red, in all 11 files.**
+
+### LZP-1007 — the ticket passes, the row does not
+
+`renderBoard` **60.8 → 3.3–3.5 ms** (0.2 of a frame), byte-identical to the rebuild it replaced —
+89 identity cells in `tests/tier2/e1-incremental.dom.js` compare `#board.outerHTML` and the
+`<textarea>` values against a from-scratch render. §E1 stays red on two cells that are not
+`renderBoard`: `memberToggle` 19.4–20.5 ms and `findWorst` 22.3–23.4 ms (`find.js`, red before
+this ticket).
+
+### The standing bar held a seventh time
+
+Zero bytes of a Privat entry: **302 tier-1/attack/fleet rows + 37 tier-2 rows + 38 SSRF rows
+across 29 launches of the shipped `.app`**, all green. An attestation change moves who is
+admitted, which is exactly where it could have broken.
+
+---
+
+## ⛔ WHAT A PERSON WOULD BE SHIPPING
+
+The full list with owners is `docs/v2/V2-FINAL.md` §8. The three that matter:
+
+1. **R-1 · F-SHELL-3 — the owner loses her own entry.** The admin's „→ Privat" arrives on the
+   owner's Mac as a deletion, not a reversion. BLOCKED in 10 of 10 runs. The only residual that
+   loses data. Owner: `family/sharing.js`.
+2. **R-2 · F-SHELL-4 — a second, identical self-attestation.** Permanent `writeOnce` refusals on
+   every peer for ever. Nothing breaks; the record splits. Cause not yet named — the obvious
+   hypothesis was built, tested, disproven and reverted.
+3. **R-3 · The Mom test cannot be run.** The shipped invitation carries **no relay address at
+   all**, so `submitJoin` dead-ends and she cannot join. One `Server:` line in
+   `docs/v2/email/invitation.*` (LZP-108) and the probe goes green.
+
+---
+
+# ── THE PREVIOUS SESSION (LZP-1001 + LZP-1002, 2026-09-03) ──
+
+*Kept verbatim below. Its suite counts are that session's and are superseded by the block above;
+nothing else in it has been contradicted.*
 
 ## THE HEADLINE: 21.5 now bounds an ORIGINATOR, not a count — and it is 1, human
 

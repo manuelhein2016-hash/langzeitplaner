@@ -208,6 +208,12 @@ test('§E1 · build, render, member toggle, scroll and find — against one 16.7
         input.value = '';
         input.dispatchEvent(new Event('input', { bubbles: true }));
       }
+      // What EVERY cell above pays before it does any work of its own: `timed`
+      // forces a real style + layout flush of the whole document after each
+      // repetition, and this is that flush with nothing to flush. Reported, not
+      // subtracted — the flush is work the frame really does — so that a reader
+      // can tell 3.9 ms of rendering from 3.9 ms of harness.
+      r.flushFloor = timed(20, () => {});
       r.domNodes = $$('#board *').length;
       results[mode] = r;
     }
@@ -222,6 +228,8 @@ test('§E1 · build, render, member toggle, scroll and find — against one 16.7
       + `${String(s ? px(f / s) : '—').padStart(6)}      ${px(f / FRAME)}`);
   }
   diag(`   DOM nodes on the board: solo ${results.solo.domNodes} · family ${results.family.domNodes}`);
+  diag(`   the harness's own floor — one forced style+layout flush, nothing changed: `
+    + `solo ${results.solo.flushFloor} ms · family ${results.family.flushFloor} ms. Every cell above includes it.`);
 
   const over = keys.filter((k) => results.family[k] != null && results.family[k] > FRAME);
   const worst = keys.filter((k) => results.family[k] != null).sort((a, b) => results.family[b] - results.family[a])[0];
@@ -237,6 +245,152 @@ test('§E1 · build, render, member toggle, scroll and find — against one 16.7
       why: `${k} costs ${results.family[k]} ms of main-thread work — ${px(results.family[k] / FRAME)} frames of the 60 fps budget (solo: ${results.solo[k]} ms)` });
   }
   verdict('§E1 · the frame budget beyond the drag', rows);
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// §E1b · THE RENDER IS INCREMENTAL, AND THAT IS A STRUCTURAL FACT (LZP-1007)
+//
+// §E1 above is a stopwatch, and a stopwatch cannot say WHY a number moved: a
+// faster machine, a warmer JIT and a genuinely different algorithm all read the
+// same on it. These cells assert the thing the timings are a CONSEQUENCE of —
+// that `renderBoard` no longer destroys the board — in terms no machine can
+// fake, and they are what goes red if anyone puts `root.textContent = ''` back.
+//
+// WHAT LZP-1007 DID. `renderBoard` was `textContent = ''` plus a twelve-month
+// rebuild of 4 195 boxes, every call. It is now a signature-gated patch: four
+// slots per day row, a keyed reconcile for the notes inside a row and for the
+// bar segments after it, and a full rebuild kept as the fallback for anything
+// the cache cannot prove (see the header block in `board.js`). Measured in
+// WebKit on this file's own 8 × 2 fixture, RUN ALONE so the numbers are not
+// contention — two runs of the code this replaced, seven of what replaced it,
+// on the same machine in the same sitting:
+//
+//                     before (2 runs)       after (7 runs)
+//     renderBoard     60.8 · 54.1 ms        3.7 – 5.0 ms
+//     memberToggle    58.2 · 62.4 ms       20.7 – 23.5 ms
+//     scroll           2.5 ·  2.9 ms        2.4 –  3.9 ms
+//     findKeystroke    8.9 · 11.6 ms        8.6 – 11.1 ms
+//     buildBoard       2.7 ·  3.0 ms        4.8 –  6.6 ms
+//
+// The 46-file run reads higher for identical code — this file's own §E1 cells
+// read 28.1 ms for the toggle inside `npm run test:dom` — and that number is
+// contention, not the product. It is never the one to quote.
+//
+// `buildBoard` is `layout.js` and was not touched; it builds the same model. It
+// is the first cell measured in each mode and `timed`'s warm-up does not flush,
+// so it also carries the layout the fixture's own install left pending. The
+// harness's own floor is printed above it and every cell includes it.
+//
+// WHAT IS STILL OVER BUDGET, AND WHY — the member toggle, at ~21 ms, is 1.3
+// frames. It is not a rendering inefficiency left on the table. Hiding one
+// member of eight changes 287 of the board's 372 day rows, 117 of its 708
+// notes and 70 of its 268 bar-segment nodes, because the capacity rule
+// re-slices every row that member had an entry on and the three-pass lane
+// rescue hands the freed lanes to bars that were previously dropped. The cells
+// below prove the renderer touches ONLY those; laying them out is ~13 ms of the
+// ~21, on top of ~3.4 ms of model and ~3 ms of signatures and construction, and
+// ~1.5 ms of the harness's own flush. Getting under one frame from here means
+// changing what the board SHOWS, not how it is written, so this cell stays red
+// and says so rather than being widened to fit.
+//
+// `findWorst` is `find.js`'s cell, not this one's, and it was already red before
+// this ticket at 19.8 / 18.1 ms on the same two baseline runs.
+//
+// The equality of the two paths — that the patched board IS the rebuilt board,
+// node for node — is not asserted here but in `tests/tier2/e1-incremental.dom.js`,
+// over 66 single mutations across 25 kinds and 10 chains of 8.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** Key every day row by column and row index, so void rows are addressable too. */
+function dayIndex() {
+  const m = new Map();
+  for (const col of $$('#board .col')) {
+    for (const d of $$('.day', col)) m.set(`${col.dataset.month}/${d.dataset.row}`, d);
+  }
+  return m;
+}
+/** Key every tail node by column, kind and bar id. */
+function tailIndex() {
+  const m = new Map();
+  for (const col of $$('#board .col')) {
+    for (const n of $$('.rows > .bar, .rows > .bar-label, .rows > .bar-cont-up, .rows > .bar-cont-down', col)) {
+      m.set(`${col.dataset.month}/${n.className}/${n.dataset.barId}`, n);
+    }
+  }
+  return m;
+}
+/** Key every note by column, row and entry id. */
+function noteIndex() {
+  const m = new Map();
+  for (const col of $$('#board .col')) {
+    for (const n of $$('.note', col)) m.set(`${col.dataset.month}/${n.dataset.date}/${n.dataset.noteId}`, n);
+  }
+  return m;
+}
+
+test('§E1b · an unchanged board is not rebuilt, and a changed one is not rebuilt either', () => {
+  const before = snapshot();
+  const rows = [];
+  try {
+    install({ ...FX, settings: SET });
+    store.state.settings.hiddenMembers = {};
+    renderBoard(boardEl());
+
+    // ── b1 · nothing changed: every element on the board survives ────────────
+    const all0 = $$('#board *');
+    renderBoard(boardEl());
+    const all1 = $$('#board *');
+    let same = 0;
+    for (let i = 0; i < Math.min(all0.length, all1.length); i++) if (all0[i] === all1[i]) same++;
+    rows.push({ id: 'LZP-1007/idle-render-keeps-every-node', ok: same === all0.length && all0.length === all1.length,
+      why: `a render with nothing changed kept ${same} of ${all0.length} elements (${all1.length} after) — a rebuild keeps 0` });
+
+    // ── b2 · a member toggle: what did not change is not touched ─────────────
+    const d0 = dayIndex(); const n0 = noteIndex(); const t0 = tailIndex();
+    const dh0 = new Map([...d0].map(([k, v]) => [k, v.outerHTML]));
+    const nh0 = new Map([...n0].map(([k, v]) => [k, v.outerHTML]));
+    const th0 = new Map([...t0].map(([k, v]) => [k, v.outerHTML]));
+
+    store.state.settings.hiddenMembers = { [MEMBERS[1].id]: true };
+    renderBoard(boardEl());
+
+    const d1 = dayIndex(); const n1 = noteIndex(); const t1 = tailIndex();
+    const survivors = (i0, h0, i1) => {
+      let unchanged = 0; let kept = 0; let lost = 0;
+      for (const [k, html] of h0) {
+        const now = i1.get(k);
+        if (!now || now.outerHTML !== html) continue;
+        unchanged++;
+        if (now === i0.get(k)) kept++; else lost++;
+      }
+      return { unchanged, kept, lost };
+    };
+    const D = survivors(d0, dh0, d1);
+    const N = survivors(n0, nh0, n1);
+    const T = survivors(t0, th0, t1);
+
+    diag(`   a member toggle: ${d1.size} day rows, ${D.unchanged} of them unchanged — ${D.kept} are the SAME element`);
+    diag(`   a member toggle: ${n1.size} notes,    ${N.unchanged} of them unchanged — ${N.kept} are the SAME element`);
+    diag(`   a member toggle: ${t1.size} bar nodes, ${T.unchanged} of them unchanged — ${T.kept} are the SAME element`);
+    diag(`   so ${d1.size - D.unchanged} day rows, ${n1.size - N.unchanged} notes and ${t1.size - T.unchanged} bar nodes genuinely change,`);
+    diag('   and the ~15 ms of layout they cost is what keeps the toggle above one frame.');
+
+    rows.push({ id: 'LZP-1007/toggle-keeps-every-unchanged-day-row', ok: D.lost === 0 && D.unchanged > 0,
+      why: `${D.lost} of ${D.unchanged} unchanged day rows were replaced by an identical new element` });
+    rows.push({ id: 'LZP-1007/toggle-keeps-every-unchanged-note', ok: N.lost === 0 && N.unchanged > 0,
+      why: `${N.lost} of ${N.unchanged} unchanged notes were replaced by an identical new element` });
+    rows.push({ id: 'LZP-1007/toggle-keeps-every-unchanged-bar-node', ok: T.lost === 0 && T.unchanged > 0,
+      why: `${T.lost} of ${T.unchanged} unchanged bar/label nodes were replaced by an identical new element` });
+
+    // ── b3 · the idle render, on the clock ───────────────────────────────────
+    store.state.settings.hiddenMembers = {};
+    renderBoard(boardEl());
+    const idle = timed(20, () => renderBoard(boardEl()));
+    diag(`   a render with nothing changed: ${idle} ms — ${px(idle / FRAME)} frames`);
+    rows.push({ id: 'LZP-1007/idle-render-inside-one-frame', ok: idle <= FRAME,
+      why: `re-rendering an unchanged family board costs ${idle} ms` });
+  } finally { restore(before); }
+  verdict('§E1b · the render is incremental', rows);
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

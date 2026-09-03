@@ -168,13 +168,45 @@ export const REJECT_REASONS = Object.freeze({
   NOT_MY_ACT: 'notMyAct',
   /** A personal- or local-space op from a device outside my local device set. */
   NOT_MY_DEVICE: 'notMyDevice',
-  /** `op.dev` is not an attested device of `op.act` (stage 0b). */
+  /**
+   * `op.dev` is not an attested device of `op.act` (stage 0b) — **and, since F-SHELL-1, the one
+   * stage-0a failure that is a statement about THIS DEVICE rather than about the op**: a
+   * single-register self-attestation (`devOf(op.ts) === att.deviceShort`) whose blob the injected
+   * `ctx.attestOpen` cannot answer for. See "TWO WAYS TO FAIL CONDITION (4)" at stage 0a.
+   *
+   * It is the only rejection code in this table that a later arrival can cure, which is why
+   * `store.js` and `sync/personal.js` both list it in `CURABLE_REFUSALS`: the store parks the
+   * line under `PARK_REASONS.ATTESTATION` instead of dropping it past a released cursor, and
+   * `store.unparkAttested()` re-judges it when the roster that can verify the blob arrives.
+   */
   UNATTESTED_DEVICE: 'unattestedDevice',
-  /** A `dev.*` register whose blob does not parse, does not verify, or names another member. */
+  /**
+   * A `dev.*` register whose blob does not parse, does not verify, or names another member.
+   *
+   * **TERMINAL, AND NARROWER THAN IT WAS (F-SHELL-1).** Every failure this code now names is
+   * STRUCTURAL — decidable from the op's own bytes, by a pure synchronous fold, with no external
+   * input: the blob does not parse, its `memberId` is not the housing member, its `deviceShort`
+   * is not the register name, the patch carries more than one `dev.*` register, or the op was
+   * not authored by the device it attests. No later arrival changes any of those answers, so a
+   * final verdict is the right one.
+   *
+   * What it no longer names is "the injected opener has not been shown this blob", which is not
+   * a property of the op at all — it is a property of how recently this Mac read the roster, and
+   * `buildAttestOpen` cannot distinguish "this signature is forged" from "I have never seen these
+   * bytes". Answering both terminally released the cursor past a peer's ONLY attestation and left
+   * that device permanently unattested; that case is `UNATTESTED_DEVICE` now.
+   */
   BAD_ATTESTATION: 'badAttestation',
   /** A `member.set` mixing `dev.*` registers with ordinary member fields. */
   MIXED_MEMBER_PATCH: 'mixedMemberPatch',
-  /** A second claim on a write-once `dev.<short>` register (ADR 001 §4.0, ADR 002 §2.3). */
+  /**
+   * A second claim on a write-once `dev.<short>` register (ADR 001 §4.0, ADR 002 §2.3).
+   *
+   * It bounds the F-SHELL-1 park as well as the fold: a register already claimed by an ADMITTED
+   * op is never held, and among unverifiable self-filed claims on one register only the minimal
+   * one under `≺` is held and every other is refused here. That is what keeps a parkable refusal
+   * from being a denial-of-service primitive — see the block above `firstHeld`.
+   */
   WRITE_ONCE: 'writeOnce',
   /** A `member.set` on somebody else's record (§4.2: self-edit, no admin involvement). */
   NOT_SELF: 'notSelf',
@@ -407,6 +439,52 @@ export const isRejectReason = (r) => REJECT_CODES.has(r);
 // member a way to un-attest an honest peer by naming their short, which is the same worse trade
 // this file already refuses for the label — and it would cost the forger nothing, since any op
 // she can author under a peer's short she can author under an invented one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TWO WAYS TO FAIL CONDITION (4), AND ONLY ONE OF THEM IS A VERDICT ABOUT THE OP
+// (FINDING F-SHELL-1 — the shell pass, 2026-09-03)
+//
+// `ctx.attestOpen` is a LOOKUP, not a verifier. `device-identity.js#buildAttestOpen` verifies
+// every blob the roster carries, ahead of time, and hands this fold a table keyed on
+// `(memberId, blob)` — keyed on the exact blob STRING, necessarily, because the signature is
+// verified over exactly those bytes and keying on the payload would mean admitting a signature
+// nobody checked. So a `null` from it means one of two entirely different things:
+//
+//   (a) THE BLOB IS BAD. It parses, it names the right member and short, and its signature does
+//       not verify under that member's recovery key. A verdict about the op. No later arrival
+//       changes it. TERMINAL — `BAD_ATTESTATION`, as it always was.
+//   (b) THIS MAC HAS NEVER SEEN THESE BYTES. The roster read that would have verified them
+//       happened before their author joined, or before that member paired the Mac that authored
+//       them. A verdict about MY OWN KNOWLEDGE, not about the op, and the next roster read
+//       changes it. This file cannot tell (a) from (b) — `attestOpen` returns the same `null` —
+//       and until F-SHELL-1 it answered both TERMINALLY.
+//
+// WHAT THAT COST, MEASURED IN THE SHIPPED BINARY. `member.set{dev.<short>}` is the ONLY op that
+// can ever attest a device, and a rejection releases the cursor past it (ADR 003 §3.3: the
+// cursor advances once the batch is folded, and a refused op is folded-with-nothing). So one (b)
+// answer made that peer's device permanently unattested HERE — every entry it ever authors parks
+// `unattestedDevice`, is retried five times and is given up on — while the same bytes opened
+// correctly on every peer whose roster happened to be fresher. The founder in the shell run
+// received a joiner's entry in **0 of 5** launches, and its refusal ledger read 0 → 6 → 13 → 25
+// over four launches because `ensureAttestedDevice` re-signed an unchanged fact every boot and
+// minted a NEW unverifiable blob each time. That second half is fixed at its root, in
+// `crypto/identity.js#ensureAttestedDevice`, which now mints once and stores.
+//
+// THE SPLIT THIS FILE MAKES, AND WHY IT IS SOUND WITHOUT A NEW CHECK. There is exactly one shape
+// in which (b) can honestly happen, and this fold can already recognise it: the possession
+// proof it computes three paragraphs above. Every honest attestation is filed by the device it
+// attests — "There is no flow in which one device files another device's attestation, and there
+// cannot be" — so `devOf(op.ts) === att.deviceShort` on a single-register patch is the honest
+// self-attestation and nothing else. Held (`UNATTESTED_DEVICE`, curable, parked by the store).
+// Anything else — a second register in the same patch, or a short the author cannot prove —
+// stays `BAD_ATTESTATION`. Nothing is ADMITTED that was not admitted before: the register is
+// still not folded, the device is still not attested, `attestationOf` still refuses it, and the
+// op is still in `rejected`. The only thing that changes is whether the line survives on disk to
+// be asked about again.
+//
+// AND IT IS BOUNDED — see the block above `firstHeld`, which is where the answer to
+// "can an attacker fill the park?" lives.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** b64url is the alphabet ADR 002 §2.3 fixes for the two raw public points. */
@@ -801,17 +879,40 @@ export function foldAuthorized(ops, ctx) {
   // the same key-injection hole §2.3 exists to close, entered through the front door.
   const attestOpen = typeof ctx.attestOpen === 'function' ? ctx.attestOpen : null;
   const attestVerifyFn = typeof ctx.attestVerify === 'function' ? ctx.attestVerify : null;
-  /** @param {string} memberId @param {string} blob @param {DeviceAttestation} parsed */
+  // IS THERE A VERIFIER AT ALL — a CONFIGURATION fact, and the line that keeps F-SHELL-1's park
+  // from swallowing a wiring bug. With neither injection present every blob fails condition (4)
+  // for a reason that has nothing to do with the roster: nobody wired an opener. That is the
+  // E6-1 defect (`sync-family.test.js` §7a: "what every Mac in this product had until the
+  // integration"), it is not curable by any op that could ever arrive, and it must stay loud and
+  // TERMINAL. The park below is only ever reached when a verifier IS installed and answered
+  // `null` for one blob — which is the case that means "my roster is older than this claim".
+  const haveVerifier = attestOpen !== null || attestVerifyFn !== null;
+  /**
+   * THREE ANSWERS, NOT TWO — F-SHELL-1. `false` used to mean both "this blob is bad" and "I have
+   * never been shown this blob", and stage 0a answered the two identically and terminally.
+   *
+   *   `'ok'`        the blob verifies.
+   *   `'disagree'`  the opener ANSWERED and its payload is not the payload in the register bytes.
+   *                 A contradiction, decidable here, and hostile: an opener allowed to disagree
+   *                 could smuggle in an attestation the log does not carry, which is the
+   *                 key-injection hole §2.3 exists to close entered through the front door.
+   *                 ALL SIX fields, not four (R4-15a) — `kexPubRaw` is the key-agreement point
+   *                 §4.2 wraps the space key to. Stays TERMINAL.
+   *   `'unknown'`   the opener returned `null`, or the legacy boolean verifier said no. That is
+   *                 a statement about what THIS Mac has verified from the roster so far, and the
+   *                 roster moves. Stage 0a holds it, under the bound stated there.
+   *
+   * @param {string} memberId @param {string} blob @param {DeviceAttestation} parsed
+   * @returns {'ok'|'unknown'|'disagree'}
+   */
   const attestationVerifies = (memberId, blob, parsed) => {
     if (attestOpen) {
       const opened = attestOpen(memberId, blob);
-      if (opened === null || typeof opened !== 'object') return false;
-      // ALL SIX, not four (R4-15a). `kexPubRaw` is the key-agreement point §4.2 wraps the space
-      // key to; an opener allowed to disagree about it is a key-injection channel.
-      return ATT_FIELDS.every((f) => opened[f] === parsed[f]);
+      if (opened === null || typeof opened !== 'object') return 'unknown';
+      return ATT_FIELDS.every((f) => opened[f] === parsed[f]) ? 'ok' : 'disagree';
     }
-    if (attestVerifyFn) return !!attestVerifyFn(memberId, blob);
-    return false;
+    if (attestVerifyFn) return attestVerifyFn(memberId, blob) ? 'ok' : 'unknown';
+    return 'unknown';        // `haveVerifier` is false here, so stage 0a keeps this terminal
   };
   // §4.0: "Personal-space ops are checked against the local device set." When the caller does
   // not know it (solo mode before any device record exists), the check degrades to `act === me`
@@ -923,6 +1024,7 @@ export function foldAuthorized(ops, ctx) {
   const unprovenShorts = new Set();    // claimed by a record that did not file it FROM that device
   const attestOps = [];
   const wellFormed = [];
+  const heldClaims = [];               // F-SHELL-1: self-filed, single-register, unverifiable YET
   const rest = [];
 
   for (const op of all) {
@@ -952,13 +1054,26 @@ export function foldAuthorized(ops, ctx) {
     //       with (3) already enforced the two are equal by then. Belt and braces, because if (3)
     //       ever moves this line is the one still holding.
     let bad = false;
+    let held = false;
     for (const name of devNames) {
       const blob = op.f[name];
       const att = parseAttestationBlob(blob);
       if (!att || att.memberId !== subject || att.deviceShort !== shortOfRegisterName(name)) { bad = true; break; }
-      if (!attestationVerifies(subject, blob, att)) { bad = true; break; }
+      const verdict4 = attestationVerifies(subject, blob, att);
+      if (verdict4 === 'ok') continue;
+      if (verdict4 === 'disagree') { bad = true; break; }
+      // ── F-SHELL-1 · THE ONE FAILURE HERE THAT IS ABOUT *THIS DEVICE'S KNOWLEDGE* ──────────
+      // See "TWO WAYS TO FAIL CONDITION (4)" above stage 0a. A single-register SELF-attestation
+      // — `devOf(op.ts) === att.deviceShort`, the possession proof this file already computes —
+      // that the injected opener cannot answer for is a statement about MY roster, not about the
+      // op. It is refused CURABLY, and `store.applyRemote` parks the line under
+      // `PARK_REASONS.ATTESTATION` rather than dropping it past a released cursor.
+      if (haveVerifier && devNames.length === 1 && devOf(op.ts) === att.deviceShort) { held = true; continue; }
+      bad = true;
+      break;
     }
     if (bad) { reject(op, STAGES[0], REJECT_REASONS.BAD_ATTESTATION); continue; }
+    if (held) { heldClaims.push(op); continue; }
     wellFormed.push(op);
   }
 
@@ -980,6 +1095,60 @@ export function foldAuthorized(ops, ctx) {
     const wins = Object.keys(op.f).every((name) => firstClaim.get(`${op.e}\u0000${name}`).op === op.id);
     if (wins) attestOps.push(op);
     else reject(op, STAGES[0], REJECT_REASONS.WRITE_ONCE);
+  }
+
+  // ── F-SHELL-1 · THE PARK, AND THE BOUND THAT MAKES IT SAFE TO HAVE ─────────────────────
+  //
+  // A parkable refusal an attacker can mint at will is a denial-of-service primitive, and this
+  // project has been bitten by exactly that twice this month (the epoch ladder, the parking
+  // slot). So the bound is stated here, beside the code that enforces it, and it is not a
+  // constant somebody picked:
+  //
+  //   **AT MOST ONE HELD ATTESTATION CLAIM PER `(member record, dev.<short>)` REGISTER - and a
+  //   register may be held only by an op the holder of that short's PRIVATE KEY authored.**
+  //
+  // Three facts compose into that, and each is enforced above rather than hoped for:
+  //   1. `op.act === subject` (the `NOT_SELF` rejection) - a claim only ever lands in the
+  //      author's OWN member record, so nobody can fill a peer's record;
+  //   2. `devNames.length === 1 && devOf(op.ts) === att.deviceShort` - the register name is the
+  //      short of the key that STAMPED the op. `openOp`'s P2, P3 and check 4 bind that stamp to
+  //      the signing key the envelope verified under (see the possession-proof block in section
+  //      2), so a member cannot vary the register name without holding a second device private
+  //      key - and that device has to be one the relay already admitted into this space;
+  //   3. this pass - for one `(e, dev.<S>)` register only the MINIMAL claim under the join's own
+  //      order may be held. Every other claim on that register is a second claim on a write-once
+  //      register and is refused `WRITE_ONCE`, terminally, exactly as it always was.
+  //
+  // So the park a hostile member can create is bounded by the number of devices they hold, which
+  // is the same number that bounds their legitimate registers. It does not grow with the number
+  // of ops they send, with the number of blobs they mint, or with time; the `dev.*` registers a
+  // circle can hold were already bounded by the relay's own device rows, and this adds nothing.
+  //
+  // A register ALREADY CLAIMED by an admitted op is never held either: the verified claim won,
+  // and a later unverifiable one is `WRITE_ONCE` rather than "ask me again". Verified ops are
+  // judged EXACTLY as they were before this change - `firstClaim` above is still computed over
+  // `wellFormed` alone - so nothing that was admitted yesterday becomes a park today.
+  const claimedByVerified = new Set();
+  for (const op of attestOps) for (const name of Object.keys(op.f)) claimedByVerified.add(`${op.e}\u0000${name}`);
+  const firstHeld = new Map();                     // `${e}\u0000${field}` -> write
+  for (const op of heldClaims) {
+    for (const name of Object.keys(op.f)) {
+      const k = `${op.e}\u0000${name}`;
+      const w = { stamp: op.ts, op: op.id, value: op.f[name] };
+      const cur = firstHeld.get(k);
+      if (cur === undefined || cmpWrites(w, cur) < 0) firstHeld.set(k, w);
+    }
+  }
+  for (const op of heldClaims) {
+    const keys = Object.keys(op.f).map((name) => `${op.e}\u0000${name}`);
+    const wins = keys.every((k) => !claimedByVerified.has(k) && firstHeld.get(k).op === op.id);
+    // `UNATTESTED_DEVICE` and not a new code, deliberately. `sync/personal.js#CURABLE_REFUSALS`
+    // and `store.js`'s copy of it already define it as "a statement about what has arrived so far
+    // rather than about the op itself", and both readers - the store's park under
+    // `PARK_REASONS.ATTESTATION` and the family sync's `defer` - already do the right thing with
+    // it. A new code would need edits in both of those files and in `sync/family.js`, none of
+    // which this pass owns; the docblock on the constant is amended to say stage 0a reaches it.
+    reject(op, STAGES[0], wins ? REJECT_REASONS.UNATTESTED_DEVICE : REJECT_REASONS.WRITE_ONCE);
   }
 
   // The device table is read back OUT of the folded registers, not out of the ops, so it can

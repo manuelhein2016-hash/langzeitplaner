@@ -60,7 +60,9 @@ no on-call rotation, no dashboard and no second opinion, and it says plainly whe
 ## 2. Standing it up — the one-time work
 
 `docs/v2/RELEASE.md` §7.2 and §7.3 are the canonical steps and are not repeated here. What follows
-is the operator's view: the order, the traps, and the two blockers that are still open.
+is the operator's view: the order, the traps, and what is still owed. The E10 blocker that
+used to head this section — a missing `server/prisma/migrations/` — is closed (§2.4); the
+pre-flight that failed to notice it is now the thing under test (§2.4.1).
 
 ### 2.1 Order
 
@@ -69,7 +71,7 @@ is the operator's view: the order, the traps, and the two blockers that are stil
    *Other* → leave install/build commands alone.
 3. Prisma Postgres database in **`eu-central-1`**.
 4. `DATABASE_URL` in Vercel, **Production**, carrying `connection_limit=1`.
-5. **`server/prisma/migrations/` — see §2.4. Nothing works before this.**
+5. **Run `node .github/scripts/check-server-config.mjs` and read every row it says it did not check** (§2.4.1). It exits 0 on the committed tree; it is the pre-flight, not a formality.
 6. Deploy. Then §2.5's smoke test.
 7. Only then is `docs/v2/MOM-TEST.md` §6 runnable past step 7.
 
@@ -96,33 +98,133 @@ the production `DATABASE_URL` migrates production from a feature branch. The def
 previews skip migrations and say so in the build log — is the safe, slightly annoying one, and it
 is the correct default.
 
-### 2.4 ⛔ BLOCKER — `server/prisma/migrations/` does not exist
+### 2.4 `server/prisma/migrations/` — generated, committed, and verified
 
 ```
-$ ls server/prisma/
-schema.prisma
+$ ls server/prisma/migrations/
+20260903092140_init/   migration_lock.toml
 ```
 
-`prisma migrate deploy` **applies** migrations; it does not create them. The first deploy against
-an empty database therefore applies nothing, creates no tables, and every query fails on a missing
-relation. `check-server-config.mjs` reports `ok every check passed` and is nonetheless letting a
-deploy through that cannot work — E2-VERIFICATION §8 filed that gap against E1 and it is still
-open.
+**This was the E10 release blocker and it is closed.** The section is kept — rewritten rather
+than deleted — because the *reason* it was a blocker outlives the blocker itself, and because the
+next schema change re-creates it exactly.
 
-**What to run once, on a machine with a scratch Postgres, and commit:**
+`prisma migrate deploy` **applies** migrations; it does not create them. Nothing else in the
+pipeline creates a table. So while `server/prisma/migrations/` was absent, the first deploy
+against an empty database applied nothing, created no tables, went live green, and would have
+failed every query on a missing relation — in production, after the DMG had gone out. And
+`check-server-config.mjs` printed `ok every check passed` on exactly that tree.
+
+**That second sentence is the defect worth remembering.** A missing directory is a five-minute
+fix. A pre-flight check that reports success on a configuration that cannot work is believed, and
+it is believed by an operator at the moment they have the least appetite to doubt it. The old
+script guarded every substantive check with `if (existsSync(subject))` and routed the misses to an
+`owed` list that was printed and then ignored, so *absence* was the one state it could not fail on.
+
+**If you ever need to regenerate the set** — a new model, a new column, a changed constraint:
 
 ```
 cd server
-DATABASE_URL="postgres://…/scratch" npx prisma migrate dev --name init
+DATABASE_URL="postgres://…/scratch" npx prisma migrate dev --name <what-changed>
 git add server/prisma/migrations && git commit
 ```
 
 `migrate dev` is safe **only** against a throwaway database. `check-server-config.mjs` fails the
-build if `migrate dev` ever appears in `vercel.json`, and that check is right.
+build if `migrate dev` or `db push` ever appears in `vercel.json` (rows V3/V4), and that check is
+right.
 
-After the first deploy, `server/prisma/migrations/` is **append-only**: `server.yml` diffs it and
-refuses a change that modifies, deletes or renames an existing migration, because Vercel serves
-the new deployment with the old one already torn down.
+After the first deploy, `server/prisma/migrations/` is **append-only**: `.github/workflows/
+server.yml` (the `--diff-filter=MDR` step) refuses a change that modifies, deletes or renames an
+existing migration, because Vercel serves the new deployment with the old one already torn down.
+
+#### 2.4.1 What the readiness check can now fail on — the enumeration
+
+Run it before every deploy:
+
+```
+node .github/scripts/check-server-config.mjs      # 41 rows: 39 offline, 2 that need a database
+LZP_CHECK_VERBOSE=1 node .github/scripts/…        # same, also listing the rows that passed
+node .github/scripts/check-server-config.mjs --json   # the ledger, for a script to read
+```
+
+A check is worth exactly what its failure modes are worth. Every row below was proven to fail by
+constructing the broken state on a scratch copy of the tree and confirming *which* row dies;
+`tests/server/deploy-readiness.test.js` is that enumeration, kept as 54 test rows so the answer
+cannot quietly change. **The honest tree passes all 39 offline rows with 0 failures** — that control is §1 of
+the test file, so a check that failed everything could not pass either.
+
+| row | fails when | what it costs if it does not |
+|---|---|---|
+| **A1/A1b/A2/A3/A4** | the deployed adapter cannot be resolved from the entry point, or is ambiguous | the check answers for a store it did not identify. `server/adapters/` has four; only `prisma` has a schema, and a verdict phrased as if it covered all four is a verdict about nothing |
+| **V1–V10** | `vercel.json` is missing, malformed, out of region, or its `buildCommand` skips `migrate deploy`/`generate`, uses `db push`, or migrates without a `VERCEL_ENV` gate; CORS added; `no-store` dropped; `functions` glob matches nothing; `npm ci` without a lockfile | V2 makes the Datenschutz region text false (21.3). V6 lets a **preview branch migrate production**. V9 is a deploy where every route 404s and the smoke test misreads it as "not deployed yet" |
+| **P1–P6** | the root app gains a dependency or mentions Prisma; the server manifest/lockfile is missing or disagrees; the Prisma CLI and client versions diverge | P5 fails **inside** the Vercel build, after the previous deployment is torn down |
+| **S1–S5** | the schema is missing, hardcodes its URL, carries literal credentials, or changes provider | S3 means the password is in git history and must be rotated, not just deleted |
+| **M1** | **`server/prisma/migrations/` is absent** | the original blocker: a live function over a database with no tables |
+| **M2** | the directory exists but is empty | a `mkdir` creates exactly as many tables as no directory |
+| **M3** | `migration_lock.toml` is missing or names another provider | `migrate deploy` aborts mid-build |
+| **M4** | a migration has no `migration.sql`, or it is empty | an empty migration is recorded as applied and can never be repaired by re-running it |
+| **M5/M6/M7** | a model, column or enum the schema declares is created by no migration | the client SELECTs what Postgres does not have — on the first query, not in the build |
+
+**The eight rows below are new, and each one closes a state the check used to wave through.**
+They exist because M5/M6/M7 compare *names*: a table name, a column name, an enum name. None of
+the following renames anything, so a name comparison sees a perfect tree — and four of them are
+**silent in production**, which makes them worse than the missing directory this ticket started
+from. That one at least failed loudly on the first request.
+
+| row | fails when | what it costs — measured, not supposed |
+|---|---|---|
+| **M9** | a `@@id` disagrees with the migration's PRIMARY KEY | **SILENT.** Narrow `KeyWrap.@@id` by its `senderDeviceId` and finding **T5-K3 reopens**: one member can overwrite every other depositor's wrap for every epoch below her own, and the relay records it as coverage because coverage counts ROWS and the relay may not open a wrap. Nobody online notices. The readers who lose are every future joiner, every device paired in tomorrow, and ADR 002 §7.3's A2 recovery |
+| **M10** | a `@@unique` is created by no migration | **SILENT.** `Op(spaceId, opId)` is the idempotency key — without it a retry after a dropped response duplicates the entry on the poster. `Member(spaceId, colorRef)` is story 15.3 and the *only* reason `colorRef` is plaintext. `Device(spaceId, deviceShort)` is what makes ADR 003 §2 step 4 resolve to one row |
+| **M11** *(warn)* | a non-unique `@@index` is missing | a sequential scan of the op log. A warning, not a failure: it is not a wrong answer, and failing the deploy for it trains the operator to override the check. It does **not** report an index the primary key already serves — `Op_pkey(spaceId, seq)` covers `@@index([spaceId, seq])` |
+| **M12** | a column type disagrees | **SILENT.** A `Bytes` column created as `TEXT` is a column that *can* hold a readable note. `store-interface.js` refuses a String at the adapter boundary, but the addendum §3 blindness claim is about what the database can hold, not only about what today's handlers write |
+| **M13** | nullability disagrees | `Member.removedAt` created `NOT NULL` means no live member can be inserted at all. `Space.founderMemberId` must stay nullable — finding T5-M1a requires its null to fail **open** |
+| **M14** | a `@default()` has no `DEFAULT` | Prisma omits a defaulted column from the INSERT, so `Space.nextSeq` without its default fails every space creation at **runtime**. The build is green |
+| **M15** | a foreign key or its `ON DELETE` disagrees | `onDelete: Cascade` is how deleting a Space purges its ops, members, devices, invites, epochs and wraps — story 20.2 and the Datenschutz deletion promise. Downgraded to `NO ACTION` the DELETE errors; dropped, the rows are orphaned and the promise is false |
+| **M16** | the migrations create a table the schema does not declare | **SILENT.** Nothing queries it, so nothing fails — but story 21.1's Datenschutz inventory enumerates everything this relay can see, and a table outside `schema.prisma` is outside that list and outside `store-contract.test.js`'s closed column set |
+
+**L1 and L2 need a live database and are reported as *not checked*, never as passes.** The script
+does not print "every check passed" while anything is unchecked; that sentence is what let the
+missing migrations survive three audits. Settle them with:
+
+```
+cd server && npm ci
+DATABASE_URL="…?connection_limit=1" SHADOW_DATABASE_URL="…/scratch" \
+  node ../.github/scripts/check-server-config.mjs --deep
+```
+
+#### 2.4.2 The migration was applied to a real Postgres, and this is what it produced
+
+The committed migration was swept into `101073b` by a workflow that was killed mid-flight, so it
+was **committed without ever being verified by the work that owned it**. It has since been applied
+to a real **PostgreSQL 17.10** on a scratch cluster and introspected. Measured, not assumed:
+
+| | |
+|---|---|
+| `migration.sql` applied in a single transaction | **no errors** |
+| tables created | **10** — `Space Member Device Op Epoch KeyWrap Invite PairSession Nonce RateBucket` |
+| enum types | **1** — `SpaceKind(PERSONAL, FAMILY)` |
+| columns | **64**, every type, nullability and default matching `schema.prisma` |
+| unique constraints | **3** · indexes **8** · foreign keys **6**, all `ON DELETE CASCADE` |
+
+The eight constraints the ADRs actually lean on were then exercised with live SQL, not inspected:
+
+| exercised | result |
+|---|---|
+| second member on a taken `colorRef` | **refused** — `Member_spaceId_colorRef_key` (15.3) |
+| same `deviceShort` in a **different** space | **allowed** — the per-space namespace, finding E2-203-1 |
+| same `deviceShort` in the **same** space | **refused** — `Device_spaceId_deviceShort_key` |
+| same `opId` twice in one space | **refused** — `Op_spaceId_opId_key`, the idempotency key |
+| two **different depositors** on one `(epoch, recipient)` cell | **both accepted** — the honest wrap and the junk coexist, which is what T5-K3's residual requires |
+| the **same** depositor twice on one cell | **refused** — write-once holds |
+| a `rec_<memberId>` recipient with no `Device` row | **accepted** — `recipientId` is deliberately not a foreign key (E3-4) |
+| `DELETE FROM "Space"` | members, devices, ops and wraps all **purged** — the 20.2 cascade works |
+
+The check's offline model of `migration.sql` was diffed against that live database column by
+column: **10 tables, 64 columns, 3 uniques, 8 indexes, 6 FKs — exact agreement**, including every
+`ON DELETE` action. That is what licenses M9–M16 to answer without a database in CI.
+
+**What this does not prove:** that `server/adapters/prisma.js` works against it. That needs the
+generated client and is §2.5's `store-contract.test.js` run, which is still owed.
 
 ### 2.5 The smoke test that settles four unverified claims at once
 
@@ -164,12 +266,19 @@ That is the 60-case contract both other adapters already pass. Until it runs, tr
 
 ### 2.6 What is still owed before a family can be told the relay exists
 
+Two of the four rows this table used to carry are **closed**, and they are listed as closed rather
+than deleted, because "it was owed and then it arrived" is the fact an operator reading an older
+copy of this file needs.
+
 | owed | why it blocks |
 |---|---|
-| `server/prisma/migrations/` | §2.4 — nothing works |
 | the relay address in the invitation e-mail | `MOM-TEST.md` §2.3 E-2 — the join screen asks for an address nobody sent |
-| the 21.3 Datenschutz section in the app | LZP-1001. The words *Frankfurt*, *Vercel* and *Prisma* appear **nowhere** in `src/` — verified by grep. §7 below is the source text; it is not yet on a screen |
 | a `RateBucket` cleanup job, or honest wording without one | §7.2 |
+
+| closed | how it was settled |
+|---|---|
+| ~~`server/prisma/migrations/`~~ | generated and committed; applied to a real PostgreSQL 17.10 and introspected — §2.4.2. The pre-flight row that failed to notice its absence is §2.4.1's **M1**, now covered by `tests/server/deploy-readiness.test.js` §2 |
+| ~~the 21.3 Datenschutz section in the app~~ | LZP-1001. *Frankfurt*, *Vercel* and *Prisma* now appear in `src/js/settings.js` in both languages — the claim in the previous edition of this table ("nowhere in `src/`, verified by grep") is **no longer true**, and §7.1 below remains the source text |
 
 ---
 
@@ -356,6 +465,23 @@ in `server/core/limits.js` (which pins the string `DOES NOT CLOSE` so that a rat
 be credited with a finding it does not close). They are here because an operator who meets one
 should recognise it in a runbook rather than diagnose it from scratch — the symptoms are strange,
 and the wrong first move makes both worse.
+
+> **Re-verified against the code at LZP-1008, because an operator meeting one of these has no
+> other source and a stale runbook entry is worse here than no entry.** Every load-bearing value
+> below was checked, not remembered:
+> `MAX_WRAPS = 1024` (`server/core/handlers/spaces.js:420`); the `413 payload_too_large` with
+> `field: "wraps"` that §5.1 tells you to look for is thrown at `spaces.js:711` and nowhere else;
+> `epochRotationsPerMemberHour: 20` (`server/core/limits.js:94`); the wall arithmetic
+> (1024 ÷ 2 = 512, ÷ 3 = 341, ÷ 8 = 128, ÷ 16 = 64) is correct as tabulated; `DOES NOT CLOSE`
+> appears 4× in `limits.js`; `tests/fleet/e6-gate-keys.test.js` still titles §1c *"PRICED, NOT
+> CLOSED"* and §2a *"SUCCEEDED — and NOT by volume"*; and the sentence §5.2 tells you the family
+> will report — „Dieser Mac hat die Schlüssel des Kreises noch nicht vollständig." — is the string
+> at `src/js/family/removal.js:216`, so it is the one they will actually see.
+>
+> The SQL in both procedures reads `Epoch`, `KeyWrap.senderDeviceId`, `Space.currentEpoch` and
+> `Op.epoch`. All four exist in the migration that is now committed, and §2.4.2 confirms they
+> exist in a real database built from it — so these procedures are runnable, which before this
+> ticket they were not.
 
 ### 5.1 The epoch ladder — a space that can no longer rotate
 

@@ -1,7 +1,7 @@
 {
   "meta": {
     "product": "LangzeitPlaner",
-    "generated": "2026-08-25",
+    "generated": "2026-09-03",
     "purpose": "Machine-readable traceability backbone for the v2 implementation. Story numbers are the contract; ticket text is the summary.",
     "sources": {
       "v1": "LangzeitPlaner_Design_Spec_v1.md (v1.0, 2026-08-01) — F1-F14, 79 stories",
@@ -20,600 +20,2329 @@
       "points": 239,
       "decisions": 6,
       "constraints": 13,
-      "ticketsNote": "68 from the sprint plan + LZP-1009 (feedback button), added by the PO on 2026-09-03 and NOT built."
+      "ticketsNote": "68 from the sprint plan + LZP-1009 (feedback button). LZP-1009’s modules now exist in src/js/feedback/ but are NOT WIRED (family/mount.js owes setFeedbackPort). The E10 verdicts for LZP-1001/1007/1009 were corrected on 2026-09-03; see verification.final."
     }
   },
-
   "stories": [
-    { "id": "15.1", "feature": "F15", "source": "v2", "priority": "Must",
+    {
+      "id": "15.1",
+      "feature": "F15",
+      "source": "v2",
+      "priority": "Must",
       "text": "By default I'm in solo mode and nothing has changed from v1 — no account, no network activity, no prompts; the family features exist only behind an explicit \"Familienkreis erstellen / beitreten\" entry point in settings.",
-      "tickets": ["LZP-601", "LZP-1005"], "amendedBy": [] },
-    { "id": "15.2", "feature": "F15", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-601",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "15.2",
+      "feature": "F15",
+      "source": "v2",
+      "priority": "Must",
       "text": "I create a Familienkreis with a name (\"Familie Weber\"), automatically become its admin, and receive a shareable invite code/link, so setup is one screen.",
-      "tickets": ["LZP-601", "LZP-203", "LZP-1005"], "amendedBy": [] },
-    { "id": "15.3", "feature": "F15", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-601",
+        "LZP-203",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "15.3",
+      "feature": "F15",
+      "source": "v2",
+      "priority": "Must",
       "text": "Mom joins by pasting the invite code into her app and choosing a display name and a personal color — no email, no password, no registration form — so a non-technical family member gets in within a minute.",
-      "tickets": ["LZP-602", "LZP-203", "LZP-108", "LZP-1006", "LZP-1005"], "amendedBy": [] },
-    { "id": "15.4", "feature": "F15", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-602",
+        "LZP-203",
+        "LZP-108",
+        "LZP-1006",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "15.4",
+      "feature": "F15",
+      "source": "v2",
+      "priority": "Must",
       "text": "All members see the member list (name, color, initial), so everyone knows who's in the circle.",
-      "tickets": ["LZP-603", "LZP-203", "LZP-1005"], "amendedBy": [] },
-    { "id": "15.5", "feature": "F15", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-603",
+        "LZP-203",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "15.5",
+      "feature": "F15",
+      "source": "v2",
+      "priority": "Must",
       "text": "Invite codes are single-use, expire after 7 days, and are revocable by the admin, so a leaked link can't haunt the family.",
-      "tickets": ["LZP-604", "LZP-203", "LZP-1005"], "amendedBy": [] },
-    { "id": "15.6", "feature": "F15", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-604",
+        "LZP-203",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "15.6",
+      "feature": "F15",
+      "source": "v2",
+      "priority": "Must",
       "text": "I can change my display name and color anytime and it propagates to everyone's boards, so identity stays current without admin involvement.",
-      "tickets": ["LZP-603", "LZP-203", "LZP-1005"], "amendedBy": [] },
-
-    { "id": "16.1", "feature": "F16", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-603",
+        "LZP-203",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "16.1",
+      "feature": "F16",
+      "source": "v2",
+      "priority": "Must",
       "text": "Everything I create is private by default — joining a family changes nothing about existing or new entries until I explicitly share them — so oversharing is structurally impossible.",
-      "tickets": ["LZP-701", "LZP-1005"], "amendedBy": [] },
-    { "id": "16.2", "feature": "F16", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-701",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "16.2",
+      "feature": "F16",
+      "source": "v2",
+      "priority": "Must",
       "text": "Every note and bar has one of three visibility levels: Privat (only me), Belegt (others see that the day/range is taken, and by whom, but no text), Geteilt (others see everything) — so I can coordinate without disclosing.",
-      "tickets": ["LZP-701", "LZP-404", "LZP-1005"], "amendedBy": [] },
-    { "id": "16.3", "feature": "F16", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-701",
+        "LZP-404",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "16.3",
+      "feature": "F16",
+      "source": "v2",
+      "priority": "Must",
       "text": "I change an entry's visibility with a three-state control in its selected state and popover, two clicks maximum, so privacy management never feels like administration.",
-      "tickets": ["LZP-702", "LZP-1005"], "amendedBy": ["A7"] },
-    { "id": "16.4", "feature": "F16", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-702",
+        "LZP-1005"
+      ],
+      "amendedBy": [
+        "A7"
+      ]
+    },
+    {
+      "id": "16.4",
+      "feature": "F16",
+      "source": "v2",
+      "priority": "Must",
       "text": "A personal category can set a default visibility for new entries in it (e.g., category \"Familie\" ⇒ Geteilt), so routine sharing costs zero extra clicks while the global default stays private.",
-      "tickets": ["LZP-703", "LZP-1005"], "amendedBy": [] },
-    { "id": "16.5", "feature": "F16", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-703",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "16.5",
+      "feature": "F16",
+      "source": "v2",
+      "priority": "Must",
       "text": "I can change visibility at any time; a downgrade removes the entry (or its details) from other members' boards at the next sync, so nothing shared is shared forever.",
-      "tickets": ["LZP-704", "LZP-1005"], "amendedBy": [] },
-    { "id": "16.6", "feature": "F16", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-704",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "16.6",
+      "feature": "F16",
+      "source": "v2",
+      "priority": "Must",
       "text": "My shared and busy entries carry a small badge on my own board, so I always see my exposure at a glance and never have to wonder what Mom can see.",
-      "tickets": ["LZP-705", "LZP-1005"], "amendedBy": [] },
-    { "id": "16.7", "feature": "F16", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-705",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "16.7",
+      "feature": "F16",
+      "source": "v2",
+      "priority": "Must",
       "text": "A Belegt entry appears on others' boards as a neutral block with my color/initial and the word \"Belegt\" — duration and owner are deliberately visible, the content deliberately not — so \"I'm away, don't plan with me\" works without explanation.",
-      "tickets": ["LZP-701", "LZP-706", "LZP-1005"], "amendedBy": [],
-      "note": "Scope-lever #3 (addendum §10) and Decision D5. LZP-701 publishes the client-side-redacted op; full content never leaves the device." },
-
-    { "id": "17.1", "feature": "F17", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-701",
+        "LZP-706",
+        "LZP-1005"
+      ],
+      "amendedBy": [],
+      "note": "Scope-lever #3 (addendum §10) and Decision D5. LZP-701 publishes the client-side-redacted op; full content never leaves the device."
+    },
+    {
+      "id": "17.1",
+      "feature": "F17",
+      "source": "v2",
+      "priority": "Must",
       "text": "Shared and Belegt entries from other members appear on my board automatically in their date rows, so family plans live exactly where my plans live.",
-      "tickets": ["LZP-801", "LZP-1005"], "amendedBy": [] },
-    { "id": "17.2", "feature": "F17", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-801",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "17.2",
+      "feature": "F17",
+      "source": "v2",
+      "priority": "Must",
       "text": "Color logic: my entries always render in my category colors (my board stays mine); others' entries render in the member's personal color with an initial chip (\"M\") — so \"whose is this?\" is answered before \"what is it?\".",
-      "tickets": ["LZP-801", "LZP-1005"], "amendedBy": [],
-      "note": "Decision D4 confirms the person-color rule before LZP-801 design." },
-    { "id": "17.3", "feature": "F17", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-801",
+        "LZP-1005"
+      ],
+      "amendedBy": [],
+      "note": "Decision D4 confirms the person-color rule before LZP-801 design."
+    },
+    {
+      "id": "17.3",
+      "feature": "F17",
+      "source": "v2",
+      "priority": "Must",
       "text": "The legend gains a member section: each member with color and a visibility toggle, so I can hide Papa's entries the same way I hide a category (4.3).",
-      "tickets": ["LZP-802", "LZP-1005"], "amendedBy": ["A3"] },
-    { "id": "17.4", "feature": "F17", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-802",
+        "LZP-1005"
+      ],
+      "amendedBy": [
+        "A3"
+      ]
+    },
+    {
+      "id": "17.4",
+      "feature": "F17",
+      "source": "v2",
+      "priority": "Must",
       "text": "Family entries obey all v1 density rules — lanes cap (3.8), \"+n\" overflow (2.4), truncation (2.5) — so a busy family can never break the board's legibility.",
-      "tickets": ["LZP-803", "LZP-1007", "LZP-1005"], "amendedBy": [] },
-    { "id": "17.5", "feature": "F17", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-803",
+        "LZP-1007",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "17.5",
+      "feature": "F17",
+      "source": "v2",
+      "priority": "Must",
       "text": "Entries added or changed by others since my last session carry a quiet \"neu\" dot that fades once I've seen them — no popups, no counters, no push — so I notice change the way I'd notice new ink on a wall calendar.",
-      "tickets": ["LZP-804", "LZP-1005"], "amendedBy": [] },
-    { "id": "17.6", "feature": "F17", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-804",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "17.6",
+      "feature": "F17",
+      "source": "v2",
+      "priority": "Must",
       "text": "Hover/popover shows attribution: \"von Mama · geteilt · geändert So.\", so provenance is one glance away but never printed on the board.",
-      "tickets": ["LZP-805", "LZP-1005"], "amendedBy": ["A7"] },
-    { "id": "17.7", "feature": "F17", "source": "v2", "priority": "Could",
+      "tickets": [
+        "LZP-805",
+        "LZP-1005"
+      ],
+      "amendedBy": [
+        "A7"
+      ]
+    },
+    {
+      "id": "17.7",
+      "feature": "F17",
+      "source": "v2",
+      "priority": "Could",
       "text": "A per-device density setting (Kompakt / Komfort) slightly increases row height and font size on that machine only — Mom's display and eyes are not mine — accepting horizontal scroll as the trade.",
-      "tickets": ["LZP-808", "LZP-1005"], "amendedBy": [],
-      "note": "The only [Could] in v2 and scope-lever #1 (addendum §10). LZP-808 is S10 stretch only." },
-
-    { "id": "18.1", "feature": "F18", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-808",
+        "LZP-1005"
+      ],
+      "amendedBy": [],
+      "note": "The only [Could] in v2 and scope-lever #1 (addendum §10). LZP-808 is S10 stretch only."
+    },
+    {
+      "id": "18.1",
+      "feature": "F18",
+      "source": "v2",
+      "priority": "Must",
       "text": "By default only the owner can edit or delete an entry; other members view — so nobody's plans can be rewritten behind their back.",
-      "tickets": ["LZP-901", "LZP-1005"], "amendedBy": [] },
-    { "id": "18.2", "feature": "F18", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-901",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "18.2",
+      "feature": "F18",
+      "source": "v2",
+      "priority": "Must",
       "text": "An entry-level flag \"Familie darf bearbeiten\" opts one entry into co-editing (the family vacation bar both of us drag around), so collaboration exists exactly where invited and nowhere else.",
-      "tickets": ["LZP-902", "LZP-404", "LZP-1005"], "amendedBy": [],
-      "note": "Scope-lever #2 (addendum §10): owner-only editing is livable if v2 must shrink." },
-    { "id": "18.3", "feature": "F18", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-902",
+        "LZP-404",
+        "LZP-1005"
+      ],
+      "amendedBy": [],
+      "note": "Scope-lever #2 (addendum §10): owner-only editing is livable if v2 must shrink."
+    },
+    {
+      "id": "18.3",
+      "feature": "F18",
+      "source": "v2",
+      "priority": "Must",
       "text": "As admin I can unshare any entry from the family space — it reverts to owner-private, it is never deleted — so moderation is possible but non-destructive, and I still can't read what was never shared.",
-      "tickets": ["LZP-903", "LZP-1005"], "amendedBy": [] },
-    { "id": "18.4", "feature": "F18", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-903",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "18.4",
+      "feature": "F18",
+      "source": "v2",
+      "priority": "Must",
       "text": "My ⌘Z undoes only my own actions; other members' changes never appear in my undo stack, so undo stays predictable in a shared world.",
-      "tickets": ["LZP-405", "LZP-1005"], "amendedBy": [] },
-    { "id": "18.5", "feature": "F18", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-405",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "18.5",
+      "feature": "F18",
+      "source": "v2",
+      "priority": "Must",
       "text": "If two people edit the same co-editable entry near-simultaneously, the later change wins per field, attribution updates (17.6), and only the person whose in-flight edit lost sees a quiet inline notice — conflicts at family scale are rare and must be treated as boring.",
-      "tickets": ["LZP-904", "LZP-406", "LZP-401", "LZP-1005"], "amendedBy": [] },
-    { "id": "18.6", "feature": "F18", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-904",
+        "LZP-406",
+        "LZP-401",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "18.6",
+      "feature": "F18",
+      "source": "v2",
+      "priority": "Must",
       "text": "Deletions propagate to all boards; my undo of my own deletion restores the entry as a new shared operation, so even destructive acts stay reversible for their author.",
-      "tickets": ["LZP-905", "LZP-1005"], "amendedBy": [] },
-
-    { "id": "19.1", "feature": "F19", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-905",
+        "LZP-1005"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "19.1",
+      "feature": "F19",
+      "source": "v2",
+      "priority": "Must",
       "text": "The app is fully functional offline — create, edit, move, everything — and queues changes locally; sync happens when connectivity returns, so a train ride never interrupts planning.",
-      "tickets": ["LZP-501", "LZP-202"], "amendedBy": [] },
-    { "id": "19.2", "feature": "F19", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-501",
+        "LZP-202"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "19.2",
+      "feature": "F19",
+      "source": "v2",
+      "priority": "Must",
       "text": "(amended v2.1) My changes upload within seconds of saving; others' changes arrive automatically — on app focus and every ~30–60 s while the app is open (serverless pull, Section 3). There is no sync button and no manual refresh anywhere.",
-      "tickets": ["LZP-501", "LZP-202"], "amendedBy": [],
-      "note": "Amended in place by v2.1 (serverless pull cadence); no UX copy may promise \"live\"." },
-    { "id": "19.3", "feature": "F19", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-501",
+        "LZP-202"
+      ],
+      "amendedBy": [],
+      "note": "Amended in place by v2.1 (serverless pull cadence); no UX copy may promise \"live\"."
+    },
+    {
+      "id": "19.3",
+      "feature": "F19",
+      "source": "v2",
+      "priority": "Must",
       "text": "Sync status is silent when healthy; only pending-offline or a real error produces a small, unobtrusive indicator — v1's \"silence is the design\" (F11) extends to the network.",
-      "tickets": ["LZP-504"], "amendedBy": [] },
-    { "id": "19.4", "feature": "F19", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-504"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "19.4",
+      "feature": "F19",
+      "source": "v2",
+      "priority": "Must",
       "text": "I can pair my own second Mac (desktop + laptop): my entire board — including private entries — syncs end-to-end encrypted between my devices only, so \"multi-desktop\" works for one person too.",
-      "tickets": ["LZP-502"], "amendedBy": [],
-      "note": "Scope-lever #4 (addendum §10)." },
-    { "id": "19.5", "feature": "F19", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-502"
+      ],
+      "amendedBy": [],
+      "note": "Scope-lever #4 (addendum §10)."
+    },
+    {
+      "id": "19.5",
+      "feature": "F19",
+      "source": "v2",
+      "priority": "Must",
       "text": "Adding a device means entering a short pairing code shown on an existing device (key transfer), not a password-reset flow — there are no passwords in this product.",
-      "tickets": ["LZP-306", "LZP-503", "LZP-302"], "amendedBy": [] },
-    { "id": "19.6", "feature": "F19", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-306",
+        "LZP-503",
+        "LZP-302"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "19.6",
+      "feature": "F19",
+      "source": "v2",
+      "priority": "Must",
       "text": "After long offline periods everything merges cleanly on return — including month rolls and yearly repeats that occurred meanwhile — so a laptop opened after three weeks just catches up.",
-      "tickets": ["LZP-505", "LZP-406"], "amendedBy": [] },
-
-    { "id": "20.1", "feature": "F20", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-505",
+        "LZP-406"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "20.1",
+      "feature": "F20",
+      "source": "v2",
+      "priority": "Must",
       "text": "As admin I can invite, revoke invites, remove members, rename the space, and transfer the admin role to another member, so the circle stays maintainable without support tickets.",
-      "tickets": ["LZP-605", "LZP-204"], "amendedBy": ["A10"] },
-    { "id": "20.2", "feature": "F20", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-605",
+        "LZP-204"
+      ],
+      "amendedBy": [
+        "A10"
+      ]
+    },
+    {
+      "id": "20.2",
+      "feature": "F20",
+      "source": "v2",
+      "priority": "Must",
       "text": "Removing a member deletes their shared/Belegt entries from all family boards and their access — their private data on their own machine is untouched, because it was never ours.",
-      "tickets": ["LZP-608", "LZP-303", "LZP-204"], "amendedBy": [] },
-    { "id": "20.3", "feature": "F20", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-608",
+        "LZP-303",
+        "LZP-204"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "20.3",
+      "feature": "F20",
+      "source": "v2",
+      "priority": "Must",
       "text": "Leaving voluntarily has the same effect, self-initiated; other members' shared entries disappear from my board, my own entries all revert to private and stay with me — nobody ever loses their own data by leaving.",
-      "tickets": ["LZP-606", "LZP-204"], "amendedBy": ["A9"] },
-    { "id": "20.4", "feature": "F20", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-606",
+        "LZP-204"
+      ],
+      "amendedBy": [
+        "A9"
+      ]
+    },
+    {
+      "id": "20.4",
+      "feature": "F20",
+      "source": "v2",
+      "priority": "Must",
       "text": "As admin I can delete the entire Familienkreis: server data is purged, every member reverts to a fully intact solo board.",
-      "tickets": ["LZP-607", "LZP-204"], "amendedBy": [] },
-    { "id": "20.5", "feature": "F20", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-607",
+        "LZP-204"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "20.5",
+      "feature": "F20",
+      "source": "v2",
+      "priority": "Must",
       "text": "Even as admin, I structurally cannot see other members' private entries or the contents of their Belegt entries — the admin role grants space management, not surveillance; this is enforced by encryption, not by policy.",
-      "tickets": ["LZP-303", "LZP-1003", "LZP-301", "LZP-608"], "amendedBy": [] },
-    { "id": "20.6", "feature": "F20", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-303",
+        "LZP-1003",
+        "LZP-301",
+        "LZP-608"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "20.6",
+      "feature": "F20",
+      "source": "v2",
+      "priority": "Must",
       "text": "In v2, each user belongs to at most one Familienkreis, so the mental model stays as simple as the family it serves.",
-      "tickets": ["LZP-601"], "amendedBy": [] },
-
-    { "id": "21.1", "feature": "F21", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-601"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "21.1",
+      "feature": "F21",
+      "source": "v2",
+      "priority": "Must",
       "text": "Shared and Belegt entries are end-to-end encrypted; only member devices hold keys — the server stores and relays ciphertext it cannot read.",
-      "tickets": ["LZP-303", "LZP-304", "LZP-202", "LZP-301", "LZP-1003"], "amendedBy": [] },
-    { "id": "21.2", "feature": "F21", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-303",
+        "LZP-304",
+        "LZP-202",
+        "LZP-301",
+        "LZP-1003"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "21.2",
+      "feature": "F21",
+      "source": "v2",
+      "priority": "Must",
       "text": "Private entries never leave my machines except end-to-end encrypted to my own paired devices (19.4) — no family key can ever decrypt them.",
-      "tickets": ["LZP-502", "LZP-301", "LZP-1003"], "amendedBy": [] },
-    { "id": "21.3", "feature": "F21", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-502",
+        "LZP-301",
+        "LZP-1003"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "21.3",
+      "feature": "F21",
+      "source": "v2",
+      "priority": "Must",
       "text": "(amended v2.1) The app documents plainly what the server side can see — pseudonymous IDs, timestamps, IP addresses in transit, encrypted blob sizes — and names the processors (Vercel, Prisma Postgres; EU/Frankfurt region), so trust is informed, not marketed.",
-      "tickets": ["LZP-207", "LZP-1001", "LZP-205"], "amendedBy": [] },
-    { "id": "21.4", "feature": "F21", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-207",
+        "LZP-1001",
+        "LZP-205"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "21.4",
+      "feature": "F21",
+      "source": "v2",
+      "priority": "Must",
       "text": "Still no analytics, no tracking, no third-party services beyond the sync endpoint.",
-      "tickets": ["LZP-205", "LZP-1002"], "amendedBy": [] },
-    { "id": "21.5", "feature": "F21", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-205",
+        "LZP-1002"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "21.5",
+      "feature": "F21",
+      "source": "v2",
+      "priority": "Must",
       "text": "Network scope, replacing 13.4: in solo mode the app makes zero network requests; with a Familienkreis it talks to exactly one sync endpoint and nothing else. The v1 property survives as a scoped guarantee.",
-      "tickets": ["LZP-1002", "LZP-1001"], "amendedBy": [],
-      "note": "Successor property to v1's 13.4 (A1)." },
-
-    { "id": "22.1", "feature": "F22", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-1002",
+        "LZP-1001"
+      ],
+      "amendedBy": [],
+      "note": "Successor property to v1's 13.4 (A1)."
+    },
+    {
+      "id": "22.1",
+      "feature": "F22",
+      "source": "v2",
+      "priority": "Must",
       "text": "The app ships as a single DMG (≈15 MB, comfortably under mail attachment limits); installing is open → drag to Programme → launch, so Mom's entire setup is one email attachment and one drag. The same email carries the GitHub-Releases download link as fallback for providers that block DMG attachments.",
-      "tickets": ["LZP-101", "LZP-107", "LZP-108", "LZP-1006"], "amendedBy": [] },
-    { "id": "22.2", "feature": "F22", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-101",
+        "LZP-107",
+        "LZP-108",
+        "LZP-1006"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "22.2",
+      "feature": "F22",
+      "source": "v2",
+      "priority": "Must",
       "text": "First launch handles macOS quarantine gracefully: a signed and notarized build simply opens; in the unsigned fallback, a first-run screen walks through the Systemeinstellungen unlock in two illustrated steps — mandatory if unsigned, because macOS 15+ removed the right-click-open bypass.",
-      "tickets": ["LZP-105", "LZP-106", "LZP-1006"], "amendedBy": [],
-      "note": "Supersedes the v1 §4 Gatekeeper note (A12). Which branch ships depends on Decision D1." },
-    { "id": "22.3", "feature": "F22", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-105",
+        "LZP-106",
+        "LZP-1006"
+      ],
+      "amendedBy": [],
+      "note": "Supersedes the v1 §4 Gatekeeper note (A12). Which branch ships depends on Decision D1."
+    },
+    {
+      "id": "22.3",
+      "feature": "F22",
+      "source": "v2",
+      "priority": "Must",
       "text": "The app checks for updates on launch and roughly daily, downloads quietly in the background, and applies on the next start — after the first email, nobody ever downloads anything manually again.",
-      "tickets": ["LZP-102"], "amendedBy": [] },
-    { "id": "22.4", "feature": "F22", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-102"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "22.4",
+      "feature": "F22",
+      "source": "v2",
+      "priority": "Must",
       "text": "An available update announces itself only as a quiet \"Update verfügbar\" hint (app menu and settings), never a modal; one click restarts into the new version, and simply quitting applies it on next launch.",
-      "tickets": ["LZP-103"], "amendedBy": [] },
-    { "id": "22.5", "feature": "F22", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-103"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "22.5",
+      "feature": "F22",
+      "source": "v2",
+      "priority": "Must",
       "text": "Every device — my two Macs and Mom's — follows the same single release channel: when I publish a version, the whole family converges on it automatically, with no per-person support rounds.",
-      "tickets": ["LZP-102"], "amendedBy": [] },
-    { "id": "22.6", "feature": "F22", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-102"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "22.6",
+      "feature": "F22",
+      "source": "v2",
+      "priority": "Must",
       "text": "Updates are cryptographically signed with the app's updater key and verified before installing, so an email-distributed app cannot grow a hijackable update path — a device installs authentic builds or nothing.",
-      "tickets": ["LZP-102", "LZP-105"], "amendedBy": [],
-      "note": "LZP-304 (op envelopes) is listed in the plan as \"22.6-adjacent\" — related versioned-ciphertext work, not a mapped AC." },
-    { "id": "22.7", "feature": "F22", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-102",
+        "LZP-105"
+      ],
+      "amendedBy": [],
+      "note": "LZP-304 (op envelopes) is listed in the plan as \"22.6-adjacent\" — related versioned-ciphertext work, not a mapped AC."
+    },
+    {
+      "id": "22.7",
+      "feature": "F22",
+      "source": "v2",
+      "priority": "Must",
       "text": "Updates never touch user data; schema migrations (11.6) run after the swap. If a server protocol change ever requires a minimum client version, the update manifest enforces it and outdated clients say so in one plain sentence instead of failing quietly.",
-      "tickets": ["LZP-104", "LZP-403", "LZP-206"], "amendedBy": [] },
-    { "id": "22.8", "feature": "F22", "source": "v2", "priority": "Must",
+      "tickets": [
+        "LZP-104",
+        "LZP-403",
+        "LZP-206"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "22.8",
+      "feature": "F22",
+      "source": "v2",
+      "priority": "Must",
       "text": "Releases flow from GitHub: tagging a version triggers the build (GitHub Actions) and publishes DMG + update manifest to GitHub Releases, while the sync server deploys from the same repository to Vercel — one git tag, and the entire product, server and every desktop, moves forward together.",
-      "tickets": ["LZP-101", "LZP-109"], "amendedBy": [] },
-
-    { "id": "2.4", "feature": "F2", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-101",
+        "LZP-109"
+      ],
+      "amendedBy": []
+    },
+    {
+      "id": "2.4",
+      "feature": "F2",
+      "source": "v1",
+      "priority": "Must",
       "text": "A crowded day shows the first two notes plus \"+n\"; clicking expands a popover with the full stack, so narrow columns never silently hide entries.",
-      "tickets": ["LZP-702", "LZP-805", "LZP-803"], "amendedBy": ["A7"],
-      "note": "Carried into v2: the popover gains the sharing cluster (A7) and family entries must obey the \"+n\" overflow rule (17.4)." },
-    { "id": "2.5", "feature": "F2", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-702",
+        "LZP-805",
+        "LZP-803"
+      ],
+      "amendedBy": [
+        "A7"
+      ],
+      "note": "Carried into v2: the popover gains the sharing cluster (A7) and family entries must obey the \"+n\" overflow rule (17.4)."
+    },
+    {
+      "id": "2.5",
+      "feature": "F2",
+      "source": "v1",
+      "priority": "Must",
       "text": "Notes cap at ~80 characters, truncate with ellipsis, and show full text on hover — keeping rows thin is what keeps 12 months on one screen.",
-      "tickets": ["LZP-803"], "amendedBy": [],
-      "note": "Must not regress: 17.4 requires family entries to obey v1 truncation." },
-    { "id": "3.8", "feature": "F3", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-803"
+      ],
+      "amendedBy": [],
+      "note": "Must not regress: 17.4 requires family entries to obey v1 truncation."
+    },
+    {
+      "id": "3.8",
+      "feature": "F3",
+      "source": "v1",
+      "priority": "Must",
       "text": "Parallel lanes cap at 3 per day; further overlaps compress into a \"+n\" marker with tooltip, so extreme weeks stay legible.",
-      "tickets": ["LZP-803"], "amendedBy": [],
-      "note": "Must not regress: 17.4 requires family entries to obey the v1 lanes cap." },
-    { "id": "4.3", "feature": "F4", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-803"
+      ],
+      "amendedBy": [],
+      "note": "Must not regress: 17.4 requires family entries to obey the v1 lanes cap."
+    },
+    {
+      "id": "4.3",
+      "feature": "F4",
+      "source": "v1",
+      "priority": "Must",
       "text": "I toggle a category's visibility in the legend, so I can isolate e.g. Work when planning around deadlines.",
-      "tickets": ["LZP-802"], "amendedBy": ["A3"],
-      "note": "The legend becomes two sections (A3); per-member toggles mirror this control (17.3). Categories are never synced." },
-    { "id": "4.5", "feature": "F4", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-802"
+      ],
+      "amendedBy": [
+        "A3"
+      ],
+      "note": "The legend becomes two sections (A3); per-member toggles mirror this control (17.3). Categories are never synced."
+    },
+    {
+      "id": "4.5",
+      "feature": "F4",
+      "source": "v1",
+      "priority": "Must",
       "text": "Colors come from a fixed palette of ~10 distinguishable, print-safe tones instead of a free picker, so the legend stays readable on screen and paper.",
-      "tickets": ["LZP-602"], "amendedBy": [],
-      "note": "Member colors draw from the same ~10-tone palette but are a separate namespace; the join flow prevents collisions (addendum §9)." },
-    { "id": "5.4", "feature": "F5", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-602"
+      ],
+      "amendedBy": [],
+      "note": "Member colors draw from the same ~10-tone palette but are a separate namespace; the join flow prevents collisions (addendum §9)."
+    },
+    {
+      "id": "5.4",
+      "feature": "F5",
+      "source": "v1",
+      "priority": "Must",
       "text": "⌘Z undoes / ⇧⌘Z redoes my recent changes (~50 steps), covering create, edit, move, resize, and delete — so no drag or delete is ever scary. Import is excluded; it has its own confirmation instead.",
-      "tickets": ["LZP-405"], "amendedBy": [],
-      "note": "LZP-405 reworks undo as inverse ops scoped to own actions (18.4); v1 ⌘Z semantics must be preserved solo." },
-    { "id": "7.4", "feature": "F7", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-405"
+      ],
+      "amendedBy": [],
+      "note": "LZP-405 reworks undo as inverse ops scoped to own actions (18.4); v1 ⌘Z semantics must be preserved solo."
+    },
+    {
+      "id": "7.4",
+      "feature": "F7",
+      "source": "v1",
+      "priority": "Must",
       "text": "Unlike public holidays, Ferien are negotiated per state and published only ~2–3 years ahead — so the bundled dataset has a visible horizon (\"Ferien-Daten bis Sommer 2028\" in settings), beyond which shading is simply absent; app updates refresh the data.",
-      "tickets": ["LZP-101"], "amendedBy": ["A11"],
-      "note": "A11 gives 7.4 its delivery vehicle: bundled Ferien datasets ride the normal update channel. No separate data download may exist (21.5)." },
-    { "id": "8.4", "feature": "F8", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-101"
+      ],
+      "amendedBy": [
+        "A11"
+      ],
+      "note": "A11 gives 7.4 its delivery vehicle: bundled Ferien datasets ride the normal update channel. No separate data download may exist (21.5)."
+    },
+    {
+      "id": "8.4",
+      "feature": "F8",
+      "source": "v1",
+      "priority": "Must",
       "text": "Entries that roll out of view are kept in storage, not deleted, so history survives and reappears if I pin an earlier start month.",
-      "tickets": ["LZP-606"], "amendedBy": ["A9"],
-      "note": "A9: history retention covers family entries while I am a member; leaving removes others' entries from my history too (20.3). My own entries' history is always fully mine." },
-    { "id": "8.5", "feature": "F8", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-606"
+      ],
+      "amendedBy": [
+        "A9"
+      ],
+      "note": "A9: history retention covers family entries while I am a member; leaving removes others' entries from my history too (20.3). My own entries' history is always fully mine."
+    },
+    {
+      "id": "8.5",
+      "feature": "F8",
+      "source": "v1",
+      "priority": "Must",
       "text": "Date changes while the app is running — midnight passes, or the Mac wakes from sleep days later — update the today marker and trigger the month-roll live, no restart needed.",
-      "tickets": ["LZP-505"], "amendedBy": [],
-      "note": "Long-offline convergence (19.6) must survive month rolls that happened meanwhile." },
-    { "id": "9.1", "feature": "F9", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-505"
+      ],
+      "amendedBy": [],
+      "note": "Long-offline convergence (19.6) must survive month rolls that happened meanwhile."
+    },
+    {
+      "id": "9.1",
+      "feature": "F9",
+      "source": "v1",
+      "priority": "Must",
       "text": "A \"repeats yearly\" checkbox on a note makes it reappear on the same date every year, so birthdays survive the roll into the next year.",
-      "tickets": ["LZP-404"], "amendedBy": ["A4"],
-      "note": "A4: yearly repeats can be shared — Oma's birthday entered once, visible to everyone, forever. seriesId lands in LZP-404." },
-    { "id": "9.3", "feature": "F9", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-404"
+      ],
+      "amendedBy": [
+        "A4"
+      ],
+      "note": "A4: yearly repeats can be shared — Oma's birthday entered once, visible to everyone, forever. seriesId lands in LZP-404."
+    },
+    {
+      "id": "9.3",
+      "feature": "F9",
+      "source": "v1",
+      "priority": "Must",
       "text": "Editing or deleting a repeating note applies to the whole series, so there's exactly one object to maintain — no exception logic.",
-      "tickets": ["LZP-404"], "amendedBy": ["A4"],
-      "note": "A4: visibility is series-level (no per-year exceptions), which is what keeps 9.3's one-object rule intact." },
-    { "id": "10.1", "feature": "F10", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-404"
+      ],
+      "amendedBy": [
+        "A4"
+      ],
+      "note": "A4: visibility is series-level (no per-year exceptions), which is what keeps 9.3's one-object rule intact."
+    },
+    {
+      "id": "10.1",
+      "feature": "F10",
+      "source": "v1",
+      "priority": "Must",
       "text": "Each month column has a small free-text area beneath it, so undated thoughts (\"book cabin?\") live next to the month they belong to.",
-      "tickets": [], "amendedBy": ["A5"],
-      "note": "A5: month scratchpads stay private in v2; a shared family scratchpad is explicitly deferred. No ticket by design — the guard is that scratchpad content must never enter the family op stream." },
-    { "id": "11.2", "feature": "F11", "source": "v1", "priority": "Must",
+      "tickets": [],
+      "amendedBy": [
+        "A5"
+      ],
+      "note": "A5: month scratchpads stay private in v2; a shared family scratchpad is explicitly deferred. No ticket by design — the guard is that scratchpad content must never enter the family op stream."
+    },
+    {
+      "id": "11.2",
+      "feature": "F11",
+      "source": "v1",
+      "priority": "Must",
       "text": "One click exports the entire state (entries, categories, settings) as a single JSON file, so backups and machine moves are trivial.",
-      "tickets": ["LZP-305", "LZP-1004"], "amendedBy": ["A2"],
-      "note": "A2: export additionally contains my identity keys and my shared/Belegt entries with flags; other members' entries are never exported." },
-    { "id": "11.3", "feature": "F11", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-305",
+        "LZP-1004"
+      ],
+      "amendedBy": [
+        "A2"
+      ],
+      "note": "A2: export additionally contains my identity keys and my shared/Belegt entries with flags; other members' entries are never exported."
+    },
+    {
+      "id": "11.3",
+      "feature": "F11",
+      "source": "v1",
+      "priority": "Must",
       "text": "Importing a JSON restores that state after an explicit \"replace current board?\" confirmation, so recovery is one action and never an accident.",
-      "tickets": ["LZP-305", "LZP-1004"], "amendedBy": ["A2"],
-      "note": "A2: import restores my data and re-joins my Familienkreis if the keys are present." },
-    { "id": "11.5", "feature": "F11", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-305",
+        "LZP-1004"
+      ],
+      "amendedBy": [
+        "A2"
+      ],
+      "note": "A2: import restores my data and re-joins my Familienkreis if the keys are present."
+    },
+    {
+      "id": "11.5",
+      "feature": "F11",
+      "source": "v1",
+      "priority": "Must",
       "text": "The app keeps the last 7 daily snapshots with one-click restore, so yesterday's bad idea is recoverable even after undo history is gone.",
-      "tickets": ["LZP-403"], "amendedBy": [],
-      "note": "LZP-403 text requires existing board.json plus snapshots to migrate losslessly on first v2 launch." },
-    { "id": "11.6", "feature": "F11", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-403"
+      ],
+      "amendedBy": [],
+      "note": "LZP-403 text requires existing board.json plus snapshots to migrate losslessly on first v2 launch."
+    },
+    {
+      "id": "11.6",
+      "feature": "F11",
+      "source": "v1",
+      "priority": "Must",
       "text": "The file carries a schema version, and newer app versions migrate it automatically, so updating the app never strands your data.",
-      "tickets": ["LZP-403"], "amendedBy": [],
-      "note": "Also referenced by 22.7: updates never touch user data; migrations run after the swap." },
-    { "id": "12.3", "feature": "F12", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-403"
+      ],
+      "amendedBy": [],
+      "note": "Also referenced by 22.7: updates never touch user data; migrations run after the swap."
+    },
+    {
+      "id": "12.3",
+      "feature": "F12",
+      "source": "v1",
+      "priority": "Must",
       "text": "Printing respects the current layer and category toggles — what I see is what prints — so I control the output with the tools I already have.",
-      "tickets": ["LZP-807"], "amendedBy": ["A8"],
-      "note": "A8 confirms 12.3 unchanged and extends it: print includes family entries and honors member toggles." },
-    { "id": "13.4", "feature": "F13", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-807"
+      ],
+      "amendedBy": [
+        "A8"
+      ],
+      "note": "A8 confirms 12.3 unchanged and extends it: print includes family entries and honors member toggles."
+    },
+    {
+      "id": "13.4",
+      "feature": "F13",
+      "source": "v1",
+      "priority": "Must",
       "text": "The app makes zero network requests — not \"we don't collect data\" but architecturally can't — privacy as a property, not a promise.",
-      "tickets": ["LZP-1002"], "amendedBy": ["A1"],
-      "note": "Superseded by 21.5 (A1). The v1 wording stays true for solo mode and should be quoted that way in about/marketing copy. LZP-1002 asserts it as an automated test." },
-    { "id": "13.7", "feature": "F13", "source": "v1", "priority": "Must",
+      "tickets": [
+        "LZP-1002"
+      ],
+      "amendedBy": [
+        "A1"
+      ],
+      "note": "Superseded by 21.5 (A1). The v1 wording stays true for solo mode and should be quoted that way in about/marketing copy. LZP-1002 asserts it as an automated test."
+    },
+    {
+      "id": "13.7",
+      "feature": "F13",
+      "source": "v1",
+      "priority": "Must",
       "text": "UI language is German by default (the content world is German — Feiertage, Ferien), with an English toggle in settings.",
-      "tickets": [], "amendedBy": [],
-      "note": "Must not regress and is a Definition-of-Done gate for every ticket: strings in DE and EN. The plan maps no ticket to it because it is a cross-cutting DoD item." },
-    { "id": "14.1", "feature": "F14", "source": "v1", "priority": "Must",
+      "tickets": [],
+      "amendedBy": [],
+      "note": "Must not regress and is a Definition-of-Done gate for every ticket: strings in DE and EN. The plan maps no ticket to it because it is a cross-cutting DoD item."
+    },
+    {
+      "id": "14.1",
+      "feature": "F14",
+      "source": "v1",
+      "priority": "Must",
       "text": "⌘F opens a slim search field; matching notes and bars light up, everything else dims; Enter steps through hits (⇧Enter backwards); Esc restores the board.",
-      "tickets": ["LZP-806"], "amendedBy": ["A6"],
-      "note": "A6: find searches family entries too (shared text, Belegt matches on owner name); dimming logic unchanged." }
+      "tickets": [
+        "LZP-806"
+      ],
+      "amendedBy": [
+        "A6"
+      ],
+      "note": "A6: find searches family entries too (shared text, Belegt matches on owner name); dimming logic unchanged."
+    }
   ],
-
   "amendments": [
-    { "id": "A1", "targets": ["13.4"], "supersedes": true,
+    {
+      "id": "A1",
+      "targets": [
+        "13.4"
+      ],
+      "supersedes": true,
       "text": "13.4 (superseded). \"Zero network by architecture\" becomes the scoped guarantee of 21.5. v1's wording may remain true for solo mode and should be quoted that way in about/marketing copy.",
-      "tickets": ["LZP-1002"] },
-    { "id": "A2", "targets": ["11.2", "11.3"], "supersedes": false,
+      "tickets": [
+        "LZP-1002"
+      ]
+    },
+    {
+      "id": "A2",
+      "targets": [
+        "11.2",
+        "11.3"
+      ],
+      "supersedes": false,
       "text": "11.2 / 11.3 (export & import). Export contains my data: private entries, my shared/Belegt entries (with flags), categories, settings, and my identity keys (this is the recovery artifact — say so in the file's header comment). Other members' entries are not exported; they re-arrive via sync. Import restores my data and re-joins my Familienkreis if the keys are present.",
-      "tickets": ["LZP-305", "LZP-1004"] },
-    { "id": "A3", "targets": ["F4"], "supersedes": false,
+      "tickets": [
+        "LZP-305",
+        "LZP-1004"
+      ]
+    },
+    {
+      "id": "A3",
+      "targets": [
+        "F4"
+      ],
+      "supersedes": false,
       "text": "F4 (legend). The legend becomes two sections: Meine Kategorien (unchanged, personal, local) and Familie (members with color + visibility toggle, 17.3). Categories are never synced; they remain a private organizational system.",
-      "tickets": ["LZP-802"] },
-    { "id": "A4", "targets": ["F9"], "supersedes": false,
+      "tickets": [
+        "LZP-802"
+      ]
+    },
+    {
+      "id": "A4",
+      "targets": [
+        "F9"
+      ],
+      "supersedes": false,
       "text": "F9 (repeats). Yearly repeats can be shared — this is the killer family feature: Oma's birthday entered once, visible to everyone, forever. Series-level visibility (the whole series is Privat/Belegt/Geteilt, no per-year exceptions) keeps 9.3's one-object rule.",
-      "tickets": ["LZP-404"] },
-    { "id": "A5", "targets": ["F10"], "supersedes": false,
+      "tickets": [
+        "LZP-404"
+      ]
+    },
+    {
+      "id": "A5",
+      "targets": [
+        "F10"
+      ],
+      "supersedes": false,
       "text": "F10 (scratchpads). Month scratchpads stay private in v2. A shared family scratchpad per month is explicitly deferred (Section 11) — free-text merging is a conflict swamp with little payoff.",
       "tickets": [],
-      "note": "The only unticketed amendment; it defers a feature by design. The implementation guard is negative: scratchpad content must never enter the family op stream." },
-    { "id": "A6", "targets": ["14.1"], "supersedes": false,
+      "note": "The only unticketed amendment; it defers a feature by design. The implementation guard is negative: scratchpad content must never enter the family op stream."
+    },
+    {
+      "id": "A6",
+      "targets": [
+        "14.1"
+      ],
+      "supersedes": false,
       "text": "14.1 (find). Find searches family entries too (shared text, Belegt matches on owner name); dimming logic unchanged.",
-      "tickets": ["LZP-806"] },
-    { "id": "A7", "targets": ["2.4", "3.x"], "supersedes": false,
+      "tickets": [
+        "LZP-806"
+      ]
+    },
+    {
+      "id": "A7",
+      "targets": [
+        "2.4",
+        "3.x"
+      ],
+      "supersedes": false,
       "text": "2.4 / 3.x (popovers). Entry popovers gain the sharing cluster: three-state visibility control (16.3), co-edit flag (18.2), attribution line (17.6).",
-      "tickets": ["LZP-702", "LZP-805"],
-      "note": "\"3.x\" is the plan's own wording — it means the bar popovers/selected states of F3 collectively; the addendum names no single F3 story." },
-    { "id": "A8", "targets": ["12.3"], "supersedes": false,
+      "tickets": [
+        "LZP-702",
+        "LZP-805"
+      ],
+      "note": "\"3.x\" is the plan's own wording — it means the bar popovers/selected states of F3 collectively; the addendum names no single F3 story."
+    },
+    {
+      "id": "A8",
+      "targets": [
+        "12.3"
+      ],
+      "supersedes": false,
       "text": "12.3 (print). Unchanged and confirmed: print renders what's visible — including family entries and honoring member toggles. A family wall poster is now a two-click product.",
-      "tickets": ["LZP-807"] },
-    { "id": "A9", "targets": ["8.4"], "supersedes": false,
+      "tickets": [
+        "LZP-807"
+      ]
+    },
+    {
+      "id": "A9",
+      "targets": [
+        "8.4"
+      ],
+      "supersedes": false,
       "text": "8.4 (history). History retention covers family entries while I'm a member; leaving removes others' entries from my history too (20.3). My own entries' history is always fully mine.",
-      "tickets": ["LZP-606"] },
-    { "id": "A10", "targets": ["F13"], "supersedes": false,
+      "tickets": [
+        "LZP-606"
+      ]
+    },
+    {
+      "id": "A10",
+      "targets": [
+        "F13"
+      ],
+      "supersedes": false,
       "text": "F13 (settings). Settings gains a Familie section: create/join, member list, admin panel (F20), sync status detail, Datenschutz text (21.3), device pairing (19.5). First-run flow remains untouched (Principle 7).",
-      "tickets": ["LZP-601", "LZP-605", "LZP-1001"] },
-    { "id": "A11", "targets": ["7.4"], "supersedes": false,
+      "tickets": [
+        "LZP-601",
+        "LZP-605",
+        "LZP-1001"
+      ]
+    },
+    {
+      "id": "A11",
+      "targets": [
+        "7.4"
+      ],
+      "supersedes": false,
       "text": "7.4 (Schulferien refresh mechanism). \"App updates refresh the data\" now has its vehicle: bundled Ferien datasets ride the normal update channel (F22). The settings horizon display simply reflects the shipped dataset; no separate data download exists.",
-      "tickets": ["LZP-101"] },
-    { "id": "A12", "targets": ["v1 §4 distribution note"], "supersedes": true,
+      "tickets": [
+        "LZP-101"
+      ]
+    },
+    {
+      "id": "A12",
+      "targets": [
+        "v1 §4 distribution note"
+      ],
+      "supersedes": true,
       "text": "v1 Section 4, distribution note (superseded). The v1 Gatekeeper note (\"right-click → Open once\") predates macOS 15's removal of that bypass and the email-distribution decision. Replaced by 22.2: preferred path signed + notarized (Developer ID), fallback path the guided Systemeinstellungen unlock screen.",
-      "tickets": ["LZP-105", "LZP-106"] }
+      "tickets": [
+        "LZP-105",
+        "LZP-106"
+      ]
+    }
   ],
-
   "tickets": [
-    { "id": "LZP-101", "epic": "E1", "title": "Release workflow", "points": 3,
+    {
+      "id": "LZP-101",
+      "epic": "E1",
+      "title": "Release workflow",
+      "points": 3,
       "text": "GitHub Actions: tag → Tauri universal macOS build → DMG + update artifacts to GitHub Releases. Bundled Schulferien datasets ride along (A11).",
-      "stories": ["22.1", "22.8", "7.4"], "deps": [], "sprint": "S1", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-102", "epic": "E1", "title": "Auto-updater", "points": 5,
+      "stories": [
+        "22.1",
+        "22.8",
+        "7.4"
+      ],
+      "deps": [],
+      "sprint": "S1",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-102",
+      "epic": "E1",
+      "title": "Auto-updater",
+      "points": 5,
       "text": "Tauri updater: signed manifest, check on launch + daily, background download, apply on relaunch; single stable channel for all devices.",
-      "stories": ["22.3", "22.5", "22.6"], "deps": [], "sprint": "S1", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-103", "epic": "E1", "title": "Update UX", "points": 3,
+      "stories": [
+        "22.3",
+        "22.5",
+        "22.6"
+      ],
+      "deps": [],
+      "sprint": "S1",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-103",
+      "epic": "E1",
+      "title": "Update UX",
+      "points": 3,
       "text": "Quiet \"Update verfügbar\" hint (app menu + settings), restart-to-update, quit-applies. No modals.",
-      "stories": ["22.4"], "deps": ["LZP-102"], "sprint": "S1", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 26" },
-    { "id": "LZP-104", "epic": "E1", "title": "Minimum-version enforcement", "points": 2,
+      "stories": [
+        "22.4"
+      ],
+      "deps": [
+        "LZP-102"
+      ],
+      "sprint": "S1",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 26"
+    },
+    {
+      "id": "LZP-104",
+      "epic": "E1",
+      "title": "Minimum-version enforcement",
+      "points": 2,
       "text": "Manifest min-version gate + plain-language outdated screen.",
-      "stories": ["22.7"], "deps": ["LZP-102", "LZP-206"], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 26" },
-    { "id": "LZP-105", "epic": "E1", "title": "Signing & notarization", "points": 3,
+      "stories": [
+        "22.7"
+      ],
+      "deps": [
+        "LZP-102",
+        "LZP-206"
+      ],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 26"
+    },
+    {
+      "id": "LZP-105",
+      "epic": "E1",
+      "title": "Signing & notarization",
+      "points": 3,
       "text": "Developer ID cert in CI, codesign + notarize + staple; quarantine-clean first launch.",
-      "stories": ["22.2", "22.6"], "amendments": ["A12"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": "D1",
-      "note": "Developer-ID procurement (D1) starts in S1 because of Apple's admin lead time, even though the ticket lands in S10 before the Mom test." },
-    { "id": "LZP-106", "epic": "E1", "title": "Unsigned fallback screen", "points": 2,
+      "stories": [
+        "22.2",
+        "22.6"
+      ],
+      "amendments": [
+        "A12"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": "D1",
+      "note": "Developer-ID procurement (D1) starts in S1 because of Apple's admin lead time, even though the ticket lands in S10 before the Mom test."
+    },
+    {
+      "id": "LZP-106",
+      "epic": "E1",
+      "title": "Unsigned fallback screen",
+      "points": 2,
       "text": "First-run guided Systemeinstellungen unlock, two illustrated steps. Only if D1 = no.",
-      "stories": ["22.2"], "amendments": ["A12"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": "D1",
-      "conditional": "Only exists if Decision D1 = no", "designer": "deliverable 27" },
-    { "id": "LZP-107", "epic": "E1", "title": "DMG polish", "points": 2,
+      "stories": [
+        "22.2"
+      ],
+      "amendments": [
+        "A12"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": "D1",
+      "conditional": "Only exists if Decision D1 = no",
+      "designer": "deliverable 27"
+    },
+    {
+      "id": "LZP-107",
+      "epic": "E1",
+      "title": "DMG polish",
+      "points": 2,
       "text": "Background art, drag-to-Programme layout, ≤ ~20 MB budget.",
-      "stories": ["22.1"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
-      "designer": "designer input" },
-    { "id": "LZP-108", "epic": "E1", "title": "Invitation email template", "points": 1,
+      "stories": [
+        "22.1"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "designer input"
+    },
+    {
+      "id": "LZP-108",
+      "epic": "E1",
+      "title": "Invitation email template",
+      "points": 1,
       "text": "With designer (deliverable 28): steps + screenshot + code slot + Releases fallback link.",
-      "stories": ["22.1", "15.3"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 28" },
-    { "id": "LZP-109", "epic": "E1", "title": "Server auto-deploy", "points": 2,
+      "stories": [
+        "22.1",
+        "15.3"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 28"
+    },
+    {
+      "id": "LZP-109",
+      "epic": "E1",
+      "title": "Server auto-deploy",
+      "points": 2,
       "text": "Vercel↔GitHub integration, preview + prod environments, Prisma migration step in deploy.",
-      "stories": ["22.8"], "deps": [], "sprint": "S1", "pathAOnly": false, "blockedBy": "D3",
-      "note": "Also references addendum §3 (deployment reading of \"GitHub sync\")." },
-
-    { "id": "LZP-201", "epic": "E2", "title": "Schema & DB setup", "points": 3,
+      "stories": [
+        "22.8"
+      ],
+      "deps": [],
+      "sprint": "S1",
+      "pathAOnly": false,
+      "blockedBy": "D3",
+      "note": "Also references addendum §3 (deployment reading of \"GitHub sync\")."
+    },
+    {
+      "id": "LZP-201",
+      "epic": "E2",
+      "title": "Schema & DB setup",
+      "points": 3,
       "text": "Prisma models Space/Member/Invite/Op per §3 sketch; Frankfurt region; migrations in CI.",
-      "stories": [], "deps": [], "sprint": "S1", "pathAOnly": false, "blockedBy": "D2", "blockedByAll": ["D2", "D3"],
-      "note": "AC is addendum §3 (server schema sketch) plus addendum §9 constraints (EU/Frankfurt region), not a numbered story." },
-    { "id": "LZP-202", "epic": "E2", "title": "Op endpoints", "points": 5,
+      "stories": [],
+      "deps": [],
+      "sprint": "S1",
+      "pathAOnly": false,
+      "blockedBy": "D2",
+      "blockedByAll": [
+        "D2",
+        "D3"
+      ],
+      "note": "AC is addendum §3 (server schema sketch) plus addendum §9 constraints (EU/Frankfurt region), not a numbered story."
+    },
+    {
+      "id": "LZP-202",
+      "epic": "E2",
+      "title": "Op endpoints",
+      "points": 5,
       "text": "Append (push) + fetch-since-seq (pull) with device-signature auth; idempotent, ordered per space.",
-      "stories": ["19.1", "19.2", "21.1"], "deps": [], "sprint": "S2", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-203", "epic": "E2", "title": "Space & invite endpoints", "points": 5,
+      "stories": [
+        "19.1",
+        "19.2",
+        "21.1"
+      ],
+      "deps": [],
+      "sprint": "S2",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-203",
+      "epic": "E2",
+      "title": "Space & invite endpoints",
+      "points": 5,
       "text": "Create space, invite create/redeem/revoke (single-use, 7-day expiry), member list/update.",
-      "stories": ["15.2", "15.3", "15.4", "15.5", "15.6"], "deps": [], "sprint": "S5", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-204", "epic": "E2", "title": "Lifecycle endpoints", "points": 5,
+      "stories": [
+        "15.2",
+        "15.3",
+        "15.4",
+        "15.5",
+        "15.6"
+      ],
+      "deps": [],
+      "sprint": "S5",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-204",
+      "epic": "E2",
+      "title": "Lifecycle endpoints",
+      "points": 5,
       "text": "Member remove/leave, role transfer, space rename/delete with full cascade purge.",
-      "stories": ["20.1", "20.2", "20.3", "20.4"], "deps": [], "sprint": "S7", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-205", "epic": "E2", "title": "Abuse basics", "points": 2,
+      "stories": [
+        "20.1",
+        "20.2",
+        "20.3",
+        "20.4"
+      ],
+      "deps": [],
+      "sprint": "S7",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-205",
+      "epic": "E2",
+      "title": "Abuse basics",
+      "points": 2,
       "text": "Rate limits, payload caps, structured logs that never contain content.",
-      "stories": ["21.3", "21.4"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-206", "epic": "E2", "title": "Protocol versioning", "points": 3,
+      "stories": [
+        "21.3",
+        "21.4"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-206",
+      "epic": "E2",
+      "title": "Protocol versioning",
+      "points": 3,
       "text": "Client version header; server supports current + previous protocol; compat test harness in CI.",
-      "stories": ["22.7"], "deps": [], "sprint": "S2", "pathAOnly": false, "blockedBy": null,
-      "note": "Also references addendum §3 compatibility discipline." },
-    { "id": "LZP-207", "epic": "E2", "title": "Server metadata inventory", "points": 1,
+      "stories": [
+        "22.7"
+      ],
+      "deps": [],
+      "sprint": "S2",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "Also references addendum §3 compatibility discipline."
+    },
+    {
+      "id": "LZP-207",
+      "epic": "E2",
+      "title": "Server metadata inventory",
+      "points": 1,
       "text": "Written inventory of everything the server can observe → feeds Datenschutz copy.",
-      "stories": ["21.3"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
-      "note": "Sprint conflict: LZP-1001 declares a dep on this ticket but is scheduled in S9, one sprint earlier." },
-
-    { "id": "LZP-301", "epic": "E3", "title": "Crypto spike & ADR", "points": 5,
+      "stories": [
+        "21.3"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "Sprint conflict: LZP-1001 declares a dep on this ticket but is scheduled in S9, one sprint earlier."
+    },
+    {
+      "id": "LZP-301",
+      "epic": "E3",
+      "title": "Crypto spike & ADR",
+      "points": 5,
       "text": "libsodium-based design: device keypairs, per-space symmetric key, per-op envelope; written threat notes. Timeboxed.",
-      "stories": ["21.1", "21.2", "20.5"], "deps": [], "sprint": "S1", "pathAOnly": false, "blockedBy": null,
-      "note": "Risk R1's mitigation: timeboxed; overrun in S2 is the early warning." },
-    { "id": "LZP-302", "epic": "E3", "title": "Device identity", "points": 3,
+      "stories": [
+        "21.1",
+        "21.2",
+        "20.5"
+      ],
+      "deps": [],
+      "sprint": "S1",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "Risk R1's mitigation: timeboxed; overrun in S2 is the early warning."
+    },
+    {
+      "id": "LZP-302",
+      "epic": "E3",
+      "title": "Device identity",
+      "points": 3,
       "text": "Keygen on first run, storage in macOS Keychain via Tauri, stable device ID.",
-      "stories": ["19.5"], "deps": ["LZP-301"], "sprint": "S2", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-303", "epic": "E3", "title": "Space keys & rotation", "points": 8,
+      "stories": [
+        "19.5"
+      ],
+      "deps": [
+        "LZP-301"
+      ],
+      "sprint": "S2",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-303",
+      "epic": "E3",
+      "title": "Space keys & rotation",
+      "points": 8,
       "text": "Create/wrap/unwrap space key per member device; rotate on every membership change so removed members cannot decrypt future ops.",
-      "stories": ["20.2", "20.5", "21.1"], "deps": ["LZP-301"], "sprint": "S5", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-304", "epic": "E3", "title": "Op envelopes", "points": 5,
+      "stories": [
+        "20.2",
+        "20.5",
+        "21.1"
+      ],
+      "deps": [
+        "LZP-301"
+      ],
+      "sprint": "S5",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-304",
+      "epic": "E3",
+      "title": "Op envelopes",
+      "points": 5,
       "text": "Encrypt/sign/decrypt/verify pipeline; versioned ciphertext format.",
-      "stories": ["21.1"], "deps": ["LZP-301"], "sprint": "S2", "pathAOnly": false, "blockedBy": null,
-      "note": "Plan lists this as \"22.6-adjacent\" — related to the signed-update trust model without being one of its ACs." },
-    { "id": "LZP-305", "epic": "E3", "title": "Backup v2", "points": 5,
+      "stories": [
+        "21.1"
+      ],
+      "deps": [
+        "LZP-301"
+      ],
+      "sprint": "S2",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "Plan lists this as \"22.6-adjacent\" — related to the signed-update trust model without being one of its ACs."
+    },
+    {
+      "id": "LZP-305",
+      "epic": "E3",
+      "title": "Backup v2",
+      "points": 5,
       "text": "Export includes identity keys + own entries (private + shared-by-me), never others'; import restores identity and re-joins the Kreis.",
-      "stories": ["11.2", "11.3"], "amendments": ["A2"], "deps": ["LZP-302"], "sprint": "S5", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-306", "epic": "E3", "title": "Device pairing protocol", "points": 8,
+      "stories": [
+        "11.2",
+        "11.3"
+      ],
+      "amendments": [
+        "A2"
+      ],
+      "deps": [
+        "LZP-302"
+      ],
+      "sprint": "S5",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-306",
+      "epic": "E3",
+      "title": "Device pairing protocol",
+      "points": 8,
       "text": "Short pairing code shown on existing device; key transfer via relay; both-ends confirmation.",
-      "stories": ["19.5"], "deps": ["LZP-302", "LZP-202"], "sprint": "S3", "pathAOnly": false, "blockedBy": null },
-
-    { "id": "LZP-401", "epic": "E4", "title": "Local op-log ADR", "points": 3,
+      "stories": [
+        "19.5"
+      ],
+      "deps": [
+        "LZP-302",
+        "LZP-202"
+      ],
+      "sprint": "S3",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-401",
+      "epic": "E4",
+      "title": "Local op-log ADR",
+      "points": 3,
       "text": "Op shapes, ULIDs, tombstones, per-field LWW timestamps, materialization strategy.",
-      "stories": ["18.5"], "deps": [], "sprint": "S1", "pathAOnly": false, "blockedBy": null,
-      "note": "AC is addendum §3 plus \"18.5-ready\" — the ADR must make per-field LWW possible, not implement it." },
-    { "id": "LZP-402", "epic": "E4", "title": "Storage retrofit", "points": 8,
+      "stories": [
+        "18.5"
+      ],
+      "deps": [],
+      "sprint": "S1",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "AC is addendum §3 plus \"18.5-ready\" — the ADR must make per-field LWW possible, not implement it."
+    },
+    {
+      "id": "LZP-402",
+      "epic": "E4",
+      "title": "Storage retrofit",
+      "points": 8,
       "text": "Convert the v1 store to op-log + materialized state; the entire v1 feature set stays green (regression suite).",
-      "stories": [], "deps": [], "sprint": "S2", "pathAOnly": true, "blockedBy": "D6",
+      "stories": [],
+      "deps": [],
+      "sprint": "S2",
+      "pathAOnly": true,
+      "blockedBy": "D6",
       "v1Regression": "all",
-      "note": "AC is \"all v1 behavior unchanged\" — the regression gate is the complete v1 story set (F1-F14, 79 stories), not a subset. Risk R5; on this machine the target is src/js/store.js." },
-    { "id": "LZP-403", "epic": "E4", "title": "v1→v2 migration", "points": 5,
+      "note": "AC is \"all v1 behavior unchanged\" — the regression gate is the complete v1 story set (F1-F14, 79 stories), not a subset. Risk R5; on this machine the target is src/js/store.js."
+    },
+    {
+      "id": "LZP-403",
+      "epic": "E4",
+      "title": "v1→v2 migration",
+      "points": 5,
       "text": "Existing board.json + snapshots migrate losslessly on first v2 launch.",
-      "stories": ["11.6", "11.5", "22.7"], "deps": [], "sprint": "S3", "pathAOnly": true, "blockedBy": "D6" },
-    { "id": "LZP-404", "epic": "E4", "title": "Entry metadata", "points": 3,
+      "stories": [
+        "11.6",
+        "11.5",
+        "22.7"
+      ],
+      "deps": [],
+      "sprint": "S3",
+      "pathAOnly": true,
+      "blockedBy": "D6"
+    },
+    {
+      "id": "LZP-404",
+      "epic": "E4",
+      "title": "Entry metadata",
+      "points": 3,
       "text": "ownerId, visibility, coEdit, seriesId on notes/bars; series-level visibility for repeats.",
-      "stories": ["16.2", "18.2", "9.1", "9.3"], "amendments": ["A4"], "deps": [], "sprint": "S3", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-405", "epic": "E4", "title": "Undo rework", "points": 5,
+      "stories": [
+        "16.2",
+        "18.2",
+        "9.1",
+        "9.3"
+      ],
+      "amendments": [
+        "A4"
+      ],
+      "deps": [],
+      "sprint": "S3",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-405",
+      "epic": "E4",
+      "title": "Undo rework",
+      "points": 5,
       "text": "Undo/redo as inverse ops, strictly scoped to own actions; v1 ⌘Z semantics preserved solo.",
-      "stories": ["5.4", "18.4"], "deps": [], "sprint": "S4", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-406", "epic": "E4", "title": "Merge property tests", "points": 5,
+      "stories": [
+        "5.4",
+        "18.4"
+      ],
+      "deps": [],
+      "sprint": "S4",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-406",
+      "epic": "E4",
+      "title": "Merge property tests",
+      "points": 5,
       "text": "Property-based harness: op reorder/duplicate/interleave ⇒ convergent state.",
-      "stories": ["19.6", "18.5"], "deps": [], "sprint": "S4", "pathAOnly": false, "blockedBy": null,
-      "note": "Plan says \"18.5 groundwork\" — convergence must be provable before LZP-904 implements the conflict UI. Risk R2." },
-
-    { "id": "LZP-501", "epic": "E5", "title": "Sync engine client", "points": 8,
+      "stories": [
+        "19.6",
+        "18.5"
+      ],
+      "deps": [],
+      "sprint": "S4",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "Plan says \"18.5 groundwork\" — convergence must be provable before LZP-904 implements the conflict UI. Risk R2."
+    },
+    {
+      "id": "LZP-501",
+      "epic": "E5",
+      "title": "Sync engine client",
+      "points": 8,
       "text": "Outbox queue, push-on-save, pull on focus + 30–60 s poll, offline queueing, backoff.",
-      "stories": ["19.1", "19.2"], "deps": ["LZP-202", "LZP-304"], "depsEpics": ["E4"], "sprint": "S3", "pathAOnly": false, "blockedBy": null,
-      "depsNote": "Plan writes the third dep as \"40x\" — the E4 op-log core collectively (LZP-401/402/403/404), not one named ticket." },
-    { "id": "LZP-502", "epic": "E5", "title": "Personal space", "points": 5,
+      "stories": [
+        "19.1",
+        "19.2"
+      ],
+      "deps": [
+        "LZP-202",
+        "LZP-304"
+      ],
+      "depsEpics": [
+        "E4"
+      ],
+      "sprint": "S3",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "depsNote": "Plan writes the third dep as \"40x\" — the E4 op-log core collectively (LZP-401/402/403/404), not one named ticket."
+    },
+    {
+      "id": "LZP-502",
+      "epic": "E5",
+      "title": "Personal space",
+      "points": 5,
       "text": "Private entries sync E2E between own devices only; no family key can ever apply.",
-      "stories": ["19.4", "21.2"], "deps": ["LZP-501", "LZP-303"], "sprint": "S4", "pathAOnly": false, "blockedBy": null,
-      "depsNote": "Sprint conflict: LZP-303 is scheduled in S5 but this ticket is in S4 — the stated dep runs backwards against the sprint plan; grooming must resolve (pull 303 forward or split the personal-space key work out of it)." },
-    { "id": "LZP-503", "epic": "E5", "title": "Pairing UX", "points": 3,
+      "stories": [
+        "19.4",
+        "21.2"
+      ],
+      "deps": [
+        "LZP-501",
+        "LZP-303"
+      ],
+      "sprint": "S4",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "depsNote": "Sprint conflict: LZP-303 is scheduled in S5 but this ticket is in S4 — the stated dep runs backwards against the sprint plan; grooming must resolve (pull 303 forward or split the personal-space key work out of it)."
+    },
+    {
+      "id": "LZP-503",
+      "epic": "E5",
+      "title": "Pairing UX",
+      "points": 3,
       "text": "Both-ends screens per deliverable 21.",
-      "stories": ["19.5"], "deps": ["LZP-306"], "sprint": "S4", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 21" },
-    { "id": "LZP-504", "epic": "E5", "title": "Sync status states", "points": 2,
+      "stories": [
+        "19.5"
+      ],
+      "deps": [
+        "LZP-306"
+      ],
+      "sprint": "S4",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 21"
+    },
+    {
+      "id": "LZP-504",
+      "epic": "E5",
+      "title": "Sync status states",
+      "points": 2,
       "text": "Silent when healthy; subtle pending-offline; calm error.",
-      "stories": ["19.3"], "deps": [], "sprint": "S4", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 20" },
-    { "id": "LZP-505", "epic": "E5", "title": "Long-offline convergence", "points": 3,
+      "stories": [
+        "19.3"
+      ],
+      "deps": [],
+      "sprint": "S4",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 20"
+    },
+    {
+      "id": "LZP-505",
+      "epic": "E5",
+      "title": "Long-offline convergence",
+      "points": 3,
       "text": "Weeks-offline device catches up cleanly incl. month rolls and yearly repeats; automated scenario test.",
-      "stories": ["19.6", "8.5"], "deps": [], "sprint": "S4", "pathAOnly": false, "blockedBy": null },
-
-    { "id": "LZP-601", "epic": "E6", "title": "Create-space flow", "points": 3,
+      "stories": [
+        "19.6",
+        "8.5"
+      ],
+      "deps": [],
+      "sprint": "S4",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-601",
+      "epic": "E6",
+      "title": "Create-space flow",
+      "points": 3,
       "text": "Settings entry point (solo untouched, 15.1), name → admin bootstrap → invite code; one Kreis per user enforced.",
-      "stories": ["15.1", "15.2", "20.6"], "amendments": ["A10"], "deps": ["LZP-203", "LZP-303"], "sprint": "S5", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 14" },
-    { "id": "LZP-602", "epic": "E6", "title": "Join flow", "points": 3,
+      "stories": [
+        "15.1",
+        "15.2",
+        "20.6"
+      ],
+      "amendments": [
+        "A10"
+      ],
+      "deps": [
+        "LZP-203",
+        "LZP-303"
+      ],
+      "sprint": "S5",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 14"
+    },
+    {
+      "id": "LZP-602",
+      "epic": "E6",
+      "title": "Join flow",
+      "points": 3,
       "text": "Code paste → display name → color (collision-prevented) → done; designed for Mom (deliverable 15).",
-      "stories": ["15.3", "4.5"], "deps": ["LZP-203"], "sprint": "S5", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 15" },
-    { "id": "LZP-603", "epic": "E6", "title": "Member list & self-edit", "points": 2,
+      "stories": [
+        "15.3",
+        "4.5"
+      ],
+      "deps": [
+        "LZP-203"
+      ],
+      "sprint": "S5",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 15"
+    },
+    {
+      "id": "LZP-603",
+      "epic": "E6",
+      "title": "Member list & self-edit",
+      "points": 2,
       "text": "Members with name/color/initial; own name/color editable, propagates.",
-      "stories": ["15.4", "15.6"], "deps": [], "sprint": "S6", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-604", "epic": "E6", "title": "Invite management", "points": 2,
+      "stories": [
+        "15.4",
+        "15.6"
+      ],
+      "deps": [],
+      "sprint": "S6",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-604",
+      "epic": "E6",
+      "title": "Invite management",
+      "points": 2,
       "text": "Admin: create/share/revoke, expiry display.",
-      "stories": ["15.5"], "deps": [], "sprint": "S6", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-605", "epic": "E6", "title": "Admin panel", "points": 3,
+      "stories": [
+        "15.5"
+      ],
+      "deps": [],
+      "sprint": "S6",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-605",
+      "epic": "E6",
+      "title": "Admin panel",
+      "points": 3,
       "text": "Remove member, transfer role, rename space; danger-zone confirmations with plain consequence copy (deliverable 22).",
-      "stories": ["20.1"], "amendments": ["A10"], "deps": ["LZP-204"], "sprint": "S7", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 22" },
-    { "id": "LZP-606", "epic": "E6", "title": "Leave flow", "points": 3,
+      "stories": [
+        "20.1"
+      ],
+      "amendments": [
+        "A10"
+      ],
+      "deps": [
+        "LZP-204"
+      ],
+      "sprint": "S7",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 22"
+    },
+    {
+      "id": "LZP-606",
+      "epic": "E6",
+      "title": "Leave flow",
+      "points": 3,
       "text": "Self-initiated exit: my entries revert private and stay; others' entries and history leave my board.",
-      "stories": ["20.3", "8.4"], "amendments": ["A9"], "deps": [], "sprint": "S7", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 22" },
-    { "id": "LZP-607", "epic": "E6", "title": "Delete space", "points": 2,
+      "stories": [
+        "20.3",
+        "8.4"
+      ],
+      "amendments": [
+        "A9"
+      ],
+      "deps": [],
+      "sprint": "S7",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 22"
+    },
+    {
+      "id": "LZP-607",
+      "epic": "E6",
+      "title": "Delete space",
+      "points": 2,
       "text": "Admin purge: server data gone, every member reverts to intact solo.",
-      "stories": ["20.4"], "deps": ["LZP-204"], "sprint": "S7", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 22" },
-    { "id": "LZP-608", "epic": "E6", "title": "Removal end-to-end", "points": 5,
+      "stories": [
+        "20.4"
+      ],
+      "deps": [
+        "LZP-204"
+      ],
+      "sprint": "S7",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 22"
+    },
+    {
+      "id": "LZP-608",
+      "epic": "E6",
+      "title": "Removal end-to-end",
+      "points": 5,
       "text": "Member removal wires key rotation + removed member's shared entries vanish from all boards; verified multi-device test.",
-      "stories": ["20.2", "20.5"], "deps": ["LZP-303", "LZP-204"], "sprint": "S7", "pathAOnly": false, "blockedBy": null },
-
-    { "id": "LZP-701", "epic": "E7", "title": "Visibility end-to-end", "points": 5,
+      "stories": [
+        "20.2",
+        "20.5"
+      ],
+      "deps": [
+        "LZP-303",
+        "LZP-204"
+      ],
+      "sprint": "S7",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-701",
+      "epic": "E7",
+      "title": "Visibility end-to-end",
+      "points": 5,
       "text": "Default Privat; only non-private ops reach the family stream; Belegt publishes a client-side-redacted op (owner, dates, color — no text), full content never leaves the device.",
-      "stories": ["16.1", "16.2", "16.7"], "deps": ["LZP-404", "LZP-502"], "sprint": "S6", "pathAOnly": false, "blockedBy": "D5" },
-    { "id": "LZP-702", "epic": "E7", "title": "Three-state control", "points": 3,
+      "stories": [
+        "16.1",
+        "16.2",
+        "16.7"
+      ],
+      "deps": [
+        "LZP-404",
+        "LZP-502"
+      ],
+      "sprint": "S6",
+      "pathAOnly": false,
+      "blockedBy": "D5"
+    },
+    {
+      "id": "LZP-702",
+      "epic": "E7",
+      "title": "Three-state control",
+      "points": 3,
       "text": "Segmented Privat/Belegt/Geteilt in popover + selected state, ≤2 clicks.",
-      "stories": ["16.3", "2.4"], "amendments": ["A7"], "deps": [], "sprint": "S6", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 18" },
-    { "id": "LZP-703", "epic": "E7", "title": "Category default visibility", "points": 2,
+      "stories": [
+        "16.3",
+        "2.4"
+      ],
+      "amendments": [
+        "A7"
+      ],
+      "deps": [],
+      "sprint": "S6",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 18"
+    },
+    {
+      "id": "LZP-703",
+      "epic": "E7",
+      "title": "Category default visibility",
+      "points": 2,
       "text": "Per-category default for new entries; global default stays Privat.",
-      "stories": ["16.4"], "deps": [], "sprint": "S7", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-704", "epic": "E7", "title": "Visibility transitions", "points": 3,
+      "stories": [
+        "16.4"
+      ],
+      "deps": [],
+      "sprint": "S7",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-704",
+      "epic": "E7",
+      "title": "Visibility transitions",
+      "points": 3,
       "text": "Upgrades publish; downgrades emit retraction ops that remove content/details from other boards on next sync.",
-      "stories": ["16.5"], "deps": [], "sprint": "S6", "pathAOnly": false, "blockedBy": null,
-      "note": "Addendum §6: unsharing is not unremembering — no notification to others on downgrade (Principle 9)." },
-    { "id": "LZP-705", "epic": "E7", "title": "Exposure badges", "points": 2,
+      "stories": [
+        "16.5"
+      ],
+      "deps": [],
+      "sprint": "S6",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "Addendum §6: unsharing is not unremembering — no notification to others on downgrade (Principle 9)."
+    },
+    {
+      "id": "LZP-705",
+      "epic": "E7",
+      "title": "Exposure badges",
+      "points": 2,
       "text": "Shared/Belegt badges on own entries, legible at 24-px rows.",
-      "stories": ["16.6"], "deps": [], "sprint": "S7", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 17" },
-    { "id": "LZP-706", "epic": "E7", "title": "Belegt rendering", "points": 3,
+      "stories": [
+        "16.6"
+      ],
+      "deps": [],
+      "sprint": "S7",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 17"
+    },
+    {
+      "id": "LZP-706",
+      "epic": "E7",
+      "title": "Belegt rendering",
+      "points": 3,
       "text": "Owner-side vs viewer-side rendering per deliverable 19.",
-      "stories": ["16.7"], "deps": ["LZP-701", "LZP-801"], "sprint": "S7", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 19" },
-
-    { "id": "LZP-801", "epic": "E8", "title": "Foreign-entry rendering", "points": 5,
+      "stories": [
+        "16.7"
+      ],
+      "deps": [
+        "LZP-701",
+        "LZP-801"
+      ],
+      "sprint": "S7",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 19"
+    },
+    {
+      "id": "LZP-801",
+      "epic": "E8",
+      "title": "Foreign-entry rendering",
+      "points": 5,
       "text": "Others' entries in date rows: member color + initial chip; my entries keep my category colors.",
-      "stories": ["17.1", "17.2"], "deps": [], "sprint": "S6", "pathAOnly": false, "blockedBy": "D4" },
-    { "id": "LZP-802", "epic": "E8", "title": "Two-section legend", "points": 3,
+      "stories": [
+        "17.1",
+        "17.2"
+      ],
+      "deps": [],
+      "sprint": "S6",
+      "pathAOnly": false,
+      "blockedBy": "D4"
+    },
+    {
+      "id": "LZP-802",
+      "epic": "E8",
+      "title": "Two-section legend",
+      "points": 3,
       "text": "Meine Kategorien + Familie with per-member visibility toggles.",
-      "stories": ["17.3", "4.3"], "amendments": ["A3"], "deps": [], "sprint": "S6", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 16" },
-    { "id": "LZP-803", "epic": "E8", "title": "Density integration", "points": 3,
+      "stories": [
+        "17.3",
+        "4.3"
+      ],
+      "amendments": [
+        "A3"
+      ],
+      "deps": [],
+      "sprint": "S6",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 16"
+    },
+    {
+      "id": "LZP-803",
+      "epic": "E8",
+      "title": "Density integration",
+      "points": 3,
       "text": "Family entries obey lanes/+n/truncation; perf fixture: 8 members × 2 years.",
-      "stories": ["17.4", "2.4", "2.5", "3.8"], "deps": [], "sprint": "S8", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-804", "epic": "E8", "title": "\"Neu\" markers", "points": 3,
+      "stories": [
+        "17.4",
+        "2.4",
+        "2.5",
+        "3.8"
+      ],
+      "deps": [],
+      "sprint": "S8",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-804",
+      "epic": "E8",
+      "title": "\"Neu\" markers",
+      "points": 3,
       "text": "Last-seen tracking per device; dot on others' new/changed entries; fades once seen; no popups.",
-      "stories": ["17.5"], "deps": [], "sprint": "S8", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 17" },
-    { "id": "LZP-805", "epic": "E8", "title": "Attribution", "points": 2,
+      "stories": [
+        "17.5"
+      ],
+      "deps": [],
+      "sprint": "S8",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 17"
+    },
+    {
+      "id": "LZP-805",
+      "epic": "E8",
+      "title": "Attribution",
+      "points": 2,
       "text": "Hover/popover \"von Mama · geteilt · geändert So.\".",
-      "stories": ["17.6", "2.4"], "amendments": ["A7"], "deps": [], "sprint": "S8", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 18" },
-    { "id": "LZP-806", "epic": "E8", "title": "Family find", "points": 2,
+      "stories": [
+        "17.6",
+        "2.4"
+      ],
+      "amendments": [
+        "A7"
+      ],
+      "deps": [],
+      "sprint": "S8",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 18"
+    },
+    {
+      "id": "LZP-806",
+      "epic": "E8",
+      "title": "Family find",
+      "points": 2,
       "text": "⌘F covers shared text and Belegt owner names; dimming unchanged.",
-      "stories": ["14.1"], "amendments": ["A6"], "deps": [], "sprint": "S9", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-807", "epic": "E8", "title": "Family print parity", "points": 1,
+      "stories": [
+        "14.1"
+      ],
+      "amendments": [
+        "A6"
+      ],
+      "deps": [],
+      "sprint": "S9",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-807",
+      "epic": "E8",
+      "title": "Family print parity",
+      "points": 1,
       "text": "Print renders exactly what's visible incl. member toggles; fixtures.",
-      "stories": ["12.3"], "amendments": ["A8"], "deps": [], "sprint": "S9", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-808", "epic": "E8", "title": "Komfort density", "points": 3,
+      "stories": [
+        "12.3"
+      ],
+      "amendments": [
+        "A8"
+      ],
+      "deps": [],
+      "sprint": "S9",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-808",
+      "epic": "E8",
+      "title": "Komfort density",
+      "points": 3,
       "text": "Per-device Kompakt/Komfort row height. Stretch only.",
-      "stories": ["17.7"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
-      "priority": "Could", "conditional": "S10 stretch only; first item on the scope-lever list (addendum §10)." },
-
-    { "id": "LZP-901", "epic": "E9", "title": "Owner-only enforcement", "points": 3,
+      "stories": [
+        "17.7"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "priority": "Could",
+      "conditional": "S10 stretch only; first item on the scope-lever list (addendum §10)."
+    },
+    {
+      "id": "LZP-901",
+      "epic": "E9",
+      "title": "Owner-only enforcement",
+      "points": 3,
       "text": "Client UX + server-side validation: non-owners cannot mutate.",
-      "stories": ["18.1"], "deps": [], "sprint": "S8", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-902", "epic": "E9", "title": "Co-edit flag", "points": 3,
+      "stories": [
+        "18.1"
+      ],
+      "deps": [],
+      "sprint": "S8",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-902",
+      "epic": "E9",
+      "title": "Co-edit flag",
+      "points": 3,
       "text": "\"Familie darf bearbeiten\" per entry; permission checks both ends.",
-      "stories": ["18.2"], "deps": ["LZP-901"], "sprint": "S8", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 18" },
-    { "id": "LZP-903", "epic": "E9", "title": "Admin unshare", "points": 2,
+      "stories": [
+        "18.2"
+      ],
+      "deps": [
+        "LZP-901"
+      ],
+      "sprint": "S8",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 18"
+    },
+    {
+      "id": "LZP-903",
+      "epic": "E9",
+      "title": "Admin unshare",
+      "points": 2,
       "text": "Revert-to-owner-private op; never deletes, never reads.",
-      "stories": ["18.3"], "deps": [], "sprint": "S8", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-904", "epic": "E9", "title": "Conflict resolution", "points": 5,
+      "stories": [
+        "18.3"
+      ],
+      "deps": [],
+      "sprint": "S8",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-904",
+      "epic": "E9",
+      "title": "Conflict resolution",
+      "points": 5,
       "text": "Per-field LWW on co-editable entries; loser sees one quiet inline notice (deliverable 23); attribution updates.",
-      "stories": ["18.5"], "deps": ["LZP-406"], "sprint": "S8", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 23" },
-    { "id": "LZP-905", "epic": "E9", "title": "Deletes & restore", "points": 3,
+      "stories": [
+        "18.5"
+      ],
+      "deps": [
+        "LZP-406"
+      ],
+      "sprint": "S8",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 23"
+    },
+    {
+      "id": "LZP-905",
+      "epic": "E9",
+      "title": "Deletes & restore",
+      "points": 3,
       "text": "Tombstones propagate; author's undo restores as new shared op.",
-      "stories": ["18.6"], "deps": ["LZP-405"], "sprint": "S8", "pathAOnly": false, "blockedBy": null },
-
-    { "id": "LZP-1001", "epic": "E10", "title": "Datenschutz section", "points": 2,
+      "stories": [
+        "18.6"
+      ],
+      "deps": [
+        "LZP-405"
+      ],
+      "sprint": "S8",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-1001",
+      "epic": "E10",
+      "title": "Datenschutz section",
+      "points": 2,
       "text": "Human-German settings copy naming processors, region, and what the server sees.",
-      "stories": ["21.3", "21.5"], "amendments": ["A10"], "deps": ["LZP-207"], "sprint": "S9", "pathAOnly": false, "blockedBy": null,
-      "depsNote": "Sprint conflict: LZP-207 (the metadata inventory this copy is written from) is scheduled in S10, one sprint after this ticket." },
-    { "id": "LZP-1002", "epic": "E10", "title": "Network scope audit", "points": 3,
+      "stories": [
+        "21.3",
+        "21.5"
+      ],
+      "amendments": [
+        "A10"
+      ],
+      "deps": [
+        "LZP-207"
+      ],
+      "sprint": "S9",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "depsNote": "Sprint conflict: LZP-207 (the metadata inventory this copy is written from) is scheduled in S10, one sprint after this ticket."
+    },
+    {
+      "id": "LZP-1002",
+      "epic": "E10",
+      "title": "Network scope audit",
+      "points": 3,
       "text": "Automated test: solo mode = zero requests; family mode = single-endpoint allowlist.",
-      "stories": ["21.5", "21.4", "13.4"], "amendments": ["A1"], "deps": [], "sprint": "S9", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-1003", "epic": "E10", "title": "Crypto self-audit", "points": 5,
+      "stories": [
+        "21.5",
+        "21.4",
+        "13.4"
+      ],
+      "amendments": [
+        "A1"
+      ],
+      "deps": [],
+      "sprint": "S9",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-1003",
+      "epic": "E10",
+      "title": "Crypto self-audit",
+      "points": 5,
       "text": "Checklist review of key handling, rotation, redaction (Belegt), pairing; fixes; written report.",
-      "stories": ["20.5", "21.1", "21.2"], "deps": [], "sprint": "S9", "pathAOnly": false, "blockedBy": null,
-      "note": "Risk R1 mitigation." },
-    { "id": "LZP-1004", "epic": "E10", "title": "Backup/restore tests", "points": 3,
+      "stories": [
+        "20.5",
+        "21.1",
+        "21.2"
+      ],
+      "deps": [],
+      "sprint": "S9",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "Risk R1 mitigation."
+    },
+    {
+      "id": "LZP-1004",
+      "epic": "E10",
+      "title": "Backup/restore tests",
+      "points": 3,
       "text": "Export→wipe→import→re-join scenarios, incl. key loss = data loss confirmation copy.",
-      "stories": ["11.2", "11.3"], "amendments": ["A2"], "deps": ["LZP-305"], "sprint": "S9", "pathAOnly": false, "blockedBy": null,
-      "designer": "deliverable 24" },
-    { "id": "LZP-1005", "epic": "E10", "title": "Multi-device E2E suite", "points": 8,
+      "stories": [
+        "11.2",
+        "11.3"
+      ],
+      "amendments": [
+        "A2"
+      ],
+      "deps": [
+        "LZP-305"
+      ],
+      "sprint": "S9",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "designer": "deliverable 24"
+    },
+    {
+      "id": "LZP-1005",
+      "epic": "E10",
+      "title": "Multi-device E2E suite",
+      "points": 8,
       "text": "CI-run simulated fleet: 2 own devices + 3-member family; scripted scenarios for every F15–F18 story.",
-      "stories": ["15.1", "15.2", "15.3", "15.4", "15.5", "15.6", "16.1", "16.2", "16.3", "16.4", "16.5", "16.6", "16.7", "17.1", "17.2", "17.3", "17.4", "17.5", "17.6", "17.7", "18.1", "18.2", "18.3", "18.4", "18.5", "18.6"],
-      "deps": [], "sprint": "S9", "pathAOnly": false, "blockedBy": null,
-      "note": "AC is the plan's §9 traceability table itself: one scripted scenario per F15–F18 story. Risk R2 mitigation." },
-    { "id": "LZP-1006", "epic": "E10", "title": "\"Mom test\" beta", "points": 3,
+      "stories": [
+        "15.1",
+        "15.2",
+        "15.3",
+        "15.4",
+        "15.5",
+        "15.6",
+        "16.1",
+        "16.2",
+        "16.3",
+        "16.4",
+        "16.5",
+        "16.6",
+        "16.7",
+        "17.1",
+        "17.2",
+        "17.3",
+        "17.4",
+        "17.5",
+        "17.6",
+        "17.7",
+        "18.1",
+        "18.2",
+        "18.3",
+        "18.4",
+        "18.5",
+        "18.6"
+      ],
+      "deps": [],
+      "sprint": "S9",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "AC is the plan's §9 traceability table itself: one scripted scenario per F15–F18 story. Risk R2 mitigation."
+    },
+    {
+      "id": "LZP-1006",
+      "epic": "E10",
+      "title": "\"Mom test\" beta",
+      "points": 3,
       "text": "Clean Mac, real email with DMG + code, unassisted install & join; fix what stumbles.",
-      "stories": ["22.1", "22.2", "15.3"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
-      "note": "Decision D1 does not gate this ticket but determines its quality (signed build vs. guided unlock screen)." },
-    { "id": "LZP-1007", "epic": "E10", "title": "Perf pass", "points": 3,
+      "stories": [
+        "22.1",
+        "22.2",
+        "15.3"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "Decision D1 does not gate this ticket but determines its quality (signed build vs. guided unlock screen)."
+    },
+    {
+      "id": "LZP-1007",
+      "epic": "E10",
+      "title": "Perf pass",
+      "points": 3,
       "text": "60 fps drag with 8-member × 2-year fixture; sync CPU/battery sanity.",
-      "stories": ["17.4"], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null },
-    { "id": "LZP-1008", "epic": "E10", "title": "Ops runbook", "points": 2,
+      "stories": [
+        "17.4"
+      ],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null
+    },
+    {
+      "id": "LZP-1008",
+      "epic": "E10",
+      "title": "Ops runbook",
+      "points": 2,
       "text": "Vercel/Prisma runbook, key-loss support script, release checklist.",
-      "stories": [], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
-      "note": "AC is addendum §3 (infrastructure decision record), not a numbered story." },
-
-    { "id": "LZP-1009", "epic": "E10", "title": "Feedback button", "points": null,
+      "stories": [],
+      "deps": [],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null,
+      "note": "AC is addendum §3 (infrastructure decision record), not a numbered story."
+    },
+    {
+      "id": "LZP-1009",
+      "epic": "E10",
+      "title": "Feedback button",
+      "points": null,
       "text": "In-app feedback: a button that sends a report — text plus a redacted screenshot — to a remote.",
-      "stories": ["21.3", "21.4", "21.5"], "amendments": ["A1"],
-      "deps": ["LZP-1001", "LZP-1002"], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
+      "stories": [
+        "21.3",
+        "21.4",
+        "21.5"
+      ],
+      "amendments": [
+        "A1"
+      ],
+      "deps": [
+        "LZP-1001",
+        "LZP-1002"
+      ],
+      "sprint": "S10",
+      "pathAOnly": false,
+      "blockedBy": null,
       "addedBy": "PO, 2026-09-03 — after the sprint plan was written, so not one of the plan's 68",
       "status": "OWED — nothing built: no module in src/js/, no bridge command in either shell, no relay route, no copy, no processor named",
-      "note": "It is a THIRD network job and a SECOND remote host, so story 21.5's exception count widens the day it lands (E10-VERIFICATION §3d, §4). Its absence is asserted by eight rows — tests/attack/e10-network-scope.test.js §1a, §1c, §2a–§2e — plus §3a/§3b for the screenshot half, which today measure that the product contains NO image primitive at all and neither shell can capture the screen. Those rows are written to be INVERTED when it lands, not repaired. It also owes a Datenschutz sentence naming a third processor (LZP-1001, also owed)." }
+      "note": "It is a THIRD network job and a SECOND remote host, so story 21.5's exception count widens the day it lands (E10-VERIFICATION §3d, §4). Its absence is asserted by eight rows — tests/attack/e10-network-scope.test.js §1a, §1c, §2a–§2e — plus §3a/§3b for the screenshot half, which today measure that the product contains NO image primitive at all and neither shell can capture the screen. Those rows are written to be INVERTED when it lands, not repaired. It also owes a Datenschutz sentence naming a third processor (LZP-1001, also owed)."
+    }
   ],
-
   "decisions": [
-    { "id": "D1", "neededBy": "S1",
+    {
+      "id": "D1",
+      "neededBy": "S1",
       "question": "Apple Developer ID (99 €/yr) — sign & notarize?",
       "recommendation": "Yes (addendum open question 8). Signing + notarization deletes the scariest screen a non-technical family member would otherwise meet (22.2) and makes background updates trustworthy on modern macOS. Procurement starts in S1 because of Apple's admin lead time, even though LZP-105 lands in S10.",
-      "blocks": ["LZP-105", "LZP-106", "LZP-1006"],
-      "note": "LZP-106 exists only if the answer is no. LZP-1006 is not gated but its quality depends on the answer. Risk R4." },
-    { "id": "D2", "neededBy": "S1",
+      "blocks": [
+        "LZP-105",
+        "LZP-106",
+        "LZP-1006"
+      ],
+      "note": "LZP-106 exists only if the answer is no. LZP-1006 is not gated but its quality depends on the answer. Risk R4."
+    },
+    {
+      "id": "D2",
+      "neededBy": "S1",
       "question": "Confirm EU/Frankfurt region for Vercel functions and Prisma Postgres.",
       "recommendation": "Yes (addendum open question 9). Frankfurt is already a fixed constraint in addendum §9 and is named in the Datenschutz copy (21.3).",
-      "blocks": ["LZP-201"] },
-    { "id": "D3", "neededBy": "S1",
+      "blocks": [
+        "LZP-201"
+      ]
+    },
+    {
+      "id": "D3",
+      "neededBy": "S1",
       "question": "Confirm \"GitHub sync\" = deploy-on-push reading.",
       "recommendation": "Confirm §3 as written: Vercel's GitHub integration deploys the server on push to main. The alternative reading (syncing data through GitHub) would veto §3 entirely.",
-      "blocks": ["LZP-109", "LZP-201"] },
-    { "id": "D4", "neededBy": "end of S4",
+      "blocks": [
+        "LZP-109",
+        "LZP-201"
+      ]
+    },
+    {
+      "id": "D4",
+      "neededBy": "end of S4",
       "question": "Person-color rule for foreign entries (17.2) — accept, or argue for shared categories instead?",
       "recommendation": "Accept 17.2 as specced (addendum open question 2): my entries in my category colors, others' entries in the member's personal color with an initial chip.",
-      "blocks": ["LZP-801"] },
-    { "id": "D5", "neededBy": "end of S5",
+      "blocks": [
+        "LZP-801"
+      ]
+    },
+    {
+      "id": "D5",
+      "neededBy": "end of S5",
       "question": "Belegt confirmed in v2.0, or deferred per addendum §10?",
       "recommendation": "Keep (addendum open question 3). Cutting Belegt is scope-lever #3 and weakens the product's core answer to \"Mom doesn't need everything\".",
-      "blocks": ["LZP-701"],
-      "note": "Also determines whether LZP-706 has any content." },
-    { "id": "D6", "neededBy": "before S1",
+      "blocks": [
+        "LZP-701"
+      ],
+      "note": "Also determines whether LZP-706 has any content."
+    },
+    {
+      "id": "D6",
+      "neededBy": "before S1",
       "question": "Path A (retrofit an existing v1) or Path B (greenfield on the op-log from day one)?",
       "recommendation": "B if greenfield — build v1 on the op-log from day one, LZP-402/403 disappear, E4 shrinks to 16 pts, v2 lands in ~226 pts ≈ 9 sprints.",
-      "blocks": ["LZP-402", "LZP-403"],
-      "resolved": "Path A. v1 exists as working code in this repository (~5100 lines of dependency-free vanilla ES modules in src/js/, plus a buildable Swift WKWebView shell in shell-macos/), so LZP-402 and LZP-403 stay in scope and the plan runs at ~239 pts ≈ 10 sprints." }
+      "blocks": [
+        "LZP-402",
+        "LZP-403"
+      ],
+      "resolved": "Path A. v1 exists as working code in this repository (~5100 lines of dependency-free vanilla ES modules in src/js/, plus a buildable Swift WKWebView shell in shell-macos/), so LZP-402 and LZP-403 stay in scope and the plan runs at ~239 pts ≈ 10 sprints."
+    }
   ],
-
   "constraints": [
     "Family scale target: 2–8 members — the design must be excellent at 2 and acceptable at 8, not the reverse. (addendum §9)",
     "One Familienkreis per user (20.6). Exactly one admin at a time; the role is transferable (20.1). (addendum §9)",
@@ -629,11 +2358,19 @@
     "Feiertage are computed (fixed dates + Easter arithmetic + Buß- und Bettag) ⇒ no data horizon. Schulferien are bundled data ⇒ visible horizon in settings (7.4). (v1 §13)",
     "Limits chosen for legibility, not tech: ~80-char notes, 3 bar lanes, ~5-line scratchpads, ~50 undo steps, 7 snapshots. (v1 §13)"
   ],
-
   "verification": {
     "e10": {
       "generated": "2026-09-03",
-      "ticket": ["LZP-1001", "LZP-1002", "LZP-1003", "LZP-1004", "LZP-1005", "LZP-1006", "LZP-1008", "LZP-1009"],
+      "ticket": [
+        "LZP-1001",
+        "LZP-1002",
+        "LZP-1003",
+        "LZP-1004",
+        "LZP-1005",
+        "LZP-1006",
+        "LZP-1008",
+        "LZP-1009"
+      ],
       "purpose": "E10's integration record. One row per ticket, the 21.5 measurement, the payload grep, and everything owed for a v2 ship. Prose: docs/v2/E10-VERIFICATION.md; findings: FINDINGS.md §16.",
       "verdicts": {
         "VERIFIED-HERE": "the artefact exists and a row in a suite that ran in this pass would fail if it regressed",
@@ -642,30 +2379,109 @@
         "OWED": "not delivered"
       },
       "tickets": {
-        "LZP-1001": { "verdict": "OWED", "evidence": "„Frankfurt\u201c, „Vercel\u201c and „Prisma\u201c appear nowhere in src/ (scripts/mom-test-probe.mjs). Enlarged by finding E10-3: the product contacts TWO remotes, so the copy must name the release host beside the relay." },
-        "LZP-1002": { "verdict": "VERIFIED-HERE", "evidence": ["tests/tier1/network-scope.test.js", "tests/tier2/network-audit.dom.js", "tests/attack/e10-network-scope.test.js"], "note": "STATUS's B-14 row — „the gate does not exist\u201c — is stale and is corrected in this pass. The genuinely open half, that neither gate could see the NATIVE side because a bridge invoke is not a fetch, is closed here by 25 new rows." },
-        "LZP-1003": { "verdict": "VERIFIED-HERE", "evidence": ["tests/attack/e10-crypto-pairing.test.js", "tests/attack/e10-crypto-backup.test.js", "tests/attack/e10-crypto-rules.test.js"], "defectsClosed": ["E10-B1", "E10-P1", "E10-P2", "E10-B2"], "residuals": ["R1", "R2", "R3", "R4", "R5"] },
-        "LZP-1004": { "verdict": "VERIFIED-HERE", "evidence": ["tests/fleet/e10-backup-restore.test.js"] },
-        "LZP-1005": { "verdict": "VERIFIED-HERE", "evidence": ["tests/fleet/e10-fleet-circle.test.js", "tests/fleet/e10-fleet-board.test.js"], "note": "per-story verdicts are the `stories` array in this same verification block" },
-        "LZP-1006": { "verdict": "OUTSTANDING-BY-NATURE", "pointsTaken": false, "evidence": ["docs/v2/MOM-TEST.md", "scripts/mom-test-probe.mjs"],
-          "defectsFound": [
-            "E-1 — „Mail-Anbieter\u201c normalises to twelve Crockford characters and WINS the code field, so she is told she mistyped a character she never typed",
-            "E-2 — the e-mail carries no relay address; parseInvitePaste takes the first URL, which is the download host",
-            "E-3 — trailing punctuation survives normalizeOrigin, so „https://…vercel.app\u201c becomes the punycode host …vercel.xn--app-5o0a"
+        "LZP-1001": {
+          "verdict": "VERIFIED-HERE",
+          "evidence": [
+            "src/js/settings.js:534 DATENSCHUTZ",
+            "tests/tier2/datenschutz.dom.js"
           ],
-          "structural": "gatekeeper_status is unimplemented in BOTH shells and „Bitte zuerst lesen.html\u201c is not on the disk image, so step 3 of the e-mail is the ONLY surface that reaches a stranger before macOS refuses to open the app" },
-        "LZP-1007": { "verdict": "NOT-THIS-PASS", "note": "a parallel workflow's; STATUS records it met with an order of magnitude in hand" },
-        "LZP-1008": { "verdict": "WRITTEN-UNVERIFIED", "evidence": ["docs/v2/RUNBOOK.md", "docs/v2/RELEASE-CHECKLIST.md"], "note": "every gate command in the checklist was executed (four scripts, all exit 0); the Vercel/Prisma procedure needs an account. Carries the release blocker: server/prisma/migrations/ does not exist, so the first deploy creates no tables and check-server-config.mjs passes anyway." },
-        "LZP-1009": { "verdict": "OWED", "evidence": "absence measured in eight independent places; see tickets[LZP-1009].note" }
+          "note": "Corrected 2026-09-03 in the final integration: the previous OWED verdict predates the commit that landed the section. The three documents that still say otherwise are listed in FINDINGS.md §20e."
+        },
+        "LZP-1002": {
+          "verdict": "VERIFIED-HERE",
+          "evidence": [
+            "tests/tier1/network-scope.test.js",
+            "tests/tier2/network-audit.dom.js",
+            "tests/attack/e10-network-scope.test.js"
+          ],
+          "note": "STATUS's B-14 row — „the gate does not exist“ — is stale and is corrected in this pass. The genuinely open half, that neither gate could see the NATIVE side because a bridge invoke is not a fetch, is closed here by 25 new rows."
+        },
+        "LZP-1003": {
+          "verdict": "VERIFIED-HERE",
+          "evidence": [
+            "tests/attack/e10-crypto-pairing.test.js",
+            "tests/attack/e10-crypto-backup.test.js",
+            "tests/attack/e10-crypto-rules.test.js"
+          ],
+          "defectsClosed": [
+            "E10-B1",
+            "E10-P1",
+            "E10-P2",
+            "E10-B2"
+          ],
+          "residuals": [
+            "R1",
+            "R2",
+            "R3",
+            "R4",
+            "R5"
+          ]
+        },
+        "LZP-1004": {
+          "verdict": "VERIFIED-HERE",
+          "evidence": [
+            "tests/fleet/e10-backup-restore.test.js"
+          ]
+        },
+        "LZP-1005": {
+          "verdict": "VERIFIED-HERE",
+          "evidence": [
+            "tests/fleet/e10-fleet-circle.test.js",
+            "tests/fleet/e10-fleet-board.test.js"
+          ],
+          "note": "per-story verdicts are the `stories` array in this same verification block"
+        },
+        "LZP-1006": {
+          "verdict": "OUTSTANDING-BY-NATURE",
+          "pointsTaken": false,
+          "evidence": [
+            "docs/v2/MOM-TEST.md",
+            "scripts/mom-test-probe.mjs"
+          ],
+          "defectsFound": [
+            "E-1 — „Mail-Anbieter“ normalises to twelve Crockford characters and WINS the code field, so she is told she mistyped a character she never typed",
+            "E-2 — the e-mail carries no relay address; parseInvitePaste takes the first URL, which is the download host",
+            "E-3 — trailing punctuation survives normalizeOrigin, so „https://…vercel.app“ becomes the punycode host …vercel.xn--app-5o0a"
+          ],
+          "structural": "gatekeeper_status is unimplemented in BOTH shells and „Bitte zuerst lesen.html“ is not on the disk image, so step 3 of the e-mail is the ONLY surface that reaches a stranger before macOS refuses to open the app"
+        },
+        "LZP-1007": {
+          "verdict": "VERIFIED-HERE",
+          "evidence": [
+            "tests/tier2/e1-incremental.dom.js (89 identity cells)",
+            "tests/tier2/e8-density-perf.dom.js §E1b"
+          ],
+          "note": "renderBoard 60.8 -> 3.3-3.5 ms, byte-identical to the full rebuild. The §E1 ROW stays red on memberToggle (19.4-20.5 ms) and findWorst (22.3-23.4 ms, find.js, red before this ticket)."
+        },
+        "LZP-1008": {
+          "verdict": "WRITTEN-UNVERIFIED",
+          "evidence": [
+            "docs/v2/RUNBOOK.md",
+            "docs/v2/RELEASE-CHECKLIST.md"
+          ],
+          "note": "every gate command in the checklist was executed (four scripts, all exit 0); the Vercel/Prisma procedure needs an account. Carries the release blocker: server/prisma/migrations/ does not exist, so the first deploy creates no tables and check-server-config.mjs passes anyway."
+        },
+        "LZP-1009": {
+          "verdict": "WRITTEN-UNVERIFIED",
+          "evidence": [
+            "src/js/feedback/ (8 modules)",
+            "tests/tier1/feedback.test.js",
+            "tests/tier2/feedback.dom.js"
+          ],
+          "note": "Corrected 2026-09-03: the modules exist. NOT WIRED — family/mount.js never calls setFeedbackPort(...), so canSend() is false and „Senden\" is disabled with the reason on screen. There is also no production sink: Vercel answers 501."
+        }
       },
       "story215": {
-        "old": "13.4 — „Zero network by architecture.\u201c  (superseded by amendment A1)",
-        "new": "21.5 — „in solo mode the app makes zero network requests; with a Familienkreis it talks to exactly one sync endpoint and nothing else.\u201c",
+        "old": "13.4 — „Zero network by architecture.“  (superseded by amendment A1)",
+        "new": "21.5 — „in solo mode the app makes zero network requests; with a Familienkreis it talks to exactly one sync endpoint and nothing else.“",
         "measured": {
           "pageSoloSession": "0 calls across a full WKWebView session — create, edit, undo, redo, settings, layers, persist, search, Heute, visibilitychange, online, focus — with spies on all five socket APIs; spies proved armed in the same file",
           "pageSourceCallSites": "1 allowed (src/js/platform/net.js), 0 others, across all of src/js/",
           "nativeSocketSites": 13,
-          "nativeJobs": ["update", "sync"],
+          "nativeJobs": [
+            "update",
+            "sync"
+          ],
           "hardcodedRemoteUrls": 1,
           "hardcodedRemoteUrl": "https://github.com/OWNER-PLACEHOLDER/langzeitplaner/releases/latest/download/latest.json",
           "soloRequestsFreshInstall": 0,
@@ -675,21 +2491,38 @@
           "requestsAfterOneHumanPress": 1
         },
         "verdict": "EXACTLY ONE exception in solo mode (the update manifest) and TWO in family mode. Human-initiated at two independent gates, each proved upstream of its socket by relative order inside the enclosing function rather than by a line number. Detectable if it widened: a third job reddens §1a, a second remote host reddens §1f, a feedback sender reddens §2a–§2e.",
-        "honestyGap": "„Solo mode makes zero network requests\u201c is FALSE as literally written: the BOARD makes zero, the SHELL makes one. Amendment A1's permission to quote v1's wording for solo mode is therefore not clean, because the update check happens in solo mode too. Owner: LZP-1001 / the PO. Finding E10-3."
+        "honestyGap": "„Solo mode makes zero network requests“ is FALSE as literally written: the BOARD makes zero, the SHELL makes one. Amendment A1's permission to quote v1's wording for solo mode is therefore not clean, because the update check happens in solo mode too. Owner: LZP-1001 / the PO. Finding E10-3."
       },
       "payloadGrep": {
         "file": "tests/attack/e10-outbound-payload.test.js",
         "path": "createBridgeTransport — the outbound carrier E10 adds, which none of the four earlier standing-bar rounds has ever seen (all four end at transport.request; this one starts there)",
-        "needles": ["Scheidungsanwältin Dr. Kübler 14:30", "Kur in Bad Wörishofen", "Zweitfamilie Süd", "Diagnose F32.1 — mittelgradige Episode", "Passwort fürs Schließfach: Großmutter77"],
-        "spellings": ["raw UTF-8", "base64url", "\\uXXXX-escaped"],
+        "needles": [
+          "Scheidungsanwältin Dr. Kübler 14:30",
+          "Kur in Bad Wörishofen",
+          "Zweitfamilie Süd",
+          "Diagnose F32.1 — mittelgradige Episode",
+          "Passwort fürs Schließfach: Großmutter77"
+        ],
+        "spellings": [
+          "raw UTF-8",
+          "base64url",
+          "\\uXXXX-escaped"
+        ],
         "scope": "url + method + every header NAME and VALUE + body",
-        "result": "0 of 5 needles in 0 of 3 spellings, on the personal push, the family push, the GET leg, the fetch leg and the anonymous transport. The legitimately shared label is absent too — „versiegelt\u201c on the wire means unreadable, not merely intact.",
+        "result": "0 of 5 needles in 0 of 3 spellings, on the personal push, the family push, the GET leg, the fetch leg and the anonymous transport. The legitimately shared label is absent too — „versiegelt“ on the wire means unreadable, not merely intact.",
         "positiveControl": "the same function over the same payload MUST find the space id, the device short id, the client version, LZP1, /api/v1/ops, the origin, and every sealed ct and sig; and every needle MUST be present in the pre-seal plaintext",
-        "imageBytes": "NONE EXIST. src/js/ contains no image primitive of any kind (no canvas, getContext, toDataURL, toBlob, getImageData, OffscreenCanvas, createImageBitmap, getDisplayMedia, captureStream) and neither shell can screenshot, so „the redacted PNG was produced by not drawing\u201c is VACUOUS rather than verified. §3a/§3b are the rows to invert when LZP-1009's screenshot half lands."
+        "imageBytes": "NONE EXIST. src/js/ contains no image primitive of any kind (no canvas, getContext, toDataURL, toBlob, getImageData, OffscreenCanvas, createImageBitmap, getDisplayMedia, captureStream) and neither shell can screenshot, so „the redacted PNG was produced by not drawing“ is VACUOUS rather than verified. §3a/§3b are the rows to invert when LZP-1009's screenshot half lands."
       },
       "standingBar": {
         "count": 5,
-        "rounds": ["tests/attack/e7-leak-downgrade.test.js", "tests/attack/e7-leak-observer.test.js", "tests/attack/e7-leak-routes.test.js", "tests/fleet/e6-attack-privat.test.js", "tests/fleet/e6-gate-privat.test.js", "tests/attack/e10-outbound-payload.test.js"],
+        "rounds": [
+          "tests/attack/e7-leak-downgrade.test.js",
+          "tests/attack/e7-leak-observer.test.js",
+          "tests/attack/e7-leak-routes.test.js",
+          "tests/fleet/e6-attack-privat.test.js",
+          "tests/fleet/e6-gate-privat.test.js",
+          "tests/attack/e10-outbound-payload.test.js"
+        ],
         "result": "zero bytes of a Privat entry, five times",
         "limit": "a needle search at the transport can NEVER catch a leak of already-sealed bytes, because the plaintext never reaches net.js. Mutant M7 demonstrates it: a debug header echoing the body reddens the four-header allowlist (e10-outbound-payload §1e) and not the needle search (§1a)."
       },
@@ -706,13 +2539,13 @@
       "mutants": {
         "count": 11,
         "method": "scratch copy of the working tree; never in place; no git stash",
-        "control": "100 pass / 0 fail on the integrated tree, before and after every mutant; and 40 pass / 0 fail on a second scratch tree carrying HEAD's shell-macos/main.swift, src-tauri/src/lib.rs and src/js/platform/net.js, where sync_request does not exist \u2014 so the two new files are green both on the tree they were written against and on the tree this commit produces",
+        "control": "100 pass / 0 fail on the integrated tree, before and after every mutant; and 40 pass / 0 fail on a second scratch tree carrying HEAD's shell-macos/main.swift, src-tauri/src/lib.rs and src/js/platform/net.js, where sync_request does not exist — so the two new files are green both on the tree they were written against and on the tree this commit produces",
         "note": "M9 — deleting the `disclosed` gate from createUpdater — killed NOTHING on the first attempt, because the `enabled` gate covered for it. Row §5f, a Mac whose switch is on but which was never told, was written BECAUSE that mutant survived, and it kills it."
       },
       "openFindings": [
-        "E10-1 — story 17.5's „neu\u201c dot never lights: store.js:_project supplies none of seqOf / isNew / lastSeenSeq / levelDecreased. Owner store.js, a parallel workflow's. The row is green while the defect exists: if it goes red, INVERT it.",
+        "E10-1 — story 17.5's „neu“ dot never lights: store.js:_project supplies none of seqOf / isNew / lastSeenSeq / levelDecreased. Owner store.js, a parallel workflow's. The row is green while the defect exists: if it goes red, INVERT it.",
         "E10-2 — LZP-1009 is OWED and its absence is load-bearing",
-        "E10-3 — „solo makes zero requests\u201c is false as written; the copy has not caught up",
+        "E10-3 — „solo makes zero requests“ is false as written; the copy has not caught up",
         "E10-4 — the tier-2 isolation guard fired once against the user's real board",
         "E10-5 — the solo module-graph measurement SKIPs in WKWebView (no Resource Timing for the app: scheme); the claim rests on E5-VERIFICATION §4's Chrome run plus the static import-graph walk"
       ],
@@ -721,14 +2554,13 @@
         "LZP-1001 — the Datenschutz section, now with a second remote to name",
         "LZP-1006 — the Mom test itself, blocked on a person and on E-1/E-2/E-3 being fixed first",
         "LZP-106's unlock screen — gatekeeper_status unimplemented in both shells",
-        "„Bitte zuerst lesen.html\u201c is not on the disk image",
+        "„Bitte zuerst lesen.html“ is not on the disk image",
         "the three e-mail/parser defects E-1, E-2, E-3",
         "LZP-1009 — the feedback button",
         "E10-1 and E10-4",
         "LZP-1003's residuals R1–R5"
       ]
     },
-
     "generated": "2026-09-03",
     "ticket": [
       "LZP-1004",
@@ -1100,6 +2932,299 @@
         ],
         "note": "The second Mac here arrives by the A2 RECOVERY route, not by the 19.5 pairing-code route. One rig carrying a paired second Mac AND a three-member family does not exist."
       }
-    ]
+    ],
+    "final": {
+      "generated": "2026-09-03",
+      "purpose": "The final integration of four parallel fix passes onto 6268cbe. Prose: docs/v2/V2-FINAL.md; findings: FINDINGS.md §21.",
+      "suites": {
+        "tier1": 2216,
+        "property": 101,
+        "attack": 970,
+        "server": 998,
+        "fleet": 423,
+        "dom": {
+          "pass": 902,
+          "fail": 3,
+          "files": 54,
+          "reds": [
+            "e8-density-legibility §A4 — the 9 px ink floor (PO ruling; palette.js is pinned by the tier-1 oracle)",
+            "e8-density-perf §E1 — memberToggle 19.4-20.5 ms and findWorst 22.3-23.4 ms against a 16.7 ms frame",
+            "e8-density-perf §E3 — the row asks 75 % where 48 % is the mathematical ceiling for any ordering (a spec threshold error)"
+          ]
+        },
+        "greenRows": 5610
+      },
+      "acceptance": {
+        "driver": "scripts/shell-family-e2e.mjs",
+        "launchesPerRun": 26,
+        "runs": [
+          {
+            "run": 1,
+            "phasesFailed": 0,
+            "founderReceivedJoinersEntry": true,
+            "crossedTo": [
+              "B",
+              "C"
+            ],
+            "refusalLedger": 2
+          },
+          {
+            "run": 2,
+            "phasesFailed": 0,
+            "founderReceivedJoinersEntry": true,
+            "crossedTo": [
+              "B",
+              "C"
+            ],
+            "refusalLedger": 2
+          },
+          {
+            "run": 3,
+            "phasesFailed": 0,
+            "founderReceivedJoinersEntry": true,
+            "crossedTo": [
+              "B",
+              "C"
+            ],
+            "refusalLedger": 2
+          },
+          {
+            "run": 4,
+            "phasesFailed": 0,
+            "founderReceivedJoinersEntry": true,
+            "crossedTo": [
+              "B",
+              "C"
+            ],
+            "refusalLedger": 34
+          },
+          {
+            "run": 5,
+            "phasesFailed": 0,
+            "founderReceivedJoinersEntry": true,
+            "crossedTo": [
+              "B",
+              "C"
+            ],
+            "refusalLedger": 2
+          }
+        ],
+        "before": "founder received a joiner’s entry in 0 of 5; ledger 0 -> 6 -> 13 -> 25 over four launches (SHELL-VERIFICATION.md §9)",
+        "bar": "5 of 5 with the ledger flat at zero",
+        "verdict": "FIRST HALF MET (5 of 5, every phase, both peers). SECOND HALF NOT MET: the residual ledger is F-SHELL-3 (one notOwner remembered by L-1) and F-SHELL-4 (a second identical self-attestation). Neither is an attestation defect and neither blocks a phase."
+      },
+      "v1Oracle": {
+        "method": "every row of the 11 characterization files added at 328c683, run at 6268cbe in a clean git-archive tree and in this tree, compared PER FILE including nested rows",
+        "rows": 626,
+        "tier1Rows": 515,
+        "tier2Rows": 111,
+        "red": 0,
+        "filesChanged": 0,
+        "files": {
+          "tier1/dates-holidays.test.js": 103,
+          "tier1/layout.test.js": 108,
+          "tier1/palette.test.js": 6,
+          "tier1/repeats-find-i18n.test.js": 137,
+          "tier1/storage.test.js": 11,
+          "tier1/store-persistence.test.js": 139,
+          "tier1/suite-integrity.test.js": 11,
+          "tier2/board-render.dom.js": 19,
+          "tier2/dom-rendering.dom.js": 44,
+          "tier2/interaction.dom.js": 32,
+          "tier2/shell-bridge.dom.js": 16
+        }
+      },
+      "e1Isolated": {
+        "note": "the file run ALONE, five times, WebKit, the shipped .app, 8x2 fixture; family = 4195 DOM nodes, solo = 1975. The harness flush floor (0.3 ms solo / 1.4 ms family) is INCLUDED in every cell.",
+        "ms": {
+          "buildBoard": {
+            "solo": "1.1",
+            "family": "4.4-4.7",
+            "frames": 0.3
+          },
+          "renderBoard": {
+            "solo": "0.9-1.0",
+            "family": "3.3-3.5",
+            "frames": 0.2
+          },
+          "memberToggle": {
+            "solo": "1.1",
+            "family": "19.4-20.5",
+            "frames": 1.2,
+            "overBudget": true
+          },
+          "scroll": {
+            "solo": "0.7",
+            "family": "2.4-2.6",
+            "frames": 0.1
+          },
+          "findKeystroke": {
+            "solo": "1.5-1.8",
+            "family": "9.5-9.8",
+            "frames": 0.6
+          },
+          "findWorst": {
+            "solo": "4.0-4.1",
+            "family": "22.3-23.4",
+            "frames": 1.4,
+            "overBudget": true
+          }
+        },
+        "neverMeasured": "wall-clock fps — neither harness has a visible window, so rAF is throttled in both. Every number is main-thread work."
+      },
+      "identityProof": {
+        "file": "tests/tier2/e1-incremental.dom.js",
+        "method": "#board.outerHTML byte-for-byte against a from-scratch rebuild, plus the <textarea> value properties; invalidateBoardCache() is the exported seam that produces the from-scratch board",
+        "cells": {
+          "I1_every_mutation_kind": "66/66",
+          "I2_eight_in_a_row": "10/10",
+          "I3_marks_and_foreign_nodes": "6/6",
+          "I4_uncommitted_scratchpad": "3/3",
+          "I5_plus_n_badge": "4/4"
+        },
+        "total": 89,
+        "failed": 0
+      },
+      "redactionBoundary": {
+        "round": 7,
+        "tier1AttackFleetRows": 302,
+        "tier2Rows": 37,
+        "ssrf": {
+          "script": "scripts/shell-ssrf.mjs",
+          "launches": 29,
+          "rows": 38,
+          "failed": 0,
+          "requestsWithCookie": 0
+        },
+        "verdict": "zero bytes of a Privat entry, seventh consecutive round"
+      },
+      "joinPath": {
+        "refuses": [
+          "Mail-Anbieter",
+          "Installation",
+          "Applications",
+          "Familie Weber",
+          "Sicherheitsmeldung",
+          "Systemeinstellungen",
+          "Serveradresse",
+          "Code: Mail-Anbieter",
+          "https://github.com/…"
+        ],
+        "stillReads": [
+          "JDNC-5A5R-JSV6",
+          "JDNC 5A5R JSV6",
+          "JDNC5A5RJSV6",
+          "a real code with a decoy after it"
+        ],
+        "note": "42 rows (tier1/createjoin.test.js 31 incl. a 20 000-paste generator, tier2/join-paste.dom.js 11). NOT PROVEN: no join has ever run over the sync_request bridge."
+      },
+      "deployReadiness": {
+        "check": ".github/scripts/check-server-config.mjs",
+        "passed": 39,
+        "failed": 0,
+        "statedSkips": [
+          "L1",
+          "L2"
+        ],
+        "failsOnBrokenConfig": "demonstrated: rm -rf server/prisma/migrations -> exit 1, FAIL M1 naming the remedy",
+        "test": "tests/server/deploy-readiness.test.js — 54 rows, 37 mutants",
+        "database": "migration applied to a live PostgreSQL 17.10: 10 tables, 1 enum, 64 columns, 3 uniques, 8 indexes, 6 FKs",
+        "notProven": "server/adapters/prisma.js has never run against it — needs the generated client and §2.5 store-contract.test.js"
+      },
+      "momTest": {
+        "probe": "scripts/mom-test-probe.mjs",
+        "rows": 35,
+        "pass": 29,
+        "note": 2,
+        "fail": 4,
+        "blocker": "the shipped invitation carries NO relay address at all, so submitJoin dead-ends and she cannot join. One `Server: <origin>` line in docs/v2/email/invitation.{de,en}.{txt,html} — LZP-108 — and the probe goes green."
+      },
+      "residuals": [
+        {
+          "id": "R-1",
+          "finding": "F-SHELL-3",
+          "severity": "DATA LOSS",
+          "owner": "src/js/family/sharing.js",
+          "what": "the admin’s „→ Privat\" reaches the owner’s Mac as a DELETION, not a reversion — she loses her own entry. BLOCKED in 10 of 10 runs. Also the single notOwner in the residual refusal ledger."
+        },
+        {
+          "id": "R-2",
+          "finding": "F-SHELL-4",
+          "severity": "OPEN, cause unnamed",
+          "owner": "src/js/family/engine.js#publishMyAttestation + store.js#_persistOps",
+          "what": "a second, IDENTICAL self-attestation for a write-once register (KHtu… / luxB…, same 545-byte blob, 3.8 s apart) leaves a permanent writeOnce refusal on every peer and splits the record. Nothing breaks. The store.registers() hypothesis was built, tested, DISPROVEN and reverted; the thread to pull is that the first op carried seq:null and never reached the relay. Characterized by tests/fleet/e11-attest.test.js §5e."
+        },
+        {
+          "id": "R-3",
+          "finding": "Mom test blocked",
+          "severity": "BLOCKS THE ONLY TEST THAT MATTERS",
+          "owner": "LZP-108",
+          "what": "no `Server:` line in the shipped invitation; she has no relay address and cannot join."
+        },
+        {
+          "id": "R-4",
+          "finding": "F-SHELL-2",
+          "severity": "wrong answer",
+          "owner": "family/adminpanel.js + family/mount.js",
+          "what": "eligibleCosigners offers a removed member as a co-signer. The originally assigned fix was refuted by measurement (lifecycle.js:229 deletes the leaver’s ops in the same transaction); the real fix is to intersect the log’s member list with the roster’s removedAt."
+        },
+        {
+          "id": "R-5",
+          "finding": "§E1",
+          "severity": "performance",
+          "owner": "find.js + a product decision on the toggle",
+          "what": "memberToggle 19.4-20.5 ms and findWorst 22.3-23.4 ms against a 16.7 ms frame. renderBoard is closed at 3.3-3.5 ms."
+        },
+        {
+          "id": "R-6",
+          "finding": "§A4 and §E3",
+          "severity": "not code defects",
+          "owner": "the PO",
+          "what": "§A4 is a PO ruling (palette.js is pinned by the oracle); §E3 asks 75 % where 48 % is the mathematical ceiling for any ordering."
+        },
+        {
+          "id": "R-7",
+          "finding": "the join path has never crossed the real bridge",
+          "severity": "unproven",
+          "owner": "a shell driver pass",
+          "what": "the tier-2 relay is in-process. SHELL-VERIFICATION.md §10’s conditional-story list is unchanged."
+        },
+        {
+          "id": "R-8",
+          "finding": "the prisma adapter is unproven",
+          "severity": "unproven",
+          "owner": "§2.5 store-contract.test.js",
+          "what": "the migration is verified against a real database; the adapter over it is not. L1/L2 are stated skips, never passes."
+        },
+        {
+          "id": "R-9",
+          "finding": "three CI/deploy gaps",
+          "severity": "process",
+          "owner": "server.yml, vercel.json, shell-family-e2e.mjs",
+          "what": "server.yml’s path filter omits tests/server/**; vercel.json’s ignoreCommand is single-commit; the e2e driver still prints BLOCKED (finding F-SHELL-1) for any attempted phase that fails."
+        },
+        {
+          "id": "R-10",
+          "finding": "LZP-1009 not wired",
+          "severity": "feature off",
+          "owner": "family/mount.js",
+          "what": "setFeedbackPort(...) is never called, so canSend() is false and „Senden\" is disabled. No production sink either — Vercel answers 501."
+        },
+        {
+          "id": "R-11",
+          "finding": "three diagnostic bugs",
+          "severity": "misleading",
+          "owner": "tests/tier2/shell-family-e2e.dom.js",
+          "what": "Object.keys() on a Map prints [] unconditionally (:466-471); m.attestation is read on the member row where ADR 003 §3.6 puts it on m.devices[] (:459); assert.doesNotThrow(() => validateOp(op)) is vacuous because validateOp returns its verdict and never throws."
+        },
+        {
+          "id": "R-12",
+          "finding": "one unreproduced flake",
+          "severity": "watch",
+          "owner": "tests/tier1/createjoin.test.js",
+          "what": "§2d failed twice earlier in the session in an unmodified tree (i=18397 \"join\\tdein\\tcode\") and has passed on every run since."
+        }
+      ]
+    }
   }
 }

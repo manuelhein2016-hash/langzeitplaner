@@ -62,146 +62,807 @@ function ft(key) {
 let model = null;
 export const currentModel = () => model;
 
+// ═════════════════════════════════════════════════════════════════════════════
+// THE INCREMENTAL RENDER — LZP-1007, story 17.4 („60 fps")
+//
+// WHAT THIS REPLACED, AND WHY TUNING COULD NOT CLOSE IT
+//
+// `renderBoard` used to be `root.textContent = ''` followed by a full twelve-
+// month rebuild: 4 195 boxes, every call. Measured in WebKit on the 8 × 2
+// fixture (`e8-density-perf.dom.js` §E1, run alone so the number is not
+// contention): 60.9 ms — 3.6 frames of a 60 fps budget — decomposed as ~3 ms of
+// model, ~23 ms of DOM construction and ~34 ms of layout. Seven CSS levers were
+// measured against it (fixed `.d-num`/`.d-wd`, `clip`, hidden pads, `contain`
+// on `.day`, `.col`, `.rows`, no label max-width) and NONE of them moved it;
+// `contain` on `.day` made it worse at 74.3. `content-visibility` is not
+// available either — eleven of twelve columns are on screen, and off-screen
+// boxes would falsify the tier-2 geometry rows.
+//
+// A full rebuild of twelve months cannot fit in one frame in WebKit. So this
+// file stopped doing one. Almost every call changes very little — a member
+// toggle, one entry edited, a category hidden, a layer flipped — and the board
+// now touches only the boxes whose MODEL SLICE changed.
+//
+// ── THE ONE INVARIANT ────────────────────────────────────────────────────────
+//
+// **The incremental result is the full result.** Not "close enough": the same
+// DOM, node for node, attribute for attribute. An incremental path that can
+// differ from the full path is a bug factory, so the design gives it exactly
+// one degree of freedom:
+//
+//   every node this file puts on the board is built by the SAME builder the
+//   full path uses. The only thing the incremental path decides is whether to
+//   RUN a builder or KEEP what the last run produced.
+//
+// That reduces correctness to a single, checkable claim: *if a slot's signature
+// is unchanged, its builder would have produced the same node.* A signature is
+// therefore a string over EVERY model field its builder reads, plus the copy
+// epoch for the strings that come from `i18n` rather than the model. Signatures
+// deliberately OVER-approximate where it is cheap to: an over-wide signature
+// costs a rebuild nobody needed, an under-wide one costs a wrong board.
+//
+// `tests/tier2/e1-incremental.dom.js` holds the claim to random mutation
+// sequences, deep-comparing the incremental board against a from-scratch
+// rebuild after every single step.
+//
+// ── THE FOUR SLOTS OF A DAY ROW, AND WHY THEY ARE FOUR ───────────────────────
+//
+// Splitting the row is not premature: it is the whole win on the gesture that
+// matters most. Hiding one member of eight changes a majority of the day rows
+// on the fixture — but on most of them the ONLY thing that changes is the „+n"
+// badge's digit, because that member's entry was folded into the overflow
+// rather than drawn. `.d-more` is `position: absolute` (`app.css`), so
+// rewriting its text dirties one out-of-flow box and NOT the row's flex line.
+// Rebuilding the whole row to change a digit would have dirtied the line for
+// nothing.
+//
+//   chrome  the row's own classes, `data-row`, `data-date`, `title`
+//   num     `.d-num`, `.d-wd`, and the demoted-holiday dot
+//   body    `.d-body` — the holiday line and the notes
+//   more    the „+n" badge
+//
+// ── WHAT MAKES A KEPT NODE STILL EQUAL TO A FRESH ONE ────────────────────────
+//
+// A full rebuild also had two side effects that were never named as such,
+// because destroying the DOM performed them for free. The incremental path has
+// to perform them on purpose or it is not equivalent:
+//
+//   1. TRANSIENT MARKS. `find.js` writes `.hit`/`.current`, `interact.js`
+//      writes `.selected`/`.dragging`. A fresh board carries none of them, so
+//      neither may a kept one — `scrubMarks` below. (`redraw()` in `main.js`
+//      re-applies all four straight after this call, exactly as before.)
+//   2. NODES THIS FILE DID NOT MAKE. `interact.js` appends a drag preview, a
+//      drop row, an inline editor and a category strip into `.rows`. The child
+//      counts are checked per column and a column that does not match is
+//      rebuilt whole, which is precisely what `textContent = ''` did to them.
+//
+// The scratchpad is the third: its `<textarea>` carries uncommitted typing in a
+// PROPERTY, which no attribute comparison would see, so `patchPad` reconciles
+// `value` and the `empty` class on every render rather than trusting the sig.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/** Field separator inside a signature — a byte no board string can contain. */
+const SEP = '\u001f';
+/** Record separator, between the segments of a column's tail signature. */
+const RSEP = '\u001e';
+
+/**
+ * The render cache: the nodes this file owns, and the signature each was built
+ * from. Null means "the next render is a full one", which is also what any
+ * failed integrity check falls back to.
+ */
+let cache = null;
+
+/**
+ * Drop the cache, forcing the next `renderBoard` to be a full rebuild.
+ *
+ * The seam exists for two callers: the identity test, which needs to produce a
+ * from-scratch board to compare against, and anyone who replaces the board's
+ * DOM behind this file's back. It is never needed for a state change — that is
+ * what the signatures are for.
+ */
+export function invalidateBoardCache() { cache = null; }
+
+/**
+ * Every string this file can put in the DOM that does NOT come from the model.
+ *
+ * `ft()` resolves through `i18n` first and falls back to `FAMILY_COPY` only
+ * while a key is missing, so the copy can change WITHOUT the language changing
+ * — the day the i18n owner lands the family keys, mid-session. Comparing the
+ * resolved strings rather than `getLang()` alone is what makes that safe.
+ *
+ * HONEST NOTE, because the rule here is that a claim with no test that dies is
+ * recorded as what it actually is. Reducing this to `getLang()` alone SURVIVES
+ * every row in `e1-incremental.dom.js` (mutant M4). It has to: `i18n.js` keeps
+ * one frozen table per language and exposes no way to change one mid-session,
+ * so this build cannot produce the state the breadth exists for. It is kept
+ * because it costs eleven table lookups per render and because the FAMILY_COPY
+ * fallback above is explicitly written to go quiet the day i18n lands those
+ * keys — but it is UNPROVEN breadth, not a tested guarantee, and the half that
+ * is tested is the language.
+ */
+function copyEpoch() {
+  return [
+    getLang(), t('continues'), t('scratchpad'), t('more'), t('lanesFull'),
+    t('untitledBar'), ft('belegt'), ft('overflowNew'), ft('belegtOwnerTip'),
+    ft('geteiltOwnerTip'), ft('expPending'),
+  ].join(SEP);
+}
+
+// ── signatures ───────────────────────────────────────────────────────────────
+//
+// One per slot, over exactly the model fields that slot's builder reads. Read
+// each of these next to its builder; they are a pair, and a field added to one
+// without the other is the only way this design can break.
+
+/** `renderNote` reads: id, colour, the five flags, the badge inputs, the text. */
+const noteSig = (n) => n.note.id + SEP + n.color + SEP
+  + (n.foreign ? 'F' : '') + (n.redacted ? 'R' : '') + (n.canEdit ? 'E' : '')
+  + (n.isNew ? 'N' : '') + (n.note.repeatsYearly ? 'Y' : '') + SEP
+  + (n.initial ?? '') + SEP
+  + (n.exposure ? n.exposure.level + (n.exposure.pending ? '~' : '') : '') + SEP
+  + (typeof n.note.text === 'string' ? n.note.text : '');
+
+/** `applyDayChrome`: classes, `data-row`, `data-date`, the hover tips. */
+const chromeSig = (d, claimed) => (d.empty
+  ? 'E' + d.row
+  : d.row + SEP + (claimed ? 'C' : '') + (d.weekend ? 'W' : '') + (d.ferien ? 'F' : '')
+    + (d.isToday ? 'T' : '') + (d.holiday ? 'H' : '') + (d.holidayDemoted ? 'D' : '') + SEP
+    + d.date + SEP + (d.ferienName || '') + SEP
+    + (d.holidayDemoted && d.holiday ? d.holiday.name : ''));
+
+/** `.d-num`, `.d-wd`, and whether the demoted-holiday dot stands before the body. */
+const numSig = (d) => d.n + SEP + d.wd + SEP + (d.holidayDemoted ? 'D' : '');
+
+/** `buildBody`: the holiday line, then every drawn note. */
+function bodySig(d) {
+  let s = d.date + SEP
+    + (d.holidayShown && d.holiday
+      ? d.holiday.short + SEP + (d.holiday.own ? 'O' : '') + SEP + d.holiday.name
+      : '');
+  for (const n of d.notes) s += SEP + noteSig(n);
+  return s;
+}
+
+/** `applyMore`: the digit, the „neu" tell, and the two branches of the hover. */
+const moreSig = (d) => (d.overflow > 0
+  ? d.overflow + SEP + d.overflowNew + SEP + d.laneOverflow + SEP + d.date
+  : '');
+
+/** The column's own chrome: the `.col` attributes and the sticky head. */
+const headSig = (col) => col.key + SEP + col.index + SEP + (col.isTodayMonth ? 'T' : '')
+  + SEP + col.label + SEP + col.fullLabel;
+
+/** The scratchpad (F10). */
+const padSig = (col) => col.key + SEP + col.fullLabel + SEP + col.pad;
+
+// ── the entry point ──────────────────────────────────────────────────────────
+
+/**
+ * Classes other files write onto board nodes between renders. A board built
+ * from scratch carries none of them; a KEPT node must not either, or the two
+ * paths are not the same board. `main.js:redraw()` re-applies every one of them
+ * immediately after this call — `applySelection()` and `refreshFind()` — so
+ * nothing the user can see flickers, and the four are removed here in ONE sweep
+ * rather than per kept node.
+ */
+const SCRUB = ['hit', 'current', 'selected', 'dragging'];
+function scrubMarks(root) {
+  // `getElementsByClassName`, not `querySelectorAll`: the collection is LIVE and
+  // the engine keeps it per class name, so on the overwhelmingly common render —
+  // no marks on the board at all — this is four cached length reads rather than
+  // a walk over 4 195 elements. Removing the class shrinks the collection under
+  // the loop, which is why it counts down rather than up.
+  for (const cls of SCRUB) {
+    const live = root.getElementsByClassName(cls);
+    for (let i = live.length - 1; i >= 0; i--) live[i].classList.remove(cls);
+  }
+}
+
 export function renderBoard(root) {
   const state = store.state;
   model = buildBoard(state);
+  const epoch = copyEpoch();
 
-  const scrollLeft = root.parentElement ? root.parentElement.scrollLeft : 0;
-  root.textContent = '';
   // Density lives on :root only. Every position below is expressed in calc()
   // against these variables, never in resolved pixels — that is what lets the
   // print stylesheet re-metric the identical DOM for A4/A3 (F12) by overriding
   // them on <body>, which sits between :root and the board.
-  document.documentElement.style.setProperty('--row-h', `${model.rowH}px`);
-  document.documentElement.style.setProperty('--col-w', `${model.colW}px`);
+  //
+  // The guard is not cosmetic. A custom property on the document element is
+  // inherited by every box on the board, so WRITING one — even the value that
+  // is already there — is a whole-document style invalidation, and this render
+  // exists to avoid exactly that class of work.
+  setVar('--row-h', `${model.rowH}px`);
+  setVar('--col-w', `${model.colW}px`);
 
+  if (canPatch(root, epoch)) {
+    try {
+      scrubMarks(root);
+      for (let i = 0; i < model.cols.length; i++) patchColumn(cache.cols[i], model.cols[i]);
+      return model;
+    } catch {
+      // THE LAST RESORT, and it is a real one.
+      //
+      // `canPatch` checks every way the DOM can move out from under the cache
+      // that this app actually produces — a different root, a changed language,
+      // a node inserted into or removed from a column. It cannot check the one
+      // it does not produce: some future caller REPLACING a node inside a row
+      // while leaving the child count alone. That would reach a `replaceChild`
+      // on a node whose parent has moved, and DOM throws for it.
+      //
+      // Falling through to the full rebuild makes that outcome slow instead of
+      // broken, which is the right trade for a path that must never be able to
+      // put a wrong board on screen. Nothing is logged: the board's content is
+      // inside these nodes, and `tests/tier1/*` police what this process is
+      // allowed to emit. A half-patched board does not survive either — the
+      // rebuild below clears the root first.
+      cache = null;
+    }
+  }
+
+  // ── the full path, which is also the first one ─────────────────────────────
+  const scrollLeft = root.parentElement ? root.parentElement.scrollLeft : 0;
+  root.textContent = '';
   const frag = document.createDocumentFragment();
-  for (const col of model.cols) frag.appendChild(renderColumn(col, model, state));
+  const recs = [];
+  for (const col of model.cols) {
+    const rec = renderColumn(col);
+    recs.push(rec);
+    frag.appendChild(rec.el);
+  }
   root.appendChild(frag);
+  cache = { root, epoch, cols: recs };
 
   if (root.parentElement) root.parentElement.scrollLeft = scrollLeft;
   return model;
 }
 
-function renderColumn(col, m, state) {
+const setVar = (name, value) => {
+  if (document.documentElement.style.getPropertyValue(name) !== value) {
+    document.documentElement.style.setProperty(name, value);
+  }
+};
+
+/**
+ * Is the cached board still the board that is on screen?
+ *
+ * Everything checked here is a way the DOM can have moved out from under the
+ * cache — a different root, a language change, a column count change, a node
+ * some other file inserted into or removed from a column. Any of them falls
+ * back to the full rebuild, which is always correct and never wrong, only slow.
+ */
+function canPatch(root, epoch) {
+  if (!cache || cache.root !== root || cache.epoch !== epoch) return false;
+  if (cache.cols.length !== model.cols.length) return false;
+  if (root.childElementCount !== cache.cols.length) return false;
+  for (let i = 0; i < cache.cols.length; i++) {
+    const rec = cache.cols[i];
+    if (rec.days.length !== model.cols[i].days.length) return false;
+    if (rec.el.parentElement !== root) return false;
+    if (rec.el.childElementCount !== 3) return false;            // head · rows · pad
+    if (rec.rows.childElementCount !== rec.days.length + tailLength(rec.tail, rec.horizon)) return false;
+  }
+  return true;
+}
+
+// ── columns ──────────────────────────────────────────────────────────────────
+
+/**
+ * WHICH ROWS HAVE A BAR LABEL STANDING IN THEIR GUTTER (2.4 · 3.7)
+ *
+ * Two things are painted to the right of a day's text: the „+n" badge and, on
+ * one row per month segment, a bar label. Both used to be opaque overlays over
+ * the TEXT COLUMN; both now live in the lane gutter instead (see `app.css`
+ * `.d-more` and `.bar-label.on-ink`). 27 px does not hold two of them side by
+ * side, so on the rows where they meet the badge steps into the line and takes
+ * width — and this scan is what tells the CSS which rows those are.
+ *
+ * `inkOf` is `layout.js`'s own label-scan predicate, to the term: a label that
+ * landed on a row scoring 0 landed on empty space, which is what 3.7 promised,
+ * and it keeps all 66 px. Everything is read from the MODEL — no layout is
+ * forced and nothing here is read back from the DOM.
+ */
+function claimedRows(col) {
+  const inkOf = (d) => (d.holidayShown ? 1 : 0) + d.notes.length + (d.overflow > 0 ? 1 : 0);
+  const dayAtRow = new Map();
+  for (const d of col.days) if (!d.empty) dayAtRow.set(d.row, d);
+  const claimed = new Set();
+  for (const seg of col.segs) {
+    const host = dayAtRow.get(seg.labelRow);
+    if (host && inkOf(host) > 0) claimed.add(seg.labelRow);
+  }
+  return claimed;
+}
+
+// ── the segment tail ─────────────────────────────────────────────────────────
+//
+// Everything in a column after its 31 day rows: one group of nodes per bar
+// segment — the stripe, the label chip and up to one horizon cue — and then the
+// column's own „continues" cue.
+//
+// IT IS THE MOST EXPENSIVE PART OF THE BOARD PER NODE, by a distance. Measured
+// in WebKit on the 8 × 2 fixture: replacing all 275 tail nodes costs 33 ms —
+// more than every day row on the board put together — because each one carries
+// its position as inline `calc()` against custom properties (which is what lets
+// `print.css` re-metric the identical DOM for A4/A3, F12), a background, and in
+// the label's case a custom property of its own. Rebuilding a column's tail
+// because ONE bar in it moved was the biggest single cost left in a member
+// toggle once the day rows were slotted, and it is why this is keyed.
+//
+// The key is the BAR ID, unique within a column by construction: `layout.js`
+// emits at most one segment per bar per month, and the per-column rescue moves
+// a segment between lanes rather than adding a second one.
+//
+// THE STRIPE AND THE LABEL ARE KEYED SEPARATELY, and that is not fussiness.
+// `layout.js`'s three-pass label scan moves a label to a different ROW whenever
+// the ink under it changes — which a member toggle does on most rows — while
+// the stripe it belongs to has not moved at all. Keyed as one unit, 25 of 198
+// otherwise-untouched stripes were being rebuilt to move their label; §E1b in
+// `e8-density-perf.dom.js` is the row that found it and the row that would find
+// it again.
+//
+// ORDER IS LOAD-BEARING and is reproduced exactly. `find.js` walks
+// `.note, .bar-label, .pad textarea` in DOCUMENT order to build its hit list and
+// its „3/17" counter, and `layout.js` sorts segments by lane and then by top
+// row, so a lane change genuinely reorders them. The placement loop below is a
+// two-pointer reconcile: a node already standing where it belongs is not
+// touched, and only the ones that actually moved are moved.
+
+/** The hover string, shared by the stripe and its label — see `segTitle`. */
+const titleSig = (seg) => (seg.redacted ? 'R' : '') + SEP + (seg.initial ?? '') + SEP
+  + (seg.bar.label ?? '') + SEP + seg.bar.startDate + SEP + seg.bar.endDate + SEP
+  + (seg.exposure ? seg.exposure.level + (seg.exposure.pending ? '~' : '') : '');
+
+/** `buildStripe`: the coloured range and its two horizon cues. */
+const stripeSig = (seg) => seg.lane + SEP + seg.topRow + SEP + seg.rows + SEP + seg.color + SEP
+  + (seg.foreign ? 'F' : '') + (seg.redacted ? 'R' : '') + (seg.canEdit ? 'E' : '')
+  + (seg.contTop ? 't' : '') + (seg.contBot ? 'b' : '')
+  + (seg.beyondStart ? 'S' : '') + (seg.beyondEnd ? 'B' : '') + SEP + titleSig(seg);
+
+/**
+ * `buildLabel`: the chip, its row, and whether it had to retreat into the gutter.
+ *
+ * The LANE is in here only on the branch that reads it. A retreated label is
+ * anchored at `right: 2px` and does not know its lane at all, so a lane change
+ * under a retreated label changes nothing it draws — and on a family board,
+ * where 3.7's scan retreats nearly every label, spending a rebuild on that was
+ * 12 of the 198 otherwise-untouched tail nodes a member toggle replaced.
+ */
+const labelSig = (seg, onInk) => (onInk ? 'I' : 'L' + seg.lane) + SEP + seg.labelRow + SEP + seg.color + SEP
+  + (seg.foreign ? 'F' : '') + (seg.redacted ? 'R' : '') + (seg.canEdit ? 'E' : '')
+  + (seg.contTop ? 't' : '') + (seg.isNew ? 'N' : '') + SEP
+  + (seg.initial ?? '') + SEP + titleSig(seg);
+
+/**
+ * One bar's nodes in one column, in DOM order: stripe, label, then the cues.
+ * `nodes` is the flattened list the placement loop and the integrity check use;
+ * `relink` is what keeps it in step after a half-rebuild.
+ */
+function relink(rec) {
+  rec.nodes = rec.cues.length ? [rec.bar, rec.label, ...rec.cues] : [rec.bar, rec.label];
+  return rec;
+}
+
+function segRecord(seg, onInk) {
+  const rec = { key: seg.bar.id, sSt: stripeSig(seg), sLb: labelSig(seg, onInk), cues: [] };
+  buildStripe(rec, seg);
+  rec.label = buildLabel(seg, onInk);
+  return relink(rec);
+}
+
+function buildTail(col, claimed, into) {
+  const recs = [];
+  for (const seg of col.segs) {
+    const rec = segRecord(seg, claimed.has(seg.labelRow));
+    for (const n of rec.nodes) into.appendChild(n);
+    recs.push(rec);
+  }
+  return recs;
+}
+
+/** Every node the tail owns, in DOM order — what the integrity check counts. */
+const tailLength = (recs, horizon) => {
+  let n = horizon ? 1 : 0;
+  for (const r of recs) n += r.nodes.length;
+  return n;
+};
+
+function patchTail(rec, col, claimed) {
+  const old = rec.tail;
+  const byKey = new Map();
+  for (const r of old) byKey.set(r.key, r);
+
+  const next = [];
+  const keep = new Set();
+  for (const seg of col.segs) {
+    const onInk = claimed.has(seg.labelRow);
+    const prev = byKey.get(seg.bar.id);
+    if (!prev || keep.has(seg.bar.id)) { next.push(segRecord(seg, onInk)); continue; }
+    keep.add(prev.key);
+    const sSt = stripeSig(seg);
+    if (sSt !== prev.sSt) {
+      prev.bar.remove();
+      for (const c of prev.cues) c.remove();
+      prev.cues = [];
+      buildStripe(prev, seg);
+      prev.sSt = sSt;
+      relink(prev);
+    }
+    const sLb = labelSig(seg, onInk);
+    if (sLb !== prev.sLb) {
+      prev.label.remove();
+      prev.label = buildLabel(seg, onInk);
+      prev.sLb = sLb;
+      relink(prev);
+    }
+    next.push(prev);
+  }
+
+  // Whatever the new list did not claim leaves the DOM first, so the placement
+  // pointer below only ever walks over nodes that are staying.
+  for (const r of old) {
+    if (keep.has(r.key)) continue;
+    for (const n of r.nodes) n.remove();
+  }
+
+  // Two-pointer placement. `ptr` is where the next tail node belongs; a node
+  // already standing there is left exactly where it is, which is the whole
+  // point — `insertBefore` on an attached node is a MOVE, and a moved
+  // out-of-flow box costs about what a new one costs.
+  let ptr = rec.days[rec.days.length - 1].el.nextSibling;
+  for (const r of next) {
+    for (const n of r.nodes) {
+      if (ptr === n) ptr = n.nextSibling;
+      else rec.rows.insertBefore(n, ptr);
+    }
+  }
+  rec.tail = next;
+
+  // 3.6's column footer, always last in the column.
+  if (col.horizon && !rec.horizon) {
+    rec.horizon = el('div', 'horizon-cue', t('continues'));
+  } else if (!col.horizon && rec.horizon) {
+    rec.horizon.remove();
+    rec.horizon = null;
+  }
+  if (rec.horizon) {
+    if (ptr === rec.horizon) ptr = rec.horizon.nextSibling;
+    else rec.rows.insertBefore(rec.horizon, ptr);
+  }
+}
+
+function renderColumn(col) {
   const c = el('div', 'col');
   c.dataset.month = col.key;
   c.dataset.index = String(col.index);
   if (col.isTodayMonth) c.classList.add('is-today-month');
 
-  const head = el('div', 'col-head');
-  head.appendChild(el('span', null, col.label));
-  head.title = col.fullLabel;
+  const head = buildHead(col);
   c.appendChild(head);
 
   const rows = el('div', 'rows');
   rows.style.height = 'calc(var(--row-h) * 31)';
   rows.dataset.month = col.key;
 
-  // ── WHICH ROWS HAVE A BAR LABEL STANDING IN THEIR GUTTER (2.4 · 3.7) ───────
-  // Two things are painted to the right of a day's text: the „+n" badge and, on
-  // one row per month segment, a bar label. Both used to be opaque overlays over
-  // the TEXT COLUMN; both now live in the lane gutter instead (see `app.css`
-  // `.d-more` and `.bar-label.on-ink`). 27 px does not hold two of them side by
-  // side, so on the rows where they meet the badge steps into the line and takes
-  // width — and this loop is what tells the CSS which rows those are.
-  //
-  // `inkOf` is `layout.js`'s own label-scan predicate, to the term: a label that
-  // landed on a row scoring 0 landed on empty space, which is what 3.7 promised,
-  // and it keeps all 66 px. Everything is read from the MODEL — no layout is
-  // forced and nothing here is read back from the DOM.
-  const inkOf = (d) => (d.holidayShown ? 1 : 0) + d.notes.length + (d.overflow > 0 ? 1 : 0);
-  const dayAtRow = new Map();
-  for (const d of col.days) if (!d.empty) dayAtRow.set(d.row, d);
-
-  /** Rows where a bar label landed on ink and must therefore give way. */
-  const claimed = new Set();
-  for (const seg of col.segs) {
-    const host = dayAtRow.get(seg.labelRow);
-    if (host && inkOf(host) > 0) claimed.add(seg.labelRow);
+  const claimed = claimedRows(col);
+  const days = [];
+  for (const d of col.days) {
+    const rec = renderDay(d, claimed.has(d.row));
+    days.push(rec);
+    rows.appendChild(rec.el);
   }
+  const tail = buildTail(col, claimed, rows);
+  const horizon = col.horizon ? el('div', 'horizon-cue', t('continues')) : null;
+  if (horizon) rows.appendChild(horizon);
 
-  for (const d of col.days) rows.appendChild(renderDay(d, m, claimed.has(d.row)));
-  for (const seg of col.segs) renderSegment(rows, seg, claimed.has(seg.labelRow));
-
-  if (col.horizon) {
-    rows.appendChild(el('div', 'horizon-cue', t('continues')));
-  }
   c.appendChild(rows);
-  c.appendChild(renderPad(col, state));
-  return c;
+  const pad = renderPad(col);
+  c.appendChild(pad.el);
+
+  return {
+    el: c, head, rows, days, tail, horizon,
+    pad: pad.el, padTa: pad.ta,
+    sHead: headSig(col), sPad: padSig(col),
+  };
 }
 
-function renderDay(d, m, claimed) {
-  const row = el('div', 'day');
-  row.dataset.row = String(d.row);
-  if (d.empty) {
-    row.classList.add('void');
-    return row;
+function buildHead(col) {
+  const head = el('div', 'col-head');
+  head.appendChild(el('span', null, col.label));
+  head.title = col.fullLabel;
+  return head;
+}
+
+function patchColumn(rec, col) {
+  const claimed = claimedRows(col);
+
+  const sh = headSig(col);
+  if (sh !== rec.sHead) {
+    rec.el.className = col.isTodayMonth ? 'col is-today-month' : 'col';
+    rec.el.dataset.month = col.key;
+    rec.el.dataset.index = String(col.index);
+    rec.rows.dataset.month = col.key;
+    const head = buildHead(col);
+    rec.el.replaceChild(head, rec.head);
+    rec.head = head;
+    rec.sHead = sh;
   }
+
+  const days = col.days;
+  for (let i = 0; i < days.length; i++) patchDay(rec.days[i], days[i], claimed.has(days[i].row));
+
+  patchTail(rec, col, claimed);
+
+  patchPad(rec, col);
+}
+
+function patchPad(rec, col) {
+  const sp = padSig(col);
+  if (sp !== rec.sPad) {
+    const pad = renderPad(col);
+    rec.el.replaceChild(pad.el, rec.pad);
+    rec.pad = pad.el;
+    rec.padTa = pad.ta;
+    rec.sPad = sp;
+    return;
+  }
+  // `interact.js` writes both of these on every keystroke and commits the text
+  // to the store only after a 600 ms pause (rule U9), so between renders the
+  // live element can hold text the model does not. A full rebuild reset it; so
+  // does this. The `!==` guard is what keeps the caret still when there is
+  // nothing to reset — assigning `value` moves it to the end.
+  if (rec.padTa.value !== col.pad) rec.padTa.value = col.pad;
+  rec.pad.classList.toggle('empty', !col.pad.trim());
+}
+
+// ── day rows ─────────────────────────────────────────────────────────────────
+
+/** The row's class list, in the order the full path produced it. */
+function dayClass(d, claimed) {
+  if (d.empty) return 'day void';
+  let c = 'day';
   // 3.7 — a bar label landed on this row, this row already carries ink, and the
   // label has therefore retreated into the lane gutter rather than paint over
   // the sentence. The class is how the „+n" badge finds out that the gutter is
   // taken; `app.css` `.day.claimed .d-more` owns what it does about it.
-  if (claimed) row.classList.add('claimed');
-  row.dataset.date = d.date;
-  if (d.weekend) row.classList.add('we');
-  if (d.ferien) row.classList.add('fer');
-  if (d.isToday) row.classList.add('today');
-  if (d.holiday) row.classList.add('hol');
+  if (claimed) c += ' claimed';
+  if (d.weekend) c += ' we';
+  if (d.ferien) c += ' fer';
+  if (d.isToday) c += ' today';
+  if (d.holiday) c += ' hol';
+  return c;
+}
 
+function applyDayChrome(row, d, claimed) {
+  row.className = dayClass(d, claimed);
+  row.dataset.row = String(d.row);
+  if (d.empty) return;
+  row.dataset.date = d.date;
   // 7.2 — the shading must never be cryptic; the period name is one hover away.
   const tips = [];
   if (d.ferienName) tips.push(d.ferienName);
   if (d.holidayDemoted && d.holiday) tips.push(d.holiday.name);
   if (tips.length) row.title = tips.join(' · ');
+  else row.removeAttribute('title');
+}
+
+/**
+ * Challenge 2's holiday line — kept only while the user has not claimed the row.
+ * `layout.js` has already decided; this is the DOM half.
+ */
+const holSig = (d) => (d.holidayShown && d.holiday
+  ? d.holiday.short + SEP + (d.holiday.own ? 'O' : '') + SEP + d.holiday.name
+  : '');
+
+function buildHol(d) {
+  const h = el('div', 'd-hol', d.holiday.short);
+  if (!d.holiday.own) h.classList.add('foreign');
+  h.title = d.holiday.name;
+  return h;
+}
+
+/**
+ * The `.d-body` block: the holiday line, then the notes the capacity rule drew.
+ * Fills in the record's per-note bookkeeping as it goes, so a later render can
+ * keep the notes that did not move.
+ */
+function buildBody(d, rec) {
+  const body = el('div', 'd-body');
+  rec.holSig = holSig(d);
+  rec.holEl = null;
+  if (rec.holSig) { rec.holEl = buildHol(d); body.appendChild(rec.holEl); }
+  rec.notes = [];
+  for (const n of d.notes) {
+    const node = renderNote(n, d);
+    rec.notes.push({ key: n.note.id, sig: noteSig(n), el: node });
+    body.appendChild(node);
+  }
+  return body;
+}
+
+/**
+ * The notes inside one day row, keyed by entry id.
+ *
+ * WHY THIS IS KEYED AND THE BODY IS NOT REPLACED WHOLE. A member toggle changes
+ * 124 bodies on the 8 × 2 fixture, and in 123 of them ONE of the two drawn notes
+ * is the same entry it was before — mine, kept by `orderForCapacity`'s own-first
+ * rule, with a peer's entry taking or vacating the second slot. A `.note` is
+ * `white-space: nowrap; text-overflow: ellipsis`, so laying one out means
+ * shaping its text and measuring the ellipsis; a note that did not change should
+ * not pay for that again. Measured in WebKit: replacing 124 whole bodies costs
+ * 6.5 ms, replacing one note inside each of them 3.1 ms.
+ *
+ * The key is the entry id, which is unique within a day — `noteOccurrencesInRange`
+ * expands a yearly repeat once per year and a date belongs to one year, so an
+ * entry cannot occur twice on the same row. A duplicate would degrade to a fresh
+ * build rather than reuse one element twice, which is safe, not merely tolerable.
+ */
+function patchBody(rec, d) {
+  const hs = holSig(d);
+  if (hs !== rec.holSig) {
+    if (!hs) { rec.holEl.remove(); rec.holEl = null; }
+    else {
+      const h = buildHol(d);
+      if (rec.holEl) rec.body.replaceChild(h, rec.holEl);
+      else rec.body.insertBefore(h, rec.body.firstChild);
+      rec.holEl = h;
+    }
+    rec.holSig = hs;
+  }
+
+  const old = rec.notes;
+  const byKey = new Map();
+  for (const r of old) byKey.set(r.key, r);
+  const next = [];
+  const keep = new Set();
+  for (const n of d.notes) {
+    const key = n.note.id;
+    const sig = noteSig(n);
+    const prev = byKey.get(key);
+    if (prev && prev.sig === sig && !keep.has(key)) { keep.add(key); next.push(prev); continue; }
+    next.push({ key, sig, el: renderNote(n, d) });
+  }
+  for (const r of old) if (!keep.has(r.key)) r.el.remove();
+
+  // The same two-pointer placement `patchTail` uses, for the same reason: a
+  // note already standing where it belongs must not be moved.
+  let ptr = rec.holEl ? rec.holEl.nextSibling : rec.body.firstChild;
+  for (const r of next) {
+    if (ptr === r.el) ptr = r.el.nextSibling;
+    else rec.body.insertBefore(r.el, ptr);
+  }
+  rec.notes = next;
+}
+
+/**
+ * The „+n" badge's content, applied to a fresh node or to the one already
+ * standing in that row's gutter.
+ *
+ * ═══ 17.5 — THE BADGE SAYS WHETHER IT IS HIDING A CHANGE ═════════════════════
+ * „Jede Änderung ist bemerkbar." A peer change the row had no line for gets no
+ * „neu" dot of its own, because there is no note element to hang one on: the
+ * „+n" badge is the only mark left on that row. Without this class the badge
+ * looks IDENTICAL whether it hides a change or four unchanged entries, and
+ * `e8-density-crowding.dom.js` §B5 measured 32 of 219 peer changes arriving
+ * that way on the 8-member fixture — noticeable nowhere.
+ *
+ * `layout.js` publishes the count as `day.overflowNew`, and it inherits §7.2's
+ * two suppressions for free: it counts `foreign && isNew`, and
+ * `materialize.js:isNewOf` is blind to a downgrade and has nothing to count for
+ * a deletion. So a DOWNGRADE still leaves no marker and a DELETION still leaves
+ * no marker — `family-legend.dom.js`'s tripwire row holds unchanged.
+ *
+ * The tell is a class and nothing else: `app.css` `.d-more.has-new` paints it
+ * INSIDE the badge's existing 17 px box, so it costs the sentence zero pixels
+ * on every board, screen and paper alike.
+ */
+function applyMore(more, d) {
+  // Guarded, and through the text node, for the same reason `.d-num` is: the
+  // overwhelmingly common badge change is the DIGIT, and rewriting the class,
+  // the dataset and the whole child list to change it would invalidate three
+  // more things than it needs to.
+  const cls = d.overflowNew > 0 ? 'd-more has-new' : 'd-more';
+  if (more.className !== cls) more.className = cls;
+  const text = `+${d.overflow}`;
+  if (more.firstChild) { if (more.firstChild.data !== text) more.firstChild.data = text; }
+  else more.textContent = text;
+  if (more.dataset.date !== d.date) more.dataset.date = d.date;
+  const base =
+    d.laneOverflow > 0 && d.overflow === d.laneOverflow
+      ? `${d.laneOverflow} ${t('lanesFull')}`
+      : `${d.overflow} ${t('more')}`;
+  // The hover says HOW MANY are changes, because the mark itself can only say
+  // „at least one" — and a number nobody can read is not an answer (2.5).
+  const title = d.overflowNew > 0 ? `${base} · ${d.overflowNew} ${ft('overflowNew')}` : base;
+  if (more.title !== title) more.title = title;
+}
+
+function buildMore(d) {
+  if (!(d.overflow > 0)) return null;
+  const more = document.createElement('div');
+  applyMore(more, d);
+  return more;
+}
+
+/** Builds one day row and the record that lets the next render patch it. */
+function renderDay(d, claimed) {
+  const row = document.createElement('div');
+  applyDayChrome(row, d, claimed);
+  const rec = {
+    el: row, empty: !!d.empty, holdot: null, body: null, more: null,
+    holEl: null, holSig: '', notes: [],
+    sChrome: chromeSig(d, claimed), sNum: '', sBody: '', sMore: '',
+  };
+  if (d.empty) return rec;
 
   row.appendChild(el('span', 'd-num', d.n));
   row.appendChild(el('span', 'd-wd', d.wd));
-
-  if (d.holidayDemoted) row.appendChild(el('span', 'd-holdot'));
-
-  const body = el('div', 'd-body');
-  if (d.holidayShown && d.holiday) {
-    const h = el('div', 'd-hol', d.holiday.short);
-    if (!d.holiday.own) h.classList.add('foreign');
-    h.title = d.holiday.name;
-    body.appendChild(h);
+  if (d.holidayDemoted) {
+    rec.holdot = el('span', 'd-holdot');
+    row.appendChild(rec.holdot);
   }
-  for (const n of d.notes) body.appendChild(renderNote(n, d));
-  row.appendChild(body);
+  rec.body = buildBody(d, rec);
+  row.appendChild(rec.body);
+  rec.more = buildMore(d);
+  if (rec.more) row.appendChild(rec.more);
 
-  if (d.overflow > 0) {
-    const more = el('div', 'd-more', `+${d.overflow}`);
-    more.dataset.date = d.date;
-    // ═══ 17.5 — THE BADGE SAYS WHETHER IT IS HIDING A CHANGE ══════════════════
-    // „Jede Änderung ist bemerkbar." A peer change the row had no line for gets
-    // no „neu" dot of its own, because there is no note element to hang one on:
-    // the „+n" badge is the only mark left on that row. Without this class the
-    // badge looks IDENTICAL whether it hides a change or four unchanged entries,
-    // and `e8-density-crowding.dom.js` §B5 measured 32 of 219 peer changes
-    // arriving that way on the 8-member fixture — noticeable nowhere.
-    //
-    // `layout.js` publishes the count as `day.overflowNew`, and it inherits
-    // §7.2's two suppressions for free: it counts `foreign && isNew`, and
-    // `materialize.js:isNewOf` is blind to a downgrade and has nothing to count
-    // for a deletion. So a DOWNGRADE still leaves no marker and a DELETION still
-    // leaves no marker — `family-legend.dom.js`'s tripwire row holds unchanged.
-    //
-    // The tell is a class and nothing else: `app.css` `.d-more.has-new` paints
-    // it INSIDE the badge's existing 17 px box, so it costs the sentence zero
-    // pixels on every board, screen and paper alike.
-    if (d.overflowNew > 0) more.classList.add('has-new');
-    const base =
-      d.laneOverflow > 0 && d.overflow === d.laneOverflow
-        ? `${d.laneOverflow} ${t('lanesFull')}`
-        : `${d.overflow} ${t('more')}`;
-    // The hover says HOW MANY are changes, because the mark itself can only say
-    // „at least one" — and a number nobody can read is not an answer (2.5).
-    more.title = d.overflowNew > 0 ? `${base} · ${d.overflowNew} ${ft('overflowNew')}` : base;
-    row.appendChild(more);
+  rec.sNum = numSig(d);
+  rec.sBody = bodySig(d);
+  rec.sMore = moreSig(d);
+  return rec;
+}
+
+/**
+ * The four slots, each rebuilt only if its own signature moved.
+ *
+ * A row that flips between void and real changes structure rather than content
+ * and is replaced whole — at most a handful of rows, on the month the window
+ * rolls past a shorter one.
+ */
+function patchDay(rec, d, claimed) {
+  if (rec.empty !== !!d.empty) {
+    const fresh = renderDay(d, claimed);
+    rec.el.replaceWith(fresh.el);
+    Object.assign(rec, fresh);
+    return;
   }
-  return row;
+
+  const sc = chromeSig(d, claimed);
+  if (sc !== rec.sChrome) { applyDayChrome(rec.el, d, claimed); rec.sChrome = sc; }
+  if (rec.empty) return;
+
+  const sn = numSig(d);
+  if (sn !== rec.sNum) {
+    // `.data` on the text node that is already there, never `textContent`:
+    // `textContent` tears the node down and builds another for the same two
+    // characters, and this runs on every row when the window rolls.
+    const kids = rec.el.children;
+    if (kids[0].firstChild.data !== d.n) kids[0].firstChild.data = d.n;
+    if (kids[1].firstChild.data !== d.wd) kids[1].firstChild.data = d.wd;
+    if (d.holidayDemoted && !rec.holdot) {
+      rec.holdot = el('span', 'd-holdot');
+      rec.el.insertBefore(rec.holdot, rec.body);
+    } else if (!d.holidayDemoted && rec.holdot) {
+      rec.holdot.remove();
+      rec.holdot = null;
+    }
+    rec.sNum = sn;
+  }
+
+  const sb = bodySig(d);
+  if (sb !== rec.sBody) {
+    patchBody(rec, d);
+    rec.sBody = sb;
+  }
+
+  const sm = moreSig(d);
+  if (sm !== rec.sMore) {
+    if (!sm) { rec.more.remove(); rec.more = null; }
+    else if (rec.more) applyMore(rec.more, d);
+    else { rec.more = buildMore(d); rec.el.appendChild(rec.more); }
+    rec.sMore = sm;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -338,14 +999,37 @@ const redactedTitle = (n) =>
     ? `${n.initial} · ${ft('belegt')}`
     : ft('belegt');
 
-function renderSegment(rows, seg, labelOnInk) {
-  const right = `calc(2px + var(--lane-gap) * ${seg.lane})`;
+/**
+ * The hover string a segment's stripe and its label chip SHARE.
+ *
+ * 16.7 — the same rule as the note: the LABEL is what is withheld, the dates
+ * are what is disclosed. `|| t('untitledBar')` is v1's own fallback and stays
+ * exactly where it was, on the non-redacted branch only.
+ */
+const segLabelText = (seg) => (seg.redacted ? ft('belegt') : (seg.bar.label || t('untitledBar')));
+
+function segTitle(seg) {
+  const span = `${seg.bar.startDate} – ${seg.bar.endDate}`;
+  return seg.redacted
+    ? [redactedTitle(seg), span].join(' · ')
+    : [`${segLabelText(seg)} · ${span}`, exposureTitle(seg.exposure)].filter(Boolean).join('\n');
+}
+
+/**
+ * The stripe and its two horizon cues, into `rec.bar` and `rec.cues`.
+ *
+ * Split from the label because the two move for different reasons: a stripe
+ * moves when its bar's lane or range moves, a label moves whenever the INK
+ * under it changes — which a member toggle does on most rows of the board.
+ * See the tail header above.
+ */
+function buildStripe(rec, seg) {
   const bar = el('div', 'bar');
   bar.dataset.barId = seg.bar.id;
   bar.dataset.lane = String(seg.lane);
   bar.style.top = `calc(var(--row-h) * ${seg.topRow} + 1px)`;
   bar.style.height = `calc(var(--row-h) * ${seg.rows} - 3px)`;
-  bar.style.right = right;
+  bar.style.right = `calc(2px + var(--lane-gap) * ${seg.lane})`;
   bar.style.background = seg.color;
   if (seg.foreign) bar.dataset.foreign = '1';
   if (seg.foreign) bar.classList.add('foreign');
@@ -355,15 +1039,7 @@ function renderSegment(rows, seg, labelOnInk) {
   // behind an affordance that suggests there is something to open.
   if (seg.redacted) bar.classList.add('belegt');
   if (!seg.canEdit) bar.classList.add('readonly');
-
-  // 16.7 — the same rule as the note: the LABEL is what is withheld, the dates
-  // are what is disclosed. `|| t('untitledBar')` is v1's own fallback and stays
-  // exactly where it was, on the non-redacted branch only.
-  const label = seg.redacted ? ft('belegt') : (seg.bar.label || t('untitledBar'));
-  const span = `${seg.bar.startDate} – ${seg.bar.endDate}`;
-  bar.title = seg.redacted
-    ? [redactedTitle(seg), span].join(' · ')
-    : [`${label} · ${span}`, exposureTitle(seg.exposure)].filter(Boolean).join('\n');
+  bar.title = segTitle(seg);
 
   // Resize grips only exist where the real end of the bar is, so dragging the
   // December half of a January bar can never silently reshape the wrong edge —
@@ -373,9 +1049,30 @@ function renderSegment(rows, seg, labelOnInk) {
     if (!seg.contTop) bar.appendChild(el('div', 'bar-handle top'));
     if (!seg.contBot) bar.appendChild(el('div', 'bar-handle bottom'));
   }
-  rows.appendChild(bar);
+  rec.bar = bar;
 
-  // 3.3 / 3.7 — one label per month segment, on a row that carries no ink.
+  // 3.6 — a bar that runs past the last visible column says so on the stripe
+  // itself, not only in the column footer. Mirrored: one that began before the
+  // first column gets the same glyph at its top, so "started earlier than you
+  // can see" is distinguishable from an ordinary month split.
+  if (seg.beyondEnd) {
+    const cue = el('div', 'bar-cont-down', '↓');
+    cue.style.color = seg.color;
+    cue.style.right = `calc(1px + var(--lane-gap) * ${seg.lane})`;
+    cue.style.top = `calc(var(--row-h) * ${seg.topRow + seg.rows} - 11px)`;
+    rec.cues.push(cue);
+  }
+  if (seg.beyondStart) {
+    const cue = el('div', 'bar-cont-up', '↑');
+    cue.style.color = seg.color;
+    cue.style.right = `calc(1px + var(--lane-gap) * ${seg.lane})`;
+    cue.style.top = `calc(var(--row-h) * ${seg.topRow} + 1px)`;
+    rec.cues.push(cue);
+  }
+}
+
+/** 3.3 / 3.7 — one label per month segment, on a row that carries no ink. */
+function buildLabel(seg, labelOnInk) {
   const lab = el('div', 'bar-label');
   lab.dataset.barId = seg.bar.id;
   lab.dataset.row = String(seg.labelRow);
@@ -407,31 +1104,17 @@ function renderSegment(rows, seg, labelOnInk) {
   if (seg.foreign) lab.appendChild(initialChip(seg.initial, null));
   const segBadge = exposureBadge(seg.exposure);
   if (segBadge) lab.appendChild(segBadge);
-  lab.appendChild(document.createTextNode(label));
-  lab.title = bar.title;
-  rows.appendChild(lab);
-
-  // 3.6 — a bar that runs past the last visible column says so on the stripe
-  // itself, not only in the column footer. Mirrored: one that began before the
-  // first column gets the same glyph at its top, so "started earlier than you
-  // can see" is distinguishable from an ordinary month split.
-  if (seg.beyondEnd) {
-    const cue = el('div', 'bar-cont-down', '↓');
-    cue.style.color = seg.color;
-    cue.style.right = `calc(1px + var(--lane-gap) * ${seg.lane})`;
-    cue.style.top = `calc(var(--row-h) * ${seg.topRow + seg.rows} - 11px)`;
-    rows.appendChild(cue);
-  }
-  if (seg.beyondStart) {
-    const cue = el('div', 'bar-cont-up', '↑');
-    cue.style.color = seg.color;
-    cue.style.right = `calc(1px + var(--lane-gap) * ${seg.lane})`;
-    cue.style.top = `calc(var(--row-h) * ${seg.topRow} + 1px)`;
-    rows.appendChild(cue);
-  }
+  lab.appendChild(document.createTextNode(segLabelText(seg)));
+  lab.title = segTitle(seg);
+  return lab;
 }
 
-function renderPad(col, state) {
+/**
+ * The scratchpad (F10). Returns the `<textarea>` alongside the block because
+ * `patchPad` has to reconcile a PROPERTY (`value`) that no attribute comparison
+ * would see, and a kept pad must not hold typing the model has not committed.
+ */
+function renderPad(col) {
   const pad = el('div', 'pad');
   pad.dataset.month = col.key;
   pad.appendChild(el('div', 'pad-label', t('scratchpad')));
@@ -443,7 +1126,7 @@ function renderPad(col, state) {
   ta.setAttribute('aria-label', `${t('scratchpad')} ${col.fullLabel}`);
   pad.appendChild(ta);
   if (!col.pad.trim()) pad.classList.add('empty');
-  return pad;
+  return { el: pad, ta };
 }
 
 export function monthLabel(key, lang) {
