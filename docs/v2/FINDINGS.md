@@ -3967,3 +3967,110 @@ capacity rule — would promise two lines to a 22 px row that can draw one and w
 crowded board **worse**. The floor is what forbids that, and it is enforced in `buildBoard` rather
 than only in the settings pane, so it holds for a `board.json` that arrived by import or by hand.
 **E8-3 can be closed as "scoped to the density presets, both ends measured".**
+
+---
+
+## 16. E10 — privacy, migration and hardening (2026-09-03)
+
+**Updated 2026-09-03 by the E10 integration pass.** Four defects closed by LZP-1003 (recorded in
+§16a), five residuals priced, **one ticket never built**, and one new open finding. The pass added
+39 rows in two files (`tests/attack/e10-network-scope.test.js`, `tests/attack/e10-outbound-payload.test.js`)
+and one helper (`tests/helpers/native-scope.js`); ten mutants on a scratch copy, each killing a
+named row, control 99/99 green before and after. Full record: `docs/v2/E10-VERIFICATION.md`.
+
+### 16a. Closed by LZP-1003 (crypto self-audit) — mutants in that ticket's report
+
+| id | severity | what | mutant |
+|---|---|---|---|
+| **E10-B1** | HIGH | an empty key ring restored as `identity-restored` — „Dein Board ist zurück und deine Schlüssel auch" over a space whose every op parks for ever. `KeyRing.missing()` answered `[1..upTo]` for the same ring; two modules gave opposite answers and the restore is the one the user reads first | M1 kills 3 INVERTED rows |
+| **E10-P1** | HIGH | the pairing delivery leg broke rule 3 (engine `DataError` escaping as a caller-visible error) and left the two Macs disagreeing about whether pairing was over — sender terminal `delivered`, receiver live in `confirmed` | M3 / M5 / M6 |
+| **E10-P2** | HIGH | the same rule-3 breach on the ECDH leg; a 65-byte off-curve `aEph` inside a well-sealed offer reached `DataError` one call later, session still live | M4 |
+| **E10-B2** | MEDIUM | `bundle.epoch` was an unbounded loop on the restore path — `epoch: 2_000_000` built and froze a two-million-element array. The identical sentence that justifies clamping `kdf.iterations` | M2 |
+
+### 16b. New, open
+
+**E10-1 · story 17.5's „neu" dot never lights.** `core/materialize.js:isNewOf` implements ADR 004
+§7.2 exactly and tier 1 proves it against injected hooks. `store.js:_project` supplies none of
+`seqOf` / `isNew` / `lastSeenSeq` / `levelDecreased`. Both halves exist — the pref
+`settings.lastSeenSeq.<spaceId>` is reserved and preserved across imports, `store.noteCursor`
+moves a cursor — and they are not joined. **Owner: `store.js`, a parallel workflow's.** The fleet
+row is green while the defect exists and says: *if it goes red the story was probably wired —
+invert it, do not repair it.*
+
+**E10-2 · LZP-1009 (the feedback button) is OWED, and its absence is now load-bearing.** The PO's
+new ticket did not land: no module, no bridge command, no relay route, no copy, no processor named.
+Tasks 4 and 5 of the E10 integration were attacks on its payload and had no subject. Recorded as
+**eight rows that go red the day it lands** rather than as a sentence — §2a–§2e and §1a/§1d of
+`e10-network-scope.test.js`, plus §3a/§3b for the screenshot half. **When 1009 is built it is a
+third network job and a second remote host**, so it needs those rows inverted *and* a Datenschutz
+sentence naming a third processor (LZP-1001, also owed).
+
+**E10-3 · "solo mode makes zero network requests" is false as literally written, and the copy has
+not caught up.** The *board* makes zero, measured six ways. The *shell* makes one — the update
+manifest — at most once a day, only with `disclosed && enabled`. `updater.js`'s header resolves
+21.5 ↔ 22.3 this way deliberately and says the Datenschutz text must name the release host as a
+second remote; nothing has written that sentence. Amendment A1's permission to quote v1's "zero
+network by architecture" for solo mode is therefore **not clean**: the update check happens in solo
+mode too. **Owner: LZP-1001 / the PO.** Measured: the whole product names exactly **one**
+hard-coded remote URL (`e10-network-scope.test.js` §1g), and it is still `OWNER-PLACEHOLDER`.
+
+**E10-4 · the tier-2 isolation guard fired once against the user's real board.**
+`tests/run-dom-tests.sh` reported `ISOLATION VIOLATED: ~/Library/Application Support/LangzeitPlaner
+changed during the test run`, with `board.json` and `snapshots.json` both moving. It did not
+reproduce on two later runs and the most likely cause is a concurrent workflow. **Filed rather than
+dismissed:** a tier-2 run that can touch the user's real board is release-blocking, and "did not
+reproduce" is not "cannot happen".
+
+**E10-5 · the solo module-graph measurement SKIPs in the engine we ship.**
+`network-audit.dom.js` §1's "no family module was ever fetched" rests on the Resource Timing API,
+and WKWebView records no entries for the `app:` scheme. The row honestly skips. The claim stands on
+E5-VERIFICATION §4's Chrome run (38 resources, none under `crypto/`, `sync/`, `family/`,
+`platform/net.js`) plus the static import-graph walk in `network-scope.test.js` gate 2. Not a
+defect; a limit on where the evidence comes from, recorded so nobody quotes the row as a WKWebView
+measurement.
+
+### 16c. Priced, not closed — LZP-1003's residuals
+
+- **R1** a stolen backup yields the whole board in the clear, with no passphrase. `board` is
+  plaintext JSON on *both* export paths; D8 covers the identity block and never claimed otherwise.
+  The gap is in the copy: „Wer diese Datei und dein Passwort hat, ist du" reads as though both are
+  needed, and „Auch die Einträge sind versiegelt" does integrity's work in a sentence a
+  non-technical reader hears as confidentiality's. **The row asserts no string says the entries are
+  readable without the password; it is the assertion to invert when one is added.**
+- **R2** the backup file + passphrase is an unbounded, undetectable member-cloning primitive.
+  §8.5's only stated mitigation — the per-member device count — renders as nothing, because
+  `family/mount.js#refreshRoster` maps the roster down to `memberId`/`colorRef`/`removedAt`.
+- **R3** epoch poisoning is locally correct and **unreportable**: a wrap addressed to a sibling Mac
+  and 156 bytes of malice are both `refused: 1`. Needs ADR 002 §8.5a's report path.
+- **R4** the 5-attempt pairing cap is a typist's budget, not an attacker's — four fresh sessions
+  absorb 20 wrong codes.
+- **R5** amendment A2 is enforced on two collections out of five (`notes`, `bars`); `categories`,
+  `scratchpads` and `settings` are copied wholesale. Safe only while the family space carries no
+  `cat:`/`pad:` registers.
+
+### 16d. Corrections to earlier entries in this register
+
+- **B-14 / F-9 are closed and STATUS §629 is stale.** That row says ADR 003 §7 gate 1 and ADR 005
+  §5 rule 4 "do not exist: no `platform/net.js`, no `tests/tier1/network-scope.test.js`". Both
+  exist, both are committed, and both are green. What was genuinely missing is a *different* gap
+  and it is closed by this pass: **neither gate could see the native side**, and a bridge `invoke`
+  is not a `fetch`.
+- **The `e8-density-*` red count is a moving target, and it is now 3.** The brief carried 17.
+  Three `test:dom` runs over this pass measured **9, 9 and 3** as the parallel density workflow
+  landed fixes underneath. The three that remain are `e8-density-legibility` (1) and
+  `e8-density-perf` (2), both in files that workflow owns. A single snapshot of this number is
+  not a fact about the product; the sequence is.
+
+### 16e. Owed after E10
+
+1. **`server/prisma/migrations/` does not exist** — the first deploy creates no tables and
+   `check-server-config.mjs` passes anyway. Release-blocking (LZP-1008).
+2. **LZP-1001** — the Datenschutz section, now with E10-3's second remote in it.
+3. **LZP-1006** — the Mom test itself. Blocked on a person, and on E-1/E-2/E-3 being fixed first.
+4. **LZP-106's unlock screen** — `gatekeeper_status` is unimplemented in both shells, and
+   `Bitte zuerst lesen.html` is not on the disk image, so **step 3 of the e-mail is the only
+   surface that reaches a stranger before macOS refuses the app**.
+5. **The three e-mail/parser defects** measured by `scripts/mom-test-probe.mjs`: „Mail-Anbieter"
+   parses as a valid invitation code and wins; the e-mail carries no relay address and the parser
+   takes the download host; trailing punctuation becomes part of the hostname.
+6. **E10-1, E10-2, E10-4** above.

@@ -1,8 +1,98 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-02 · **Stopped at:** **E9 — collaboration and conflicts, INTEGRATED AND
-DEMONSTRATED**, together with LZP-808 (E8's last ticket). Full record:
-`docs/v2/E9-VERIFICATION.md`; findings in `FINDINGS.md` §15.
+**Last session:** 2026-09-03 · **Stopped at:** **E10 — privacy, migration and hardening,
+INTEGRATED**. Full record: `docs/v2/E10-VERIFICATION.md`; findings in `FINDINGS.md` §16. The E9
+record below it is unchanged and still current.
+
+---
+
+## THE E10 HEADLINE: the guarantees are tested facts; Mom's install day is not boring
+
+**Story 21.5 is no longer asserted, it is counted.** A fresh solo install, launched twice and left
+alone for a week of daily timers, makes **zero** requests. Disclosed but switched off: zero.
+Switch on but never disclosed — a restored Mac, a copied prefs file: zero. Six launches in two
+hours with both gates open: **one**. A person pressing „Jetzt suchen": **exactly one**, and no
+download. In a real WKWebView, a whole session — create, edit, undo, redo, settings, layers,
+persist, search, „Heute", `visibilitychange`, `online`, `focus` — with spies on all five ways a
+page can open a socket: **zero calls**, spies proved armed.
+
+**The exception is one in solo mode and two in family mode, and the second one is the honest
+answer.** Every primitive in either shell that can put a byte on a wire was enumerated — thirteen
+sites — and **every one is in one of exactly two jobs, `update` or `sync`**. The whole product
+names **exactly one hard-coded remote URL**, the update manifest, and it is still
+`OWNER-PLACEHOLDER`. Both gates sit upstream of their socket, proved by relative order inside the
+enclosing function rather than by a line number, because both shells were being edited as this ran.
+
+**„Solo mode makes zero network requests" is therefore false as literally written.** The *board*
+makes zero. The *shell* makes one, at most daily, only after the user has been told and left the
+switch on. `updater.js`'s header resolves 21.5 ↔ 22.3 that way deliberately and says the
+Datenschutz copy must name the release host as a second remote. **Nobody has written that
+sentence** — LZP-1001 is not in the product at all: „Frankfurt", „Vercel" and „Prisma" appear
+nowhere in `src/`.
+
+**The redaction boundary held a fifth time, through the carrier E10 itself adds.** All four
+earlier rounds end at `transport.request`; `createBridgeTransport` starts there. A real German
+fixture board — „Scheidungsanwältin Dr. Kübler 14:30", „Kur in Bad Wörishofen", „Zweitfamilie
+Süd", „Diagnose F32.1", „Passwort fürs Schließfach" — sealed with real keys and pushed across the
+bridge: **zero of five needles, in zero of three spellings** (raw UTF-8, b64url, `\uXXXX`), over
+url + method + every header name and value + body. The shared label is absent too — „versiegelt"
+on the wire means unreadable, not merely intact. The same search over the same payload is required
+to **find** the space id, the device id, the client version, `LZP1`, the path, the origin and every
+sealed `ct` and `sig`.
+
+**One ticket of the eight was never built.** LZP-1009 — the PO's feedback button, asked for today
+— did not land, and tasks 4 and 5 of this integration were attacks on its payload. There was
+nothing to attack. Its absence is now **eight rows that go red the day it lands**: no sender, no
+bridge command, no relay route, no reachable path, no remote host in the page, no native sender —
+and, for the screenshot half, **no image primitive anywhere in the product and no screenshot
+capability in either shell**. "The redacted PNG was produced by not drawing" cannot be verified,
+because the product cannot draw. That is the strongest true form of the claim and it is not the
+claim that was asked for.
+
+**Mom's install day is not boring.** `scripts/mom-test-probe.mjs` ran the shipped parser over the
+shipped e-mail: „Mail-Anbieter" normalises to twelve Crockford characters and **wins** the code
+field, so she is told she mistyped a character she never typed; the e-mail carries **no relay
+address** and the parser takes the download host, filling *Server* with `https://github.com`;
+trailing punctuation becomes part of the hostname. Underneath all three: `gatekeeper_status` is
+unimplemented in both shells and `Bitte zuerst lesen.html` is not on the disk image, so **step 3 of
+the e-mail is the only surface that reaches her before macOS refuses to open the app**.
+
+### Suites — all six, at the close of E10
+
+```
+npm test  2121/2121 · test:property 101/101 · test:attack 960/960
+test:server 903/903 · test:fleet 397/397 · test:dom 811 pass / 3 fail (48 files)
+```
+
+The three are in two files — `e8-density-legibility`, `e8-density-perf` — **owned by the parallel
+density workflow and mid-edit.** The brief said 17; three runs over this pass measured 9, 9 and 3,
+and the fall is their work landing, not ours. Not counted, not fixed, not touched.
+`network-audit.dom.js`, the file this epic cares about, is 10 pass / 0 fail / 1 skip in all three.
+
+### Tickets
+
+| ticket | verdict |
+|---|---|
+| LZP-1001 Datenschutz section | **OWED** — not in the product |
+| LZP-1002 Network scope audit | **VERIFIED-HERE** — +25 rows covering the native side neither existing gate could see |
+| LZP-1003 Crypto self-audit | **VERIFIED-HERE** — 60 rows, 4 defects closed, 5 residuals priced |
+| LZP-1004 Backup/restore | **VERIFIED-HERE** — 21 rows, D8 asserted on the bytes |
+| LZP-1005 Multi-device E2E | **VERIFIED-HERE** — 47 rows, 26 stories, one OPEN (17.5) |
+| LZP-1006 "Mom test" beta | **OUTSTANDING BY NATURE — do not count the 3 points** |
+| LZP-1007 Perf pass | *parallel workflow's* |
+| LZP-1008 Ops runbook | **WRITTEN-UNVERIFIED** — every gate command executed; the deploy cannot be |
+| LZP-1009 Feedback button *(new)* | **OWED** — nothing built |
+
+**Points: 231/239.** LZP-1001 (2) and LZP-1006 (3) remain, and 1006's three must not be taken
+until a stranger has actually sat down.
+
+### Release-blocking, after E10
+
+1. **`server/prisma/migrations/` does not exist** — first deploy creates no tables and
+   `check-server-config.mjs` passes anyway.
+2. **LZP-1001**, now with a second remote to name.
+3. **LZP-1006**, blocked on a person and on the three e-mail defects above.
+4. **LZP-106's unlock screen** and the missing `Bitte zuerst lesen.html`.
 
 ---
 
@@ -627,6 +717,7 @@ caught it, so the next reader can tell a *verified* sentence from a *reasoned* o
 | B-12 | **ADR 005 §2.1** | `boot()` **cannot** be called from `index.html` — the page's own CSP refuses an inline module. The call lives in `src/js/boot.js`; and `main.js`'s top-level `blur` listener was an unlisted **third** import blocker | `index.html:17, 82`; `src/js/boot.js` |
 | B-13 | **ADR 005 §2.2** | `mutate()` was **not** removed; it survives re-implemented as a diff transaction, and is a supported door — which is why findings A3-M3/M4 against it are contract defects, not dead branches | `src/js/store.js:19-31, 642-653` |
 | B-14 | **ADR 003 §7 gate 1** + **ADR 005 §5 rule 4** | the gate **does not exist**: no `platform/net.js`, no `tests/tier1/network-scope.test.js`, and `PURE_DIRS` never scans `src/js/` as a whole. Marked **OWED (WP-8 / LZP-1002)** rather than left implying it holds | `tests/helpers/purity.js:28`; finding F-9 |
+| B-14 ✅ | *(correction, 2026-09-03)* | **CLOSED, and this row is stale as written.** Both files exist and are committed; `tests/helpers/netscope.js` scans all of `src/js/` (not `PURE_DIRS`) and both gates are green. What was genuinely still missing is a *different* gap and E10 closes it: **neither gate could see the native side**, because a bridge `invoke` is not a `fetch`. See `FINDINGS.md` §16d and `tests/attack/e10-network-scope.test.js` §1 | E10-VERIFICATION §3 |
 | B-16 | **ADR 002 §2.3 + §5.2** | the `deviceShort` resolution — see below | `src/js/core/ids.js:138`, `authz.js:591-663` |
 | — | **contracts** | `ops.contract.js` (`attestedDevices` mistyped; `attestationOf` owed), `crypto.contract.js` (`openOp`'s signature and check list), `server.contract.js` (`setLastPushedSeq`/`minLastPushedSeq`) | all three still `node --check` clean |
 
@@ -677,6 +768,7 @@ envelope, but the fold must not pretend the collision did not happen — hence `
   replacement for `attestVerify`. **Owner: WP-6.**
 - `server.contract.js` now names `setLastPushedSeq` / `minLastPushedSeq`. **Owner: WP-7.**
 - ADR 003 §7 gate 1 and ADR 005 §5 rule 4 are marked **owed**. **Owner: WP-8 / LZP-1002.**
+  *(2026-09-03: both are closed — see the B-14 correction row above and `FINDINGS.md` §16d.)*
 
 ## 7. What to build next, in order
 

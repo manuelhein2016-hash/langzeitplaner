@@ -695,8 +695,24 @@ export async function restorePairingPayload(payload, ports) {
     if (err instanceof CodecError) return fail('payload', 'restorePairingPayload: the recovery keys are not base64url');
     throw err;
   }
-  const recSigPriv = await S.importKey('pkcs8', recSigBytes, SIG, RECOVERY_KEY_EXTRACTABLE, [...USAGES.sigPrivate]);
-  const recKexPriv = await S.importKey('pkcs8', recKexBytes, KEX, RECOVERY_KEY_EXTRACTABLE, [...USAGES.kexPrivate]);
+  // RULE 3 AT THE MODULE BOUNDARY — finding E10-P1.
+  //
+  // These two calls used to be bare. 138 base64url bytes that are not a P-256 PKCS#8 are valid
+  // input to `ub64` and invalid input to `importKey`, so the engine's own `DataError` escaped
+  // `restorePairingPayload` — and therefore escaped `session.receive()`, whose whole contract is
+  // that `PairingError.code` is "our own vocabulary … the ONLY thing a caller may branch on".
+  // A caller that follows that contract met `err.code === 0` and an `err.name` the two engines
+  // spell differently, which is the exact hazard rule 3 was written down to prevent. The rule
+  // does not stop applying because the code was written after it.
+  let recSigPriv;
+  let recKexPriv;
+  try {
+    recSigPriv = await S.importKey('pkcs8', recSigBytes, SIG, RECOVERY_KEY_EXTRACTABLE, [...USAGES.sigPrivate]);
+    recKexPriv = await S.importKey('pkcs8', recKexBytes, KEX, RECOVERY_KEY_EXTRACTABLE, [...USAGES.kexPrivate]);
+  } catch (err) {
+    if (err instanceof PairingError) throw err;
+    return fail('payload', 'restorePairingPayload: the delivered recovery keys are not P-256 private keys');
+  }
 
   const personal = await importSpace(payload.personal, 'restorePairingPayload: personal', ports);
   if (personal === null) fail('payload', 'restorePairingPayload: the personal space is required (story 19.4)');
@@ -869,8 +885,21 @@ export function createPairingSession(identity, keyring, ports) {
   }
 
   async function agree(peerRaw) {
-    const pub = await importKexPublic(peerRaw, ports); // rule 5 — keyUsages: []
-    return new Uint8Array(await S.deriveBits({ name: KEX.name, public: pub }, ephPriv, 256));
+    // RULE 3, the same hazard as `restorePairingPayload`'s (E10-P1). `assertRawPoint` checks the
+    // LENGTH of a peer's ephemeral point and nothing else — deliberately, because both engines
+    // validate the point inside `importKey` (§9.2) and a hand-rolled curve check here would be
+    // the weaker of the two. But "the engine validates it" is only half a design: the engine's
+    // refusal is a `DataError`/`InvalidAccessException` whose name differs BETWEEN engines, and
+    // it was escaping `confirmExisting()` / `confirmNew()` raw, leaving the session live in
+    // `offered` / `answered` while the caller held an error it may not branch on.
+    try {
+      const pub = await importKexPublic(peerRaw, ports); // rule 5 — keyUsages: []
+      return new Uint8Array(await S.deriveBits({ name: KEX.name, public: pub }, ephPriv, 256));
+    } catch (err) {
+      if (err instanceof PairingError) throw err;
+      terminate(PAIR_STATE.failed);
+      return fail('protocol', 'pairing: the peer\'s ephemeral point is not a P-256 public key');
+    }
   }
 
   return {
@@ -1119,7 +1148,22 @@ export function createPairingSession(identity, keyring, ports) {
       if (role !== 'new') fail('role', 'receive: only the new device receives');
       const opened = await openPairBox(kek, PAIR_MSG.deliver, rid, blob, ports);
       if (opened === null) noteFailedOpen('receive');
-      const restored = await restorePairingPayload(opened, ports);
+      // E10-P1's second half — THE DELIVERY LEG FAILS TERMINALLY LIKE THE OTHER TWO.
+      //
+      // `answerAsNew` and `confirmExisting` `terminate(PAIR_STATE.failed)` on every malformed
+      // field of a message that OPENED, because a box that decrypts and then does not parse is a
+      // protocol violation and not a typo. This leg — the ONLY one carrying key material — did
+      // not: a malformed payload threw and left the session in `confirmed`, i.e. still willing to
+      // `receive()` again, while the other Mac had already gone terminal `delivered` and taken on
+      // §6.3 step 9's obligation to rotate. That is the half-completed pairing with the two ends
+      // disagreeing about whether it is over, and the disagreement is now removed.
+      let restored;
+      try {
+        restored = await restorePairingPayload(opened, ports);
+      } catch (err) {
+        terminate(PAIR_STATE.failed);
+        throw err;
+      }
       if (restored.memberId !== peer.memberId) {
         terminate(PAIR_STATE.failed);
         fail(
@@ -1142,7 +1186,25 @@ async function kekFrom(S, shared) {
   return S.deriveKey(hkdf(NO_SALT, INFO.pairKek), k, { name: AEAD.name, length: AEAD.length }, false, [...USAGES.aead]);
 }
 
-/** The far side's acceptance rules, applied before sending rather than after. */
+/**
+ * The far side's acceptance rules, applied before sending rather than after.
+ *
+ * ⚠ THE SENTENCE ABOVE IS A CLAIM, AND IT USED TO BE FALSE — finding E10-P1.
+ *
+ * `deliver()`'s call site says "so a caller can never deliver a ring the new Mac is then obliged
+ * to reject", and four shapes walked straight past it: a `recSigPkcs8` of the wrong length, a
+ * `recSigPkcs8` of the right length that is not a key, an epoch value that is not 32 bytes, and
+ * an epoch value that is not base64url at all. Each was sealed, sent, and refused by
+ * `restorePairingPayload` — after the sending Mac had already gone terminal `delivered` and taken
+ * on §6.3 step 9's obligation to rotate its personal space to `e+1`.
+ *
+ * So the byte-level checks the far side makes are made HERE too. They are cheap (a length and an
+ * alphabet), they are exactly what `restorePairingPayload` will apply, and there is no honest
+ * payload they can refuse: `buildPairingPayload` already guarantees both lengths at the source.
+ * What cannot be checked on this side is whether 138 well-formed bytes are a POINT — that needs
+ * `importKey`, which is the far side's job and now fails there with a code rather than a
+ * `DataError`.
+ */
 function assertPayloadShape(p) {
   if (!p || typeof p !== 'object') fail('payload', 'deliver: the payload must be an object');
   if (p.v !== PAIR_V) fail('version', `deliver: payload version must be ${PAIR_V}`);
@@ -1150,11 +1212,34 @@ function assertPayloadShape(p) {
   if (typeof p.recSigPkcs8 !== 'string' || typeof p.recKexPkcs8 !== 'string') {
     fail('payload', 'deliver: the recovery keys are required — §6.3 step 8 self-attests with RK_sig');
   }
+  for (const [name, b64] of [['RK_sig', p.recSigPkcs8], ['RK_kex', p.recKexPkcs8]]) {
+    assertB64uLength(b64, PKCS8_P256_BYTES, `deliver: ${name} PKCS#8`);
+  }
   if (!p.personal || typeof p.personal !== 'object') fail('payload', 'deliver: the personal space is required');
   if (!isSpaceId(p.personal.spaceId)) fail('payload', 'deliver: the personal spaceId is not a space id');
   if (p.family && !isSpaceId(p.family.spaceId)) fail('payload', 'deliver: the family spaceId is not a space id');
-  assertContiguousFromOne(epochEntries(p.personal.epochs, 'deliver: personal'), 'deliver: personal');
-  if (p.family) assertContiguousFromOne(epochEntries(p.family.epochs, 'deliver: family'), 'deliver: family');
+  for (const which of ['personal', 'family']) {
+    if (!p[which]) continue;
+    const entries = epochEntries(p[which].epochs, `deliver: ${which}`);
+    assertContiguousFromOne(entries, `deliver: ${which}`);
+    for (const [n, v] of entries) {
+      assertB64uLength(v, SYMMETRIC_KEY_BYTES, `deliver: ${which} epoch ${n}`);
+    }
+  }
+}
+
+/** A base64url string of exactly `want` bytes, or a `PairingError` naming the field. */
+function assertB64uLength(value, want, who) {
+  if (typeof value !== 'string') fail('payload', `${who}: expected a base64url string`);
+  let raw;
+  try {
+    raw = ub64(value);
+  } catch (err) {
+    if (!(err instanceof CodecError)) throw err;
+    return fail('payload', `${who}: not base64url`);
+  }
+  if (raw.length !== want) fail('payload', `${who}: ${raw.length} bytes, expected ${want}`);
+  return raw;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

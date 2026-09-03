@@ -16,10 +16,11 @@
       "storiesV2": 51,
       "storiesV1Carried": 20,
       "amendments": 12,
-      "tickets": 68,
+      "tickets": 69,
       "points": 239,
       "decisions": 6,
-      "constraints": 13
+      "constraints": 13,
+      "ticketsNote": "68 from the sprint plan + LZP-1009 (feedback button), added by the PO on 2026-09-03 and NOT built."
     }
   },
 
@@ -572,7 +573,15 @@
     { "id": "LZP-1008", "epic": "E10", "title": "Ops runbook", "points": 2,
       "text": "Vercel/Prisma runbook, key-loss support script, release checklist.",
       "stories": [], "deps": [], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
-      "note": "AC is addendum §3 (infrastructure decision record), not a numbered story." }
+      "note": "AC is addendum §3 (infrastructure decision record), not a numbered story." },
+
+    { "id": "LZP-1009", "epic": "E10", "title": "Feedback button", "points": null,
+      "text": "In-app feedback: a button that sends a report — text plus a redacted screenshot — to a remote.",
+      "stories": ["21.3", "21.4", "21.5"], "amendments": ["A1"],
+      "deps": ["LZP-1001", "LZP-1002"], "sprint": "S10", "pathAOnly": false, "blockedBy": null,
+      "addedBy": "PO, 2026-09-03 — after the sprint plan was written, so not one of the plan's 68",
+      "status": "OWED — nothing built: no module in src/js/, no bridge command in either shell, no relay route, no copy, no processor named",
+      "note": "It is a THIRD network job and a SECOND remote host, so story 21.5's exception count widens the day it lands (E10-VERIFICATION §3d, §4). Its absence is asserted by eight rows — tests/attack/e10-network-scope.test.js §1a, §1c, §2a–§2e — plus §3a/§3b for the screenshot half, which today measure that the product contains NO image primitive at all and neither shell can capture the screen. Those rows are written to be INVERTED when it lands, not repaired. It also owes a Datenschutz sentence naming a third processor (LZP-1001, also owed)." }
   ],
 
   "decisions": [
@@ -619,5 +628,478 @@
     "Holiday granularity is the Bundesland (16 states; the selector also offers \"nur bundesweite Feiertage\"). Municipal specials (e.g. Augsburger Friedensfest) are out of scope. (v1 §13)",
     "Feiertage are computed (fixed dates + Easter arithmetic + Buß- und Bettag) ⇒ no data horizon. Schulferien are bundled data ⇒ visible horizon in settings (7.4). (v1 §13)",
     "Limits chosen for legibility, not tech: ~80-char notes, 3 bar lanes, ~5-line scratchpads, ~50 undo steps, 7 snapshots. (v1 §13)"
-  ]
+  ],
+
+  "verification": {
+    "e10": {
+      "generated": "2026-09-03",
+      "ticket": ["LZP-1001", "LZP-1002", "LZP-1003", "LZP-1004", "LZP-1005", "LZP-1006", "LZP-1008", "LZP-1009"],
+      "purpose": "E10's integration record. One row per ticket, the 21.5 measurement, the payload grep, and everything owed for a v2 ship. Prose: docs/v2/E10-VERIFICATION.md; findings: FINDINGS.md §16.",
+      "verdicts": {
+        "VERIFIED-HERE": "the artefact exists and a row in a suite that ran in this pass would fail if it regressed",
+        "WRITTEN-UNVERIFIED": "the artefact exists and is correct as far as reading can establish, but what it describes cannot be executed here (a person, a deploy, a Rust toolchain)",
+        "OUTSTANDING-BY-NATURE": "the acceptance criterion is a person who has never seen the app; nobody who knows how it works can run it without destroying the measurement",
+        "OWED": "not delivered"
+      },
+      "tickets": {
+        "LZP-1001": { "verdict": "OWED", "evidence": "„Frankfurt\u201c, „Vercel\u201c and „Prisma\u201c appear nowhere in src/ (scripts/mom-test-probe.mjs). Enlarged by finding E10-3: the product contacts TWO remotes, so the copy must name the release host beside the relay." },
+        "LZP-1002": { "verdict": "VERIFIED-HERE", "evidence": ["tests/tier1/network-scope.test.js", "tests/tier2/network-audit.dom.js", "tests/attack/e10-network-scope.test.js"], "note": "STATUS's B-14 row — „the gate does not exist\u201c — is stale and is corrected in this pass. The genuinely open half, that neither gate could see the NATIVE side because a bridge invoke is not a fetch, is closed here by 25 new rows." },
+        "LZP-1003": { "verdict": "VERIFIED-HERE", "evidence": ["tests/attack/e10-crypto-pairing.test.js", "tests/attack/e10-crypto-backup.test.js", "tests/attack/e10-crypto-rules.test.js"], "defectsClosed": ["E10-B1", "E10-P1", "E10-P2", "E10-B2"], "residuals": ["R1", "R2", "R3", "R4", "R5"] },
+        "LZP-1004": { "verdict": "VERIFIED-HERE", "evidence": ["tests/fleet/e10-backup-restore.test.js"] },
+        "LZP-1005": { "verdict": "VERIFIED-HERE", "evidence": ["tests/fleet/e10-fleet-circle.test.js", "tests/fleet/e10-fleet-board.test.js"], "note": "per-story verdicts are the `stories` array in this same verification block" },
+        "LZP-1006": { "verdict": "OUTSTANDING-BY-NATURE", "pointsTaken": false, "evidence": ["docs/v2/MOM-TEST.md", "scripts/mom-test-probe.mjs"],
+          "defectsFound": [
+            "E-1 — „Mail-Anbieter\u201c normalises to twelve Crockford characters and WINS the code field, so she is told she mistyped a character she never typed",
+            "E-2 — the e-mail carries no relay address; parseInvitePaste takes the first URL, which is the download host",
+            "E-3 — trailing punctuation survives normalizeOrigin, so „https://…vercel.app\u201c becomes the punycode host …vercel.xn--app-5o0a"
+          ],
+          "structural": "gatekeeper_status is unimplemented in BOTH shells and „Bitte zuerst lesen.html\u201c is not on the disk image, so step 3 of the e-mail is the ONLY surface that reaches a stranger before macOS refuses to open the app" },
+        "LZP-1007": { "verdict": "NOT-THIS-PASS", "note": "a parallel workflow's; STATUS records it met with an order of magnitude in hand" },
+        "LZP-1008": { "verdict": "WRITTEN-UNVERIFIED", "evidence": ["docs/v2/RUNBOOK.md", "docs/v2/RELEASE-CHECKLIST.md"], "note": "every gate command in the checklist was executed (four scripts, all exit 0); the Vercel/Prisma procedure needs an account. Carries the release blocker: server/prisma/migrations/ does not exist, so the first deploy creates no tables and check-server-config.mjs passes anyway." },
+        "LZP-1009": { "verdict": "OWED", "evidence": "absence measured in eight independent places; see tickets[LZP-1009].note" }
+      },
+      "story215": {
+        "old": "13.4 — „Zero network by architecture.\u201c  (superseded by amendment A1)",
+        "new": "21.5 — „in solo mode the app makes zero network requests; with a Familienkreis it talks to exactly one sync endpoint and nothing else.\u201c",
+        "measured": {
+          "pageSoloSession": "0 calls across a full WKWebView session — create, edit, undo, redo, settings, layers, persist, search, Heute, visibilitychange, online, focus — with spies on all five socket APIs; spies proved armed in the same file",
+          "pageSourceCallSites": "1 allowed (src/js/platform/net.js), 0 others, across all of src/js/",
+          "nativeSocketSites": 13,
+          "nativeJobs": ["update", "sync"],
+          "hardcodedRemoteUrls": 1,
+          "hardcodedRemoteUrl": "https://github.com/OWNER-PLACEHOLDER/langzeitplaner/releases/latest/download/latest.json",
+          "soloRequestsFreshInstall": 0,
+          "soloRequestsDisclosedSwitchOff": 0,
+          "soloRequestsSwitchOnNeverDisclosed": 0,
+          "soloRequestsSixLaunchesInTwoHours": 1,
+          "requestsAfterOneHumanPress": 1
+        },
+        "verdict": "EXACTLY ONE exception in solo mode (the update manifest) and TWO in family mode. Human-initiated at two independent gates, each proved upstream of its socket by relative order inside the enclosing function rather than by a line number. Detectable if it widened: a third job reddens §1a, a second remote host reddens §1f, a feedback sender reddens §2a–§2e.",
+        "honestyGap": "„Solo mode makes zero network requests\u201c is FALSE as literally written: the BOARD makes zero, the SHELL makes one. Amendment A1's permission to quote v1's wording for solo mode is therefore not clean, because the update check happens in solo mode too. Owner: LZP-1001 / the PO. Finding E10-3."
+      },
+      "payloadGrep": {
+        "file": "tests/attack/e10-outbound-payload.test.js",
+        "path": "createBridgeTransport — the outbound carrier E10 adds, which none of the four earlier standing-bar rounds has ever seen (all four end at transport.request; this one starts there)",
+        "needles": ["Scheidungsanwältin Dr. Kübler 14:30", "Kur in Bad Wörishofen", "Zweitfamilie Süd", "Diagnose F32.1 — mittelgradige Episode", "Passwort fürs Schließfach: Großmutter77"],
+        "spellings": ["raw UTF-8", "base64url", "\\uXXXX-escaped"],
+        "scope": "url + method + every header NAME and VALUE + body",
+        "result": "0 of 5 needles in 0 of 3 spellings, on the personal push, the family push, the GET leg, the fetch leg and the anonymous transport. The legitimately shared label is absent too — „versiegelt\u201c on the wire means unreadable, not merely intact.",
+        "positiveControl": "the same function over the same payload MUST find the space id, the device short id, the client version, LZP1, /api/v1/ops, the origin, and every sealed ct and sig; and every needle MUST be present in the pre-seal plaintext",
+        "imageBytes": "NONE EXIST. src/js/ contains no image primitive of any kind (no canvas, getContext, toDataURL, toBlob, getImageData, OffscreenCanvas, createImageBitmap, getDisplayMedia, captureStream) and neither shell can screenshot, so „the redacted PNG was produced by not drawing\u201c is VACUOUS rather than verified. §3a/§3b are the rows to invert when LZP-1009's screenshot half lands."
+      },
+      "standingBar": {
+        "count": 5,
+        "rounds": ["tests/attack/e7-leak-downgrade.test.js", "tests/attack/e7-leak-observer.test.js", "tests/attack/e7-leak-routes.test.js", "tests/fleet/e6-attack-privat.test.js", "tests/fleet/e6-gate-privat.test.js", "tests/attack/e10-outbound-payload.test.js"],
+        "result": "zero bytes of a Privat entry, five times",
+        "limit": "a needle search at the transport can NEVER catch a leak of already-sealed bytes, because the plaintext never reaches net.js. Mutant M7 demonstrates it: a debug header echoing the body reddens the four-header allowlist (e10-outbound-payload §1e) and not the needle search (§1a)."
+      },
+      "suites": {
+        "npm test": "2121 / 0",
+        "npm run test:property": "101 / 0",
+        "npm run test:attack": "960 / 0 (+60 LZP-1003, +40 this pass)",
+        "npm run test:server": "903 / 0",
+        "npm run test:fleet": "397 / 0",
+        "npm run test:dom": "811 pass / 3 fail — a moving target: three runs over this pass measured 9, 9 and 3 failures as the parallel density workflow landed fixes",
+        "domFailures": "final run: e8-density-legibility (1), e8-density-perf (2) — both owned by the parallel density workflow (layout.js, src/css/app.css), mid-edit, none counted, none touched. The brief said 17; three runs over this pass measured 9, 9 and 3 as their work landed.",
+        "transient": "tests/tier1/suite-integrity.test.js went red mid-session on a node:fs import in the parallel workflow's headless-shell.test.js and was green again by the close; tests/run-dom-tests.sh's isolation guard fired once against the user's real board and did not reproduce (finding E10-4)."
+      },
+      "mutants": {
+        "count": 11,
+        "method": "scratch copy of the working tree; never in place; no git stash",
+        "control": "100 pass / 0 fail on the integrated tree, before and after every mutant; and 40 pass / 0 fail on a second scratch tree carrying HEAD's shell-macos/main.swift, src-tauri/src/lib.rs and src/js/platform/net.js, where sync_request does not exist \u2014 so the two new files are green both on the tree they were written against and on the tree this commit produces",
+        "note": "M9 — deleting the `disclosed` gate from createUpdater — killed NOTHING on the first attempt, because the `enabled` gate covered for it. Row §5f, a Mac whose switch is on but which was never told, was written BECAUSE that mutant survived, and it kills it."
+      },
+      "openFindings": [
+        "E10-1 — story 17.5's „neu\u201c dot never lights: store.js:_project supplies none of seqOf / isNew / lastSeenSeq / levelDecreased. Owner store.js, a parallel workflow's. The row is green while the defect exists: if it goes red, INVERT it.",
+        "E10-2 — LZP-1009 is OWED and its absence is load-bearing",
+        "E10-3 — „solo makes zero requests\u201c is false as written; the copy has not caught up",
+        "E10-4 — the tier-2 isolation guard fired once against the user's real board",
+        "E10-5 — the solo module-graph measurement SKIPs in WKWebView (no Resource Timing for the app: scheme); the claim rests on E5-VERIFICATION §4's Chrome run plus the static import-graph walk"
+      ],
+      "owedForShip": [
+        "server/prisma/migrations/ does not exist — the first deploy creates no tables (release-blocking)",
+        "LZP-1001 — the Datenschutz section, now with a second remote to name",
+        "LZP-1006 — the Mom test itself, blocked on a person and on E-1/E-2/E-3 being fixed first",
+        "LZP-106's unlock screen — gatekeeper_status unimplemented in both shells",
+        "„Bitte zuerst lesen.html\u201c is not on the disk image",
+        "the three e-mail/parser defects E-1, E-2, E-3",
+        "LZP-1009 — the feedback button",
+        "E10-1 and E10-4",
+        "LZP-1003's residuals R1–R5"
+      ]
+    },
+
+    "generated": "2026-09-03",
+    "ticket": [
+      "LZP-1004",
+      "LZP-1005"
+    ],
+    "purpose": "LZP-1005's acceptance criterion is this table. One row per F15-F18 story, saying which fleet row proves it and — where a fleet row cannot — what does.",
+    "verdicts": {
+      "fleet": "a fleet row drives real handlers, real crypto and one store.js evaluation per simulated Mac, and would fail if the story regressed",
+      "fleet-partial": "the fleet proves the DATA half; the named DOM file proves the rendered half, and the story is not complete without it",
+      "browser-only": "no fleet row can prove this story; only a rendered board can",
+      "open": "the story is not wired; the row is green while the defect exists and names it"
+    },
+    "rig": {
+      "shape": "3-member family (papa/mama/oma) on the real relay, plus a second own device for one member arriving through the A2 backup route",
+      "reuses": [
+        "tests/fleet/e6-attack-circle.js",
+        "tests/fleet/e9-attack-kit.js"
+      ],
+      "transportDependency": "Every family scenario runs on the FETCH shape of platform/net.js. createBridgeTransport's `sync_request` is unimplemented in shell-macos/ and src-tauri/ (a parallel workflow's, in progress). The rows assert PROPERTIES of the request and its answer, never net.js line numbers, so that file can move underneath them."
+    },
+    "suites": {
+      "npm run test:fleet": "395 pass / 0 fail (2026-09-03), of which 47 are this ticket's",
+      "note": "test:dom carries 17 open density failures owned by a parallel workflow; they are not counted here and 17.4 is marked browser-only because of them."
+    },
+    "openFindings": [
+      {
+        "id": "E10-1",
+        "story": "17.5",
+        "what": "The quiet 'neu' dot never lights on a real Mac: `store.js:_project` supplies none of materialize's isNew hooks.",
+        "owner": "store.js (a parallel workflow's file)",
+        "row": "tests/fleet/e10-fleet-board.test.js §17.5"
+      }
+    ],
+    "stories": [
+      {
+        "story": "15.1",
+        "verdict": "fleet",
+        "proves": "A Mac that never joins makes zero network requests across create, edit, persist and relaunch — measured on the same relay, in the same process, against a founder that did talk.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §15.1"
+        ]
+      },
+      {
+        "story": "15.2",
+        "verdict": "fleet",
+        "proves": "The founder holds the admin seat in EVERY Mac's own fold (ADR 001 §4.1), resolved from the op set and not from a server column.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §15.2"
+        ]
+      },
+      {
+        "story": "15.3",
+        "verdict": "fleet",
+        "proves": "The redeem request carries a name, a colour, a device and an invite proof — and, exhaustively, nothing else: no wrap, no secret (D9).",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §15.3",
+          "tests/fleet/e6-attack-keydelivery.test.js (D9's waiting state and the key delivery that ends it)"
+        ]
+      },
+      {
+        "story": "15.4",
+        "verdict": "fleet",
+        "proves": "All three Macs read the same member list — name, colour, initial, alive, admin — and the join flow's colour pre-selection comes from that same list.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §15.4"
+        ]
+      },
+      {
+        "story": "15.5",
+        "verdict": "fleet",
+        "proves": "Single-use (a spent code answers invite_used), seven days (the TTL is the server's, and a code past it answers invite_invalid), revocable (a revoked code admits nobody and leaves the admin's open list).",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §15.5a",
+          "tests/fleet/e10-fleet-circle.test.js §15.5b",
+          "tests/fleet/e10-fleet-circle.test.js §15.5c"
+        ]
+      },
+      {
+        "story": "15.6",
+        "verdict": "fleet",
+        "proves": "A rename and a recolour by a member — admin and non-admin alike — reach every other Mac's board and re-tint that member's entries there, with no admin act anywhere.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §15.6"
+        ]
+      },
+      {
+        "story": "16.1",
+        "verdict": "fleet",
+        "proves": "An entry created with no visibility argument is Privat, reaches nobody's board, and its words never enter another Mac's register map at all.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §16.1"
+        ]
+      },
+      {
+        "story": "16.2",
+        "verdict": "fleet",
+        "proves": "Privat / Belegt / Geteilt, end to end on a peer's Mac: absent, redacted with no `text` key at all, and full.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §16.2"
+        ]
+      },
+      {
+        "story": "16.3",
+        "verdict": "fleet-partial",
+        "proves": "Every transition of the three-state control, driven through `family/sharing.js#planVisibilityChange`, lands on the peer within one sync, plus the v1 decline protocol for a no-op click.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §16.3"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/sharing-control.dom.js — the segmented control itself, its two-click reach and its disabled states"
+        ]
+      },
+      {
+        "story": "16.4",
+        "verdict": "fleet-partial",
+        "proves": "A category with `defaultVisibility: 'geteilt'` carries a new entry to the family with zero extra acts, while the global default stays Privat; and A3 — the category itself is never synced.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §16.4"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/sharing-control.dom.js — that `interact.js` actually reads the category default at the create gesture (`defaultVisibilityOf`)"
+        ]
+      },
+      {
+        "story": "16.5",
+        "verdict": "fleet",
+        "proves": "A downgrade removes the entry (Geteilt→Belegt) or the whole entry (→Privat) from the other members' boards at the next sync.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §16.3",
+          "tests/fleet/e10-fleet-circle.test.js §16.6"
+        ]
+      },
+      {
+        "story": "16.6",
+        "verdict": "fleet-partial",
+        "proves": "The exposure badge's two inputs: after a local downgrade and before the push it still reports the HIGHER acked level with pending=true, and the peer really can still see the entry at that moment.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §16.6"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/sharing-control.dom.js, tests/tier2/density-808.dom.js — that the badge survives a 24 px row"
+        ]
+      },
+      {
+        "story": "16.7",
+        "verdict": "fleet-partial",
+        "proves": "Belegt leaks existence, owner, member colour, initial and duration BY CHOICE — and carries neither `label`/`text` nor `categoryId`.",
+        "rows": [
+          "tests/fleet/e10-fleet-circle.test.js §16.7",
+          "tests/fleet/e10-fleet-circle.test.js §16.2"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/belegt-render.dom.js — the neutral block and the word 'Belegt' on screen"
+        ]
+      },
+      {
+        "story": "17.1",
+        "verdict": "fleet",
+        "proves": "Two other members' notes and bars land in my own date rows, in the same collections my entries live in, with no act of mine.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §17.1",
+          "tests/fleet/e6-attack-keydelivery.test.js"
+        ]
+      },
+      {
+        "story": "17.2",
+        "verdict": "fleet-partial",
+        "proves": "My entries carry my categoryId and no member tone; a peer's carry the member colour and initial chip and no categoryId (A3). The mirror holds on the peer's Mac.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §17.2"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/family-render.dom.js, tests/tier2/e8-density-legibility.dom.js — that chip and colour stay distinguishable at bar-lane width"
+        ]
+      },
+      {
+        "story": "17.3",
+        "verdict": "fleet-partial",
+        "proves": "Hiding a member removes exactly that member's entries from my board, leaves everyone else's, changes nobody else's board, and never reaches the relay in any form.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §17.3"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/family-legend.dom.js, tests/tier2/family-members.dom.js — the legend's member section and its toggle"
+        ]
+      },
+      {
+        "story": "17.4",
+        "verdict": "browser-only",
+        "proves": "NOT PROVEN BY A FLEET ROW. The lanes cap (3.8), the '+n' overflow (2.4) and truncation (2.5) are geometry, decided in `layout.js#buildBoard` and `src/css/app.css`. The fleet row proves only the PRECONDITION: nine entries (six foreign, three mine) share one day row and are indistinguishable to everything downstream of the projection except in the fields that must differ.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §17.4 (precondition only)"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/family-density.dom.js",
+          "tests/tier2/e8-density-crowding.dom.js",
+          "tests/tier2/e8-density-truncation.dom.js",
+          "tests/tier2/e8-density-legibility.dom.js"
+        ],
+        "note": "Those DOM files are a PARALLEL workflow's and carry open failures at the time of writing; this ticket does not touch them and does not count them."
+      },
+      {
+        "story": "17.5",
+        "verdict": "open",
+        "proves": "OPEN FINDING E10-1. `core/materialize.js:isNewOf` implements ADR 004 §7.2 exactly and tier 1 proves it against injected hooks, but `store.js:_project` supplies none of `seqOf` / `isNew` / `lastSeenSeq` / `levelDecreased`. On every real Mac a peer's brand-new entry therefore has `isNew === false` and the quiet 'neu' dot never lights. The pref `settings.lastSeenSeq.<spaceId>` and the cursor both exist; they are not joined.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §17.5"
+        ],
+        "note": "The row is GREEN WHILE THE DEFECT EXISTS and asserts the current behaviour plus the rule's correctness under an injected hook. If it goes red the story was probably wired: invert it, do not repair it. `store.js` is a parallel workflow's file."
+      },
+      {
+        "story": "17.6",
+        "verdict": "fleet",
+        "proves": "„von Mama · geteilt · geändert <Wd>.\" and its English twin, built off a stamp a different Mac really minted; my own entry produces no line at all; the projection carries the ingredients and never the sentence.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §17.6"
+        ]
+      },
+      {
+        "story": "17.7",
+        "verdict": "fleet-partial",
+        "proves": "`[Could]`. The density pref is device-local: Mama's row height does not travel to Papa or Oma and survives her own sync.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §17.7"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/density-808.dom.js — that Kompakt/Komfort actually change row height and font size, and the horizontal-scroll trade"
+        ]
+      },
+      {
+        "story": "18.1",
+        "verdict": "fleet",
+        "proves": "The honest client refuses: `canEditEntry` is false and `store.applyCoEdit` declines, using the CO-EDITABLE field names so the refusal is about ownership; the owner's bar does not move. A foreign entry is also never mine to grant.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §18.1",
+          "tests/fleet/e9-attack-coedit.test.js §1a–§1d (the patched client)"
+        ]
+      },
+      {
+        "story": "18.2",
+        "verdict": "fleet",
+        "proves": "The flag is per entry: an opened bar takes a peer's drag and its neighbour refuses it, and both facts are visible on a third member's Mac.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §18.2",
+          "tests/fleet/e9-attack-coedit.test.js",
+          "tests/fleet/e9-attack-diverge.test.js"
+        ]
+      },
+      {
+        "story": "18.3",
+        "verdict": "fleet",
+        "proves": "An unshare is non-destructive: the entry leaves every other board and is still on the owner's, with its text, reverted to Privat.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §18.3",
+          "tests/fleet/e9-attack-moderation.test.js §2"
+        ]
+      },
+      {
+        "story": "18.4",
+        "verdict": "fleet",
+        "proves": "With a peer's op applied between my two actions, one ⌘Z undoes my own last action and a second undoes my creation, and her entry is untouched by both.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §18.4",
+          "tests/fleet/e9-attack-moderation.test.js §3"
+        ],
+        "note": "The ISOLATION half has no surviving-code mutant: `store.applyRemote` records no undo step at all, so a peer's op cannot enter my stack because there is no path by which it could. Two mutants against `core/undo.js` (UNDOABLE_KINDS, and captureImages' `op.act !== me` refusal) both left the row green. Its value is regression detection on the day such a path is added."
+      },
+      {
+        "story": "18.5",
+        "verdict": "fleet",
+        "proves": "Per-field LWW and the lost-edit case, including the state neither author wrote.",
+        "rows": [
+          "tests/fleet/e9-attack-restore.test.js §4c (OPEN finding)",
+          "tests/fleet/e9-attack-diverge.test.js"
+        ],
+        "alsoNeeds": [
+          "tests/tier2 — `family/conflict.js`'s one-line inline notice, the only conflict UI in the product"
+        ],
+        "note": "Not duplicated by E10. §4c is an existing OPEN finding: two honest co-editors converge to an inverted bar and 18.5 has no loser to tell."
+      },
+      {
+        "story": "18.6",
+        "verdict": "fleet",
+        "proves": "A delete reaches both other boards; the author's ⌘Z restores it as a new shared operation and it comes back on both.",
+        "rows": [
+          "tests/fleet/e10-fleet-board.test.js §18.6",
+          "tests/fleet/e9-attack-coedit.test.js §1i",
+          "tests/fleet/e9-attack-restore.test.js §4a, §4b"
+        ]
+      }
+    ],
+    "backupRestore": [
+      {
+        "story": "11.2",
+        "verdict": "fleet",
+        "proves": "Export produces exactly two shapes and no third: a sealed identity block of {kdf, memberId, sealed} with PBKDF2-SHA-256/600000, or no `identity` key at all. A2 holds on the artefact — my private entries are in, another member's entries are not. A ring that does not cover 1..e is refused when the file is WRITTEN.",
+        "rows": [
+          "tests/fleet/e10-backup-restore.test.js §1a",
+          "tests/fleet/e10-backup-restore.test.js §1b",
+          "tests/fleet/e10-backup-restore.test.js §1c",
+          "tests/fleet/e10-backup-restore.test.js §4a"
+        ]
+      },
+      {
+        "story": "11.3",
+        "verdict": "fleet",
+        "proves": "Import restores my board (private entries included), mints FRESH device keys, self-attests under the RESTORED recovery key, re-joins the circle through POST /devices/adopt, and the family's shared entries arrive on their own. A wrong passphrase and an edited board both refuse. A restore over a live board replaces rather than merges, clears the undo stack, and computes the retractions the old board's shared entries owe the family.",
+        "rows": [
+          "tests/fleet/e10-backup-restore.test.js §1d",
+          "tests/fleet/e10-backup-restore.test.js §2a",
+          "tests/fleet/e10-backup-restore.test.js §2b",
+          "tests/fleet/e10-backup-restore.test.js §2c",
+          "tests/fleet/e10-backup-restore.test.js §2d",
+          "tests/fleet/e10-backup-restore.test.js §2e",
+          "tests/fleet/e10-backup-restore.test.js §3a",
+          "tests/fleet/e10-backup-restore.test.js §3b",
+          "tests/fleet/e10-backup-restore.test.js §3c",
+          "tests/fleet/e10-backup-restore.test.js §4b",
+          "tests/fleet/e10-backup-restore.test.js §4c"
+        ]
+      },
+      {
+        "story": "A2",
+        "verdict": "fleet",
+        "proves": "The export is MY data: private entries, my shared entries with their flags, categories, settings and my identity keys. Other members' entries are not in the file and re-arrive via sync after the restore.",
+        "rows": [
+          "tests/fleet/e10-backup-restore.test.js §1a",
+          "tests/fleet/e10-backup-restore.test.js §2b",
+          "tests/fleet/e10-backup-restore.test.js §2d"
+        ]
+      },
+      {
+        "story": "D8",
+        "verdict": "fleet",
+        "proves": "The identity block is passphrase-encrypted or omitted, never plaintext — checked on JSON.stringify(file), by searching the file's own text for every private key this export handled, plus an exhaustive key list on the block and on the file. The passphrase floor is SOFT and the caller is told, as a testable fact.",
+        "rows": [
+          "tests/fleet/e10-backup-restore.test.js §1a",
+          "tests/fleet/e10-backup-restore.test.js §1b",
+          "tests/fleet/e10-backup-restore.test.js §1c",
+          "tests/fleet/e10-backup-restore.test.js §5e",
+          "tests/fleet/e10-backup-restore.test.js §5f"
+        ]
+      },
+      {
+        "story": "key loss = data loss (copy)",
+        "verdict": "fleet-partial",
+        "proves": "Both halves of the single point of failure in one sentence, in German and English; the two export buttons and what each gains and loses; the file's own two headers; and that nothing in the copy promises a recovery that does not exist.",
+        "rows": [
+          "tests/fleet/e10-backup-restore.test.js §5a",
+          "tests/fleet/e10-backup-restore.test.js §5b",
+          "tests/fleet/e10-backup-restore.test.js §5c",
+          "tests/fleet/e10-backup-restore.test.js §5d"
+        ],
+        "alsoNeeds": [
+          "tests/tier2/crypto-backup.dom.js — that the sheet actually shows these strings before the button is armed (deliverable 24)"
+        ]
+      },
+      {
+        "story": "19.4 (partial, by side effect)",
+        "verdict": "fleet-partial",
+        "proves": "One member ends the scenario with TWO live devices on the relay's roster, and the second one reads and writes the family's entries.",
+        "rows": [
+          "tests/fleet/e10-backup-restore.test.js §2c",
+          "tests/fleet/e10-backup-restore.test.js §2d",
+          "tests/fleet/e10-backup-restore.test.js §2e"
+        ],
+        "alsoNeeds": [
+          "tests/helpers/fleet.js + tests/fleet/fleet-harness.test.js — `crypto/pairing.js`'s pairing-code route (19.5), in a PERSONAL space with no Familienkreis"
+        ],
+        "note": "The second Mac here arrives by the A2 RECOVERY route, not by the 19.5 pairing-code route. One rig carrying a paired second Mac AND a three-member family does not exist."
+      }
+    ]
+  }
 }

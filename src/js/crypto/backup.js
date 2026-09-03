@@ -226,6 +226,20 @@ export const MAX_SEALED_B64_CHARS = 1024 * 1024;
 export const MAX_KDF_ITERATIONS = 10_000_000;
 
 /**
+ * How many missing epoch numbers `result.spaces.<which>.missingEpochs` will ever list (E10-B1).
+ *
+ * The same argument as `MAX_KDF_ITERATIONS`, one field along: a bundle's `epoch` is authenticated
+ * by the tag but CHOSEN by whoever wrote the file, and `missingEpochsOf` enumerates `1..epoch`.
+ * `epoch: 2_000_000` built and froze a two-million-element array on the restore path — on a Mac
+ * whose owner may have nothing else left.
+ *
+ * Capping the LIST costs nothing, because the list is not the signal: S8 fixes the field's
+ * contract as **present ⇒ the ring has holes**, and `result.consequence` — the sentence the user
+ * actually reads — is derived from whether it is present at all.
+ */
+export const MAX_REPORTED_MISSING_EPOCHS = 1024;
+
+/**
  * The entry fields a v2 backup carries: v1's own product fields, plus the two TRUTH flags A2
  * asks for by name ("my shared/Belegt entries **with their flags**").
  *
@@ -1866,10 +1880,29 @@ async function importSpaces(S, payload) {
  */
 function missingEpochsOf(epochs, epoch) {
   const held = [...epochs.keys()];
-  if (held.length === 0) return [];
-  const top = Number.isSafeInteger(epoch) && epoch > 0 ? Math.max(epoch, ...held) : Math.max(...held);
+  const claimed = Number.isSafeInteger(epoch) && epoch > 0 ? epoch : 0;
+  // E10-B1 — AN EMPTY RING IS NOT A COMPLETE RING, and this line used to say it was.
+  //
+  // `if (held.length === 0) return []` reported NO GAPS for a bundle holding zero keys, so
+  // `missingEpochs` was absent, and S8's own contract makes that absence the "complete" signal:
+  // `importBackup` then returned `identity-restored` — „Dein Board ist zurück und deine Schlüssel
+  // auch" — over a space whose every op will park for ever. `spacekeys.js`'s `KeyRing.missing()`
+  // answers `1..upTo` for exactly the same ring, and ADR 002 §8.5a made THAT the authority for
+  // D9's „Schlüssel ausstehend". Two modules cannot give opposite answers about one empty ring
+  // when the one the user reads first is the restore.
+  //
+  // A ring holding nothing is missing at least epoch 1 — the floor `bundleFor` and `importSpaces`
+  // both refuse below, and the epoch story 19.4 and §7.1 step 5 are about.
+  const top = Math.max(claimed, held.length > 0 ? Math.max(...held) : FIRST_BACKUP_EPOCH);
   const gaps = [];
-  for (let n = FIRST_BACKUP_EPOCH; n <= top; n++) if (!epochs.has(n)) gaps.push(n);
+  // BOUNDED. `epoch` is a payload field: authenticated by the tag, but chosen by whoever wrote
+  // the file, which §7.3's own copy says may not be this member („Wenn dir jemand anderes diese
+  // Datei gegeben hat"). `epoch: 2_000_000` used to build and freeze a two-million-element array
+  // on the restore path. The FIELD'S CONTRACT IS ITS PRESENCE, not its length — `consequence`
+  // is what the user reads — so the list is capped and the signal is unharmed.
+  for (let n = FIRST_BACKUP_EPOCH; n <= top && gaps.length < MAX_REPORTED_MISSING_EPOCHS; n++) {
+    if (!epochs.has(n)) gaps.push(n);
+  }
   return gaps;
 }
 
