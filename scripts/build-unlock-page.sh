@@ -10,17 +10,28 @@
 # harness: build the Swift shell, run one generator file in a real WKWebView,
 # and take the document back out over stdout as base64.
 #
-# WHERE IT IS SUPPOSED TO END UP, AND WHY IT DOES NOT YET. Under D1 the app is
-# blocked on first launch, so no screen inside the app can be the first thing a
-# non-technical person sees. firstrun.js says this page should ride ON the disk
-# image next to the app, where a double-click opens it in Safari -- which
-# Gatekeeper does not block. That is right, and it is not wired up, because
-# Tauri's DMG bundler can position exactly two items (bundle.macOS.dmg gives
-# `appPosition` and `applicationFolderPosition` and nothing else). A third file
-# injected into the image afterwards lands wherever Finder decides, which can be
-# on top of the arrow -- making the window this ticket exists to polish worse.
-# The three ways out, with their costs, are in docs/v2/RELEASE.md § 12.
-# Until one is chosen this script produces the file and nothing consumes it.
+# WHERE IT ENDS UP. Under D1 the app is blocked on first launch, so no screen
+# inside the app can be the first thing a non-technical person sees -- and the
+# in-app unlock screen cannot present itself unasked either, because
+# `gatekeeper_status` is implemented in neither shell (firstrun.js:37,117). So
+# this page riding ON the disk image next to the app is not a second surface, it
+# is the ONLY one that reaches a blocked reader: a double-click opens it in
+# Safari, which Gatekeeper does not block.
+#
+# WIRED UP 2026-09-04, both paths. It used to say here that nothing consumed the
+# file, and that was true and cost a real thing: the built page was thrown away
+# and the mounted DMG held three entries. Tauri genuinely cannot stage it --
+# `bundle.macOS.dmg` is "additionalProperties": false with exactly five keys, so
+# an invented sixth makes `cargo tauri build` REJECT the config -- so it is an
+# explicit post-bundle step instead:
+#
+#   verification   scripts/make-dmg.sh                staged + positioned
+#   production     .github/scripts/dmg-add-readme.sh  injected into the built DMG
+#   gate           release.yml step 10                fails if it is not on the image
+#   agreement      .github/scripts/check-dmg-readme.mjs   producer == both consumers
+#
+# The position (304, 70) is measured against the artwork, not chosen; see
+# make-dmg.sh's header for the scan and docs/v2/invitation-email.md § 8.2.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

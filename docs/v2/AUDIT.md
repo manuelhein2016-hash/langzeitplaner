@@ -29,6 +29,98 @@ Everything else the audit asked for is done and re-measured. **The solo product 
 still is; the Familienkreis is now ready too, and the remaining distance to a family release is a
 domain registration and one ruling.**
 
+## §0 · THE INTEGRATION PASS — 2026-09-04
+
+Three fix branches landed together and the artifacts were built and inspected. Four things
+turned that no previous pass could see, because no previous pass had built anything.
+
+### 0a · The DMG carried no instructions — the whole reason LZP-106 exists, undone by the image
+
+Measured on the real artifact before the fix (`hdiutil attach`): the DMG root held exactly
+`.background/`, `Applications ->`, `LangzeitPlaner.app`. `scripts/build-unlock-page.sh` produced
+`build/dmg/Bitte zuerst lesen.html` — **19 427 bytes, rendered in a real WKWebView — and threw it
+away**; `grep -rln "zuerst lesen"` matched only its own builder.
+
+Under D1 macOS refuses the app on first launch. The screen that walks somebody past that wall is
+**inside the app she cannot open**. The DMG window is the only surface that reaches her first, and
+it carried nothing.
+
+**Tauri cannot stage a DMG file at all, and that was checked rather than assumed.**
+`schema.tauri.app/config/2`'s `DmgConfig` has exactly five properties and
+`"additionalProperties": false`, so an invented sixth key makes `cargo tauri build` *reject the
+config*. `bundle.resources` / `bundle.macOS.files` copy into the `.app`, never onto the image. The
+bundler's vendored `bundle_dmg` **does** support `--add-file`, but Tauri never passes it and
+rewrites the script from an `include_str!` on every run. Hence an explicit post-bundle step, and
+`tauri.conf.json` deliberately untouched.
+
+Now on the image on **both** paths — `scripts/make-dmg.sh` (verification) and
+`.github/scripts/dmg-add-readme.sh` (production) — with `.github/scripts/check-dmg-readme.mjs`
+holding the producer, both consumers, the gate and the icon geometry in agreement.
+
+### 0b · The gate, demonstrated by failure and not by pass
+
+The mount gate's read-me block was lifted **verbatim out of `release.yml`** and run against two
+images differing by exactly one file:
+
+```
+PAGE-LESS (the state at 79929b5)   ::error title=DMG has no instructions on it::…   EXIT = 1
+WITH the page                       read-me: Bitte zuerst lesen.html present (19427 bytes)  EXIT = 0
+```
+
+And the production injector, run on the page-less image: `2 671 703 → 2 436 555 B`, page present,
+sha256 identical to source, gate then green.
+
+### 0c · `src-tauri/` did not compile, and the failure was in `build.rs`
+
+A toolchain was obtained (rustc 1.98.1 / cargo 1.98.1, aarch64-apple-darwin). The first-ever
+`cargo check` **failed** — and not in `lib.rs`:
+
+```
+error: failed to run custom build command for `langzeitplaner v1.0.0`
+  The `tauri` dependency features on the `Cargo.toml` file does not match the
+  allowlist defined under `tauri.conf.json`.
+```
+
+`Cargo.toml:25` declared `macos-private-api`; `tauri.conf.json:29` declared
+`"macOSPrivateApi": false`. Because it is a **build-script** failure it happens before rustc reads
+a line of source — `grep -c "lib.rs"` over the cargo output: **0 diagnostics**. No amount of
+reviewing `lib.rs` could have found it, and `helper-hygiene.js`'s `SHELL_RUST` gate could not
+either: it compares Swift↔Rust textually and neither offending file is `lib.rs`. `release.yml`
+runs `cargo tauri build` only on a tag, so **the first person to learn would have been the
+releaser, 25–40 minutes into the run.**
+
+Fixed by dropping the feature. After: `cargo check --all-targets --locked` with `-D warnings` →
+exit 0, zero warnings; `cargo build --release` → 10 035 776 B stripped arm64. `ci.yml` gains a
+`shell-rust` job so this cannot go unmeasured again.
+
+**A defect found on the way, and the broken half is the Swift shell.** Same configured origin,
+opposite outcomes: `URLComponents.host` decodes an IDN to its U-label, the `url` crate keeps the
+A-label, and `net.js:265` sends the A-label. An umlaut relay domain silently bricks every family
+request in the shell every measurement in this project was taken on. `release-gate.test.js` cannot
+see it — it compares the two constants for *equality*, and they *are* equal.
+
+### 0d · The stranger's first run, walked — and the one step that could not be executed
+
+`unlockLead` and `unlockNote` gained a sentence each, both languages, and the artwork stopped
+deferring to the e-mail. All three are held by rows that die alone
+(`tests/tier1/unlock-copy.test.js`, `ART-POINTS-AT-PAGE` in `check-dmg-readme.mjs`).
+
+**Measured — quarantine rides on the `.dmg` file, not its contents.** Nothing on the mounted image
+carries `com.apple.quarantine`: not the volume root, not the `.app`, not one file inside the bundle
+(checked recursively). The copy is stamped `0283;…` at copy time. So the app on the image and the
+app in Programme are different objects to Gatekeeper, and approving one does not approve the other
+— the ordering trap, now named in the copy.
+
+**NOT measured — the dialog she actually sees.** The quarantined bundle launched here, translocated
+and with no prompt, including with a CDHash this Mac had never seen. `spctl --status` says
+`assessments enabled`, so this is not Gatekeeper being off: the responsible process for anything
+this session launches is Claude Code, which plausibly holds the **Developer Tools** TCC exemption.
+`TCC.db` is SIP-protected and could not be read to confirm it. **So no local launch measures what
+her Mac will do**, and the „beschädigt" wording remains an unverified possibility — named in the
+copy anyway, because one sentence is cheaper than her trashing the app.
+
+---
+
 ### The disposition, finding by finding
 
 | # | audit severity | disposition | the evidence |
@@ -46,20 +138,26 @@ domain registration and one ruling.**
 | **F11** | MEDIUM | **CLOSED** | `layout.js` counts a dropped foreign **bar** into `overflowNew`, per day, like `laneOverflow` itself. `display-integrity.dom.js` §D6 green |
 | **F12** | MEDIUM | **PARTLY CLOSED · doc work outstanding** | the two that were code-adjacent are closed (the retracted R-1b sentence is gone from `store.js`; `ROUTE_NAMES.length === 24` is now asserted against the screen). The record-vs-tree disagreements are doc drift and are listed as outstanding below |
 | **F13** | ⛔ BLOCKS FAMILY | **CLOSED (gate) · PO-DECISION (claim the host)** | the placeholder is now `https://serveradresse-fehlt.invalid` — RFC 2606 §2, **undelegatable**, so no stranger can register it. The probe's `M2s` is red and stays red until a host is claimed, which is the correct state |
-| **F14** | MEDIUM | **OPEN** | untouched. 0 tags, 0 remotes, `release.yml` never run. Not in this cycle's scope |
-| **F15** | LOW | **OPEN** | untouched, all six items |
+| **F14** | MEDIUM | **PARTLY CLOSED (2026-09-04) · the tag is still OPEN** | the artifacts were **built and mounted**: `build-frontend` → `shell-macos/build.sh` → `build-release-assets.sh` → `build-unlock-page.sh` → `make-dmg.sh`, then `hdiutil attach` and a listing. 2 442 008 B = 2.33 MiB, four entries at the root. The Rust crate now **compiles** (and did not — see the new §0 below). What is still untouched: 0 tags, 0 remotes, `release.yml` has never run, `cargo tauri build` has never run anywhere |
+| **F15 · 1** | LOW | **CLOSED** | `withoutForeignEntries` was blind to the stripped format. One predicate at `store.js:403`; `tests/tier1/spine-foreign-guard.test.js`, 3 rows, both mutants die on the named row |
+| **F15 · 2–7** | LOW | **OPEN** | untouched — docs and declared blast radius, listed below |
+| **E10 § 8.2** | — | **CLOSED (2026-09-04)** | *the DMG carried no instructions at all.* The page was built (19 427 B) and discarded; the mounted image held three entries. It is now on the image on **both** paths, gated in `release.yml`, and the gate was **demonstrated by failure** — see §0 |
 
 ### What is genuinely still open
 
-- **F14** and every **F15** item.
+- **F14's tag half**, and **F15 items 2–7**. F15 item 1 is closed; F14's build half is measured.
 - **F12's doc drift** — `MOM-TEST.md` §2.3/§5.3/§8, `RUNBOOK.md` §2.6, `SHELL-VERIFICATION.md`
   §1/§5 and its SSRF table (owed the 17th refusal), `traceability.json:3209` and story 21.5's
   pre-D10 text with `amendedBy: []`.
-- **Two `tests/audit/` rows are mechanically broken, not turned** — `pass5-doc-drift.test.js`
-  §2b/§2c call `execFileSync` on the probe without tolerating exit 1, so they throw. Their claims
-  are undetermined, and saying they "turned" would be false.
-- **The Rust shell has never been compiled.** `cargo` is absent. `lib.rs` is held to `main.swift`
-  by a vocabulary row and by source mirroring, and that is all.
+- ~~**Two `tests/audit/` rows are mechanically broken, not turned**~~ — **closed 2026-09-04.**
+  `pass5-doc-drift.test.js` §2b/§2c tolerate the probe's exit 1 and are now determinate and green.
+  The probe reads `41 rows · 38 pass · 2 note · 1 FAIL`; the single FAIL is `M2s`, the reserved
+  relay slot, which is the correct state until the host is claimed. §2c asserts that line and that
+  row by name.
+- ~~**The Rust shell has never been compiled.**~~ — **it has now, and it did not build.** See §0.
+  It compiles today; it has still never been **run**, and because `lib.rs:794` has no headless hook
+  no existing harness can point it at a test relay, so tier 2 can never cover it. That is the
+  largest remaining unknown in the shell.
 - **LZP-1006** — a real person, on a clean Mac, unassisted. Nothing here moves it.
 - **The eight human-only v1 stories.** Still about twenty minutes with the app open, still the
   cheapest missing evidence in the project.
@@ -87,9 +185,14 @@ So both numbers are true about different situations, and neither cancels the oth
   it ALWAYS-WRONG — wrong with *and* without the relaunch — and it reproduced on the shipped binary
   on every run at `2d092a6`. It was never a compaction defect. It is now green in all five runs.
 
-**Not proved:** a shipped-app relaunch with the relay unreachable or pruned. That is the one
-measurement that would settle the offline case end to end on the binary, and it is still the next
-thing to do.
+~~**Not proved:** a shipped-app relaunch with the relay unreachable or pruned.~~ — **measured
+2026-09-04, 4 of 4 green on the shipped `.app`** (`scripts/shell-offline-relaunch.mjs`,
+`tests/tier2/shell-offline-relaunch.dom.js`). With the relay dead and `engineArmed:false`, family
+mode entered in 0 ms and the bridge answering `{"error":"blocked"}`: F2/18.2 co-edit green on the
+co-editor *and* her peer, F4/16.6 exposure `geteilt`, F3/20.2 removal enforced. F6/17.5's dot is
+**unreachable offline by design** and the row says so instead of asserting it — `_lastSeenSeqCtx`
+installs a session floor of `_maxFamilySeq()` when the pref is unwritten, so nothing already on
+disk can be new and offline nothing new can arrive.
 
 ### The blind spot itself
 

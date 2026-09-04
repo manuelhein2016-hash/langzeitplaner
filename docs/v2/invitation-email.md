@@ -387,7 +387,20 @@ names so she does not click it.
 
 `check-email-copy.mjs` pins the e-mail to those strings rather than to anybody's memory of macOS.
 
-## 8.2 The unlock page that should ride on the DMG — built, not yet placed
+## 8.2 The unlock page that rides on the DMG — built, and placed (option (a), landed 2026-09-04)
+
+> **Status.** This section's option **(a)** is landed. The page is on the image on both the
+> verification path (`scripts/make-dmg.sh`) and the production path
+> (`.github/scripts/dmg-add-readme.sh`), gated in `release.yml` step 10, and held in agreement by
+> `.github/scripts/check-dmg-readme.mjs`. The one thing this section feared — *"a third file
+> injected into the image afterwards lands wherever Finder decides, which can be on top of the
+> arrow"* — is now a number rather than a worry: the position (304, 70) was found by scanning
+> every candidate centre against the app box, the Applications box and the painted artwork, and
+> the `NO-OVERLAP` row fails the build if it ever starts overlapping an item. **Zero candidates
+> collide with nothing** in a 660×420 window already holding two 128pt icons; (304, 70) clears both
+> Finder items completely and grazes the arrowhead by 115 px² of 20 024 (0.6%). Widening
+> `windowSize` is the proper fix and `NO-OVERLAP` stays green when the window grows, so it will
+> not block that change. The text below is the reasoning as it stood before the decision.
 
 `src/js/firstrun.js` exposes `renderUnlockDocument()`: the same two illustrated steps as one
 self-contained HTML file, both languages, no script and no external asset. Its purpose is to sit

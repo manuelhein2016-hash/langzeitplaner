@@ -946,14 +946,56 @@ export function createOpLog(ports = {}) {
      * are NEVER dropped — an unknown-kind op from a newer sibling can easily be older than the
      * horizon, and dropping it would be exactly the "loses the new thing" failure §7.4 exists to
      * prevent.
+     *
+     * ─────────────────────────────────────────────────────────────────────────────────────────
+     * `opts.retain` — THE SECOND CLASS OF OP A FOLD CANNOT EXPRESS (R-1b, second route)
+     *
+     * Compaction is lossless for STATE. It is not lossless for HISTORY, and one thing the
+     * product needs is history: the admin chain. `store.js#isAdminLink` says the whole of why —
+     * an LWW cell keeps the head of the chain and cannot keep the link below it, so a fold that
+     * absorbs `space.set{admin, adminPrev}` loses a TRANSFERRED seat and every later admin
+     * retraction is refused `notOwner`, terminally.
+     *
+     * `store.js#_persistOps` ④ already puts those lines back into `ops.jsonl` after each
+     * truncate. That retention was blind to THIS function: step ② compacts first, so by ④
+     * `_retainedTailLines()` reads a `_log.lines()` the compaction has already emptied and puts
+     * nothing back — and `rememberBody` has by then listed the link's fingerprint in
+     * `bodies`, so `bodiesObject()` publishes it and `load()` answers a re-appended copy
+     * `duplicate`. MEASURED before this parameter existed, on a real converged three-Mac circle
+     * after a real `transferAdmin`: retained-before-compact **2**, dropped **2**,
+     * retained-after-compact **0**, `checkpoint().bodies` carrying **1 fingerprint for each of
+     * the two link opIds**. A circle that reaches `TAIL_COMPACT_AT` lines lost the seat again.
+     *
+     * A retained line is simply NOT DROPPED: it stays live, so `bodiesObject()` skips it (it
+     * already skips every live id), no fingerprint is ever published for it, `lines()` still
+     * offers it to `_retainedTailLines()`, and `load()` reads it back as a LINE. Its writes are
+     * in `regs` as well — `foldTo` applied it — and applying an op twice is idempotent
+     * (ADR 001 §6), so state is untouched. `resolveHorizon`'s `'advance'` mode already tolerates
+     * a live line below the horizon (see its docblock), so the horizon does not recede.
+     *
+     * THE BOUND IS THE CALLER'S. Retaining an unbounded set makes compaction a no-op and
+     * unbounds `ops.jsonl`; the only shipped caller retains `isAdminLink` ops of one space,
+     * which is one line per transfer plus genesis. `core/` may not import `store.js`
+     * (ADR 005 §2), hence a predicate rather than a kind list here.
+     *
+     * @param {{horizon?:string, retain?:(op:Object)=>boolean}} [opts]
      * @returns {number} lines dropped
      */
     compact(opts = {}) {
+      const keep = opts.retain ?? null;
+      if (keep !== null && typeof keep !== 'function') {
+        throw new OpLogError(`compact: retain must be a function (op) => boolean, got ${typeof keep}`);
+      }
       const h = resolveHorizon(opts, 'advance');
       regs = foldTo(h);
       horizon = h;
       let dropped = 0;
       for (const [id, entry] of [...live]) {
+        // A retained line keeps its LINE and its place in `live`; its writes are already in the
+        // fold above. No `rememberBody`, deliberately: a fingerprint here would be published by
+        // `bodiesObject()` the moment the line ever does go, and `load()` would then answer the
+        // very bytes ④ wrote `duplicate`. See the note on `retain`.
+        if (keep !== null && keep(entry.op) === true) continue;
         if (cmp(entry.op.ts, h) <= 0) {
           // The body's line goes; its FINGERPRINT stays, so that a second body arriving under the
           // same opId afterwards is still recognised as a splice rather than answered `duplicate`

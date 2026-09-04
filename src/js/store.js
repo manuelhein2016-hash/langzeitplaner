@@ -371,13 +371,36 @@ export function defaultState() {
  * `entityKey` prefix is `core/entities.js`'s, and a board hand-edited to carry one without the
  * other must still not be authored as mine.
  *
+ * ── THE THIRD TEST, AND THE BLIND SPOT IT CLOSES (AUDIT F15, first item) ──────────────────────
+ *
+ * Those two markers are exactly what `materialize.js#stripV2Fields` REMOVES — `isForeign` and
+ * `entityKey` are both in its `DECORATIONS` list — and `V1_ENTRY_FIELDS.note` keeps `id`. A
+ * foreign entry's `id` IS its entity key (`materialize.js#foreignCandidate`: `id: key`), so a
+ * board that has been through the v1 strip carries `id: 'fnote:<memberId>/<uuid>'` with neither
+ * marker beside it, and the two tests above see an ordinary v1 note.
+ *
+ * It is NOT LIVE and the audit says so: a family Mac persists the FULL v2 board
+ * (`_familySpaceId ? full : stripV2Fields(full)`), where both markers are present, and
+ * `stripV2Fields` filters foreign entries out on the way past anyway. But this function is a
+ * defence-in-depth guard on the one path that turns a file into MY OWN authored ops, and a guard
+ * with a documented blind spot is a guard that will one day be reached by an import, a restored
+ * backup, or a board a person hand-edited. The `id` shape is one predicate and it closes it.
+ *
+ * It cannot cost v1 anything: a v1 note id is a UUID (`entityUuid`), a v1 category id is
+ * `c<digits>`, and neither can begin `fnote:` or `fbar:` — the colon alone is outside both
+ * alphabets. And the whole function is inert while `_familySpaceId === null`… except that it is
+ * NOT gated on that, deliberately: the strip case above is precisely a board with no family
+ * markers left, so a gate would re-open the hole it closes.
+ *
  * @param {Object} board a migrated v1-shaped board
  * @returns {{board: Object, dropped: number}} the same object when nothing is foreign
  */
 function withoutForeignEntries(board) {
+  const foreignKey = /^f(?:note|bar):/;
   const isForeign = (e) => !!e && typeof e === 'object'
     && (e.isForeign === true
-      || (typeof e.entityKey === 'string' && /^f(?:note|bar):/.test(e.entityKey)));
+      || (typeof e.entityKey === 'string' && foreignKey.test(e.entityKey))
+      || (typeof e.id === 'string' && foreignKey.test(e.id)));
   const notes = Array.isArray(board.notes) ? board.notes.filter((n) => !isForeign(n)) : board.notes;
   const bars = Array.isArray(board.bars) ? board.bars.filter((b) => !isForeign(b)) : board.bars;
   const dropped = (Array.isArray(board.notes) ? board.notes.length - notes.length : 0)
@@ -4980,11 +5003,58 @@ class Store {
    * when a founder hands the seat over before leaving). The claim that used to stand here — that
    * the seat had never moved in any shipped circle — was retracted by V2-FINAL and is gone.
    *
-   * WHAT IS STILL OPEN. `oplog.js#compact()` at `TAIL_COMPACT_AT` drops the link from the log,
-   * and `bodiesObject()` then lists its fingerprint, so a re-appended copy would be answered
-   * `duplicate` by `load()`. A circle that reaches 5 000 tail lines therefore loses a
-   * TRANSFERRED seat again. `_retainedTailLines` reads `_log.lines()` for exactly this reason:
-   * it writes only what can still come back.
+   * THE SECOND ROUTE, CLOSED (E14). `oplog.js#compact()` at `TAIL_COMPACT_AT` used to drop the
+   * link from the log before step ④ could ask for it, and `bodiesObject()` then listed its
+   * fingerprint, so even a re-appended copy would have been answered `duplicate` by `load()` —
+   * a circle that reached 5 000 tail lines lost a TRANSFERRED seat again. Step ② now hands
+   * `compact()` the same predicate ④ retains by, so a retained link is never dropped and never
+   * fingerprinted. MEASURED on a converged circle after a real `transferAdmin`: retained before
+   * ② **2**, after ② **2**, published fingerprints **0**, `ops.jsonl` **2 lines**; with the
+   * predicate removed, **0 · 0 · 2 · 0**. `tests/fleet/e14-transfer-compaction.test.js`.
+   * `_retainedTailLines` still reads `_log.lines()` for the same reason: it writes only what can
+   * still come back.
+   *
+   * ─────────────────────────────────────────────────────────────────────────────────────────
+   * A LOG AN OLDER BUILD ALREADY COMPACTED — WHAT CAN BE RECOVERED, MEASURED, AND WHY NO
+   * MIGRATION IS SHIPPED FOR IT
+   *
+   * Retention prevents the loss; it does not undo one. F2/F3/F4 ARE repaired retroactively
+   * because they read registers the checkpoint KEPT. This one is not: the link is not in the
+   * checkpoint at all, and its fingerprint in `bodies` makes even a re-delivered copy
+   * `duplicate`.
+   *
+   * IT IS NEVERTHELESS RECOVERABLE, and the whole procedure was driven on a damaged three-Mac
+   * circle (a real transfer, then a compaction with `retain` stripped, then a relaunch):
+   *
+   *   damaged      `space.set` lines **0** · both link fingerprints published in
+   *                `checkpoint().bodies` · transport cursor **6** · `familyAdmin()` still names
+   *                the new admin, so the UI looks entirely healthy · the admin's retraction is
+   *                refused and the entry stays `geteilt`
+   *   repair A     the sitting admin calls `claimAdmin` — **DECLINED (`false`)**. `core/ops.js`
+   *                #claimAdmin refuses once the register carries an admin, and it is RIGHT to:
+   *                a second genesis link is a rival root, not a correction. **There is no
+   *                in-app repair through the admin mutations.**
+   *   repair B     drop the two fingerprints from `checkpoint().bodies` and reset this space's
+   *                transport cursor to 0, then pull — **both links come back as LINES**. The
+   *                relay never prunes ops (ADR 003 §6.3 — there is deliberately no redaction
+   *                endpoint), so the bytes are still there to fetch.
+   *   the catch    the retraction that was ALREADY refused stays refused — a `notOwner`
+   *                rejection is final and `notOwner` is in neither `CURABLE_REFUSALS` nor
+   *                `RETROACTIVE_REFUSALS`, by design — so the entry is still `geteilt` after
+   *                repair B alone.
+   *   and then     the admin re-issues the retraction (a fresh op, a fresh opId) → **`privat`.**
+   *
+   * SO THE RECOVERY IS TWO PARTS AND THE SECOND IS A PERSON: repair the chain, then ask the
+   * admin to moderate again. That is a RUNBOOK entry, not a migration.
+   *
+   * WHY IT IS NOT SHIPPED AS ONE. The trigger would be a full re-pull of a family space's log,
+   * armed on every launch, for a population that is EMPTY BY CONSTRUCTION: reaching this state
+   * needs an OLDER build that synced a family and compacted its log past a transfer, and
+   * `SYNC_ORIGIN_BUILTIN` is `""` in both shells (`shell-macos/main.swift:799`,
+   * `src-tauri/src/lib.rs:714`) — no shipped build has ever synced a family at all. A one-shot
+   * full re-pull shipped for nobody is a liability, not a repair. If a build ever ships with a
+   * claimed relay origin AND without the `retain` predicate above, this paragraph is the
+   * procedure; while both hold, there is nothing to migrate.
    *
    * @returns {Object[]} ops, or `[]`
    */
@@ -5714,8 +5784,18 @@ class Store {
     if (this._tailLines >= TAIL_COMPACT_AT || this._tailOverBytes) {
       this._tailOverBytes = false;
       try {
-        if (cap === undefined) this._log.compact();
-        else if (cap !== ZERO_STAMP) this._log.compact({ horizon: cap });
+        // ── THE RETAINED LINES ARE ④'s SET, HANDED TO ② (R-1b, second route) ──────────────
+        //
+        // ④ puts the admin-chain links back after the truncate, and reads them out of
+        // `_log.lines()` — which THIS compaction empties two statements earlier. Without the
+        // predicate, `_retainedTailLines()` answers `[]` here and `bodiesObject()` publishes the
+        // links' fingerprints, so even a re-appended copy would be answered `duplicate` by
+        // `load()`. Measured on a converged circle after a real `transferAdmin`: 2 retained
+        // before, 0 after. See `compact`'s `retain` note and `isAdminLink`.
+        const retain = this._familySpaceId === null ? undefined
+          : (op) => isAdminLink(op) && op.space === this._familySpaceId;
+        if (cap === undefined) this._log.compact({ retain });
+        else if (cap !== ZERO_STAMP) this._log.compact({ horizon: cap, retain });
       } catch (e) {
         // A compaction that cannot run costs a bigger file and nothing else, so it is a warning
         // and never a refusal to persist — the checkpoint below is still written.

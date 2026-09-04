@@ -65,6 +65,103 @@ jobs:
       - name: tier 2
         run: npm run test:dom
 
+  shell-rust:
+    name: Tier 0 — the shell PRODUCTION ships actually compiles
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # ═══════════════════════════════════════════════════════════════════════
+      # WHY THIS JOB EXISTS
+      # ═══════════════════════════════════════════════════════════════════════
+      #
+      # Until 2026-09-04 this workflow had FOUR jobs and not one of them ran
+      # `cargo`. `src-tauri/` had never been compiled by anybody — the audit's
+      # own "what was not audited" section said so: "whether `src-tauri/`
+      # compiles at all [is] unmeasured by anybody. The Rust shell is reviewed,
+      # never executed."
+      #
+      # That is not a small gap, because the two shells are not equal in status:
+      # `shell-macos/main.swift` is what every measurement in this project used
+      # and what `scripts/make-dmg.sh` packages, but `src-tauri/src/lib.rs` is
+      # what `release.yml` actually ships (`cargo tauri build`). The only
+      # workflow that compiled the production shell ran on a TAG — so the first
+      # time anyone would have learned it was broken is the release itself.
+      #
+      # It WAS broken. Measured 2026-09-04 on rustc 1.98.1 / cargo 1.98.1, a
+      # clean `cargo check` failed before rustc ever looked at lib.rs:
+      #
+      #     error: failed to run custom build command for `langzeitplaner`
+      #     The `tauri` dependency features on the `Cargo.toml` file does not
+      #     match the allowlist defined under `tauri.conf.json`.
+      #     Please run `tauri dev` or `tauri build` or remove the
+      #     `macos-private-api` feature.
+      #
+      # `Cargo.toml` declared `features = ["tray-icon", "macos-private-api"]`
+      # while `tauri.conf.json` declared `"macOSPrivateApi": false`. Because it
+      # is a BUILD SCRIPT failure it happens before type checking, so no amount
+      # of reading lib.rs could find it, and `tests/helpers/helper-hygiene.js`'s
+      # `SHELL_RUST` gate could not either — that gate compares Swift and Rust
+      # TEXTUALLY, and a text gate cannot catch a manifest that disagrees with a
+      # config file. Only a compiler catches this. Hence: a compiler, on every
+      # push, not on a tag.
+      #
+      # Deliberately cheap and dependency-free:
+      #   · no `npm ci` — the app has zero runtime dependencies (see the header)
+      #   · no frontend build — MEASURED 2026-09-04: with `dist/` absent (it is
+      #     gitignored, so it is absent on every clean checkout) `build.rs`
+      #     re-ran and `cargo check --all-targets --locked` still exited 0. The
+      #     dev profile does not embed the frontend; only a release
+      #     `tauri build` does, and that is `release.yml`'s job.
+      #   · no third-party actions — the macos-14 runner ships a Rust toolchain,
+      #     and the cache action is first-party.
+      - name: A Rust toolchain exists, and say which one
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            echo "::error title=No Rust toolchain::The macos-14 runner did not provide cargo. Install one here rather than deleting this job — without it the shell production ships goes back to being unverified."
+            exit 1
+          fi
+          rustc -vV
+          cargo -V
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # `--locked` requires src-tauri/Cargo.lock to be COMMITTED. It is, as of
+      # this change. Without it every build resolves dependency versions afresh,
+      # which is how "compiles today" quietly becomes "broke on the tag nobody
+      # could reproduce". If you ever see "the lock file needs to be updated"
+      # here, run `cargo check` locally and commit the resulting Cargo.lock —
+      # do NOT drop `--locked`.
+      #
+      # `-D warnings` is a real gate and it is green: measured 2026-09-04,
+      # `RUSTFLAGS="-D warnings" cargo check --all-targets --locked` exited 0
+      # with zero warnings on 1,472 lines of lib.rs.
+      - name: cargo check — does the production shell type-check
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets --locked
+
+      # `check` stops before codegen and linking. This is the step that proves
+      # a binary actually comes out. Locally this produced a 55,942,992-byte
+      # Mach-O arm64 executable — the first one this crate has ever produced.
+      - name: cargo build — does it codegen and link
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --locked
+          test -x src-tauri/target/debug/langzeitplaner \
+            || { echo "::error title=No binary::cargo build reported success but produced no executable."; exit 1; }
+          file src-tauri/target/debug/langzeitplaner
+
   release-config:
     name: Release config pre-flight
     runs-on: ubuntu-latest
@@ -93,6 +190,78 @@ jobs:
 
       - name: Invitation e-mail says what it must (LZP-108)
         run: node .github/scripts/check-email-copy.mjs
+
+      # The cheap half of the `shell-rust` job, on the fast runner, so a manifest
+      # that cannot build is reported in seconds rather than after a 45-minute
+      # macOS Rust job. This is pure text and JSON — no cargo, no toolchain.
+      #
+      # It exists because of a real failure. Measured 2026-09-04, the FIRST time
+      # anybody compiled src-tauri/: `tauri-build` aborts when the `tauri`
+      # dependency's feature list disagrees with tauri.conf.json. `Cargo.toml`
+      # declared `macos-private-api`; `tauri.conf.json` said
+      # `"macOSPrivateApi": false`. Because it is a BUILD SCRIPT failure it
+      # happens before rustc reads a line of lib.rs, so reviewing lib.rs could
+      # never find it — and `helper-hygiene.js`'s SHELL_RUST gate could not
+      # either, because it compares Swift to Rust textually and neither of these
+      # two files is lib.rs.
+      #
+      # This is deliberately NOT a tier-1 test: tests/tier1/suite-integrity.test.js
+      # requires every tier-1 file to import a real src/js module and forbids
+      # node:fs, and a build-manifest check is neither. That rule is correct and
+      # was left alone.
+      - name: Cargo.toml and tauri.conf.json agree, or tauri-build will abort
+        run: |
+          node - <<'NODE'
+          const { readFileSync } = require('node:fs');
+          const toml = readFileSync('src-tauri/Cargo.toml', 'utf8');
+          const conf = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const line = toml.split('\n')
+            .filter((l) => !l.trimStart().startsWith('#'))
+            .find((l) => /^tauri\s*=/.test(l));
+          if (!line) {
+            console.log('::error title=No tauri dependency::src-tauri/Cargo.toml has no `tauri = …` line.');
+            process.exit(1);
+          }
+          const m = line.match(/features\s*=\s*\[([^\]]*)\]/);
+          const features = m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
+          let bad = 0;
+          // Every tauri feature that tauri-build cross-checks against the config.
+          for (const [feature, read] of [['macos-private-api', (c) => c.app?.macOSPrivateApi === true]]) {
+            const inToml = features.includes(feature);
+            const inConf = read(conf);
+            if (inToml !== inConf) {
+              bad++;
+              console.log(`::error title=Cargo.toml and tauri.conf.json disagree::Cargo.toml `
+                + `${inToml ? 'declares' : 'does not declare'} the \`${feature}\` feature, but `
+                + `tauri.conf.json resolves its counterpart to ${inConf}. tauri-build compares `
+                + `these and FAILS THE BUILD before rustc reads lib.rs. Set both, or neither.`);
+            }
+          }
+          const known = new Set(['tray-icon', 'macos-private-api', 'devtools', 'isolation']);
+          for (const f of features) {
+            if (!known.has(f)) {
+              bad++;
+              console.log(`::error title=Unrecognised tauri feature::${f} is not in this check's `
+                + `known set. If it has a tauri.conf.json counterpart, add the pair to the list `
+                + `above — tauri-build fails the build when they disagree.`);
+            }
+          }
+          if (bad) process.exit(1);
+          console.log(`tauri features [${features.join(', ')}] agree with tauri.conf.json`);
+          NODE
+
+      # `shell-rust` passes `--locked`, which fails outright without a committed
+      # lock. src-tauri/Cargo.lock did not exist until 2026-09-04, because
+      # nothing had ever run cargo.
+      - name: The Rust lockfile the --locked gate depends on is committed
+        run: |
+          if [ ! -f src-tauri/Cargo.lock ]; then
+            echo "::error title=No Cargo.lock::src-tauri/Cargo.lock is missing, so the shell-rust job's \`--locked\` will fail. Run \`cargo check --manifest-path src-tauri/Cargo.toml\` and COMMIT the result. Do not drop --locked: without a lock every release resolves dependency versions afresh."
+            exit 1
+          fi
+          grep -q '^name = "langzeitplaner"$' src-tauri/Cargo.lock \
+            || { echo "::error title=Cargo.lock does not name this crate::src-tauri/Cargo.lock exists but does not contain the langzeitplaner package."; exit 1; }
+          echo "src-tauri/Cargo.lock present, $(grep -c '^\[\[package\]\]' src-tauri/Cargo.lock) packages pinned"
 
       # R-9.1. `server.yml`'s path filter did not name `tests/server/**`, so the
       # workflow that runs the 998-row server suite was not triggered by an edit

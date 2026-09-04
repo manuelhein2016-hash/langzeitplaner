@@ -79,10 +79,23 @@ const DE = {
   // Systemeinstellungen → Datenschutz & Sicherheit → „Dennoch öffnen“ → „Öffnen“.
   // Voice: this is someone who was told "it's just a calendar" and has just met
   // a security warning. Calm, short, no jargon, no blame, no exclamation marks.
+  // THE ORDER IS LOAD-BEARING, AND IT IS MEASURED (2026-09-04, macOS 26.6.2).
+  // Quarantine rides on the .dmg FILE, not on its contents. Mount a downloaded
+  // image and nothing inside carries com.apple.quarantine — not the volume, not
+  // the .app, not one file inside the bundle. Copy the app off the image and the
+  // copy is stamped `0283;…` at copy time. So the app on the DMG and the app in
+  // Programme are two different objects as far as Gatekeeper is concerned, and
+  // approving the first does not approve the second. Somebody who opens it from
+  // the DMG window may see it simply work, drag it across afterwards, and meet
+  // the wall a second time on a copy she thinks she has already unlocked. One
+  // sentence prevents that, so it is here rather than in a support call.
   unlockTitle: 'macOS fragt beim ersten Start einmal nach',
   unlockLead:
     'Das ist normal. Die App kommt nicht aus dem App Store, deshalb möchte der Mac eine Bestätigung. '
-    + 'Zwei Schritte, dann öffnet sie sich — und danach ohne Nachfrage.',
+    + 'Zwei Schritte, dann öffnet sie sich — und danach ohne Nachfrage. '
+    + 'Wichtig ist dabei nur die Reihenfolge: erst das Symbol in den Ordner „Programme“ ziehen, '
+    + 'dann von dort öffnen. Wer die App direkt im Fenster der geladenen Datei startet, '
+    + 'muss die Freigabe später noch einmal machen.',
 
   unlockStep1Title: 'In den Systemeinstellungen freigeben',
   unlockStep1Body:
@@ -96,9 +109,22 @@ const DE = {
     + 'Danach fragt der Mac nach dem Passwort oder dem Fingerabdruck. Das ist der letzte Schritt.',
 
   unlockDone: 'Danach ist es erledigt. Bei dieser App fragt macOS nicht wieder.',
+  // The second sentence covers the wording nobody here could reproduce without a
+  // real download, and it is cheap insurance. Under decision D1 the bundle is
+  // ad-hoc signed: `codesign --verify` says "valid on disk, satisfies its
+  // Designated Requirement", and `syspolicy_check distribution` says "Adhoc
+  // Signed App — Warning" plus "Notary Ticket Missing — Fatal" (both measured
+  // 2026-09-04). A quarantined ad-hoc bundle can present as „ist beschädigt und
+  // kann nicht geöffnet werden“ with a Papierkorb button and sometimes no
+  // „Dennoch öffnen“ at all. The cost of naming it is one sentence. The cost of
+  // not naming it is her putting the app in the Papierkorb, which is the one
+  // outcome this whole screen exists to prevent.
   unlockNote:
     'Kein „Dennoch öffnen“ zu sehen? Der Knopf erscheint nur kurz nach einem Startversuch. '
-    + 'Die App noch einmal öffnen und dann gleich wieder in den Einstellungen nachsehen.',
+    + 'Die App noch einmal öffnen und dann gleich wieder in den Einstellungen nachsehen. '
+    + 'Und falls der Mac stattdessen sagt, die App sei „beschädigt“: sie ist es nicht. '
+    + 'Das ist dieselbe Sperre mit anderen Worten. Bitte nicht in den Papierkorb legen — '
+    + 'der Weg über Datenschutz & Sicherheit ist derselbe.',
   unlockWhy:
     'Warum das kommt: die App ist nicht bei Apple registriert. Am Board ändert das nichts — '
     + 'die Einträge bleiben auf diesem Mac.',
@@ -533,10 +559,14 @@ const EN = {
   // ── F22 · 22.2 / A12 — the first-run unlock screen (LZP-106) ───────────────
   // English path from support.apple.com/en-us/102445:
   // System Settings → Privacy & Security → Open Anyway → Open.
+  // See the German twin above for the measurement behind the ordering sentence.
   unlockTitle: 'macOS asks once, on the first launch',
   unlockLead:
     'This is normal. The app does not come from the App Store, so your Mac wants a confirmation. '
-    + 'Two steps, and it opens — and after that it will not ask again.',
+    + 'Two steps, and it opens — and after that it will not ask again. '
+    + 'Only the order matters: drag the icon into the “Applications” folder first, '
+    + 'then open it from there. If you start it inside the window of the downloaded file, '
+    + 'you will have to do the approval a second time later on.',
 
   unlockStep1Title: 'Allow it in System Settings',
   unlockStep1Body:
@@ -552,7 +582,10 @@ const EN = {
   unlockDone: 'That is all. macOS will not ask again for this app.',
   unlockNote:
     'No “Open Anyway” to be seen? The button only appears shortly after a launch attempt. '
-    + 'Open the app once more, then look in Settings again straight away.',
+    + 'Open the app once more, then look in Settings again straight away. '
+    + 'And if your Mac says instead that the app is “damaged”: it is not. '
+    + 'That is the same block in different words. Please do not move it to the Trash — '
+    + 'the route through Privacy & Security is the same.',
   unlockWhy:
     'Why this happens: the app is not registered with Apple. It changes nothing about the board — '
     + 'the entries stay on this Mac.',

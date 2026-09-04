@@ -13,7 +13,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+# `macos-private-api` was declared here and `"macOSPrivateApi": false` in tauri.conf.json.
+# `tauri-build` compares the two and ABORTS: "The `tauri` dependency features on the
+# `Cargo.toml` file does not match the allowlist defined under `tauri.conf.json`." That is a
+# build-script failure, so it happens before rustc ever looks at src/lib.rs — which is why no
+# amount of reading this crate could find it and why `cargo tauri build` in release.yml would
+# have failed on the first real tag. Measured 2026-09-04, rustc 1.98.1, cargo 1.98.1.
+# The config is the half that is right: no window here is transparent and nothing calls
+# `set_effects`, so the app does not need the private API. Removing the feature keeps the
+# shipped behaviour and makes the two halves agree.
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 # LZP-102 (22.3, 22.6). The plugin owns the HTTPS GET, the minisign verification

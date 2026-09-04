@@ -565,7 +565,7 @@ paths now render from `assets/icon.svg` instead, which keeps the alpha channel. 
 `.icns` grows from 828 KB to 954 KB. The CI job *"Release artwork builds from source"* asserts
 `hasAlpha: yes`, because a white square looks exactly like a build that worked.
 
-### The unlock page that should ride on the DMG — built, not placed
+### The unlock page that rides on the DMG — built, and now placed
 
 `src/js/firstrun.js` (LZP-106) can render its two illustrated unlock steps as one
 self-contained HTML file, both languages, no script and no external asset. Its whole point is to
@@ -576,10 +576,15 @@ opening an HTML file, so this is the only thing on the DMG a blocked user can st
 real WKWebView through the tier-2 harness, asserting the page is complete and asset-free before
 writing it. `build-release-assets.sh` calls it, so it cannot rot.
 
-**Nothing consumes it yet.** `bundle.macOS.dmg` can position exactly two items — `appPosition`
-and `applicationFolderPosition`. A third file injected after the build lands wherever Finder puts
-it, possibly on top of the arrow. The three options and the recommendation are in
-`docs/v2/invitation-email.md` § 8.2; the short version is *inject it and re-run the whole layout,
+**It is consumed, on both paths, since 2026-09-04** — § 8.2's option (a). `scripts/make-dmg.sh`
+stages and positions it; `.github/scripts/dmg-add-readme.sh` injects it into the DMG the bundler
+produced; `release.yml` step 10 fails the release if it is not on the mounted image; and
+`.github/scripts/check-dmg-readme.mjs` holds the producer, both consumers, the gate and the icon
+geometry in agreement. Measured on the built artifact: DMG root = 4 entries, page sha256 identical
+to source. Tauri cannot do this itself and that was checked rather than assumed —
+`bundle.macOS.dmg` is `"additionalProperties": false` with exactly five keys, so an invented sixth
+makes `cargo tauri build` reject the config outright. The historical reasoning is preserved in
+`docs/v2/invitation-email.md` § 8.2; the short version was *inject it and re-run the whole layout,
 on the first CI run that produces a real DMG* — which is also the first moment anybody can look
 at the result.
 

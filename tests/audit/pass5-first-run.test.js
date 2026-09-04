@@ -41,49 +41,84 @@ const PLACEHOLDER_ORIGIN = 'https://lzp-sync-po.vercel.app';
 // Everything here happens before the app has drawn one pixel, so nothing inside the app can
 // mitigate any of it.
 
-test('§1a · make-dmg.sh stages exactly two visible items — the unlock page is not one of them',
-  () => {
-    const sh = read('scripts/make-dmg.sh');
-    // The staging block, verbatim. Three `cp`/`ln` lines land in $STAGE, and one of them is
-    // the hidden background art.
-    const staged = [...sh.matchAll(/^\s*(?:cp|ln|mkdir)[^\n]*\$STAGE[^\n]*$/gm)].map((m) => m[0].trim());
-    assert.ok(staged.length > 0, 'the staging lines moved; re-read the script');
-    const visible = staged.filter((l) => !l.includes('.background'));
-    assert.equal(visible.length, 2, `expected app + Applications, got:\n  ${staged.join('\n  ')}`);
-    assert.ok(visible.some((l) => l.includes('$VOLNAME.app')), 'the app is staged');
-    assert.ok(visible.some((l) => l.includes('/Applications')), 'the drop target is staged');
+// ═══ §1 TURNED — CLOSED 2026-09-04 ══════════════════════════════════════════════════════════
+// This section found that the disk image she receives carries no instructions, and it was right:
+// measured on a real artifact at 79929b5, `hdiutil attach` showed exactly three entries —
+// `.background/`, `Applications ->`, `LangzeitPlaner.app` — while `scripts/build-unlock-page.sh`
+// built `Bitte zuerst lesen.html` (19 427 bytes, rendered in a real WKWebView) and discarded it.
+//
+// The finding is closed. Per this file's own rule a fixed finding must be NOTICED rather than
+// forgotten, so the rows are inverted rather than deleted: each one now asserts the FIX, and each
+// one goes red again the day the fix is undone. The original finding text is kept in the comments
+// above each row so the evidence file still reads as evidence.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
 
-    // FINDING. `Bitte zuerst lesen.html` is built by scripts/build-unlock-page.sh and never
-    // staged by anything. `firstrun.js`'s own header calls the disk image the surface that
-    // "Mom actually reads"; it is not on the disk image.
-    assert.ok(!sh.includes('lesen'),
-      'FIXED: make-dmg.sh now stages the unlock page — delete this row and MOM-TEST §3.3.');
-  });
-
-test('§1b · build-unlock-page.sh says outright that nothing consumes what it builds', () => {
-  const sh = read('scripts/build-unlock-page.sh');
-  assert.match(sh, /this script produces the file and nothing consumes it/);
-  // And the file it produces is real, so this is a wiring gap and not a missing artefact.
-  assert.match(sh, /build\/dmg\/Bitte zuerst lesen\.html/);
+test('§1a · CLOSED — make-dmg.sh stages the unlock page, and positions it', () => {
+  const sh = read('scripts/make-dmg.sh');
+  // WAS: three staging lines, two of them visible (the app and the Applications symlink), and
+  // the page nowhere among them. Now there is a fourth, and staging alone is not enough — a
+  // page Finder drops wherever it likes is § 8.2's own stated objection, so the position is
+  // asserted too.
+  const staged = [...sh.matchAll(/^\s*(?:cp|ln|mkdir)[^\n]*\$STAGE[^\n]*$/gm)].map((m) => m[0].trim());
+  const visible = staged.filter((l) => !l.includes('.background'));
+  assert.equal(visible.length, 3,
+    `expected app + Applications + the unlock page, got:\n  ${staged.join('\n  ')}`);
+  assert.ok(visible.some((l) => l.includes('$VOLNAME.app')), 'the app is staged');
+  assert.ok(visible.some((l) => l.includes('/Applications')), 'the drop target is staged');
+  assert.ok(visible.some((l) => l.includes('$READ_NAME')), 'the unlock page is staged');
+  assert.match(sh, /set position of item "\$READ_NAME"/,
+    'staged but unpositioned is the half-fix § 8.2 refused: Finder would place it, possibly on '
+    + 'top of the drop arrow');
 });
 
-test('§1c · so exactly ONE surface reaches her before macOS refuses the app: step 3 of the mail',
+test('§1b · CLOSED — the production path stages it too, and the release gate fails without it',
   () => {
-    // Surface 1 — the disk image: covered by §1a.
-    // Surface 2 — the in-app screen. It asks the host `gatekeeper_status` and shows nothing
-    // without a documented yes. Neither shell answers.
-    assert.match(read('src/js/firstrun.js'), /invoke\('gatekeeper_status'/);
-    assert.ok(!read('shell-macos/main.swift').includes('gatekeeper_status'),
-      'FIXED: the Swift shell answers the probe now.');
-    assert.ok(!read('src-tauri/src/lib.rs').includes('gatekeeper_status'),
-      'FIXED: the Tauri shell answers the probe now.');
-    // Surface 3 — the e-mail. It is the only one left, and it is the one she can skim.
-    for (const f of MAILS) {
-      const t = read(f).toLowerCase();
-      assert.ok(t.includes('dennoch öffnen') || t.includes('open anyway'),
-        `${f}: the unlock route is the last surface standing and must be in every file`);
-    }
+    // WAS: `build-unlock-page.sh` said outright that nothing consumed what it built. Fixing only
+    // make-dmg.sh would repair the path a developer can run and leave the SHIPPED artifact
+    // broken, because production is `cargo tauri build`.
+    const gen = read('scripts/build-unlock-page.sh');
+    assert.ok(!gen.includes('this script produces the file and nothing consumes it'),
+      'the generator still says nothing consumes it — either that is true again, or the comment '
+      + 'is stale; both are worth stopping for');
+    assert.match(gen, /build\/dmg\/Bitte zuerst lesen\.html/);
+
+    const inj = read('.github/scripts/dmg-add-readme.sh');
+    assert.match(inj, /READ_NAME="Bitte zuerst lesen\.html"/);
+
+    const rel = read('.github/workflows/release.yml');
+    assert.ok(rel.includes('.github/scripts/dmg-add-readme.sh'),
+      'release.yml does not inject the page into the built DMG');
+    assert.ok(rel.indexOf('.github/scripts/dmg-add-readme.sh')
+      < rel.indexOf('The DMG mounts and contains the app'),
+      'the injection must run BEFORE the mount gate, or the gate checks the wrong bytes');
+    assert.match(rel, /if \[ ! -f "\$MNT\/\$READ_NAME" \]; then[\s\S]{0,1200}?exit 1/,
+      'the mount gate must EXIT 1 when the page is missing, not warn: a warning on a runner '
+      + 'nobody watches is the same as no check');
   });
+
+test('§1c · the count is now TWO surfaces, and the in-app one still cannot present itself', () => {
+  // WAS: "exactly ONE surface reaches her — step 3 of the mail", because the disk image carried
+  // nothing and the in-app screen cannot fire. Half of that has changed and half has not, and
+  // the half that has not is why the disk image matters so much.
+  //
+  // Surface 1 — the disk image. Now carries the page; §1a and §1b hold it there.
+  // Surface 2 — the in-app screen. Still asks the host `gatekeeper_status`, and STILL neither
+  //             shell answers, so its automatic path remains dark. It can only be opened by
+  //             somebody who already knows to go looking for it.
+  assert.match(read('src/js/firstrun.js'), /invoke\('gatekeeper_status'/);
+  assert.ok(!read('shell-macos/main.swift').includes('gatekeeper_status'),
+    'FIXED: the Swift shell answers the probe now — the in-app screen can present itself, and '
+    + 'this row should be turned again.');
+  assert.ok(!read('src-tauri/src/lib.rs').includes('gatekeeper_status'),
+    'FIXED: the Tauri shell answers the probe now.');
+  // Surface 3 — the e-mail. Still must carry the unlock route in every file: it can be lost or
+  // forwarded without its body, which is exactly why surface 1 had to exist.
+  for (const f of MAILS) {
+    const t = read(f).toLowerCase();
+    assert.ok(t.includes('dennoch öffnen') || t.includes('open anyway'),
+      `${f}: the unlock route must be in every invitation file`);
+  }
+});
 
 // ── §2 · THE RELAY ADDRESS ─────────────────────────────────────────────────────────────────
 

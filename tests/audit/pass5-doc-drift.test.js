@@ -33,6 +33,34 @@ const CHECKLIST = read('docs/v2/RELEASE-CHECKLIST.md');
 const MOM = read('docs/v2/MOM-TEST.md');
 const RUNBOOK = read('docs/v2/RUNBOOK.md');
 
+/**
+ * ── THE PROBE, RUN WITHOUT PRETENDING IT EXITS 0 (audit: "mechanically broken, not turned") ──
+ *
+ * `scripts/mom-test-probe.mjs` exits 1 whenever any row FAILs, and `execFileSync` turns a non-zero
+ * exit into a THROW. Three rows below called it bare and therefore threw before they asserted
+ * anything: the audit's own disposition lists §2b and §2c as *"mechanically broken, not turned —
+ * their claims are undetermined, and saying they turned would be false."* This helper is the
+ * repair. It captures stdout either way and hands back the exit code as data.
+ *
+ * AND THE PROBE IS SUPPOSED TO BE RED RIGHT NOW. Its one FAIL is `M2s` — *"the relay address is a
+ * claimed host, not the reserved slot"* — and the address is `https://serveradresse-fehlt.invalid`
+ * (RFC 2606 §2, undelegatable) precisely so that no stranger can register it before the PO claims
+ * a real one (AUDIT F13/D-D). So a row here may not assert "exit 0"; it must assert the CONTENT,
+ * and the exit code belongs in the assertion message where a reader can see why it is 1.
+ *
+ * MEASURED at the time of writing: exit **1** · `41 rows · 38 pass · 2 note · 1 FAIL` · the single
+ * FAIL is `M2s` and nothing else.
+ */
+function probe(args = []) {
+  try {
+    return { code: 0, out: execFileSync('node', [join(ROOT, 'scripts/mom-test-probe.mjs'), ...args],
+      { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
+  } catch (e) {
+    if (e.stdout === undefined || e.stdout === null) throw e;   // it did not run at all
+    return { code: e.status === undefined ? 1 : e.status, out: String(e.stdout) };
+  }
+}
+
 // ── §1 · THE CHECKLIST ─────────────────────────────────────────────────────────────────────
 
 test('§1a · ⛔ "server/prisma/migrations/ … It does not exist" — it exists, and it is tracked',
@@ -74,9 +102,8 @@ test('§1b · §G "Frankfurt, Vercel, Prisma appear nowhere in src/" — all thr
 test('§1c · §B "mom-test-probe.mjs → exit 0 (fails today)" — it exits 0 today', () => {
   assert.match(CHECKLIST, /mom-test-probe\.mjs` → exit 0 \*\(fails today: `MOM-TEST\.md` §2\.3\)\*/,
     'FIXED: the checklist no longer says the probe fails.');
-  const out = execFileSync('node', [join(ROOT, 'scripts/mom-test-probe.mjs')],
-    { cwd: ROOT, encoding: 'utf8' });
-  assert.match(out, /0 FAIL/);
+  const { code, out } = probe();
+  assert.match(out, /0 FAIL/, `the probe reports ${out.match(/\d+ FAIL/)?.[0]} at exit ${code}`);
 });
 
 test('§1d · the two things the checklist says are open ARE open — measured, not assumed', () => {
@@ -127,8 +154,7 @@ test('§2b · §2.3 E-3 publishes a punctuation table the parser no longer behav
   assert.match(src, /const URL_TAIL_RE = \/\[\.,;:!\?/);
   assert.match(src, /m\[0\]\.replace\(URL_TAIL_RE, ''\)/);
   // And the probe's own reference rows R04–R06, which §2.3 calls "the reference table", now pass.
-  const verbose = execFileSync('node',
-    [join(ROOT, 'scripts/mom-test-probe.mjs'), '--json'], { cwd: ROOT, encoding: 'utf8' });
+  const verbose = probe(['--json']).out;
   const rows = JSON.parse(verbose).rows || JSON.parse(verbose);
   const byId = new Map((Array.isArray(rows) ? rows : []).map((r) => [r.id, r.status]));
   for (const id of ['R04', 'R05', 'R06']) {
@@ -138,12 +164,20 @@ test('§2b · §2.3 E-3 publishes a punctuation table the parser no longer behav
   // „Keine Verbindung zum Server", and it now over-explains a cause that has been removed.
 });
 
-test('§2c · §5.3 publishes the probe output as 6 FAIL; the probe reads 0 FAIL', () => {
+test('§2c · §5.3 publishes a probe output the probe no longer produces', () => {
   assert.match(MOM, /6 FAIL:\s+M1-de\.txt/, 'FIXED: §5.3 was re-measured.');
   assert.match(MOM, /8 note:/);
-  const out = execFileSync('node', [join(ROOT, 'scripts/mom-test-probe.mjs')],
-    { cwd: ROOT, encoding: 'utf8' });
-  assert.match(out, /35 rows · 33 pass · 2 note · 0 FAIL/);
+  // MEASURED, not assumed: the probe's own totals and the one row that is red, with the exit
+  // code carried as data. §5.3's published block is neither today's numbers nor today's shape.
+  const { code, out } = probe();
+  const totals = (out.match(/\d+ rows · \d+ pass · \d+ note · \d+ FAIL/) || ['(no totals line)'])[0];
+  assert.equal(totals, '41 rows · 38 pass · 2 note · 1 FAIL',
+            `the probe now reports "${totals}" at exit ${code} — re-measure §5.3 against this line`);
+  assert.match(out, /FAIL\s+M2s\s+the relay address is a claimed host, not the reserved slot/,
+    `the probe's single FAIL is no longer M2s: ${totals} at exit ${code}. If a DIFFERENT row is `
+    + 'red, that is a finding and not doc drift.');
+  assert.equal(code, 1, 'the probe exits 0 — then the relay host has been claimed and §B\'s gate '
+    + 'and D-D are both done, which is a bigger event than this row');
 });
 
 test('§2d · §4.2\'s last row still tells the PO the whole-mail paste is broken', () => {

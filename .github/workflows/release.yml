@@ -240,6 +240,15 @@ jobs:
       - name: DMG geometry agrees with the artwork
         run: node .github/scripts/check-dmg-geometry.mjs
 
+      # The unlock page is produced by the step above (build-release-assets.sh calls
+      # build-unlock-page.sh) and consumed by two different DMG builders. This asserts
+      # the producer, both consumers and the gate below still name the same file, and
+      # that the read-me's icon box clears the app's and the Applications folder's.
+      # It runs BEFORE the build so a naming or layout mistake costs seconds, not the
+      # ~40 minutes of a universal Rust build.
+      - name: The unlock page is named, placed and gated
+        run: node .github/scripts/check-dmg-readme.mjs
+
       # ── 7. Build ──────────────────────────────────────────────────────────
       # --target universal-apple-darwin builds both slices and lipos them, so
       # one DMG serves Intel and Apple silicon alike (22.1: Mom's Mac may be
@@ -287,6 +296,26 @@ jobs:
             echo "archive=$ARCHIVE"
           } >> "$GITHUB_OUTPUT"
           ls -l "$DMG" "$ARCHIVE" "$ARCHIVE.sig" 2>&1 || true
+
+      # ── 8b. The page that reaches her before macOS refuses the app ────────
+      # D1 ships unsigned on purpose, so the Gatekeeper rejection two steps down is
+      # the expected state — and it is why LZP-106's guided unlock screen exists. But
+      # that screen is inside the app she cannot open yet. The DMG window is the one
+      # surface that reaches her first, so the standalone page rides on the image next
+      # to the app; double-clicking an HTML file opens Safari, which Gatekeeper does
+      # not block.
+      #
+      # This is a post-bundle step because Tauri offers nothing else, and that was
+      # checked rather than assumed: bundle.macOS.dmg is "additionalProperties": false
+      # with five keys, bundle.resources copies into the .app and not onto the image,
+      # and the bundler rewrites its vendored create-dmg script from an include_str!
+      # on every run. The full evidence is in the script's header.
+      #
+      # It runs before every gate below so that everything downstream — the mount
+      # check, the size budget, the checksum, the upload — sees the artifact that
+      # actually ships.
+      - name: Put the unlock page on the DMG
+        run: .github/scripts/dmg-add-readme.sh '${{ steps.art.outputs.dmg }}'
 
       # ── 9. Gate: the bundle is actually signed with something ─────────────
       - name: The .app carries a code signature
@@ -339,6 +368,21 @@ jobs:
             exit 1
           fi
           echo "  DMG window: background present, view settings written."
+
+          # ── the page a blocked user can still open (LZP-106 / LZP-107) ──────
+          # Decision D1 ships unsigned, so the Gatekeeper assessment printed below
+          # says "rejected" — correctly. The screen that walks somebody past that
+          # wall is inside the app macOS has just refused to launch, so the ONLY
+          # surface that reaches her first is this DMG window. E10's audit named it:
+          # "step 3 of the e-mail is the only surface reaching a stranger before
+          # macOS refuses the app" — and an e-mail can be lost, forwarded without
+          # its body, or read on a phone. The page cannot be.
+          READ_NAME="Bitte zuerst lesen.html"
+          if [ ! -f "$MNT/$READ_NAME" ]; then
+            echo "::error title=DMG has no instructions on it::\"$READ_NAME\" is not at the root of the mounted DMG, so the first thing a non-technical person sees after macOS refuses this unsigned app is a window with an app icon, a folder, and nothing that explains the warning. Fix in this order: (1) did 'Build release artwork' run? it calls scripts/build-unlock-page.sh, which writes build/dmg/$READ_NAME; (2) did that script take its 'src/js/firstrun.js does not exist yet' early exit? (3) did the 'Put the unlock page on the DMG' step above run and succeed? Do not publish without it — see docs/v2/invitation-email.md section 8.2."
+            exit 1
+          fi
+          echo "  read-me: $READ_NAME present ($(stat -f%z "$MNT/$READ_NAME") bytes)."
           codesign --verify --verbose=2 "$INNER" 2>&1 | sed 's/^/  /'
           # Diagnostic only. Unsigned, this WILL say "rejected" — that is the
           # expected state under D1 and exactly the wall LZP-106 walks Mom past.

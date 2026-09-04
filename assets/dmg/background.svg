@@ -62,8 +62,8 @@
     <text x="330" y="334" font-size="11.5" fill="#7d8798">Drag LangzeitPlaner into the Applications folder</text>
 
     <!-- the sentence that makes the unsigned first launch survivable (D1) -->
-    <text x="330" y="366" font-size="10" fill="#7f8a9c">Beim ersten Öffnen zeigt macOS eine Sicherheitswarnung. Das ist normal — die E-Mail erklärt, was zu tun ist.</text>
-    <text x="330" y="381" font-size="10" fill="#9aa3b2">macOS shows a security warning the first time. That is expected — the e-mail explains what to do.</text>
+    <text x="330" y="366" font-size="10" fill="#7f8a9c">Beim ersten Öffnen zeigt macOS eine Sicherheitswarnung. Das ist normal — „Bitte zuerst lesen“ hier im Fenster erklärt es.</text>
+    <text x="330" y="381" font-size="10" fill="#9aa3b2">macOS shows a security warning the first time. That is expected — open “Bitte zuerst lesen” in this window.</text>
   </g>
 
 </svg>
