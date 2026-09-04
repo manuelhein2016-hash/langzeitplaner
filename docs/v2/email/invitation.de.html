@@ -12,17 +12,40 @@
   subject line (it is in <title> and repeated in the first comment below), attach
   LangzeitPlaner.dmg, and replace the four {{PLACEHOLDERS}}.
 
-  ONE VALUE IN THE BODY IS NOT A PLACEHOLDER: the relay address under
-  "Und die Serveradresse dazu" is written out in full, because `scripts/mom-test-probe.mjs`
-  parses these files with only the four {{...}} slots filled and has to see a real
-  origin to check that the paste gesture yields one. It is
-  `https://lzp-sync-po.vercel.app` in all four invitation files. If the Vercel
-  project is created under a different name, substitute it in all four at once:
+  EIN WERT IM TEXT IST KEIN PLATZHALTER — UND ER IST DIE HÄLFTE EINER HANDLUNG.
 
-      sed -i '' 's|https://lzp-sync-po\.vercel\.app|https://NEW-HOST|g' docs/v2/email/invitation.*
+  Die Serveradresse unter „Und die Serveradresse dazu" steht ausgeschrieben da, weil
+  `scripts/mom-test-probe.mjs` diese Dateien mit nur den vier {{...}}-Feldern gefüllt
+  einliest und einen echten Origin sehen muss, um zu prüfen, dass die Einfüge-Geste
+  einen hergibt.
 
-  and update RELAY_ORIGIN in scripts/mom-test-probe.mjs and RELAY in
-  tests/tier1/createjoin.test.js to match. The probe is the check that they agree.
+  Heute steht dort in allen vier Dateien `https://serveradresse-fehlt.invalid`.
+  Das ist ein PLATZHALTER, keine Adresse. RFC 2606 Abschnitt 2 reserviert `.invalid`
+  so, dass keine Registrierungsstelle den Namen vergeben kann und kein Resolver ihn
+  beantwortet — geht diese Mail also vor dem Ersetzen raus, nennt sie niemandes
+  Server. Der vorherige Name, `lzp-sync-po.vercel.app`, war das Gegenteil: gemessen am
+  2026-09-03 antwortete er HTTP 404 `x-vercel-error: DEPLOYMENT_NOT_FOUND`, war also
+  für jeden Fremden frei registrierbar (AUDIT F13). Eine Einladung trägt kein
+  Schlüsselmaterial (D9), ein fremder Relay könnte also keinen einzigen geteilten
+  Eintrag lesen — aber `deriveInvite` ist rein, die erste Anfrage der Beitretenden
+  würde diesem Fremden daher im Klartext ein Token übergeben, das diese Einladung
+  gegen den ECHTEN Relay einlöst: eine verbrannte Einladung, ein von jemand anderem
+  belegter Platz im Kreis, dazu ihre öffentlichen Geräteschlüssel und ihre IP.
+
+  ERSETZEN IST EINE HANDLUNG MIT ZWEI HÄLFTEN, UND EINE HÄLFTE IST SCHLIMMER ALS KEINE:
+
+      # 1 · die vier Mails
+      sed -i '' 's|https://serveradresse-fehlt\.invalid|https://NEUER-HOST|g' docs/v2/email/invitation.*
+      # 2 · der fest verdrahtete Origin, den BEIDE Shells bei jedem sync_request lesen
+      #     shell-macos/main.swift   let SYNC_ORIGIN_BUILTIN = "https://NEUER-HOST"
+      #     src-tauri/src/lib.rs     const SYNC_ORIGIN_BUILTIN: &str = "https://NEUER-HOST";
+
+  Nur eine Hälfte zu machen liefert entweder einen Build aus, dessen Einladung einen
+  Host nennt, mit dem die App nicht spricht, oder einen Build, der zu einem Host
+  synchronisiert, von dem niemandem erzählt wurde. `tests/tier1/release-gate.test.js`
+  schlägt bei jeder einzelnen Hälfte fehl und ebenso, wenn beide Hälften verschiedene
+  Hosts nennen. Der Test läuft in `npm test`, das RELEASE-CHECKLIST.md Abschnitt B
+  ohnehin grün verlangt, bevor getaggt wird.
 
   Rules this file follows on purpose, checked by .github/scripts/check-email-copy.mjs:
     · every style is inline — mail clients drop <style> blocks unpredictably
@@ -126,7 +149,7 @@
        address becomes part of the hostname and the join screen then reports a server
        that was never spelled right. -->
   <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 16px 0;">
-  <tr><td align="center" style="padding:14px;background:#f4f7fb;border:1px dashed #a8c0e6;border-radius:10px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:15px;color:#16233d;">https://lzp-sync-po.vercel.app</td></tr>
+  <tr><td align="center" style="padding:14px;background:#f4f7fb;border:1px dashed #a8c0e6;border-radius:10px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:15px;color:#16233d;">https://serveradresse-fehlt.invalid</td></tr>
   </table>
 
   <p style="margin:0 0 16px 0;">In der App: <strong>Einstellungen → „Familienkreis beitreten“</strong>. Am einfachsten markierst du diese ganze E-Mail, kopierst sie und setzt sie oben in das große Feld ein — beides holt sich die App dann selbst heraus. Danach noch Namen und eine Farbe aussuchen. Das war's, du bist dabei.</p>

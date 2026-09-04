@@ -767,6 +767,35 @@ func updaterDownload(version: String, urlString: String, signature: String, expe
 /// no host to allowlist"). Empty means every `sync_request` is refused locally — which is the
 /// correct behaviour for a build with nowhere to sync to, and it is why `--sync-origin` below
 /// exists for the headless suites.
+///
+/// ██ AUDIT F1 · SUBSTITUTING THIS IS HALF AN ACT, AND HALF IS WORSE THAN NONE ██
+///
+/// The audit's finding was not that this constant is empty — empty is correct for a build with
+/// nowhere to sync to. The finding was that **no release gate named it**, while the checklist
+/// *did* force the releaser to substitute a relay address into four invitation mails that
+/// nothing reads. Work the sheet top to bottom and you ship a build in which the address you
+/// were just made to write down is read by nothing and every family request is refused locally:
+/// `chooseTransport` returns `bridge` inside the shell, `syncPreflight` rebuilds the URL against
+/// this string and requires byte equality, and `index.html`'s `connect-src 'self'` means the
+/// page cannot route around it.
+///
+/// So the two substitutions are now **one act, held by one row**:
+///
+///   1. this constant, and `SYNC_ORIGIN_BUILTIN` in `src-tauri/src/lib.rs` — byte for byte;
+///   2. the `SERVERADRESSE` / `SERVER ADDRESS` line in all four
+///      `docs/v2/email/invitation.{de,en}.{txt,html}` files.
+///
+/// `tests/tier1/release-gate.test.js` §1c fails when those two halves are in different states —
+/// either half moved alone, or both moved to different hosts. It runs inside `npm test`, which
+/// `docs/v2/RELEASE-CHECKLIST.md` §B already requires green before a tag. A checklist item is a
+/// reminder; that row is a gate.
+///
+/// While this is `""` the invitations carry `https://serveradresse-fehlt.invalid`. RFC 2606 §2
+/// reserves `.invalid` so that no registry can delegate it and no resolver will answer it —
+/// which is the property the old `lzp-sync-po.vercel.app` placeholder did not have (measured
+/// 2026-09-03: HTTP 404 `x-vercel-error: DEPLOYMENT_NOT_FOUND`, i.e. free for anyone to claim).
+/// `isReservedSyncHost` below refuses it here too, by name, so pasting the placeholder in here
+/// by mistake is a named local refusal rather than a DNS failure blamed on the connection.
 let SYNC_ORIGIN_BUILTIN = ""
 
 let SYNC_PREFS_FILE = "sync.json"
@@ -803,6 +832,7 @@ enum SyncRefusal: String, Error {
     case noOriginConfigured    = "no_origin_configured"
     case originNotHttps        = "origin_is_not_https"
     case originIsLocal         = "origin_host_is_local_private_or_an_ip_literal"
+    case originIsReserved      = "origin_host_is_a_reserved_name_that_cannot_resolve"
     case originShape           = "origin_is_not_scheme_host_port"
     case urlUnparsable         = "url_did_not_parse"
     case urlOffOrigin          = "url_is_not_the_pinned_origin"
@@ -904,6 +934,24 @@ func isPrivateOrLocalSyncHost(_ host: String) -> Bool {
     return false
 }
 
+/// Is this host a name the DNS root will never delegate?
+///
+/// RFC 2606 §2 reserves `.invalid` "for use in online construction of domain names that are sure
+/// to be invalid": no registry can sell it and no resolver will answer it. That is exactly what a
+/// placeholder has to be, and it is why `docs/v2/email/invitation.*` name a `.invalid` host while
+/// the relay is unclaimed — AUDIT F13. A `*.vercel.app` placeholder is a live hazard because it
+/// is *claimable*: `deriveInvite` is pure, so a joiner's first request to whoever holds that name
+/// hands over, in the clear, a token that redeems the invite against the real relay unchanged.
+///
+/// Deliberately NARROW — `.invalid` and nothing else. `.test`, `.example` and `example.org` are
+/// reserved too, but `https://relay.example.org` is the origin the tier-2 SSRF table drives a
+/// SUCCESSFUL request against (`tests/tier2/shell-transport.dom.js:161`), and refusing it here
+/// would break a working demonstration in order to make a point.
+func isReservedSyncHost(_ host: String) -> Bool {
+    let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    return h == "invalid" || h.hasSuffix(".invalid")
+}
+
 /// Normalise the CONFIGURED origin to `scheme://host[:port]`, or say which rule refused it.
 ///
 /// The single exception is a headless run with `--sync-origin` at a loopback host over `http:`
@@ -927,6 +975,8 @@ func normalizeSyncOrigin(_ raw: String) -> Result<String, SyncRefusal> {
     if !devLoopback {
         guard scheme == "https" else { return .failure(.originNotHttps) }
         guard !isPrivateOrLocalSyncHost(host) else { return .failure(.originIsLocal) }
+        // AFTER the local check, so `localhost` keeps the name the SSRF table already gives it.
+        guard !isReservedSyncHost(host) else { return .failure(.originIsReserved) }
     }
     let port = c.port.map { ":\($0)" } ?? ""
     return .success("\(scheme)://\(host)\(port)")

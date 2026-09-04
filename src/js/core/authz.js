@@ -1381,6 +1381,29 @@ export function foldAuthorized(ops, ctx) {
   }
 
   // 3a — governing fields. Owner, or the admin's unshare, and nobody else, ever.
+  //
+  // ── `emptyRegs()` IS A CLAIM ABOUT THE CALLER, AND FOR ONE RELEASE IT WAS FALSE ───────────
+  //
+  // `govRegs` starts EMPTY and folds only the `pub.set` ops in THIS fold. That is correct and it
+  // must stay correct — stage 3b's order-independence argument depends on `govRegs` being the
+  // fold of a set, never a device-local accumulation — but it makes `ops` a total input: this
+  // function can only be as complete as the array it is handed.
+  //
+  // `store.js` hands it `_log.ops()`, and a checkpoint ABSORBS a line into a register and drops
+  // it. So after the first quit-and-open of a converged circle — 8 lines before, 0 after — the
+  // owner's `pub.coEdit` grant was not in `ops` at all, `govRegs` was empty for that entity, and
+  // stage 3b below refused every co-editor write `noCoEdit`. That reason is in neither
+  // `CURABLE_REFUSALS` nor `RETROACTIVE_REFUSALS`, so it was terminal: story 18.2 stopped working
+  // on the second launch, for every family, while `store.familyCoEditLevelOf` — which reads the
+  // REGISTER map — went on offering the gesture.
+  //
+  // THE CONTRACT THAT MAKES `emptyRegs()` HONEST is `store.js#_absorbedOps`: the fold's input is
+  // `absorbed(registers) ∪ lines`, and a reconstruction pays every gate in this file again. See
+  // the essay on `_absorbedGovernanceOps`. Nothing here changes; what changed is that `ops` now
+  // means what this stage has always assumed it meant.
+  //
+  // Pinned by `tests/fleet/e13-compaction.test.js` §1 and `e9-attack-coedit.test.js` §2 — the
+  // first rows in this product that co-edit AFTER a relaunch.
   const govRegs = emptyRegs();
   const admittedFamily = [];
   const forStage3b = [];

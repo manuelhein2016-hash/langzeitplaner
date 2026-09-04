@@ -5065,3 +5065,146 @@ The residual list is `docs/v2/V2-FINAL.md` §8, re-issued. In one line each:
    invitation files (both now on `RELEASE-CHECKLIST.md` §A).
 6. **R8-R1** — the adapter has met a local cluster, not Frankfurt's pooler.
 7. **`storage.js#quarantineLogAside` still has no native command** in either shell.
+
+---
+
+## 23. THE AUDIT FIX CYCLE — the compaction class, the glass, the copy and the gate (2026-09-04)
+
+An independent five-pass audit landed at `2d092a6` (`docs/v2/AUDIT.md`) and returned one verdict:
+*"Ship the solo product. Do not ship the Familienkreis yet."* Its central result was a defect class
+and, underneath it, a mechanical coverage hole:
+
+> **`e9-attack-coedit.test.js` had 17 `coEdit` references and 0 relaunches;
+> `scripts/shell-family-e2e.mjs` relaunched 27 times and had 0 co-edit phases.
+> Every rig that co-edited never rebooted, and the rig that rebooted never co-edited.**
+
+Five parallel workflows and one integration pass answered it. Every row below was **reproduced
+first, then repaired, then re-measured**, and every closure carries mutants that name the row that
+dies plus an honest-path control.
+
+### 23.1 · The counts
+
+| suite | before | after |
+|---|---|---|
+| `npm test` | 2229 · 0 | **2249 · 0** |
+| `test:attack` | 970 · 0 | **977 · 0** |
+| `test:property` | 101 · 0 | **101 · 0** |
+| `test:server` | 1002 · 0 · 1 skip | **1009 · 0 · 1 skip** |
+| `test:fleet` | 435 · 0 | **476 · 0** |
+| `test:dom` | 875 · 3 · 36 skip | **904 · 3 · 36 skip** |
+| **total** | **5 612** | **5 716** |
+
+The three tier-2 reds are §A4, §E1 and §E3 and nothing else. **The v1 oracle did not move**: per
+file, at `2d092a6` and at this tree, 436/437 tier-1 and 111/111 tier-2, identical. The one red
+(`mutate() (5.4)`) is the admitted v1 behaviour change already recorded as F12.
+
+### 23.2 · The rows
+
+| id | finding | severity | status | owner file |
+|---|---|---|---|---|
+| **AU-1** | F1 · the shipped build cannot sync and no release gate says so | ⛔ | **CLOSED (gate)** · PO must claim a host | `RELEASE-CHECKLIST.md`, `main.swift`, `lib.rs`, `mom-test-probe.mjs`, `release-gate.test.js` |
+| **AU-2** | F2 · a quit-and-open silently kills co-editing, for every family | ⛔ | **CLOSED** | `store.js#_absorbedGovernanceOps` |
+| **AU-3** | F3 · after a relaunch a removal stops being enforced | ⛔ | **CLOSED** | `store.js`, same table |
+| **AU-4** | F4 · the exposure badge under-reports what others can see | ⛔ | **CLOSED** | `store.js#_ackedLevelFloor` |
+| **AU-5** | F5 · the Datenschutz screen states four things that are false | ⛔ | **CLOSED** · raises D10 | `settings.js` |
+| **AU-6** | F6 · story 17.5's „neu" dot has never lit on any real board | HIGH | **CLOSED** | `store.js#_exposureCtx` + `main.js#armFamilySeen` |
+| **AU-7** | F7 · a peer's change discards uncommitted typing (P3) | HIGH | **CLOSED** | `board.js` |
+| **AU-8** | F8 · stale `data-date` on a yearly repeat → a phantom published write | HIGH | **CLOSED** | `board.js`, `interact.js` |
+| **AU-9** | F9 / R-1b · the moderation path is lost on a bystander's Mac | MED | **CLOSED (retention)** · residual narrowed | `store.js#_persistOps` |
+| **AU-10** | F10 · two honest co-editors collapse a shared bar to one day | MED | **PO-DECISION (D-G)** | — |
+| **AU-11** | F11 · a peer's new *bar* can arrive with no mark of any kind | MED | **CLOSED** | `layout.js` |
+| **AU-12** | F12 · the release record disagrees with the tree in five places | MED | **PARTLY CLOSED** | doc owner |
+| **AU-13** | F13 · the relay address belongs to nobody and the gate asserts it | ⛔ | **CLOSED (gate)** · PO must claim | four invitations + both shells |
+| **AU-14** | F14 · F22 has never executed | MED | **OPEN** | PO |
+| **AU-15** | F15 · six low-severity observations | LOW | **OPEN** | various |
+
+### 23.3 · The general statement behind AU-2/3/4/9
+
+ADR 006 cuts the class in two and every face falls on one side:
+
+- **A question about the PRESENT — the register answers it exactly.** `foldAuthorized` is handed
+  `_log.ops()`, which is not "the ops" but "the ops no checkpoint has absorbed yet". An absorbed op
+  is not gone: a register cell is `{value, stamp, author, op}`, which is `f`, `ts`, `act`, `id`, and
+  `devOf(stamp)` matched against the author's own `dev.*` record is `dev`. So the fold's input is
+  `absorbed(registers) ∪ lines`, computed once from a **table** — `ABSORBED_ROWS`, two rows,
+  `member:`·`_alive` and `fnote|fbar:`·`pub.(level|coEdit|alive)`. **Content is not an
+  admissibility input**, which is the sentence that keeps the redaction boundary intact.
+- **A question about HISTORY — the op belongs outside compaction.** The admin *chain* is a causal
+  sequence and an LWW cell keeps only its head, so `space:<id>` → `admin` can certify a transfer and
+  can never certify the link it supersedes. `_persistOps` therefore retains the chain lines across
+  the horizon. Bound: one line per transfer plus genesis.
+
+**Grouping by `cell.op` rather than per cell is load-bearing.** `publishSharedEntry` writes
+`pub.level`, `pub.coEdit` and `pub.alive` in one op; three bodies under one opId is what
+`foldAuthorized` Pass A reports as envelope splicing (ADR 002 §5.1), resolves by canonical max, and
+two of the three fields are discarded — the grant lost exactly as before the repair. Mutant M-E13-8
+measures it.
+
+### 23.4 · Two findings the fix cycle produced that the audit did not have
+
+**(a) The severity of AU-2/3/4 must be re-priced, in the direction nobody expected.** AUDIT §5 item
+5 predicted *"a real relaunch loses more, never less."* Measured on the shipped binary across five
+acceptance runs: every launch of every Mac reads `lines == ops`, horizon covering 0–5 of them,
+checkpoint holding 2 registers. **The app re-pulls from the relay on every launch and the lines come
+back as lines**, so its fold never reaches the absorbed state; `_outboxHorizonCap` keeps the horizon
+low while anything is unacknowledged. The fleet rig's `quitAndOpen` persists a fully converged,
+fully acknowledged log with **no relay in between** — the *stricter* environment. So AU-2/3/4 were
+real and terminal for a Mac that quits and opens with nothing to re-pull (offline, a pruned relay, a
+peer whose `since` cursor is past the op) and were never reachable in the acceptance topology.
+**AU-6 is the exception and always was**: `e13-relaunch-sweep.test.js` classifies it ALWAYS-WRONG —
+wrong with *and* without the relaunch — and it reproduced on the shipped binary every run.
+
+**(b) Two gates were defending the erosion they exist to catch.** `network-scope.test.js` §5e and
+`datenschutz.dom.js` §3a both *required* the sentence „Von allein sendet dieses Programm nichts",
+which `boot()`'s `startDailyTimer()` makes false. A gate that pins a false sentence is worse than no
+gate: it converts a correction into a regression. Both now require the harder property — the screen
+must name the automatic originator **and** the consent it is gated on, in both languages. The same
+shape appeared a third time in `headless-shell.test.js:326`, which required the literal
+`SYNC_ORIGIN_BUILTIN = ""` and so **actively forbade the correct release act**. Measured: with the
+old assertion restored and a real origin pinned, `npm test` reads 22 · 1.
+
+### 23.5 · The coverage hole, closed and self-maintaining
+
+```
+tests/fleet/e9-attack-coedit.test.js    coEdit  32 · relaunch  10     (was 17 · 0)
+tests/fleet/e13-relaunch-sweep.test.js  coEdit  20 · relaunch  97     (new)
+tests/fleet/e13-compaction.test.js      every row relaunches except four named controls
+scripts/shell-family-e2e.mjs            27 → 35 launches, six new phases
+```
+
+`e13-relaunch-sweep.test.js` enumerates 16 fold inputs as data, runs every probe **twice over two
+freshly built circles — once with a quit-and-open, once without** — and classifies each pair
+HOLDS / ABSORBED / ALWAYS-WRONG / RIG-BROKEN. Separating ABSORBED from ALWAYS-WRONG is what
+produced 23.4(a). Its §4a re-measures the co-edit/relaunch census on every run and fails if any
+family gesture is driven in `tests/fleet/` by nothing that relaunches, so the hole cannot silently
+reopen.
+
+### 23.6 · The redaction boundary, asked a ninth time
+
+The repair puts a **new producer of ops** inside the boundary, deciding who is admitted and what is
+shown. `tests/attack/e13-absorbed-boundary.test.js` (7 rows) asks the bar of that producer
+specifically: the vocabulary is a two-row table anchored at both ends, not a filter; on a real
+converged circle after a real quit-and-open no rebuilt op carries a field outside it, nor the shared
+entry's text nor any word of it; and a Privat entry has **nothing to reconstruct**, asserted at the
+source rather than at the output. Attack suite: **977 · 0**.
+
+⚠ **One mutant survived the first draft and the reason is the finding.** Copying the whole register
+cell instead of its value leaks no entry text — the four admissible cells hold booleans and one
+short enum — but it leaks `cell.stamp`, whose last sixteen characters **are** the authoring device
+(`core/stamp.js#devOf`). Principle 9 is enforced by the absence of a distinguishing byte; that
+would have added one. §2b now asserts the value's *type* as well as its name. **A mutant that
+survives is a missing row.**
+
+### 23.7 · Owed, and not closed here
+
+- A shipped-app relaunch with the relay **unreachable or pruned**. That is the one measurement that
+  would settle 23.4(a)'s offline case end to end on the binary.
+- `src-tauri/` has **still never been compiled** — `cargo` is absent. `lib.rs` is held to
+  `main.swift` by a refusal-vocabulary row and by source mirroring.
+- `oplog.js#compact()` at `TAIL_COMPACT_AT` (5 000 lines) drops the retained admin link from the
+  log and `bodiesObject()` then lists its fingerprint, so `load()` would answer a re-appended copy
+  `duplicate`. A circle that reaches 5 000 tail lines loses a *transferred* seat again.
+- **A log already compacted by an older build** keeps R-1b for a transferred seat. Retention
+  prevents the loss; it cannot repair one. AU-3, AU-4 and AU-2 *are* repaired retroactively,
+  because those are reconstructions.
+- F12's remaining doc drift, F14, and all six F15 items.

@@ -56,6 +56,29 @@ import { RedactionError } from '../../src/js/crypto/envelope.js';
 import {
   circle, converge, on, mkPubSet, patchedOp, regsOf, boardOf,
 } from './e9-attack-kit.js';
+import { engineFor } from './e6-attack-circle.js';
+
+/**
+ * QUIT AND OPEN AGAIN ON THE SAME DISK — `persistNow()` then `init()` over the same storage,
+ * with the family engine rebuilt afterwards because a real quit drops it.
+ *
+ * ⚠ THIS FILE HAD NO SUCH MOVE, AND THAT IS WHY IT WAS BLIND. Measured across the tree:
+ * `grep -c relaunch` was **0** in every co-editor rig and every removal rig this product has,
+ * and `scripts/shell-family-e2e.mjs` — 27 launches of the shipped `.app` — has no co-edit phase
+ * at all. Every rig that co-edited never rebooted; the rig that rebooted never co-edited. So
+ * this file's own §1a…§1i, all green, could not see that the thing they were testing stopped
+ * working on the second launch. §2 below is the row that would have caught it.
+ */
+async function quitAndOpen(C, mac) {
+  await on(mac, async () => {
+    clearTimeout(mac.store._saveTimer);
+    await mac.store.persistNow();
+    mac.store.ready = false;
+    mac.store.listeners.clear();
+    await mac.store.init();
+    mac.engine = engineFor(C, mac);
+  });
+}
 
 /**
  * Papa publishes one entry. The patch is assembled here rather than through
@@ -276,5 +299,90 @@ describe('E9-A · every route into somebody else\'s entry', () => {
         .filter((o) => JSON.stringify(o.f).includes('GHOST'));
       assert.deepEqual(ghosts, [], 'no line of it survives anywhere on a peer\'s Mac');
     });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §2 · THE SECOND LAUNCH — F2, AND THE COVERAGE HOLE THAT HID IT
+//
+// Everything above runs inside ONE session of every Mac. `e6-attack-circle.js#bootMac` is a
+// FIRST INSTALL — clear the disk, seed `board.json`, `init()` once — and nothing here ever quit.
+// A relaunch is the only event that turns an op into a register-only fact, and four things
+// `foldAuthorized` reads from ops die there. The one that killed THIS file's subject:
+//
+//   `_persistOps` ① skips every line at or below the coming horizon, which on the first
+//   quit-and-open is EVERY line, so the checkpoint carries the registers and `ops.jsonl` is
+//   written empty. `authz.js` stage 3a then builds `govRegs` with `emptyRegs()` and folds only
+//   the `pub.set` ops IN THIS FOLD — so Papa's `pub.coEdit` grant was invisible, stage 3b
+//   refused every co-editor write `noCoEdit`, and `noCoEdit` is in neither `CURABLE_REFUSALS`
+//   nor `RETROACTIVE_REFUSALS`: not parked, not re-offered, not re-judged. TERMINAL.
+//
+//   Story 18.2 therefore stopped working from the second launch onward, for every family, with
+//   no attacker and no unusual setup — while `store.familyCoEditLevelOf` (which reads the
+//   REGISTER map, and so still saw the grant) went on offering the gesture. Measured steady
+//   state before the repair: {papa:"Herbstferien", mama:"Nordsee", oma:"Herbstferien"}.
+//
+// The repair is `store.js#_absorbedGovernanceOps` — the general form of the two reconstructions
+// that already existed. §2 is measured end to end in `tests/fleet/e13-compaction.test.js`; these
+// two rows are here so that THIS rig, the one whose whole subject is 18.2, can never again be
+// green while 18.2 is dead.
+//
+//   MUTANT: `store.js#_absorbedGovernanceOps` → `return []`.
+//   MEASURED: dies §2a and §2b. §1a — the honest-path control, no relaunch — stays green, which
+//   is the point: it is exactly what 5,612 rows measured.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('E9-A §2 · the same grant, on the second launch', () => {
+  test('§2a · 18.2 · a co-edit still lands after every Mac has quit and opened', async () => {
+    const C = await circle(['papa', 'mama', 'oma']);
+    const e = await papaShares(C, { 'pub.coEdit': true, 'pub.text': 'Herbstferien' });
+    for (const m of [C.papa, C.mama, C.oma]) await quitAndOpen(C, m);
+
+    await on(C.mama, async () => {
+      assert.equal(C.mama.store.familyCoEditLevelOf(e.key), 'geteilt',
+        'the door still opens — it always did, off the register map');
+      assert.equal(C.mama.store.applyCoEdit(e.key, { 'pub.text': 'Nordsee' }), true);
+      await C.mama.engine.syncNow();
+    });
+    await converge(C, [C.papa, C.oma]);
+
+    const seen = {
+      papa: (await regsOf(C.papa, e.key))['pub.text'],
+      mama: (await regsOf(C.mama, e.key))['pub.text'],
+      oma: (await regsOf(C.oma, e.key))['pub.text'],
+    };
+    assert.deepEqual(seen, { papa: 'Nordsee', mama: 'Nordsee', oma: 'Nordsee' },
+      `18.2 across a relaunch. Measured: ${JSON.stringify(seen)}`);
+
+    for (const m of [C.papa, C.oma]) {
+      await on(m, () => {
+        assert.deepEqual(m.store.warnings.filter((w) => /noCoEdit/.test(w)), [],
+          `${m.tag} refused the co-edit after a relaunch`);
+        assert.deepEqual(m.store._log.parkedOps().map((p) => p.reason), [],
+          `${m.tag} parked something — a noCoEdit refusal is not parked at all, so a park here `
+          + 'means some other gate started firing');
+      });
+    }
+  });
+
+  test('§2b · 18.1 · and the relaunch does not hand out a grant nobody made', async () => {
+    // The mirror of §1b, after a reboot. A reconstruction that INVENTED `pub.coEdit` would open
+    // every entry in the family to every member — worse than the defect it closes.
+    const C = await circle(['papa', 'mama', 'oma']);
+    const e = await papaShares(C, { 'pub.text': 'Zahnarzt' });
+    for (const m of [C.papa, C.mama, C.oma]) await quitAndOpen(C, m);
+
+    await on(C.mama, () => {
+      assert.equal(C.mama.store.familyCoEditLevelOf(e.key), null,
+        'the owner granted nothing, and a relaunch grants nothing');
+      assert.equal(C.mama.store.applyCoEdit(e.key, { 'pub.text': 'gekapert' }), false);
+    });
+    // Door 2: mint it anyway, with a real member, a real device and a real seal.
+    await on(C.mama, () => patchedOp(C, C.mama, mkPubSet(C, C.mama, e.key, { 'pub.text': 'gekapert' })));
+    await converge(C, [C.papa, C.oma]);
+    for (const m of [C.papa, C.oma]) {
+      assert.equal((await regsOf(m, e.key))['pub.text'], 'Zahnarzt',
+        `${m.tag} folded a co-edit on an entry the owner never opened`);
+    }
   });
 });

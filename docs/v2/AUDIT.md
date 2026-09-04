@@ -1,31 +1,473 @@
-# LangzeitPlaner v2 — INDEPENDENT AUDIT
+# LangzeitPlaner v2 — INDEPENDENT AUDIT, AND THE FIX CYCLE'S ANSWER
 
-**Tree:** `92545df` · **Audited:** 2026-09-03/04 · **Auditor:** synthesis pass over five independent
-audit passes, all load-bearing claims re-measured in this tree.
-
-**Nothing was fixed.** No file in `src/`, `server/`, `shell-macos/`, `src-tauri/` or any existing
-test was modified. New evidence files live under `tests/audit/` and are wired into no npm script.
+**Audited:** 2026-09-03/04 at `92545df`/`2d092a6` · **Answered:** 2026-09-04 · one fix cycle, five
+parallel workflows, one integration pass. The audit's own text is preserved below from §1 onward,
+unedited, because a finding that is rewritten after it is fixed cannot be audited a second time.
+This header is the disposition and the evidence for it.
 
 ---
 
-## THE VERDICT
+## THE ANSWER
 
-**Ship the solo product. Do not ship the Familienkreis yet — and today you could not even if you
-decided to, because `SYNC_ORIGIN_BUILTIN` is the empty string in both shells and no release gate
-names it.** The engineering here is genuinely strong: I reproduced the 27-launch acceptance run
-against the shipped `.app` and a real out-of-process relay (80 rows, 0 phases failed, refusal
-ledger 0, a founder receiving a joiner's entry, a founder-less removal with key rotation), and the
-redaction boundary held again under 970 attack rows. But the family feature has a defect class
-that every one of this project's 5,612 green rows is structurally blind to: **a quit-and-open
-turns ops into registers, and four things a fold reads from ops are never rebuilt.** The worst of
-them kills story 18.2 — *"Familie darf bearbeiten"* — from the second launch onward, for every
-family, with no attacker and no unusual setup, while the app still offers the gesture. That is not
-covered by the acceptance battery either: the 27-launch driver has **no co-edit phase at all**.
-Separately, the Datenschutz screen — the one surface whose entire job is that trust is informed
-rather than marketed — carries **three false sentences**, two of which the product contradicts in
-its own shipped copy one module over. None of that is expensive to fix; all of it is between a
-person and a working calendar. **My recommendation: cut a solo-only release now, hold the
-Familienkreis for one fix cycle covering the four compaction findings and the privacy copy.**
+**Ship the Familienkreis — after the PO does two things nobody but the PO can do.**
+
+The audit's verdict was *"ship solo, hold the Familienkreis for one fix cycle covering the four
+compaction findings and the privacy copy."* That cycle has run. Every finding it called BLOCKS is
+closed and measured, the gap that hid them is closed in the rigs that were blind to it, and the two
+items still standing are not engineering:
+
+1. **Claim a relay host** and substitute it in one act — the four invitations *and*
+   `SYNC_ORIGIN_BUILTIN` in both shells. `RELEASE-CHECKLIST.md` §A now forces both halves and
+   `tests/tier1/release-gate.test.js` §1c fails on either half alone. Demonstrated below by
+   failure, in all four states.
+2. **Decide D10.** The Datenschutz screen now says what the code does, and what the code does is
+   refuse the feedback report from the only tester who has no Familienkreis — which is the person
+   D10's amendment was written about. That is a product decision, not a defect, and it is stated
+   in §6 as PO-DECISION rather than resolved here.
+
+Everything else the audit asked for is done and re-measured. **The solo product was ready and
+still is; the Familienkreis is now ready too, and the remaining distance to a family release is a
+domain registration and one ruling.**
+
+### The disposition, finding by finding
+
+| # | audit severity | disposition | the evidence |
+|---|---|---|---|
+| **F1** | ⛔ BLOCKS FAMILY | **CLOSED (gate) · PO-DECISION (act)** | the constant is still `""`, which is *correct* for a solo release; what was missing was a gate. `release-gate.test.js` (20 rows) + `mom-test-probe.mjs` `S1/S2/S3` now fail on a half-done substitution and pass on a whole one — four states measured |
+| **F2** | ⛔ BLOCKS FAMILY | **CLOSED** | `store.js#_absorbedGovernanceOps` rebuilds `pub.{level,coEdit,alive}` from the registers a checkpoint absorbed. `compaction-sweep.test.js` §1b/§1c green (red on arrival); `e13-compaction.test.js` 26 rows; the shipped `.app` co-edits after relaunch, 5 runs of 5 |
+| **F3** | ⛔ BLOCKS FAMILY | **CLOSED · one caveat answered** | the `member:_alive` row of the same table. §2b/§2c green. And the audit's §5 item 6 — *"whether epoch rotation independently blocks a removed member in the field"* — is now **answered on the shipped binary**: `pushed=0 rosterOk=false`, the crypto layer and the fold layer reported separately |
+| **F4** | ⛔ BLOCKS FAMILY | **CLOSED** | `_ackedLevelFloor` reads `checkpoint({horizon})`, sound because `_outboxHorizonCap` forbids folding past an unacknowledged line. §4a green; the badge reads `geteilt` on the shipped app after a relaunch, 5 runs of 5 |
+| **F5** | ⛔ BLOCKS | **CLOSED · (a) raises a PO-DECISION** | four false sentences replaced, five disclosures added, both languages. 19 tier-2 rows at the glass + 7 new `tests/server/` rows binding the copy to the live enums. §6 walks every sentence |
+| **F6** | HIGH | **CLOSED** | `_exposureCtx` supplies `seqOf`/`levelDecreased`, `_lastSeenSeqCtx` the baseline, `main.js#armFamilySeen` the fade. `e10-fleet-board §17.5` inverted OPEN→CLOSED. On the shipped `.app`: `isNew=true .neu-dot=1`, 5 runs of 5 |
+| **F7** | HIGH | **CLOSED** | `board.js` patches the pad in place and guards on *unsent keystrokes*, not on the caret. `display-integrity.dom.js` §D3 green |
+| **F8** | HIGH | **CLOSED** | `patchBody` re-syncs `data-date`; `interact.js:584` refuses a move whose result equals the entry. §D1/§D1b/§D2 green |
+| **F9 / R-1b** | MEDIUM | **CLOSED (retention) · residual NARROWED** | `_persistOps` retains the admin-chain lines across the horizon — measured on the shipped binary: every family Mac's `ops.jsonl` keeps exactly one `space.set` line, the solo Mac writes none. Retention prevents the loss; it cannot repair a log an *older* build already compacted, and that is the narrowed residual |
+| **F10** | MEDIUM | **PO-DECISION (D-G)** | untouched by design. The row and its file header still disagree; that is §6's D-G |
+| **F11** | MEDIUM | **CLOSED** | `layout.js` counts a dropped foreign **bar** into `overflowNew`, per day, like `laneOverflow` itself. `display-integrity.dom.js` §D6 green |
+| **F12** | MEDIUM | **PARTLY CLOSED · doc work outstanding** | the two that were code-adjacent are closed (the retracted R-1b sentence is gone from `store.js`; `ROUTE_NAMES.length === 24` is now asserted against the screen). The record-vs-tree disagreements are doc drift and are listed as outstanding below |
+| **F13** | ⛔ BLOCKS FAMILY | **CLOSED (gate) · PO-DECISION (claim the host)** | the placeholder is now `https://serveradresse-fehlt.invalid` — RFC 2606 §2, **undelegatable**, so no stranger can register it. The probe's `M2s` is red and stays red until a host is claimed, which is the correct state |
+| **F14** | MEDIUM | **OPEN** | untouched. 0 tags, 0 remotes, `release.yml` never run. Not in this cycle's scope |
+| **F15** | LOW | **OPEN** | untouched, all six items |
+
+### What is genuinely still open
+
+- **F14** and every **F15** item.
+- **F12's doc drift** — `MOM-TEST.md` §2.3/§5.3/§8, `RUNBOOK.md` §2.6, `SHELL-VERIFICATION.md`
+  §1/§5 and its SSRF table (owed the 17th refusal), `traceability.json:3209` and story 21.5's
+  pre-D10 text with `amendedBy: []`.
+- **Two `tests/audit/` rows are mechanically broken, not turned** — `pass5-doc-drift.test.js`
+  §2b/§2c call `execFileSync` on the probe without tolerating exit 1, so they throw. Their claims
+  are undetermined, and saying they "turned" would be false.
+- **The Rust shell has never been compiled.** `cargo` is absent. `lib.rs` is held to `main.swift`
+  by a vocabulary row and by source mirroring, and that is all.
+- **LZP-1006** — a real person, on a clean Mac, unassisted. Nothing here moves it.
+- **The eight human-only v1 stories.** Still about twenty minutes with the app open, still the
+  cheapest missing evidence in the project.
+
+### The one place the audit was wrong, and it matters for pricing
+
+AUDIT §5 item 5 predicted: *"a real process boot re-establishes more from disk, so a real relaunch
+loses **more, never less**."* **The opposite is true, and it was measured both ways.**
+
+On the shipped `.app` the fold **never reaches the absorbed state at all**: across five acceptance
+runs every launch of every Mac read `lines == ops` with a horizon covering 0–5 of them, and each
+Mac's checkpoint held 2 registers. The app re-pulls from the relay on every launch and the lines
+come back *as lines*; `_outboxHorizonCap` keeps the horizon low while anything is unacknowledged.
+The fleet rig's `quitAndOpen` persists a fully converged, fully acknowledged log with **no relay in
+between** — it is the *stricter* environment, not the weaker one.
+
+So both numbers are true about different situations, and neither cancels the other:
+
+- **A Mac that quits and opens with a relay holding every op** — the acceptance topology — never
+  had F2/F3/F4. They should not be priced as "kills every family from the second launch".
+- **A Mac that quits and opens with nothing to re-pull** — offline, a pruned relay, or a peer whose
+  `since` cursor is past the op — is exactly the fleet rig, and there F2/F3/F4 were real and
+  terminal. That is an ordinary Tuesday, not an exotic setup.
+- **F6 is the exception and the one that always mattered**: `e13-relaunch-sweep.test.js` classifies
+  it ALWAYS-WRONG — wrong with *and* without the relaunch — and it reproduced on the shipped binary
+  on every run at `2d092a6`. It was never a compaction defect. It is now green in all five runs.
+
+**Not proved:** a shipped-app relaunch with the relay unreachable or pruned. That is the one
+measurement that would settle the offline case end to end on the binary, and it is still the next
+thing to do.
+
+### The blind spot itself
+
+The audit's mechanical count was the finding under the findings — *every rig that co-edits never
+reboots, and the rig that reboots never co-edits.* Measured now:
+
+```
+tests/fleet/e9-attack-coedit.test.js    coEdit  32 · relaunch  10     (was 17 · 0)
+tests/fleet/e13-relaunch-sweep.test.js  coEdit  20 · relaunch  97     (new)
+tests/fleet/e13-compaction.test.js      every row relaunches except four named controls
+scripts/shell-family-e2e.mjs            27 → 35 launches, six co-edit/removal/exposure/dot phases
+```
+
+`e13-relaunch-sweep.test.js` §4a re-measures that census on every run and fails if any family
+gesture is driven in `tests/fleet/` by nothing that relaunches. The hole cannot silently reopen.
+
+---
+
+## THE SUITES, AFTER THE CYCLE
+
+Tier 2 counted from the runner's own per-file `# pass` lines, which is the only correct total.
+
+| suite | audit baseline | now | delta |
+|---|---|---|---|
+| tier 1 `npm test` | 2229 · 0 | **2249 · 0** | +20 (`release-gate.test.js`) |
+| attack | 970 · 0 | **977 · 0** | +7 (`e13-absorbed-boundary.test.js`) |
+| property | 101 · 0 | **101 · 0** | — |
+| server | 1002 · 0 · 1 skip | **1009 · 0 · 1 skip** | +7 (`datenschutz-claims.test.js`) |
+| fleet | 435 · 0 | **476 · 0** | +41 (E13 compaction, relaunch sweep, E9-A §2a/§2b) |
+| tier 2 DOM | 875 · 3 · 36 skip | **904 · 3 · 36 skip**, 57 files | +29 (`e13-glass`, `e13-datenschutz`) |
+| **total** | **5,612** | **5,716** | |
+
+**The three tier-2 reds are exactly §A4, §E1 and §E3** — the PO's own declared residuals, D-A/D-C
+and the D-B threshold error. Nothing else is red in any suite.
+
+**The v1 oracle did not move.** The original characterization files as of `328c683`, run unmodified,
+**per file**, at `2d092a6` and at this tree:
+
+| file | `2d092a6` | now |
+|---|---|---|
+| `v1orig-dates-holidays.test.js` | 87 · 0 | 87 · 0 |
+| `v1orig-layout.test.js` | 93 · 0 | 93 · 0 |
+| `v1orig-palette.test.js` | 6 · 0 | 6 · 0 |
+| `v1orig-repeats-find-i18n.test.js` | 121 · 0 | 121 · 0 |
+| `v1orig-storage.test.js` | 5 · 0 | 5 · 0 |
+| `v1orig-store-persistence.test.js` | 124 · **1** | 124 · **1** |
+| `v1orig-board-render.dom.js` | 19 · 0 | 19 · 0 |
+| `v1orig-dom-rendering.dom.js` | 44 · 0 | 44 · 0 |
+| `v1orig-interaction.dom.js` | 32 · 0 | 32 · 0 |
+| `v1orig-shell-bridge.dom.js` | 16 · 0 | 16 · 0 |
+
+**436/437 tier-1 and 111/111 tier-2, identical on both trees. Not one characterization row moved.**
+The single red is `mutate() (5.4)`, which F12 already names as an admitted v1 behaviour change and
+which is red at `2d092a6` too. (The audit's tier-2 figure of "112" is one higher than its own four
+files produce; the per-file comparison is the claim that matters and it is exact.)
+
+---
+
+## THE ACCEPTANCE RUN, FIVE TIMES, ON THE SHIPPED BINARY
+
+`node scripts/shell-family-e2e.mjs --port 880N`, five separate runs on five ports, each one
+35 `execFileSync` launches of the built `.app` against a real out-of-process relay.
+
+| run | phases failed | founder got a joiner's entry | refusal ledger | battery | exit |
+|---|---|---|---|---|---|
+| 1 · :8801 | **0** of 35 launches / 104 rows | **YES** | **0** across 8 launches | **8 of 8** | 0 |
+| 2 · :8802 | **0** | **YES** | **0** | **8 of 8** | 0 |
+| 3 · :8803 | **0** | **YES** | **0** | **8 of 8** | 0 |
+| 4 · :8804 | **0** | **YES** | **0** | **8 of 8** | 0 |
+| 5 · :8805 | **0** | **YES** | **0** | **8 of 8** | 0 |
+
+The four new relaunch phases, every run:
+
+| phase | Mac · launch # | story | witness (identical in all five runs) |
+|---|---|---|---|
+| **co-edit — write** | B · launch **7** | 18.2 | `co-editor wrote="Nordsee"` |
+| **co-edit — receive** | C · launch **5** | 18.2 | `reads="Nordsee" · sawNoCoEdit=false` |
+| **co-edit — receive** | A · launch **8** | 18.2 | `reads="Nordsee" · sawNoCoEdit=false` — the *owner*, a bystander to the grant |
+| **exposure badge** | A · launch **9** | 16.6 | `exposure={"level":"geteilt","pending":false} visibility="geteilt"` |
+| **„neu" dot** | C · launch **4** | 17.5 | `isNew=true .neu-dot=1` — asserted in the DOM, not only in the model |
+| **removal — write** | D · launch **4** | 20.2 | `pushed=0 rosterOk=false` (epoch 5 in runs 1–4, 0 in run 5) |
+| **removal — check** | B · launch **11** | 20.2 | `onBoard=false inRegisters=false sawNotMember=false` |
+
+**The bar was co-editing on the second launch and the fifth.** Every co-edit phase here runs on a
+launch at or past the fifth: C reads a peer's co-edit on **its fifth launch**, B writes one on its
+seventh, A — the entry's *owner*, who granted the permission and then quit twice — folds it on its
+eighth. The two `coedit-receive` rows are two different claims on purpose: C is a bystander, A is
+the owner, and F2 killed both.
+
+`removed-write`'s epoch witness read 5 in four runs and 0 in the fifth. It is a **reported** number,
+not the claim; the claim is `pushed=0 rosterOk=false`, which held in all five. Recorded rather than
+smoothed over.
+
+Two witnesses are printed from outside the app on every phase: each Mac's `board.json` /
+`ops.jsonl` / `checkpoint.json` byte and line counts, and `{ops, lines, horizon, registers}` at the
+top and end of the launch. Those are the numbers that produced the re-pricing above.
+
+---
+
+## THE RELEASE GATE, DEMONSTRATED BY FAILURE
+
+The audit's F13 said the gate *"reads backwards"* — green meant nobody had substituted the address,
+and doing the work correctly turned it red. Four states, measured in a scratch copy of this tree:
+
+| tree state | `release-gate.test.js` | `mom-test-probe.mjs` |
+|---|---|---|
+| **1 · shipped today** — both shells `""`, four mails carry the `.invalid` slot | **20 · 0** | 41 rows · 1 FAIL (`M2s`) · **exit 1** |
+| **2 · mails substituted, shells not** — ⛔ **this is F1 exactly** | **19 · 1** → `§1c` | `S2: HALF DONE — the mail was substituted and the shells were not` · exit 1 |
+| **3 · shells substituted, mails not** | **19 · 1** → `§1c` | `S2: HALF DONE the other way` · exit 1 |
+| **4 · the correct act** — both, one host | **20 · 0** | 41 rows · **0 FAIL · exit 0** |
+
+State 2's own words, from the shipped predicate:
+
+> HALF DONE — the mail was substituted and the shells were not. The invitation tells her
+> `https://lzp-relay-po.example.org`, the app pins `""`, and every `sync_request` is refused
+> locally with `no_origin_configured` before a socket exists. **She joins a family that never
+> syncs, and nothing on her screen says why.**
+
+**And the row that used to forbid the correct act is gone.** `headless-shell.test.js:326` required
+the literal `SYNC_ORIGIN_BUILTIN = ""`, so pinning a real origin turned `npm test` red as if the
+work were the regression — F13's shape, one row over. Counterfactual measured: with the old
+assertion restored, **state 4 reads 22 · 1**. With the row as it now stands — *either* empty *or* a
+bare https origin that is not a reserved name — state 4 reads **23 · 0**, and the coupling is held
+properly by `release-gate.test.js` §1a/§1c, which reads all six files.
+
+**The placeholder is unregistrable.** `https://serveradresse-fehlt.invalid` — RFC 2606 §2 reserves
+`.invalid` as undelegatable. The old `lzp-sync-po.vercel.app` answered **HTTP 404 /
+`x-vercel-error: DEPLOYMENT_NOT_FOUND`** and was claimable by anyone, which mattered because
+`deriveInvite` is pure: a joiner's first request to a wrong host hands over, in the clear, a token
+redeemable against the real relay, plus her device public keys and her IP. The shell refuses the
+slot by name (`origin_host_is_a_reserved_name_that_cannot_resolve`, the 17th refusal, both shells,
+vocabulary parity green), and `shell-transport.dom.js`'s table now carries it.
+
+---
+
+## THE `tests/audit/` ROWS — WHICH TURNED
+
+The audit uses two conventions and both are honoured. **Red-on-arrival** files assert the *correct*
+behaviour and go green when it is fixed; the **inverse-convention** files assert the *defect* and go
+red when it is repaired. Every one of the audit's own evidence rows was re-run.
+
+**Red-on-arrival — every one of the seven findings turned green:**
+
+| `compaction-sweep.test.js` | before | now |
+|---|---|---|
+| §1b · one Mac quits and opens; it never folds another co-edit | RED | **green** |
+| §1c · once every Mac has relaunched, a co-edit reaches nobody | RED | **green** |
+| §2b · after one quit-and-open the removed member's write is ADMITTED | RED | **green** |
+| §2c · and a re-join publishes everything she wrote while removed | RED | **green** |
+| §3c · R-1b · a TRANSFERRED admin's unshare is refused by every relaunched Mac | RED | **green** |
+| §4a · a Geteilt entry's badge says Privat on the second launch | RED | **green** |
+| §5a · a peer's brand-new shared entry never carries `isNew` | RED | **green** |
+| §1a §2a §2d §3a §3b — the five controls | green | **green** |
+
+Its §0a/§0b now read red, and that is the fix reporting itself: they assert *"absorption is total"*
+and *"`ops.jsonl` on disk is empty"*, and R-1b's retention deliberately keeps exactly one line.
+`after = 1`, and the one line is the admin chain.
+
+`display-integrity.dom.js`: **11 · 0** — all five red-on-arrival rows turned (§D1, §D1b, §D2, §D3
+and §D6/F11), and the six green rows stayed green.
+
+**Inverse convention — 20 rows turned red, correctly, each naming a closed finding:**
+
+| file | rows now red | the finding each names |
+|---|---|---|
+| `synthesis-reconciliation.test.js` | §1c, §2a, §2d, §2e, §4a, §4b, §4c | F1, F5(a), F5(c), F5(b), the coverage hole ×2, R-1b |
+| `pass1-datenschutz.test.js` | §A1, §A6, §B2, §D1, §F1 | F5(a), F5(a), F5(b), F5(c), F5's missing disclosures |
+| `pass4-conformance.test.js` | §2a, §2b, §4a | F5(a/b) in both languages, F6 |
+| `pass5-first-run.test.js` | §2a, §3b, §3c | F13 ×3 |
+| `pass1-release-and-pointers.test.js` | §L2, §M1 | F1's missing gate, F9's retracted sentence |
+| `pass5-doc-drift.test.js` | §1c, §2a, §3a | the probe's state, MOM-TEST §8, RUNBOOK §2.6 |
+
+**Did not turn — and the distinction is not cosmetic:** `pass5-doc-drift.test.js` §2b and §2c
+**throw** rather than fail. They call `execFileSync` on the probe and do not tolerate exit 1, which
+is now the probe's correct state. Their claims are **undetermined**. `pass1-doc-drift.test.js`
+(12 · 0) and `spine-reauthoring.test.js` (5 · 0) are untouched and green.
+
+---
+
+## THE REDACTION BOUNDARY, A NINTH TIME
+
+F2/F3/F4 put a **new producer of ops** inside the boundary: `store.js` now reconstructs governing
+ops out of register cells a checkpoint absorbed and hands them to `foldAuthorized` at all three
+fold sites. Those ops decide **who is admitted** and **what is shown**, which is the boundary's own
+territory, so it was asked again of the new producer specifically —
+`tests/attack/e13-absorbed-boundary.test.js`, 7 rows, and the whole attack suite at **977 · 0**.
+
+The guarantee holds and it holds *structurally*, which is the only form worth having:
+
+- **The reconstruction's vocabulary is a two-row table, not a filter.** `ABSORBED_ROWS` admits
+  `member:`·`_alive` and `fnote|fbar:`·`pub.(level|coEdit|alive)` — anchored at both ends — and
+  nothing else. `pub.text`, `pub.label`, `pub.date` and every personal-space field are unreachable
+  by construction, because content is not an admissibility input.
+- **Measured on a real converged circle, after a real quit-and-open:** not one rebuilt op carries a
+  field outside that vocabulary; not one carries the shared entry's text **or any word of it**,
+  while the text demonstrably *is* in the reader's registers (she is entitled to it — the claim is
+  about the reconstruction, not about secrecy).
+- **A Privat entry has nothing to reconstruct**, and that is asserted at the source: no family
+  register exists for it at all. 16.1 remains an absence of bytes, not a filter that could be
+  bypassed.
+- **The chain repair carries two member ids and a `null`.**
+
+Three mutants, each applied alone, baseline restored between: widening the `pub` row to `/^pub\./`
+kills §1a/§2b/§2c; adding a personal-space `note:`/`text` row kills §1a/§1b/§2d.
+
+⚠ **The third mutant survived the first draft of this file — 7/7, with the mutant in.** Copying the
+whole register cell instead of its value leaks no entry text (the four admissible cells hold
+booleans and one short enum), so the text row had nothing to find and passed honestly. What it
+*does* leak is `cell.stamp`, whose last sixteen characters **are** the authoring device
+(`core/stamp.js#devOf`) — a device identifier inside an op body that should carry a permission and
+nothing else. Principle 9 is enforced by the absence of a distinguishing byte; that would have
+added one. §2b now asserts the value's **type** as well as its name, and the mutant dies there. A
+mutant that survives is a missing row, not a footnote.
+
+---
+
+## THE DATENSCHUTZ SCREEN, SENTENCE BY SENTENCE
+
+Story 21.3's whole job is that trust is *informed, not marketed*. Every sentence the audit
+challenged was walked against the code, in both languages. 19 tier-2 rows drive the real sheet in a
+real WKWebView (**19 · 0**); 7 new `tests/server/` rows bind the numbers on the screen to the live
+server enums, so the screen and the server cannot drift apart silently.
+
+**(a) The promised exception a solo Mac cannot take — CORRECTED.**
+Was: *„Genau eine Ausnahme gibt es … die Rückmeldung unter ‚Hilfe'."* Measured in a process that
+never loaded `family/mount.js`: `canSend() === false`, `feedbackPort() === null`, „Senden"
+`disabled === true`. The screen now says the feedback needs a Familienkreis, that without one there
+is no server anything could go to, that „Senden" is switched off, and that the text can be copied
+or saved to a file. ⚠ **This raises a PO-DECISION — see D10 below.**
+
+**(b) „Von allein sendet dieses Programm nichts" — REPLACED, because it was false.**
+`main.js:110-111` runs `runLaunchCheck(); startDailyTimer();` on every launch of every install, and
+`startDailyTimer` is a bare `setInterval` over `updater.checkDaily()`. Driven live with a configured
+port, `fetchManifest` fires with nobody pressing anything. The screen now says: *„Von allein
+geschieht genau eines, und nur, wenn du vorher zugestimmt hast: die Update-Prüfung weiter unten. Sie
+fragt nach dem Programm und nie nach deinem Plan."* / *"Exactly one thing happens on its own, and
+only if you agreed to it beforehand: the update check further down."*
+
+⚠ **Two gates were holding the false sentence in place and both were widened, not deleted.**
+`network-scope.test.js` §5e and `datenschutz.dom.js` §3a each required the old wording — a gate
+defending the erosion it exists to catch. Both now require the *harder* property: the screen must
+name the automatic originator **and** the consent it is gated on, in both languages. Deleting the
+disclosure to make the flat sentence true again turns them red.
+
+**(c) The loss sentence — CORRECTED, and this one had a data-loss shape.**
+Was: *„…und du keine Sicherung **mit Passwort** hast, kann niemand deine Daten wiederherstellen."*
+Measured through the real functions: `exportBackup(board, {memberId}, null, null, …)` writes
+`Mamas Geburtstag — Kuchen bestellen` and `Urlaub Ostsee` verbatim; `importBackup(file, null, null)`
+hands the board back with `identityRestored: false`. A person holding a keyless export was told it
+was worthless. The condition is now „gar keine Sicherung" / "no backup at all", with the true limit
+named: the keyless file does not restore the Familienkreis membership.
+
+**(d) „…nicht, was" — SCOPED, and the log named beside it.**
+`ROUTE_NAMES` is a closed enum of **24** verbs (`removeMember`, `transferAdmin`, `renameSpace`,
+`deleteSpace`, …) and `LOG_FIELDS` admits `route`, `spaceId` and `deviceShort` **in one line**. The
+denial is now about the entry's content — *„nicht, was in dem Eintrag steht"* — followed by *„Das
+ist aber weniger, als es klingt: der Inhalt bleibt verschlossen, die Handlung nicht. Unser eigenes
+Anfrageprotokoll hält bei jeder Anfrage fest, WELCHE Handlung es war."* Both halves are load-bearing;
+half a repair reads as a hedge.
+
+### The five newly-disclosed facts, verbatim, and what each rests on
+
+Every number below was re-measured against the live enums, not against the copy.
+
+**infer1 — who administers the circle** *(4 tells: `Member.joinedAt`, `Invite.createdBy`,
+`RATE_RULES.memberRemove` `identity:'member'`, `transferAdmin` in the log — all four verified)*
+
+> **DE** „Wer den Familienkreis verwaltet. Es gibt keine Spalte dafür, und trotzdem steht es auf
+> vier Wegen da: wer zuerst dabei war, hat den Kreis gegründet — alle anderen kamen über eine
+> Einladung, die später ausgestellt wurde. Jede Einladung merkt sich, wer sie ausgestellt hat, und
+> einladen darf nur die Verwaltung. Wer ein Mitglied entfernt, hinterlässt eine Zeile, die auf ihn
+> ausgestellt ist. Und die Übergabe der Verwaltung steht mit beiden Seiten im Anfrageprotokoll. In
+> einer Familie ist die Verwaltung eine bestimmte Person: die Vermittlungsstelle kann sagen, wer
+> von euch das Sagen hat."
+>
+> **EN** "Who administers the Familienkreis. There is no column for it, and it is there four ways
+> regardless: whoever was there first created the circle — everybody else arrived through an
+> invitation issued later. Every invitation remembers who issued it, and only the administrator may
+> invite. Whoever removes a member leaves behind a row made out in their name. And handing over the
+> administration stands in the request log with both sides. In a family the administrator is a
+> particular person: the relay can say which of you is in charge."
+
+**infer2 — who lives in another time zone** *(arrival times alone; no text, no IP)*
+
+> **DE** „Wer in einer anderen Zeitzone sitzt. Wann welches Gerät spricht, ergibt für jedes Mitglied
+> ein Tagesmuster. Ist das Muster eines Mitglieds regelmäßig um Stunden verschoben, lebt dieses
+> Mitglied woanders — ein Kind im Auslandssemester, jemand, der beruflich weg ist, ein Au-pair, das
+> über den Sommer zu Hause ist. Dafür braucht es keinen Text und keine IP-Adresse, nur die
+> Ankunftszeiten."
+>
+> **EN** "Who sits in another time zone. When each device speaks gives every member a daily
+> pattern. If one member's pattern is regularly shifted by hours, that member lives somewhere else
+> — a child on a semester abroad, somebody posted away for work, an au pair home for the summer.
+> This needs no text and no IP address, only the arrival times."
+
+**infer3 — what one member did, permanently** *(measured: exactly **3** member-keyed rate rules —
+`pairSession`, `memberRemove`, `epochRotate` — and not one)*
+
+> **DE** „Was ein einzelnes Mitglied getan hat, dauerhaft. Drei der Zeilen, mit denen Missbrauch
+> gebremst wird, sind nicht auf einen Anschluss ausgestellt, sondern auf ein Mitglied: ein Mitglied
+> entfernen, ein Gerät koppeln, die Schlüssel wechseln. Diese Zeilen sagen nicht „von dieser Adresse
+> kam etwas", sondern „dieses Mitglied hat das getan". Sie werden nie automatisch gelöscht — sie
+> überdauern den Zähler, für den sie angelegt wurden, und die Mitgliedschaft, die sie festhalten."
+>
+> **EN** "What one particular member did, permanently. Three of the rows used to throttle abuse are
+> made out not to a connection but to a member: removing a member, pairing a device, changing the
+> keys. Those rows do not say \"something came from this address\", they say \"this member did
+> this\". They are never deleted automatically — they outlive the counter they were created for,
+> and the membership they record."
+
+**infer4 — which action it was** *(measured: `ROUTE_NAMES.length === 24`; `route`, `spaceId`,
+`deviceShort` all in `LOG_FIELDS`; `renameSpace` real)*
+
+> **DE** „Welche Handlung es war, nicht nur dass eine stattfand. Im Anfrageprotokoll stehen die
+> Handlung, der Familienkreis und das Gerät in einer Zeile; die Handlung ist eine von
+> vierundzwanzig festen Bezeichnungen, und vom Gerät zum Mitglied ist es ein Schritt. Das
+> Umbenennen ist das schärfste Beispiel: die Vermittlungsstelle speichert den neuen Namen nirgends,
+> und im Protokoll steht trotzdem, dass ihr euren Familienkreis am 25. Juli umbenannt habt."
+>
+> **EN** "Which action it was, not merely that one happened. The request log holds the action, the
+> circle and the device in one line; the action is one of twenty-four fixed names, and from the
+> device to the member is one step. Renaming is the sharpest example: the relay stores the new name
+> nowhere, and the log still says that you renamed your Familienkreis on 25 July."
+
+**infer5 — that two circles are the same person** *(`Device.sigPubRaw` is published to every member;
+`Member.recoveryPubSig` / `recoveryPubKex` are the second join)*
+
+> **DE** „Dass zwei Familienkreise dieselbe Person sind. Wer in zweien ist — der eigenen Familie und
+> der der Eltern —, erscheint dort als zwei Mitglieder mit verschiedenen Kennungen. Verbunden sind
+> sie trotzdem: derselbe Mac trägt in beiden denselben öffentlichen Schlüssel, weil die
+> Vermittlungsstelle ihn braucht, um eine Unterschrift überhaupt prüfen zu können, und dasselbe gilt
+> für den Wiederherstellungsschlüssel eines Mitglieds. Selbst ohne beides genügen die Ankunftszeiten.
+> Wer beide Kreise auf demselben Server betreibt, kann sie derselben Person zuordnen."
+>
+> **EN** "That two circles are the same person. Whoever is in two of them — your own family and your
+> parents' — appears there as two members with different ids. They are connected all the same: the
+> same Mac carries the same public key in both, because the relay needs it in order to check a
+> signature at all, and the same holds for a member's recovery key. Even without either, the arrival
+> times are enough. Whoever runs both circles on one server can attach them to one person."
+
+**inferIp — and the route that actually matters**
+
+> **DE** „Und der Weg, der in der Praxis zählt, führt an alledem vorbei: eine Wohnung hat meist einen
+> Anschluss, und ein Anschluss mit dem Tagesrhythmus einer fünfköpfigen Familie ist für jemanden, der
+> auch die Unterlagen des Anbieters sehen kann, nicht anonym. Dass die Kennungen Zufallsnummern sind,
+> stimmt — und es ist nicht die ganze Geschichte."
+>
+> **EN** "And the route that matters in practice goes past all of it: a home usually has one
+> connection, and a connection with the daily rhythm of a household of five is not anonymous to
+> anyone who can also see the provider's records. That the ids are random numbers is true — and it
+> is not the whole story."
+
+They are rendered as paragraphs rather than a second `<ul>` deliberately: `datenschutz.dom.js` §1b
+counts `[data-ds] li` against `sees.length` and would have gone red for the wrong reason.
+
+### ⚠ D10 / story 21.5 — FOR THE PO, NOT DECIDED HERE
+
+D10 and ADR 003 §7.5 amended a **measured** property, justified as *"the second refuses the report
+from the only tester who has no Familienkreis."* **As shipped, the code refuses her anyway** — the
+feedback port is bound only inside the family door (`family/mount.js#bindFeedback`, reachable
+through the one dynamic `import()` behind `if (!hasPersonal && !hasCircle) return;`).
+
+So either the gate is wrong — the button should work solo, because the PO's mother *is* solo until
+she joins — **or the amendment bought nothing and D10 should be revisited.** The screen now says
+what the code does, so it is honest either way. Whichever way it goes, `soloBody` changes with it.
+This is written into `settings.js` at the F5(a) header, and it is **the PO's ruling, not an
+engineering choice.** It is D-E and D-F in §6 below, now with the coupling measured.
+
+---
+
+---
+
+# ═══ THE AUDIT AS IT WAS DELIVERED, FROM HERE ON, UNEDITED ═══
+
+Everything below this line is the independent audit's own text at `92545df`/`2d092a6`, preserved
+word for word. Its numbers, its verdicts and its open questions are as they were written. The
+disposition of every finding, and the evidence for it, is in the header above — a finding that is
+rewritten after it is fixed cannot be audited a second time.
 
 ---
 

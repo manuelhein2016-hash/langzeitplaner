@@ -138,6 +138,73 @@ const CURABLE_REFUSALS = new Set([REJECT_REASONS.NOT_MY_DEVICE, REJECT_REASONS.U
 const DEV_REGISTER_NAME = /^dev\.[0-9A-HJKMNP-TV-Z]{16}$/;
 
 /**
+ * THE TABLE `_absorbedGovernanceOps` WALKS — one row per register a fold reads to answer a
+ * question about the PRESENT, and nothing else. See the essay on `_absorbedGovernanceOps` for
+ * why a table and not a fourth sibling function, and for the one fact (the admin CHAIN) that is
+ * a question about HISTORY and is therefore kept out of compaction instead.
+ *
+ *   `member:<id>` · `_alive`                       `core/authz.js` stage 2, `currentMembers`
+ *   `fnote:`/`fbar:` · the three `gov: true` cells stage 3a's `govRegs`, read by stage 3b
+ *
+ * The `pub.*` row is exactly the three registers stage 3b reads (authz.js's `NOT_ALIVE`,
+ * `NO_COEDIT`, `NOT_GETEILT` in that order) and `store.familyCoEditLevelOf` asks for — no more,
+ * because content is not an admissibility input, and no fewer, because asking two of three is
+ * what E9-A §1i was.
+ */
+const ABSORBED_ROWS = Object.freeze([
+  Object.freeze({ entity: /^member:/, field: /^_alive$/, k: 'member.set' }),
+  Object.freeze({ entity: /^(fnote|fbar):/, field: /^pub\.(level|coEdit|alive)$/, k: 'pub.set' }),
+]);
+
+/**
+ * A LINE THAT MAY NOT BE COMPACTED AWAY — `_persistOps` step ①'s one exception, and the other
+ * half of the general statement.
+ *
+ * `core/authz.js` stage 1 resolves the admin seat from a CHAIN of `space.set{admin, adminPrev}`
+ * links, each naming its predecessor, and `resolveChain` accepts a link only from a root it also
+ * holds (`prev === null && op.act === op.f.admin`). A register is LWW: `space:<id>` → `admin`
+ * keeps the WINNER and nothing below it. So a cell can certify the head of a transferred chain
+ * and can never certify the link it supersedes — `_absorbedChainOps` says exactly that, refuses
+ * to guess, and `tests/fleet/e12-unshare.test.js` §8 pins the refusal.
+ *
+ * That is ADR 006's other clause. The fact is genuinely HISTORY, the register cannot answer it,
+ * so the op belongs outside compaction: these lines are appended to `ops.jsonl` even when the
+ * coming checkpoint folds them, and step ④ puts them back after the truncate. The bound is one
+ * line per transfer plus one genesis — `family/adminpanel.js#transferAdmin` is a deliberate,
+ * rare, human act — so `ops.jsonl` does not grow with the log, with time, or with a peer.
+ *
+ * IT IS INERT OUTSIDE A FAMILY CIRCLE: `space.set` is a family-space op kind, so a solo board
+ * has no such line and every step of `_persistOps` takes the byte-identical path it took before.
+ */
+/**
+ * The three published levels, ordered by how much of an entry the family can see. Used for ONE
+ * question, 17.5's suppression clause: *did this entity's level go DOWN?* ADR 004 §7 forbids
+ * surveillance mechanics and a dot on a retraction is one — it tells a member that somebody made
+ * something private. Addendum principle 9.
+ */
+const LEVEL_RANK = Object.freeze({ privat: 0, belegt: 1, geteilt: 2 });
+
+/**
+ * Compare two server seqs. They are decimal integers that outgrow `Number.MAX_SAFE_INTEGER` in
+ * principle and are typed as strings (ADR 003 §3.1), so this is `BigInt` and never `Number` —
+ * `materialize.js#cmpSeq` makes the same choice for the same reason: rounding two distinct large
+ * seqs to one value would silently stop the dot.
+ */
+function cmpDecimal(a, b) {
+  const num = (v) => (typeof v === 'bigint' ? v
+    : typeof v === 'number' && Number.isInteger(v) ? BigInt(v)
+      : typeof v === 'string' && /^\d+$/.test(v) ? BigInt(v) : null);
+  const na = num(a); const nb = num(b);
+  if (na === null || nb === null) return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+  return na < nb ? -1 : na > nb ? 1 : 0;
+}
+
+const isAdminLink = (op) => !!op && op.k === 'space.set'
+  && typeof op.f === 'object' && op.f !== null
+  && Object.prototype.hasOwnProperty.call(op.f, 'admin')
+  && Object.prototype.hasOwnProperty.call(op.f, 'adminPrev');
+
+/**
  * THE REFUSALS A LATER OP CAN CREATE — the mirror of `CURABLE_REFUSALS`, and the whole input to
  * the retroactive-withdrawal pass. See `store.registers()` for the argument and for what is
  * deliberately absent (`notOwner`, `notCoEditable`, `notMember`, `lostAdminChain`).
@@ -1492,6 +1559,12 @@ class Store {
     /** `tailLineKey(op)` for every line already committed — to the tail file, or to a checkpoint
      *  that folds it. Never appended twice. Reset by `init()` from the tail it just read. */
     this._opsCommitted = new Set();
+    /** 17.5's session baseline; `undefined` until the first projection takes it. See
+     *  `_lastSeenSeqCtx`. A relaunch re-takes it, which is why `markFamilySeen()` exists. */
+    this._seqFloor = undefined;
+    /** 16.6's acked-`pub.level` floor; `undefined` until the first projection reads the
+     *  checkpoint. See `_ackedLevelFloor`. */
+    this._ackedLevels = undefined;
     /** Did the tail `init()` read exceed `TAIL_COMPACT_BYTES`? ADR 001 §7.2's second trigger.
      *  One-shot: the first `_persistOps` of the session compacts and clears it. */
     this._tailOverBytes = false;
@@ -2599,6 +2672,12 @@ class Store {
     // pair or a `lines()` record, exactly as `oplog.load()` accepts them.
     this._tailLines = tail.length;
     this._opsCommitted = new Set(tail.map((l) => tailLineKey(l && typeof l === 'object' && l.op ? l.op : l)));
+    // 17.5's baseline is re-taken on every LOAD and not only in the constructor, because a real
+    // quit-and-open is a fresh process with a fresh store and the two must not disagree: what
+    // this device already held when it opened is not new. `markFamilySeen()`'s pref outranks it.
+    this._seqFloor = undefined;
+    // …and so is 16.6's acked floor, which is a fact about the checkpoint just read.
+    this._ackedLevels = undefined;
     // The FILE, not the verdict: a checkpoint that `adoptable()` goes on to refuse is still a
     // checkpoint on disk, and step ⓪b's question is only "would the next append create a bare
     // tail". A refused log is read-only anyway (`_logMayBeWritten`), so the two never disagree
@@ -3815,7 +3894,7 @@ class Store {
   _refoldAuthorized(base) {
     let verdict;
     try {
-      const all = [...this._absorbedAttestOps(), ...this._absorbedChainOps(), ...this._log.ops({ includeParked: true })];
+      const all = [...this._absorbedOps(), ...this._log.ops({ includeParked: true })];
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
       verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
     } catch (e) {
@@ -4055,22 +4134,65 @@ class Store {
    */
   _exposureCtx() {
     if (this._familySpaceId === null) return {};
-    // ONE PASS over the log, not one per entity. Two answers come out of it:
+    // ONE PASS over the log, not one per entity. Four answers come out of it:
     //   `pending`  entity keys with a `pub.set` still in the outbox (no seq, not parked)
-    //   `acked`    the NEWEST `pub.level` among ops that DO carry a seq
+    //   `acked`    the NEWEST `pub.level` among ops that DO carry a seq          — 16.6
+    //   `seqs`     the entity's max server seq                                   — 17.5
+    //   `fell`     the entity's newest level write is LOWER than the one before  — 17.5
     //
-    // The second cannot be read off the register map, and that is the whole subtlety: the map
-    // keeps only the winner, and the winner of a pending downgrade is the op that has not reached
-    // the server. Asking the map and treating an unacked winner as "no answer" makes a pending
-    // Geteilt→Belegt render as PRIVAT — the badge under-reporting what the family can still see,
-    // which is the one direction ADR 004 §6 forbids.
+    // ── THE SEED, AND WHY IT IS NOT "ASK THE MAP" (F4) ──────────────────────────────────────
+    //
+    // `acked` used to be the line walk and nothing else, and lines are exactly what a checkpoint
+    // absorbs. After the first quit-and-open the walk saw NOTHING, `lastAckedPubLevel` answered
+    // `null` for every entity, and `materialize.js#exposureOf` reads `… || 'privat'`. So every
+    // Geteilt entry's badge read **Privat** on every launch after the first, while the family
+    // really did still see it — ADR 004 §6's one forbidden direction, quoted above this method:
+    // *"the badge never UNDER-reports what others can see."* Measured in
+    // `tests/audit/compaction-sweep.test.js` §4a.
+    //
+    // The docblock's warning — "this cannot be read off the register map" — is true of the
+    // WINNER and false of the fold at the persisted HORIZON, and the difference is the repair:
+    //
+    //   `_outboxHorizonCap` is the rule that **a persist may not fold past the oldest line the
+    //   relay has not acknowledged**. So everything at or below the horizon was acknowledged
+    //   before it was folded. Absorbed ⇒ acked. `_ackedLevelFloor` is that fold, and asking the
+    //   WINNER instead is a defect of its own — measured in `e13-compaction` §4c, where a
+    //   pending Geteilt→Belegt made the badge read Privat by a second route.
+    //
+    // The floor answers for what the checkpoint absorbed; the walk answers for what is still a
+    // line, and feeds anything acked back into the floor so the next persist cannot erase it.
+    // Neither has to guess.
     const pending = new Set();
     const acked = new Map();
     const ackedAt = new Map();
+    const seqs = new Map();
+    const levelAt = new Map();      // e -> [{ts, level}, {ts, level}] — the two newest, ts-desc
+    const noteLevel = (e, ts, level) => {
+      const rank = LEVEL_RANK[level];
+      if (rank === undefined) return;
+      const seen = levelAt.get(e) ?? [];
+      seen.push({ ts, rank });
+      seen.sort((a, b) => (a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0));
+      levelAt.set(e, seen.slice(0, 2));
+    };
+
+    const floor = this._ackedLevelFloor();
+    for (const [entity, seed] of floor) {
+      ackedAt.set(entity, seed.ts);
+      acked.set(entity, seed.level);
+      noteLevel(entity, seed.ts, seed.level);
+    }
+
     for (const line of this._log.lines()) {
       const op = line.op;
       if (!op || op.k !== 'pub.set' || op.space !== this._familySpaceId) continue;
-      if (line.seq === null || line.seq === undefined) {
+      const hasSeq = line.seq !== null && line.seq !== undefined;
+      if (hasSeq) {
+        const prevSeq = seqs.get(op.e);
+        if (prevSeq === undefined || cmpDecimal(line.seq, prevSeq) > 0) seqs.set(op.e, line.seq);
+      }
+      if (Object.hasOwn(op.f ?? {}, 'pub.level')) noteLevel(op.e, op.ts, op.f['pub.level']);
+      if (!hasSeq) {
         if (!line.park) pending.add(op.e);
         continue;
       }
@@ -4081,6 +4203,10 @@ class Store {
       if (prev !== undefined && prev >= op.ts) continue;
       ackedAt.set(op.e, op.ts);
       acked.set(op.e, op.f['pub.level']);
+      // AND REMEMBER IT. This line is acked today and may be absorbed by the very next persist;
+      // the floor is monotone in stamp order, so what the walk has seen once it never loses.
+      const held = floor.get(op.e);
+      if (held === undefined || held.ts < op.ts) floor.set(op.e, { ts: op.ts, level: op.f['pub.level'] });
     }
     return {
       pendingPub: (fkey) => pending.has(fkey),
@@ -4088,7 +4214,148 @@ class Store {
         const v = acked.get(fkey);
         return v === 'privat' || v === 'belegt' || v === 'geteilt' ? v : null;
       },
+      // ── 17.5, THE TWO HOOKS `materialize.js#isNewOf` HAS ALWAYS ACCEPTED AND NEVER BEEN GIVEN
+      //
+      // `seqOf` is the entity's max SERVER seq. It is a line-only fact by construction — ADR 001
+      // §7.2 says a register carries `{value, stamp, author}` and no seq — and that is the right
+      // answer rather than a second gap: an entity whose ops a checkpoint has absorbed is an
+      // entity this device has held since before the last quit, and a dot on it would not be
+      // "changes from others arrive quietly", it would be a dot on everything, for ever.
+      //
+      // `levelDecreased` is ADDENDUM PRINCIPLE 9's constraint and `isNewOf` enforces it before
+      // it reads anything else: a downgrade must NEVER dot, because a dot on a retraction tells
+      // a member that somebody made something private — the surveillance mechanic ADR 004 §7
+      // forbids. It is answered from the two newest `pub.level` writes this device holds,
+      // absorbed cell included, so a Geteilt → Belegt that arrives while the app is open is
+      // silent even though its seq is brand new.
+      seqOf: (fkey) => seqs.get(fkey) ?? null,
+      levelDecreased: (fkey) => {
+        const seen = levelAt.get(fkey);
+        return Array.isArray(seen) && seen.length === 2 && seen[0].rank < seen[1].rank;
+      },
     };
+  }
+
+  /**
+   * ── THE ACKED-PUB-LEVEL FLOOR (F4, and the part a register cell CANNOT answer) ─────────────
+   *
+   * `lastAckedPubLevel` is not a question about the current value: it is *"what has the relay
+   * been told?"*, and the two differ for exactly one round trip after every publication and
+   * every downgrade. That is the whole reason the hook exists (ADR 004 §6).
+   *
+   * ASKING `_log.registers()` FOR IT DOES NOT WORK, and the failing case is the ordinary one:
+   * the map keeps only the WINNER, and the winner of a pending downgrade is a live line with no
+   * seq. Seed from the winner and a Geteilt→Belegt that has not reached the server renders
+   * **Privat** — the same forbidden direction the compaction defect had, by another route. It is
+   * measured: `tests/fleet/e13-compaction.test.js` §4c, which failed against the first cut of
+   * this repair and is the reason this method exists rather than a one-line seed.
+   *
+   * THE FOLD AT THE PERSISTED HORIZON IS THE ANSWER, and it is sound for one reason:
+   * `_outboxHorizonCap` forbids a persist from folding past the oldest line the relay has not
+   * acknowledged. So **everything at or below the horizon is acknowledged**, by construction —
+   * absorbed ⇒ acked — and `_log.checkpoint({horizon})` is that fold, exactly.
+   *
+   * IT IS TAKEN ONCE PER LOAD and then kept MONOTONE by `_exposureCtx`'s walk, which records
+   * every acked line it sees. A line the next persist absorbs was therefore already remembered,
+   * so absorption can no longer erase an answer this session has given.
+   *
+   * WHEN THE HORIZON IS NULL — no checkpoint has ever been written — there is nothing absorbed
+   * and the walk is complete on its own. `checkpoint()`'s own default would fold `maxLiveStamp`
+   * instead, which would claim an op in the outbox had been acknowledged: over-reporting rather
+   * than under-reporting, the permitted direction, but a claim nothing backs. So it is not made.
+   *
+   * @returns {Map<string, {ts:string, level:*}>} entity key → the newest ACKED `pub.level`
+   */
+  _ackedLevelFloor() {
+    if (this._ackedLevels !== undefined) return this._ackedLevels;
+    const out = new Map();
+    this._ackedLevels = out;
+    const h = this._log.horizon();
+    if (h === null || h === undefined) return out;
+    try {
+      const regs = deserializeRegisters(this._log.checkpoint({ horizon: h }).regs);
+      for (const [entity, cells] of regs) {
+        if (typeof entity !== 'string' || !/^(fnote|fbar):/.test(entity)) continue;
+        const cell = typeof cells?.get === 'function' ? cells.get('pub.level') : null;
+        if (!cell || typeof cell.stamp !== 'string') continue;
+        out.set(entity, { ts: cell.stamp, level: cell.value });
+      }
+    } catch (e) {
+      // A checkpoint that cannot be built costs the SEED and nothing else: the walk still
+      // answers for everything the log holds as a line. Loud, because it is not expected.
+      this._warn(`the exposure badge could not read the checkpoint (${e.name}: ${e.message}); `
+        + 'it falls back to the live lines alone');
+    }
+    return out;
+  }
+
+  /**
+   * 17.5 — the „neu" baseline: `settings.lastSeenSeq.<spaceId>`, and a session floor when the
+   * pref has never been written.
+   *
+   * `materialize.js#isNewOf` treats an ABSENT `lastSeenSeq` as "everything is new" — correct as
+   * a formula and wrong as a first launch, where it would dot every entry the family has ever
+   * shared. `core/replace.js#PRESERVED_PREF_PREFIXES` already carries the pref across an import
+   * for exactly that reason ("clearing `lastSeenSeq` would light up a new-entry dot on every
+   * foreign entry").
+   *
+   * So the floor is the max family seq this device held when the session opened. With no pref
+   * writer the dot then means "arrived while the app was open", which is the honest half of
+   * principle 10 — *"changes from others arrive quietly … you notice when you look"* — and it
+   * becomes the full statement the moment a caller starts calling `markFamilySeen()`.
+   *
+   * OWED, AND NOT MINE: the view layer has to call `markFamilySeen()` when the board is looked
+   * at. `board.js` appends the dot, `layout.js` gates it on `foreign`, `app.css` styles it; the
+   * fade is the one step still missing, and it is a `board/` decision, not a store one.
+   */
+  _lastSeenSeqCtx() {
+    if (this._familySpaceId === null) return {};
+    const pref = this.state?.settings?.lastSeenSeq;
+    const stored = pref && typeof pref === 'object' ? pref[this._familySpaceId] : undefined;
+    // The floor is taken ONCE per session, at the first projection after the log is loaded, and
+    // then held: recomputing it on every `_project()` would raise it past an entry that arrived
+    // one render ago and the dot would never survive its own paint.
+    if (this._seqFloor === undefined) this._seqFloor = this._maxFamilySeq();
+    const floor = stored === undefined || stored === null ? this._seqFloor : stored;
+    return floor === null || floor === undefined ? {} : { lastSeenSeq: { [this._familySpaceId]: floor } };
+  }
+
+  /**
+   * 17.5's "the dot fades once seen" (ADR 004 §7.2). Records the highest family seq this device
+   * has read, as the DEVICE-LOCAL pref `lastSeenSeq.<spaceId>` — rule U6, never synced.
+   *
+   * It is a plain `setSettings`, so it is one `pref.set` in the `local` space and it survives a
+   * quit; the in-memory floor moves with it so the current projection stops dotting immediately.
+   * @returns {boolean} whether anything moved
+   */
+  markFamilySeen() {
+    if (this._familySpaceId === null) return false;
+    const max = this._maxFamilySeq();
+    if (max === null) return false;
+    const pref = this.state?.settings?.lastSeenSeq;
+    const cur = pref && typeof pref === 'object' ? pref[this._familySpaceId] : undefined;
+    if (cur !== undefined && cur !== null && cmpDecimal(max, cur) <= 0) return false;
+    this._seqFloor = max;
+    this.setSettings({ lastSeenSeq: { ...(pref && typeof pref === 'object' ? pref : {}), [this._familySpaceId]: max } });
+    // `setSettings` re-projects only for `hiddenMembers` (the one pref that changes WHICH
+    // entries are on the board). `lastSeenSeq` changes a per-entry FIELD, so the projection has
+    // to be re-run here or the dot stays lit until something else happens to redraw.
+    this._project();
+    this.emit('remote');
+    return true;
+  }
+
+  /** The highest server seq this device holds for a family `pub.set`, as a decimal string. */
+  _maxFamilySeq() {
+    if (this._familySpaceId === null) return null;
+    let max = null;
+    for (const line of this._log.lines()) {
+      const op = line.op;
+      if (!op || op.k !== 'pub.set' || op.space !== this._familySpaceId) continue;
+      if (line.seq === null || line.seq === undefined) continue;
+      if (max === null || cmpDecimal(line.seq, max) > 0) max = String(line.seq);
+    }
+    return max;
   }
 
   /**
@@ -4130,6 +4397,7 @@ class Store {
       familySpaceId: this._familySpaceId,
       ...this._memberCtx(regs),
       ...this._exposureCtx(),
+      ...this._lastSeenSeqCtx(),
       defaultSettings: d.settings,
     });
     const next = this._familySpaceId ? full : stripV2Fields(full);
@@ -4463,7 +4731,7 @@ class Store {
       // fold per remote batch, over a set that is already in memory — and it is paid ONLY when
       // the identity is durable, because in solo mode `_myDevices()` is `null` by design and the
       // second fold would be identical to the first.
-      const all = [...this._absorbedAttestOps(wellFormed), ...this._absorbedChainOps(wellFormed), ...this._log.ops({ includeParked: true }), ...wellFormed];
+      const all = [...this._absorbedOps(wellFormed), ...this._log.ops({ includeParked: true }), ...wellFormed];
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
       verdict = foldAuthorized(all, this._authzCtx(devices ? { myDevices: devices } : {}));
     } catch (e) {
@@ -4701,10 +4969,22 @@ class Store {
    *
    * THE BOUND is one op per family space.
    *
-   * RESIDUAL (not closed here): a circle whose admin seat has been TRANSFERRED. The general
-   * repair is to keep `space.set` links (and `member.set{dev.*}`) out of compaction in
-   * `_persistOps` — bounded at one op per transfer and per (member, device). No shipped circle
-   * transfers the seat yet.
+   * RESIDUAL, AND WHERE IT WENT (R-1b). A circle whose admin seat has been TRANSFERRED cannot
+   * be repaired from here — a chain is a sequence and an LWW cell keeps only its head — and
+   * `tests/fleet/e12-unshare.test.js` §8 pins that this method refuses to guess rather than
+   * present a transfer as a rootless genesis root. The general repair named here is the one that
+   * landed: `space.set` links are kept OUT of compaction, in `_persistOps` steps ① and ④, at the
+   * bound stated — one line per transfer. See `isAdminLink`.
+   *
+   * `transferAdmin` IS shipped (`family/adminpanel.js:654`, reached from `leavedelete.js:1433`
+   * when a founder hands the seat over before leaving). The claim that used to stand here — that
+   * the seat had never moved in any shipped circle — was retracted by V2-FINAL and is gone.
+   *
+   * WHAT IS STILL OPEN. `oplog.js#compact()` at `TAIL_COMPACT_AT` drops the link from the log,
+   * and `bodiesObject()` then lists its fingerprint, so a re-appended copy would be answered
+   * `duplicate` by `load()`. A circle that reaches 5 000 tail lines therefore loses a
+   * TRANSFERRED seat again. `_retainedTailLines` reads `_log.lines()` for exactly this reason:
+   * it writes only what can still come back.
    *
    * @returns {Object[]} ops, or `[]`
    */
@@ -4753,6 +5033,163 @@ class Store {
       e: key,
       f: Object.freeze({ admin: cell.value, adminPrev: null }),
     })];
+  }
+
+  /**
+   * ── THE GENERAL STATEMENT · WHAT A CHECKPOINT ABSORBS, AND WHAT PUTS IT BACK ──────────────
+   *
+   * `foldAuthorized` is handed `_log.ops()`. That set is not "the ops": it is "the ops no
+   * checkpoint has absorbed yet", and absorption is TOTAL and ordinary — `_persistOps` ① skips
+   * every line at or below the coming horizon, which on the first quit-and-open of any install
+   * is every line the log holds. `tests/audit/compaction-sweep.test.js` §0a measures a converged
+   * three-Mac circle at 8 lines before and **0** after, with not one register lost.
+   *
+   * ADR 006 is the lens, and it cuts the problem in two rather than into four defects:
+   *
+   *   A FACT ABOUT THE PRESENT — "may this member write?", "did the owner grant co-edit?",
+   *   "is she still in the circle?" — is a question the REGISTER answers. board.json is the
+   *   truth and the op log is history; a fold that reaches for history to answer it is the
+   *   anti-pattern. And the register answers it EXACTLY: a cell is `{value, stamp, author, op}`,
+   *   which is `f`, `ts`, `act` and `id`, and `devOf(stamp)` matched against the author's own
+   *   `dev.*` record is `dev`. Every field the fold reads off the op is in the cell. So the
+   *   correct input is `absorbed(registers) ∪ lines`, computed ONCE from a table of the
+   *   registers the fold reads — not a sibling function per defect.
+   *
+   *   A FACT ABOUT HISTORY — the admin CHAIN — a register cannot answer, because an LWW cell
+   *   keeps only the winner and a chain is a sequence. There ADR 006's other clause applies:
+   *   the op belongs OUTSIDE compaction. That is `_persistOps` step ①'s `_isRetainedLine`, at
+   *   the bound this file already named — one line per transfer.
+   *
+   * NOTHING IS TRUSTED. A reconstruction is handed back to `foldAuthorized` as an ordinary op
+   * and pays every gate again: stage 0b's `attested.get(op.act).has(op.dev)`, stage 1's chain,
+   * stage 2's `onlyAlive` admin test, stage 3a's ownership. It cannot invent authority, because
+   * `applyRemote` gates every remote op on `foldAuthorized` BEFORE it reaches the log — so a
+   * cell exists only because this device already admitted the op that wrote it. The one field
+   * a cell does not retain is `gid`, and `_absorbedAttestOps`'s essay says why the opId is the
+   * only deterministic answer: two Macs holding the cell must rebuild the same op, byte for byte.
+   *
+   * THE TABLE. One row per register the fold reads, and each row says only three things: which
+   * entities carry it, which cells, and what op kind wrote it.
+   *
+   *   `member:<id>` · `dev.<short>`                     stage 0a/0b   `_absorbedAttestOps`
+   *   `space:<id>`  · `admin` (genesis-shaped only)     stage 1       `_absorbedChainOps`
+   *   `member:<id>` · `_alive`                          stage 2       ← here (F3 / story 20.2)
+   *   `fnote:`/`fbar:` · `pub.level|coEdit|alive`       stage 3a/3b   ← here (F2 / story 18.2)
+   *
+   * The first two keep their own methods because three test files outside this one call them by
+   * name and pin their contracts (`e11-attest` §5, `e12-unshare` §2–§8, `unshare-owner.dom`);
+   * they are the same statement, and `_absorbedOps` is where all four are joined.
+   *
+   * WHY ONLY THE THREE GOVERNING `pub.*` CELLS AND NOT `pub.text`. Stage 3b reads exactly
+   * `pub.alive`, `pub.coEdit`, `pub.level` (authz.js:1453-1455) and stage 3a folds exactly the
+   * `gov: true` fields. Content is not an admissibility input; rebuilding it would put a second
+   * copy of a body into a fold whose stage 3c redaction pass walks every admitted op, for no
+   * gain. The rebuild is the smallest set that answers the question the fold is asking.
+   *
+   * THE BOUND is the register map itself: one op per (member, device), one per member, one per
+   * shared entity. It does not grow with the log, with time, or with anything a peer can send.
+   *
+   * @param {Object[]|null} arriving the batch being folded, which counts as LIVE — see the essay
+   *        on `_absorbedAttestOps`, where not counting it manufactured envelope splices
+   * @returns {Object[]} ops, or `[]`
+   */
+  _absorbedGovernanceOps(arriving = null) {
+    if (this._familySpaceId === null) return [];
+    let regs;
+    try { regs = this._log.registers(); } catch { return []; }
+    const live = new Set();
+    for (const op of this._log.ops({ includeParked: true })) live.add(op.id);
+    if (arriving) for (const op of arriving) if (op && typeof op.id === 'string') live.add(op.id);
+
+    // opId → the op being rebuilt. Cells that share an opId shared an OP, so they are rebuilt as
+    // ONE op with all of its fields — which is not a nicety: two ops with one id and two bodies
+    // is exactly what `foldAuthorized` Pass A reports as envelope splicing (ADR 002 §5.1), and
+    // an owner's `publishSharedEntry` writes `pub.level`, `pub.coEdit` and `pub.alive` together.
+    const byOp = new Map();
+    for (const [entity, cells] of regs) {
+      if (typeof entity !== 'string') continue;
+      const row = ABSORBED_ROWS.find((r) => r.entity.test(entity));
+      if (row === undefined) continue;
+      if (typeof cells?.[Symbol.iterator] !== 'function') continue;
+      for (const [name, cell] of cells) {
+        if (!row.field.test(name)) continue;
+        if (!cell || cell.value === undefined) continue;
+        // Still a line (or in this fold's own input): the fold already has the real op.
+        if (typeof cell.op !== 'string' || !isOpId(cell.op)) continue;
+        if (live.has(cell.op)) continue;
+        if (typeof cell.stamp !== 'string' || typeof cell.author !== 'string') continue;
+        let acc = byOp.get(cell.op);
+        if (acc === undefined) {
+          // THE AUTHORING DEVICE, READ OUT OF THE STAMP AND MATCHED AGAINST THE AUTHOR'S OWN
+          // RECORD — the same proof `_absorbedChainOps` demands, and for the same reason: stage
+          // 0b asks `attested.get(op.act).has(op.dev)`, and an invented device would be the one
+          // field here that nothing backs. No match, no reconstruction.
+          const dev = this._deviceOfStamp(regs, cell.author, cell.stamp);
+          if (dev === null) continue;
+          acc = { id: cell.op, ts: cell.stamp, act: cell.author, dev, k: row.k, e: entity, f: {} };
+          byOp.set(cell.op, acc);
+        } else if (acc.e !== entity || acc.ts !== cell.stamp || acc.act !== cell.author) {
+          // One opId, two entities or two stamps: the map is not self-consistent and a rebuild
+          // would be a guess. Say nothing, exactly as the chain repair says nothing about a
+          // transfer it cannot prove.
+          continue;
+        }
+        acc.f[name] = cell.value;
+      }
+    }
+    const out = [];
+    for (const a of byOp.values()) {
+      if (Object.keys(a.f).length === 0) continue;
+      out.push(Object.freeze({
+        v: 1,
+        id: a.id,
+        ts: a.ts,
+        space: this._familySpaceId,
+        act: a.act,
+        dev: a.dev,
+        gid: a.id,
+        k: a.k,
+        e: a.e,
+        f: Object.freeze(a.f),
+      }));
+    }
+    return out;
+  }
+
+  /**
+   * The deviceId a stamp was minted on, proved against the author's own attestation records.
+   *
+   * A stamp's last sixteen characters ARE the writing device's short (`stamp.js#devOf`), and a
+   * member's `dev.<short>` register maps a short to the deviceId inside the attestation blob.
+   * `null` when no record matches — which is the only honest answer, and the reason a rebuilt op
+   * can never name a device its author never attested.
+   * @returns {string|null}
+   */
+  _deviceOfStamp(regs, author, stamp) {
+    const short = devOf(stamp);
+    const mine = regs.get(`member:${author}`);
+    if (!mine || typeof mine[Symbol.iterator] !== 'function') return null;
+    for (const [name, c] of mine) {
+      if (!DEV_REGISTER_NAME.test(name) || !c || typeof c.value !== 'string') continue;
+      const att = parseAttestationBlob(c.value);
+      if (att && att.deviceShort === short && typeof att.deviceId === 'string') return att.deviceId;
+    }
+    return null;
+  }
+
+  /**
+   * `absorbed(registers) ∪ nothing` — the four rows of the table above, in one call, so that the
+   * three fold sites cannot drift apart again. They did: `unparkAttested` and `_refoldAuthorized`
+   * and `applyRemote` each spelled the concatenation out, which is how a third row could be
+   * added to two of them and a fourth to none.
+   * @param {Object[]|null} arriving the batch being folded
+   */
+  _absorbedOps(arriving = null) {
+    return [
+      ...this._absorbedAttestOps(arriving),
+      ...this._absorbedChainOps(arriving),
+      ...this._absorbedGovernanceOps(arriving),
+    ];
   }
 
   /**
@@ -4874,7 +5311,7 @@ class Store {
   unparkAttested() {
     const held = this._log.parkedOps({ reason: PARK_REASONS.ATTESTATION });
     if (!held.length) return [];
-    const all = [...this._absorbedAttestOps(), ...this._absorbedChainOps(), ...this._log.ops({ includeParked: true })];
+    const all = [...this._absorbedOps(), ...this._log.ops({ includeParked: true })];
     let verdict;
     try {
       const devices = this._identity ? this._myDevices(foldAuthorized(all, this._authzCtx())) : null;
@@ -5291,14 +5728,57 @@ class Store {
     await storage.saveCheckpoint(cp);
     this._checkpointOnDisk = true;
 
-    // ④ drop only what ③ folds
+    // ④ drop only what ③ folds — MINUS the lines ③ cannot express (R-1b)
+    //
+    // `truncateOps(n)` drops the FIRST n lines and the retained links are interleaved among
+    // them, so the file cannot be pruned selectively. Truncate, then put the retained lines
+    // back: the tail that survives is exactly `isAdminLink`'s set, one line per transfer plus
+    // genesis, and `_opsCommitted` already holds their keys so ① never appends them twice.
+    //
+    // THE CRASH WINDOW IS NAMED. A crash between the truncate and the re-append loses the links
+    // and lands on exactly today's behaviour — `_absorbedChainOps` still rebuilds a genesis-
+    // shaped seat, a transferred one is lost. It cannot lose CONTENT: ③ has already folded every
+    // one of these ops into the checkpoint's registers, and `board.json` is the truth either way
+    // (ADR 006 R5/INV-8). The reverse order is not available — `storage` offers append and
+    // truncate and no rewrite — and holding the file open across both is not worth a lost seat.
     if (this._tailLines > 0 && !this._log.ops().some((o) => cmp(o.ts, cp.horizon) > 0)) {
+      const keep = this._retainedTailLines();
       await storage.truncateOps(this._tailLines);
       this._tailLines = 0;
       // `_opsCommitted` is deliberately NOT cleared: those lines are committed to the CHECKPOINT
       // now, which is a stronger statement than "they are in the tail file", and re-appending
       // them would put back exactly what this call just dropped.
+      if (keep.length) {
+        await storage.appendOps(keep);
+        this._tailLines = keep.length;
+      }
     }
+  }
+
+  /**
+   * The lines `_persistOps` ④ puts back after the truncate: the admin-chain links, and nothing
+   * else. See `isAdminLink` for why these and only these — a chain is a question about HISTORY,
+   * an LWW cell keeps only the winner, so the op is the only thing that can answer.
+   *
+   * PARKED LINES ARE EXCLUDED, as everywhere else in this method: they ride in
+   * `checkpoint().parked` with their reasons, and writing them to the tail as well would hand
+   * `load()` two copies of one op.
+   *
+   * `_log.lines()` is the source rather than a session-local cache, deliberately: a line the log
+   * no longer holds is a line `oplog.js#bodiesObject` has already listed in `checkpoint().bodies`,
+   * and `load()` answers such a line `duplicate` and drops it. Re-appending it would write bytes
+   * that can never come back. See RESIDUAL in `_absorbedChainOps`.
+   */
+  _retainedTailLines() {
+    if (this._familySpaceId === null) return [];
+    const out = [];
+    for (const line of this._log.lines()) {
+      if (line.park !== null && line.park !== undefined) continue;
+      if (!isAdminLink(line.op)) continue;
+      if (line.op.space !== this._familySpaceId) continue;
+      out.push(line);
+    }
+    return out;
   }
 
   /**
@@ -5321,7 +5801,18 @@ class Store {
     const out = [];
     for (const line of this._log.lines()) {
       if (line.park !== null && line.park !== undefined) continue;
-      if (h !== null && isStamp(line.op?.ts) && cmp(line.op.ts, h) <= 0) continue;
+      // ── THE ONE EXCEPTION TO "THE CHECKPOINT ALREADY CARRIES IT" (R-1b) ──────────────────
+      //
+      // For every other op that sentence is true: the checkpoint carries the FACT, and the fact
+      // is what the fold needs. For an admin-chain link it is false — the checkpoint carries the
+      // head of the chain and cannot carry the link below it, so the fold loses the seat and
+      // refuses the admin's retraction `notOwner`, terminally. `isAdminLink`'s docblock is the
+      // whole argument; the bound is one line per transfer.
+      //
+      // `_opsCommitted` still applies below, so a retained line is appended EXACTLY ONCE per log
+      // lifetime, and step ④ re-appends it after each truncate rather than growing the file.
+      const retained = isAdminLink(line.op) && line.op.space === this._familySpaceId;
+      if (!retained && h !== null && isStamp(line.op?.ts) && cmp(line.op.ts, h) <= 0) continue;
       if (this._opsCommitted.has(tailLineKey(line.op))) continue;
       out.push(line);
     }

@@ -12,17 +12,38 @@
   subject line (it is in <title> and repeated in the first comment below), attach
   LangzeitPlaner.dmg, and replace the four {{PLACEHOLDERS}}.
 
-  ONE VALUE IN THE BODY IS NOT A PLACEHOLDER: the relay address under
-  "And the server address that goes with it" is written out in full, because `scripts/mom-test-probe.mjs`
-  parses these files with only the four {{...}} slots filled and has to see a real
-  origin to check that the paste gesture yields one. It is
-  `https://lzp-sync-po.vercel.app` in all four invitation files. If the Vercel
-  project is created under a different name, substitute it in all four at once:
+  ONE VALUE IN THE BODY IS NOT A PLACEHOLDER, AND IT IS HALF OF ONE ACT.
 
-      sed -i '' 's|https://lzp-sync-po\.vercel\.app|https://NEW-HOST|g' docs/v2/email/invitation.*
+  The relay address under "And the server address that goes with it" is written out
+  in full, because `scripts/mom-test-probe.mjs` parses these files with only the four
+  {{...}} slots filled and has to see a real origin to check that the paste gesture
+  yields one.
 
-  and update RELAY_ORIGIN in scripts/mom-test-probe.mjs and RELAY in
-  tests/tier1/createjoin.test.js to match. The probe is the check that they agree.
+  Today it is `https://serveradresse-fehlt.invalid` in all four invitation files.
+  That is a SLOT, not an address. RFC 2606 section 2 reserves `.invalid` so that no
+  registry can delegate it and no resolver will answer it — so if this mail is sent
+  before the substitution, it names nobody's server. The name it replaced,
+  `lzp-sync-po.vercel.app`, was the opposite: measured 2026-09-03 it answered HTTP 404
+  `x-vercel-error: DEPLOYMENT_NOT_FOUND`, i.e. it was free for any stranger to
+  register (AUDIT F13). An invitation carries no key material (D9), so a stranger's
+  relay could not read one shared entry — but `deriveInvite` is pure, so the joiner's
+  first request would hand that stranger, in the clear, a token that redeems this
+  invite against the real relay: a burnt invitation, a seat in the circle taken by
+  somebody else, plus her device public keys and her IP.
+
+  SUBSTITUTING IT IS ONE ACT WITH TWO HALVES, AND HALF IS WORSE THAN NONE:
+
+      # 1 · the four mails
+      sed -i '' 's|https://serveradresse-fehlt\.invalid|https://NEW-HOST|g' docs/v2/email/invitation.*
+      # 2 · the pinned origin BOTH shells read on every sync_request
+      #     shell-macos/main.swift   let SYNC_ORIGIN_BUILTIN = "https://NEW-HOST"
+      #     src-tauri/src/lib.rs     const SYNC_ORIGIN_BUILTIN: &str = "https://NEW-HOST";
+
+  Doing only half ships a build whose invitation names a host the app will not talk
+  to, or a build that syncs to a host nobody was told about.
+  `tests/tier1/release-gate.test.js` fails on either half alone, and on two halves
+  naming different hosts. It runs inside `npm test`, which RELEASE-CHECKLIST.md
+  section B already requires green before a tag.
 
   Rules this file follows on purpose, checked by .github/scripts/check-email-copy.mjs:
     · every style is inline — mail clients drop <style> blocks unpredictably
@@ -126,7 +147,7 @@
        becomes part of the hostname and the join screen then reports a server that was
        never spelled right. -->
   <table width="100%" cellpadding="0" cellspacing="0" border="0" role="presentation" style="margin:0 0 16px 0;">
-  <tr><td align="center" style="padding:14px;background:#f4f7fb;border:1px dashed #a8c0e6;border-radius:10px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:15px;color:#16233d;">https://lzp-sync-po.vercel.app</td></tr>
+  <tr><td align="center" style="padding:14px;background:#f4f7fb;border:1px dashed #a8c0e6;border-radius:10px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,monospace;font-size:15px;color:#16233d;">https://serveradresse-fehlt.invalid</td></tr>
   </table>
 
   <p style="margin:0 0 16px 0;">In the app: <strong>Settings → “Join family circle”</strong>. The easiest way: select this whole e-mail, copy it, and paste it into the big field at the top — the app picks both out of it by itself. Then pick a name and a colour. That’s it, you’re in.</p>

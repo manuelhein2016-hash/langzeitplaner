@@ -414,7 +414,9 @@ Each was demonstrated against the real router in `tests/server/attack-relay-infe
 4. **The application log's `route` is a named per-member event feed.** §8 lists the seven fields
    the log may carry and then says what is *not* in it. It never says what the fields that **are**
    in it mean together: `(route, spaceId, deviceShort)` at a timestamp, with `LOG_ROUTES` a closed
-   enum of 23 verbs, is *this machine renamed the circle / invited somebody / removed somebody /
+   enum of 24 verbs (AUDIT F12, corrected 2026-09-04 — `feedback` is the 24th; asserted against the
+   live enum by `tests/server/datenschutz-claims.test.js` §1), is *this machine renamed the circle /
+   invited somebody / removed somebody /
    handed over the admin role* — and `deviceShort` maps to a member by one join. **The log line
    names the event.** `renameSpace` is the sharpest case: the handler stores nothing, is
    documented as storing nothing, and the log still records that the family renamed its circle on

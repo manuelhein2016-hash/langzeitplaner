@@ -253,6 +253,7 @@ ranges": every IP literal is refused, v4 and v6, public ones included** — a re
 |---|---|
 | **accepted** (4 — the control, without which a validator that refused everything would pass every other row) | `https://relay.example.org` · `https://RELAY.example.ORG` (normalised to lower case) · `http://127.0.0.1:8792` and `http://localhost:8787` (the **headless-only** dev carve-out) |
 | `origin_host_is_local_private_or_an_ip_literal` (17) | `10.0.0.5` · `192.168.1.1` · `172.20.0.1` · `169.254.169.254` · `100.64.0.1` · `127.0.0.1` · `0.0.0.0` · **`93.184.216.34`** (public, still an address) · `[::1]` · `[fd00::1]` · `[fe80::1]` · `router.local` · `nas` · `box.home.arpa` · `relay.internal` · `relay.example.org.` (trailing dot) · `localhost` |
+| `origin_host_is_a_reserved_name_that_cannot_resolve` (1) | `serveradresse-fehlt.invalid` — **the 17th refusal, added 2026-09-04** (AUDIT F13). The invitation placeholder is now an RFC 2606 §2 `.invalid` name: undelegatable, so unlike the abandoned `lzp-sync-po.vercel.app` no stranger can register it and harvest a joiner's invite token. Checked AFTER the local rule so `localhost` keeps its own refusal, and deliberately narrow — `relay.example.org` is the origin `shell-transport.dom.js` drives a **successful** request against. |
 | `origin_is_not_https` (1) | `http://relay.example.org` |
 | `origin_is_not_scheme_host_port` (6) | `…/api` · `user:pw@…` · `…?x=1` · `file:///etc/passwd` · `javascript:alert(1)` · `not a url at all` |
 

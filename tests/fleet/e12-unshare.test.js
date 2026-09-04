@@ -209,11 +209,13 @@ async function refusalsOn(mac) {
  * proves nothing.
  */
 async function foldInputWithoutChainOn(mac) {
-  let out = [];
-  await on(mac, () => {
-    out = [...mac.store._absorbedAttestOps(), ...mac.store._log.ops({ includeParked: true })];
-  });
-  return out;
+  // The absorption is imposed (see `withSpaceSetAbsorbed`): "before `_absorbedChainOps` landed"
+  // means a log whose chain link a checkpoint has swallowed AND no reconstruction — the state
+  // R-1b's retention now prevents on a fresh log and cannot repair on an old one. Both arms of
+  // §4's contrast read this one input, so imposing it here keeps them the same situation.
+  return withSpaceSetAbsorbed(mac, () => [
+    ...mac.store._absorbedAttestOps(), ...mac.store._log.ops({ includeParked: true }),
+  ]);
 }
 
 async function foldInputOn(mac) {
@@ -221,6 +223,38 @@ async function foldInputOn(mac) {
   await on(mac, () => {
     out = [...mac.store._absorbedAttestOps(), ...mac.store._absorbedChainOps(),
       ...mac.store._log.ops({ includeParked: true })];
+  });
+  return out;
+}
+
+/**
+ * IMPOSE THE ABSORPTION FOR THE LENGTH OF ONE CALL — `_log.ops()` answers without the
+ * `space.set` lines, which is precisely and only what a checkpoint that has absorbed them
+ * returns.
+ *
+ * 2026-09-04, R-1b's repair. §3, §4 and §8 used to get this state for free: `_persistOps` ①
+ * skipped every line at or below the horizon, so a relaunch simply left the genesis link out of
+ * `ops.jsonl` and the reconstruction was the only thing that could answer. R-1b's fix is that
+ * `_persistOps` now RETAINS the admin-chain lines across the horizon — retention prevents the
+ * loss it cannot repair — so after a relaunch the link is a LINE again and `_absorbedChainOps`
+ * correctly rebuilds NOTHING beside it (rebuilding a link that is still a line is the
+ * envelope-splice defect, ADR 002 §5.1).
+ *
+ * That is the repair working. It is also the reason these three rows stopped being tested: their
+ * PRECONDITION evaporated, not their claim. So the absorption is imposed here instead of waited
+ * for — the idiom §8 already carried for the transfer case, promoted to a helper and used by all
+ * three. The two named residuals in `_absorbedChainOps`'s docblock are exactly the situations in
+ * which a real Mac still reaches this state: a log compacted by an OLDER build, and
+ * `oplog.js#compact()` at `TAIL_COMPACT_AT`. Nothing else about the store is shaped: the
+ * registers, the checkpoint and the reconstruction are all the ones the real run produced.
+ */
+async function withSpaceSetAbsorbed(mac, fn) {
+  let out = null;
+  await on(mac, async () => {
+    const log = mac.store._log;
+    const realOps = log.ops.bind(log);
+    log.ops = (opts) => realOps(opts).filter((o) => o.k !== 'space.set');
+    try { out = await fn(); } finally { log.ops = realOps; }
   });
   return out;
 }
@@ -302,15 +336,22 @@ describe('E12 · the admin unshare, across the owner\'s relaunch', () => {
   test('§3 · CLOSED · the relaunch still empties the LOG, and the reconstruction refills the FOLD', async () => {
     await relaunch(C, C.mama);            // this row owns its own precondition, not §2's
 
-    // NON-VACUITY FIRST: the absorption itself is unchanged and still total. If this ever goes
-    // green for the other reason — the link surviving compaction — the rest of the row is inert.
+    // NON-VACUITY FIRST, in the direction that now matters. R-1b's repair RETAINS the chain line
+    // across the horizon, so after a relaunch it is a line again — and that is the first defence,
+    // asserted here so a future edit that drops the retention is caught by this row and not only
+    // by E13 §0b. The reconstruction is the SECOND defence, for a log an older build already
+    // compacted, and it is what the rest of this row is about; the absorption is therefore
+    // imposed below rather than waited for.
     let lines = [];
     await on(C.mama, () => { lines = C.mama.store._log.ops({ includeParked: true }); });
-    assert.deepEqual(lines.filter((o) => o.k === 'space.set'), [],
-      'the owner\'s log still holds a `space.set` line — the absorption this row is about did not happen, '
-      + 'so the reconstruction below is not being tested');
+    assert.equal(lines.filter((o) => o.k === 'space.set').length, 1,
+      'the relaunch did not keep the admin-chain line — R-1b\'s retention is the first defence and '
+      + 'it is gone, so a Mac with no reconstruction path loses the seat again');
 
-    const ops = await foldInputOn(C.mama);
+    const ops = await withSpaceSetAbsorbed(C.mama, () => [
+      ...C.mama.store._absorbedAttestOps(), ...C.mama.store._absorbedChainOps(),
+      ...C.mama.store._log.ops({ includeParked: true }),
+    ]);
     const links = ops.filter((o) => o.k === 'space.set');
     assert.ok(ops.some((o) => o.k === 'member.set' && /^dev\./.test(Object.keys(o.f)[0] || '')),
       'the attestation reconstruction did not fire — then stage 0b, not the chain, is what refuses');
@@ -408,8 +449,10 @@ describe('E12 · the admin unshare, across the owner\'s relaunch', () => {
     // AND THE SHIPPED RECONSTRUCTION IS THIS ONE, FIELD FOR FIELD. This row built its link by
     // hand to prove the mechanism; `store.js#_absorbedChainOps` now builds it in `src/`, and the
     // two must be the same op or the proof is about something the product does not do.
-    let shipped = null;
-    await on(C.mama, () => { shipped = C.mama.store._absorbedChainOps(); });
+    // (The absorption is imposed — see `withSpaceSetAbsorbed`. R-1b's repair keeps the line, and
+    // a link that is still a line is correctly NOT rebuilt beside itself; this row is about what
+    // the reconstruction produces for a log that no longer carries it.)
+    const shipped = await withSpaceSetAbsorbed(C.mama, () => C.mama.store._absorbedChainOps());
     assert.equal(shipped.length, 1, `the store rebuilt ${shipped.length} chain links, not one`);
     assert.deepEqual({ ...shipped[0] }, { ...rebuilt },
       'the store\'s reconstruction is not the one this row proves admissible');
@@ -575,10 +618,12 @@ describe('E12 · the admin unshare, across the owner\'s relaunch', () => {
   // ⚠ THIS ROW IS LAST ON PURPOSE: it moves the admin seat on the shared circle, and every
   //   row above it is written for a circle whose seat is still Papa's.
   test('§8 · ⛔ RESIDUAL · after a TRANSFER the reconstruction refuses to guess, and says nothing', async () => {
-    // NON-VACUITY: before the transfer, this Mac rebuilds exactly one link.
+    // NON-VACUITY: before the transfer, and with the absorption imposed the same way the last
+    // step of this row imposes it, this Mac rebuilds exactly one link. The contrast this row
+    // draws is genesis-rebuilt vs. transfer-not-rebuilt, so both arms must be measured under the
+    // same absorption or the contrast is between two different situations.
     await relaunch(C, C.mama);
-    let before = null;
-    await on(C.mama, () => { before = C.mama.store._absorbedChainOps(); });
+    const before = await withSpaceSetAbsorbed(C.mama, () => C.mama.store._absorbedChainOps());
     assert.equal(before.length, 1, 'the genesis case is not being rebuilt — §2 would be failing too');
 
     // Papa hands the seat to Mama, through the shipped mutation and the shipped seal.

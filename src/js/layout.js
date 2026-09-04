@@ -683,8 +683,25 @@ export function buildBoard(state, opts = {}) {
       if (placed >= 0) { seg.lane = placed; segs.push(seg); }
       else dropped.push(seg);
     }
+    // F11, 2026-09-04. A dropped BAR segment was counted into `laneOverflow` — and therefore into
+    // the „+n" badge's digit — and into nothing else. `hiddenNew` below counted foreign NOTES
+    // only, so a peer's brand-new shared bar that lost the lane lottery arrived with **no mark of
+    // any kind**: no dot (it is not drawn), and a badge indistinguishable from one hiding an
+    // unchanged thing. `e8-density-crowding.dom.js` §B5 closed exactly this for notes and left it
+    // open for bars; principle 10's "changes from others arrive quietly … you notice when you
+    // look" needs something to look AT.
+    //
+    // Counted per DAY, like `laneOverflow` itself, because the badge is per day: on each row the
+    // segment covers, the badge that hides it says a peer change is inside it. §7.2's two
+    // suppressions ride along for free — `decorate` sets `isNew: foreign && !!entry.isNew`, and
+    // `materialize.js#isNewOf` is already blind to a downgrade and to a deletion.
+    const laneNew = new Array(32).fill(0);
     for (const seg of dropped) {
-      for (let d = seg.startDay; d <= seg.endDay; d++) laneOverflow[d] += 1;
+      const peersNew = !!(seg.foreign && seg.isNew);
+      for (let d = seg.startDay; d <= seg.endDay; d++) {
+        laneOverflow[d] += 1;
+        if (peersNew) laneNew[d] += 1;
+      }
     }
 
     // ── day rows ─────────────────────────────────────────────────────────────
@@ -735,7 +752,7 @@ export function buildBoard(state, opts = {}) {
       // how many of the folded entries are peer changes so the badge can say
       // so; nothing is inferred from the number's size, and a day with no
       // hidden change answers 0 — the quiet state, as Principle 8 requires.
-      const hiddenNew = hidden.filter((x) => x.foreign && x.isNew).length;
+      const hiddenNew = hidden.filter((x) => x.foreign && x.isNew).length + laneNew[d];
 
       days.push({
         empty: false,

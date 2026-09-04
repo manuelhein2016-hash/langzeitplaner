@@ -323,13 +323,24 @@ test('both caps are real, and they are the numbers net.js and ADR 003 §6.1 alre
     'the response cap must be enforced as the bytes arrive, not after they are all in memory');
 });
 
-test('the shipped build names no relay: SYNC_ORIGIN_BUILTIN is empty, so solo refuses locally', () => {
-  // The same discipline as the updater's OWNER-PLACEHOLDER. There is no relay yet (ADR 003 §1
-  // names a host that does not exist), and a placeholder host baked into a shipped binary is a
-  // lie that resolves. Empty means every sync_request is refused before a socket exists.
-  assert.match(shellSource(), /let SYNC_ORIGIN_BUILTIN = ""/,
-    'a relay host has been baked into the shipping shell — say so in the release notes, and check '
-      + 'that ADR 003 §1 and the Datenschutz copy name the same host');
+test('SYNC_ORIGIN_BUILTIN is either empty or a real https origin — never a placeholder', () => {
+  // The same discipline as the updater's OWNER-PLACEHOLDER: a placeholder host baked into a
+  // shipped binary is a lie that resolves. Empty means every sync_request is refused before a
+  // socket exists, which is the correct state for the solo release.
+  //
+  // F1/F13, 2026-09-04. This row used to require the literal `""` — which actively FORBADE the
+  // correct act. The day the PO pins a real origin, `npm test` would have gone red here as if
+  // doing the work were the regression, which is F13's shape one row over. The shape is what
+  // matters, and the COUPLING (mails and both shells naming one host, together) is held properly
+  // by `tests/tier1/release-gate.test.js` §1a/§1c, which reads all six files.
+  const m = shellSource().match(/let SYNC_ORIGIN_BUILTIN = "([^"]*)"/);
+  assert.ok(m, 'SYNC_ORIGIN_BUILTIN is gone from the shell, or is no longer a string literal');
+  const origin = m[1];
+  if (origin === '') return; // solo release: refused locally, before a socket exists
+  assert.match(origin, /^https:\/\/[a-z0-9.-]+[a-z0-9]$/i,
+    `SYNC_ORIGIN_BUILTIN is "${origin}" — a pinned origin must be a bare https origin, no path, no port`);
+  assert.doesNotMatch(origin, /\.(invalid|example|test|localhost)$|PLACEHOLDER|serveradresse-fehlt/i,
+    `SYNC_ORIGIN_BUILTIN is "${origin}" — that is the unsubstituted slot, not a claimed host`);
 });
 
 test('gate 3 is the bridge command, not the navigation delegate — the ADR amendment, held', () => {

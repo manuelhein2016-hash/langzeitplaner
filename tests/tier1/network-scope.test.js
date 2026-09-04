@@ -598,10 +598,19 @@ describe('the amendment — the one exception is a human press, and it stays one
     // languages — or the amended promise is one this product does not actually make.
     const settings = shippedFiles().find((f) => f.rel === 'src/js/settings.js');
     assert.ok(settings, 'settings.js was not scanned');
-    assert.match(settings.src, /Von allein sendet dieses Programm nichts/,
-      'the German Datenschutz copy no longer says the app originates nothing by itself');
-    assert.match(settings.src, /On its own this program sends nothing/,
-      'the English Datenschutz copy no longer says it');
+    // F5(b), 2026-09-04. The two matchers that used to sit here required the sentence
+    // "the app originates nothing by itself" in both languages. `boot()` arms `startDailyTimer()`
+    // on every launch of every install, so that sentence was FALSE and this row was holding it in
+    // place — a gate defending the erosion it exists to catch. What 21.5 actually asks is that the
+    // screen ACCOUNT for every originator, so the row now demands the harder thing: the screen
+    // must name the automatic one AND state the consent it is gated on, in both languages. A
+    // future edit that deletes the update-check disclosure to make the old flat sentence true
+    // again turns this row red, which is the direction that matters.
+    assert.match(settings.src, /nur, wenn du vorher zugestimmt hast: die[\s\S]{0,80}Update-Prüfung/,
+      'the German Datenschutz copy no longer names the automatic update check as the one thing that '
+        + 'happens by itself, conditioned on prior consent');
+    assert.match(settings.src, /only if you agreed to it beforehand: the update check/,
+      'the English Datenschutz copy no longer names it');
     assert.match(settings.src, /nur, wenn du sie auslöst/, 'the German no longer states the condition');
     assert.match(settings.src, /only when you trigger it/, 'the English no longer states the condition');
     // A1: v1's wording survives as the SCOPED guarantee, so the solo paragraph must still be

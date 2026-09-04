@@ -39,15 +39,44 @@ Nothing below repeats. All of it is still open today.
 - [ ] `shell-macos/main.swift`'s `UPDATE_MANIFEST_URL` no longer says `OWNER-PLACEHOLDER`
 - [ ] **`workflow_dispatch` run completed green before any real tag** — `src-tauri/` has never been
       compiled; nobody knows whether the Rust half builds
-- [ ] ⛔ **The relay address in the four invitation files is the REAL one.**
-      `docs/v2/email/invitation.{de,en}.{txt,html}` each carry a `SERVERADRESSE` / `SERVER ADDRESS`
-      line with the literal `https://lzp-sync-po.vercel.app` on it, alone, unpunctuated. That host
-      is the project's own placeholder name and **no such app exists yet** — a `*.vercel.app`
-      project name is claimable by anyone until the PO claims it. It is a literal and not a
-      `{{…}}` placeholder because `scripts/mom-test-probe.mjs`'s `FILL` substitutes only
-      `NAME`/`RELEASE_URL`/`EINLADUNGSCODE`/`ABSENDER`, and probe row `M2` asserts the parsed
-      origin equals that exact string. Substitute it before the mail is sent; both HTML files
-      carry the `sed` in their head comment. → real origin: ...................................
+- [ ] ⛔ **THE RELAY ORIGIN — ONE ACT, FOUR MAILS AND TWO SHELLS, OR NOT AT ALL.**
+      This was two things until AUDIT F1, and the half that mattered was missing. The sheet made
+      you write a relay address into four invitation mails that **nothing reads**, and never
+      named `SYNC_ORIGIN_BUILTIN` — the string every `sync_request` is rebuilt against, byte for
+      byte, in both shells. Work that version of this sheet top to bottom and you ship a build in
+      which the address you were just made to write down is read by nothing and every family
+      request is refused locally as `no_origin_configured`, before a socket exists. The page
+      cannot route around it: `chooseTransport` returns `bridge` inside the shell and
+      `index.html:14` is `connect-src 'self'`. Both halves, in one commit:
+
+      ```bash
+      # 1 · the four mails  (docs/v2/email/invitation.{de,en}.{txt,html})
+      sed -i '' 's|https://serveradresse-fehlt\.invalid|https://NEW-HOST|g' docs/v2/email/invitation.*
+      # 2 · the pinned origin, both shells
+      #     shell-macos/main.swift   let SYNC_ORIGIN_BUILTIN = "https://NEW-HOST"
+      #     src-tauri/src/lib.rs     const SYNC_ORIGIN_BUILTIN: &str = "https://NEW-HOST";
+      ```
+
+      → real origin: ...................................  → written into all six files ☐
+
+      **This box is not the gate.** `tests/tier1/release-gate.test.js` is, and it runs inside
+      `npm test` (§B). It fails when the two halves are in different states — either half moved
+      alone, or both moved to different hosts — and `scripts/mom-test-probe.mjs` row `M2s` fails
+      while the address is still the reserved slot. A checklist item is a reminder; those rows
+      are what a release cannot pass with an unset origin.
+- [ ] ⛔ **The relay host is CLAIMED, and the placeholder is not.** Today the four mails carry
+      `https://serveradresse-fehlt.invalid`. RFC 2606 §2 reserves `.invalid` so no registry can
+      delegate it and no resolver answers it — a mail sent before the substitution therefore
+      names **nobody**. That is deliberate (AUDIT F13): the previous placeholder was
+      `https://lzp-sync-po.vercel.app`, and measured 2026-09-03 it answered **HTTP 404
+      `x-vercel-error: DEPLOYMENT_NOT_FOUND`** — a `*.vercel.app` name free for any stranger to
+      register. An invitation carries **no key material** (D9), so a stranger's relay mints no
+      epoch key and could not read one shared entry; but `deriveInvite(code)` is pure, so a
+      joiner's first request would hand that stranger, in the clear, a token that redeems the
+      invite against the **real** relay unchanged, plus her device public keys and her IP. The
+      cost is a burnt invitation, a seat in the circle taken by somebody else, and a person told
+      she joined a family that is not there — **not** a way to read the family's calendar.
+      → host claimed on: .................. → `curl -si https://<host>/api/v1/meta` → ..........
 - [ ] **Note what that address changed, and say so if anyone asks.** Before it, the e-mail alone
       was not enough to join — the reader had to learn the relay address elsewhere. Now it is.
       That is inside the accepted model (ADR 002 §8.4 and §5's residual-risk paragraph: whoever
@@ -98,10 +127,20 @@ Nothing below repeats. All of it is still open today.
 - [ ] `node .github/scripts/check-server-config.mjs` → exit 0
 - [ ] `node .github/scripts/check-email-copy.mjs` → exit 0
 - [ ] `node .github/scripts/check-dmg-geometry.mjs` → exit 0
-- [ ] `node scripts/mom-test-probe.mjs` → exit 0 *(fails today: `MOM-TEST.md` §2.3)*
+- [ ] `node scripts/mom-test-probe.mjs` → exit 0.
+      **Red today, and it is supposed to be.** Row `M2s` fails while the four invitations still
+      carry the reserved `.invalid` slot, so *green means somebody claimed a host and substituted
+      it* — the inverse of what this row used to mean, when it hardcoded and asserted the
+      placeholder and a green probe meant "nobody has done the work yet" (AUDIT F13). A
+      **solo-only** release may ship with this red: write `solo` in the box, and leave §A's two
+      ⛔ relay items unticked. A **family** release may not.  → .............
 - [ ] Suites green:
       `npm test` ......... · `npm run test:attack` ......... · `npm run test:server` ......... ·
       `npm run test:fleet` ......... · `npm run test:property` ......... · `npm run test:dom` .........
+      Inside `npm test`, **`tests/tier1/release-gate.test.js` is the row that fails on a
+      half-done relay substitution** (§A's first ⛔). It reads `SYNC_ORIGIN_BUILTIN` out of both
+      shells and the address out of all four invitation files and refuses every state except the
+      two coherent ones — everything unset, or everything set to one https origin.
 - [ ] **Zero npm dependencies at the repository root.** `package.json` declares no
       `dependencies`; the only `devDependency` is `@tauri-apps/cli`; there is no `node_modules`.
       Prisma belongs to `server/package.json` and to nowhere else.
@@ -193,10 +232,11 @@ cannot be mistaken for a finished product.
 
 | still open | where |
 |---|---|
+| **the Familienkreis syncs at all.** `SYNC_ORIGIN_BUILTIN` is `""` in both shells until §A's first ⛔ is done, so every `sync_request` is refused locally. A solo release is unaffected and complete | §A · AUDIT F1 |
 | **LZP-1006, the Mom test** — a real person, on a clean Mac, unassisted | `docs/v2/MOM-TEST.md` §0, §9 |
 | `gatekeeper_status` is implemented in neither shell, so the guided unlock screen never fires | `E1-VERIFICATION.md` §4 |
 | the DMG's Finder layout has never been seen | `E1-VERIFICATION.md` §3 |
-| the 21.3 Datenschutz section is not in the product (`Frankfurt`, `Vercel`, `Prisma` appear nowhere in `src/`) | LZP-1001 |
+| ~~the 21.3 Datenschutz section is not in the product~~ — **CLOSED, and the parenthesis was false when written** (AUDIT F12, 2026-09-04). `Frankfurt`, `Vercel` and `Prisma` are all in `src/js/settings.js`, in both languages; `E10-VERIFICATION.md:491` said the opposite in the same file. The section ships and its sentences are held to the live server enums by `tests/server/datenschutz-claims.test.js`. | LZP-1001 |
 | the epoch ladder and the poisoned rung are **priced, not closed** | `RUNBOOK.md` §5 |
 | `RateBucket` rows carrying IP addresses are never swept | `RUNBOOK.md` §7.2 |
 | D1 is reversible for 99 €/yr, 3 secrets and 4 variables, and **no code change** | `RELEASE.md` §8 |

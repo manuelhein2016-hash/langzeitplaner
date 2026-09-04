@@ -219,11 +219,18 @@ test('§3a · solo mode is stated as zero UNREQUESTED requests, with the one exc
   // PO 2026-09-03) bounds the ORIGINATOR rather than the count — and a promise amended in an ADR
   // and not in the product is the erosion with an extra step. `tests/tier1/network-scope.test.js`
   // §5b holds the code to it; this row holds the copy to it.
+  // F5(b), 2026-09-04: the third matcher used to be "the app originates nothing by itself" in
+  // both languages, and `boot()` arms `startDailyTimer()` on every launch of every install — so
+  // this row was holding a FALSE sentence on the glass. The amended promise bounds originators,
+  // and there are two: a human press, and an automatic update check the user consented to. The
+  // row now requires BOTH to be named, which is the harder property and the true one.
   bothLanguages((lang, body) => {
     const text = rendered(body);
     const must = lang === 'de'
-      ? [/verlässt kein Eintrag diesen Mac/, /nur, wenn du sie auslöst/, /Von allein sendet dieses Programm nichts/]
-      : [/no entry leaves this Mac/, /only when you trigger it/, /On its own this program sends nothing/];
+      ? [/verlässt kein Eintrag diesen Mac/, /nur, wenn du sie auslöst/,
+        /nur, wenn du vorher zugestimmt hast/, /Update-Prüfung/]
+      : [/no entry leaves this Mac/, /only when you trigger it/,
+        /only if you agreed to it beforehand/, /update check/];
     for (const re of must) assert.match(text, re, `${lang}: the solo paragraph is missing ${re}`);
     // And it must not have re-acquired the un-amended absolute, which is now false.
     assert.equal(/keine einzige Netzwerkanfrage|zero network requests/i.test(text), false,

@@ -158,6 +158,12 @@ test('§0 the origin the shell was configured with is classified by the rule the
     'https://relay.example.org/api': 'origin_is_not_scheme_host_port',
     'https://user:pw@relay.example.org': 'origin_is_not_scheme_host_port',
     'file:///etc/passwd': 'origin_is_not_scheme_host_port',
+    // F13, 2026-09-04 — the invitation placeholder. `https://serveradresse-fehlt.invalid` is the
+    // slot the four invitation mails carry until the PO substitutes a claimed host. `.invalid` is
+    // RFC 2606 §2: undelegatable, so unlike `lzp-sync-po.vercel.app` nobody can register it and a
+    // half-substituted release cannot quietly resolve. The shell refuses it BY NAME, after the
+    // local rule so `localhost` keeps its own refusal — the 17th name in the vocabulary.
+    'https://serveradresse-fehlt.invalid': 'origin_host_is_a_reserved_name_that_cannot_resolve',
     'https://relay.example.org': null,
   };
   const s = await invoke('sync_status');

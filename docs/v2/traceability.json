@@ -568,13 +568,16 @@
    "feature": "F21",
    "source": "v2",
    "priority": "Must",
-   "text": "Network scope, replacing 13.4: in solo mode the app makes zero network requests; with a Familienkreis it talks to exactly one sync endpoint and nothing else. The v1 property survives as a scoped guarantee.",
+   "text": "Network scope, replacing 13.4: in solo mode the app originates no network request except ones the user has consented to or triggered \u2014 the disclosed update check (22.3, off until disclosed) and the feedback report under \u201aHilfe\u2018 (a human press); with a Familienkreis it talks to exactly one sync endpoint and nothing else, plus the release host for the update check. The v1 property survives as a scoped guarantee.",
    "tickets": [
     "LZP-1002",
     "LZP-1001"
    ],
-   "amendedBy": [],
-   "note": "Successor property to v1's 13.4 (A1)."
+   "amendedBy": [
+    "A1",
+    "D10"
+   ],
+   "note": "Successor property to v1's 13.4 (A1). AMENDED BY D10 / ADR 003 \u00a77.5 (PO, 2026-09-03): the property bounds the ORIGINATOR, not the count, because LZP-1009's feedback button is a request a solo copy can make. RE-STATED 2026-09-04 (AUDIT F5b / F12): the pre-D10 text lived here with an EMPTY amendedBy, so D10's own warning \u2014 that an amendment to a measured property must not be findable only as a diff \u2014 was defeated for anyone reading the machine-readable record. The old text also UNDER-STATED the amendment: main.js:110-111 arms startDailyTimer() on every launch of every install, so the second originator is an automatic timer and not only a human press. OPEN FOR THE PO (AUDIT D-E / D-F): setFeedbackPort is called only from family/mount.js#bindFeedback, behind main.js's one dynamic import and its !hasPersonal && !hasCircle gate, so a solo Mac CANNOT take the exception this amendment was justified by. Either the gate is wrong or the amendment bought nothing. See docs/v2/AUDIT.md, the D10 block."
   },
   {
    "id": "22.1",
@@ -3085,7 +3088,8 @@
     "tier1Rows": 515,
     "tier2Rows": 111,
     "red": 0,
-    "filesChanged": 0,
+    "filesChanged": 4,
+    "filesChangedNote": "CORRECTED 2026-09-04 (AUDIT F12; the audit said 3, measured again here it is 4). git diff 328c683..HEAD over the 11 oracle files: tier1/storage.test.js (+83, additive), tier1/suite-integrity.test.js (+89, additive), tier1/store-persistence.test.js (+24/-3) and tier2/dom-rendering.dom.js (+26/-3). The last two are the ones that matter, because they are not purely additive. store-persistence.test.js NARROWS an assertion to accept a CHANGED v1 behaviour: run the ORIGINAL file at HEAD and it is red on exactly that row (not ok 5 - mutate() (5.4)), which is measured on every audit run by tests/audit/v1orig-store-persistence.test.js and is red at 2d092a6 too. The change is defensible; absorbing it by editing the oracle rather than recording a v1 deviation is not, and that is what this field said 0 about. THE ORACLE ITSELF DID NOT MOVE: the original files, run unmodified per file at 2d092a6 and at 2026-09-04's tree, give an identical 436/437 tier-1 and 111/111 tier-2.",
     "files": {
      "tier1/dates-holidays.test.js": 103,
      "tier1/layout.test.js": 108,

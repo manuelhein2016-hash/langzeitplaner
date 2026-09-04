@@ -31,6 +31,7 @@ import {
   assertDocumented, documents, b64u, opId,
 } from './_attack-relay-kit.js';
 import { rateKey } from '../../server/core/limits.js';
+import { ROUTE_NAMES } from '../../server/core/router.js';
 
 const SPACE = 'fsp_INFERaaaaaaaaaaaaaaaaX';
 
@@ -487,15 +488,24 @@ test('SUCCEEDED (now DOCUMENTED — 21.3 §7.4) — `route` turns the log into a
   // NOT in it ("No IP, no path, no body, no ciphertext"). It never says what the fields that ARE
   // in it mean together: `(route, spaceId, deviceShort)` at a timestamp is "this machine renamed
   // the circle / invited somebody / removed somebody / handed over the admin role", by name, and
-  // `LOG_ROUTES` is a closed enum of exactly those 23 verbs. `renameSpace` is the sharpest case
-  // — the handler stores nothing and is documented as storing nothing, and the log still records
+  // `LOG_ROUTES` is a closed enum of exactly those verbs. `renameSpace` is the sharpest case —
+  // the handler stores nothing and is documented as storing nothing, and the log still records
   // that the family renamed its circle on 25 July.
   // INVERTED — §7's fourth inference now says what the seven allowlisted fields mean TOGETHER,
   // and §8's bullet points at it so a reader of the log paragraph cannot miss it.
+  //
+  // ⚠ THE COUNT IS DERIVED, NOT TYPED, since 2026-09-04. This row required the literal phrase
+  // "enum of 23 verbs" while `ROUTE_NAMES.length` had been 24 since `feedback` shipped — so the
+  // gate was pinning a WRONG number into `server-metadata.md` and going red the moment somebody
+  // corrected it. That is AUDIT F12's shape exactly: the record is what a ship decision leans on,
+  // and a gate that defends a stale record is worse than no gate. The phrase is now built from
+  // the live enum, so the document and the server cannot disagree in either direction.
+  // (`tests/server/datenschutz-claims.test.js` §1 holds the same number on the Datenschutz
+  // SCREEN, and makes a change to it a deliberate three-file act.)
   assertDocumented(assert, 'the application log route as a named per-member event feed', [
     'the log line',
     'names the event',
-    'enum of 23 verbs',
+    `enum of ${ROUTE_NAMES.length} verbs`,
   ]);
 });
 

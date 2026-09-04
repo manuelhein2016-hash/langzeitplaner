@@ -1,15 +1,53 @@
 # LangzeitPlaner v2 — the final integration record
 
-**Date:** 2026-09-03 · **Tree:** `v1-characterization-suite`. Two passes are recorded here: the
-four-way integration onto `6268cbe` (§3 onward, kept as written), and **the closing pass onto
-`78016e8`**, which is §0, §1, §2 and the re-issued §8.
+**Date:** 2026-09-04 · **Tree:** `v1-characterization-suite`. Three passes are recorded here: the
+four-way integration onto `6268cbe` (§3 onward, kept as written), the closing pass onto `78016e8`
+(§0, §1, §2 and the re-issued §8), and **the audit fix cycle onto `2d092a6`**, which is §-1 below
+and the re-issued §8. The audit itself, with every finding marked and its evidence, is
+`docs/v2/AUDIT.md`.
 
 This file answers the question the whole product is for:
 
 > **Can a stranger get from an e-mail to a shared family board — and does nobody lose anything on
 > the way?**
 
-**Yes, and nobody does.** The refusal ledger, which had never once been flat, is **0**.
+**Yes, and nobody does.** The refusal ledger, which had never once been flat, is **0** — and it
+stays 0 across a quit-and-open, which is the thing this project could not previously say.
+
+---
+
+## −1. The audit fix cycle (2026-09-04), in five lines
+
+An independent five-pass audit at `2d092a6` said: *"Ship the solo product. Do not ship the
+Familienkreis yet."* Its central result was that **a quit-and-open turns ops into registers, and
+four things a fold reads from ops are never rebuilt** — invisible to 5,612 green rows because
+every rig that co-edited never rebooted and the rig that rebooted never co-edited.
+
+1. **The compaction class is closed** by one general statement (ADR 006's two clauses): a question
+   about the PRESENT is answered from the registers by a two-row table, a question about HISTORY is
+   kept out of compaction. All seven red-on-arrival rows in `tests/audit/compaction-sweep.test.js`
+   turned green. **Content is not an admissibility input** — the redaction boundary is asked a
+   ninth time, of the new producer specifically, in `tests/attack/e13-absorbed-boundary.test.js`.
+2. **The coverage hole is closed and self-maintaining.** `e9-attack-coedit` went from 17 co-edit
+   references and **0** relaunches to 32 and **10**; the acceptance driver grew 27 → **35 launches**
+   with six co-edit / removal / exposure / „neu" phases; and `e13-relaunch-sweep.test.js` §4a
+   re-measures the census on every run and fails if any family gesture is driven by a rig that
+   never reboots.
+3. **The release gate now fails on an unset origin**, in both directions, demonstrated in four tree
+   states — and the row that *forbade* the correct act is gone. The invitation placeholder is
+   `https://serveradresse-fehlt.invalid`: RFC 2606 §2, undelegatable, unregistrable by anyone.
+4. **The Datenschutz screen is true.** Four false sentences replaced, five disclosures added, both
+   languages, held to the live server enums by `tests/server/datenschutz-claims.test.js`.
+5. **Five acceptance runs of five, 35 launches each, 0 phases failed, ledger 0, battery 8 of 8** —
+   co-editing works on the second launch and the fifth, the badge reads `geteilt` after a relaunch,
+   and the „neu" dot lights on a real board for the first time.
+
+⚠ **One re-pricing.** The audit predicted a real relaunch would lose *more* than the rig. It loses
+**less**: on the shipped `.app` the fold never reaches the absorbed state, because the app re-pulls
+from the relay and the lines come back as lines. The fleet rig — which quits and reopens with **no
+relay in between** — is the stricter environment. So the compaction findings were real for a Mac
+that quits and opens offline or against a pruned relay, and were never reachable in the acceptance
+topology. **17.5's „neu" dot is the exception**: it was wrong with and without a relaunch.
 
 ---
 
@@ -396,6 +434,40 @@ closing pass: R-1 through R-5, R-7's readiness half, R-8, R-9 and R-10 are close
 paragraphs that carried them are replaced by what is actually left. Nothing here is a plan; every
 line is a measurement or a decision.
 
+### R-1b · ✅ CLOSED BY RETENTION (2026-09-04) — with one narrowed residual
+
+**The repair landed and it is the one this paragraph asked for.** `store.js#_persistOps` step ①
+now keeps `space.set` chain links out of compaction — they are written to `ops.jsonl` even when the
+coming checkpoint folds them, and step ④ re-appends them after the truncate. Bound: **one line per
+transfer plus genesis**, because `family/adminpanel.js#transferAdmin` is a deliberate, rare, human
+act, so `ops.jsonl` does not grow with the log, with time, or with a peer. Measured on the shipped
+binary: every family Mac's `ops.jsonl` retains exactly **one** `space.set` line after a full
+acceptance run; a solo Mac writes no such line and no checkpoint at all.
+
+`tests/fleet/e12-unshare.test.js` §8's refusal is intact and byte-for-byte unchanged — the
+reconstruction still declines to guess a transfer — and §3, §4 and §8 now impose the absorption
+(`withSpaceSetAbsorbed`) rather than waiting for a persist to produce it, because retention means
+it no longer does. That is the repair working, not a weakening: the rows' *precondition* evaporated,
+not their claim. `tests/tier2/unshare-owner.dom.js` §3 and §4 carry the same idiom.
+
+**THE NARROWED RESIDUAL — what retention cannot do.** Retention prevents the loss; it cannot repair
+one. Two situations still reach the old state:
+
+1. **A log already compacted by an older build** keeps R-1b for a transferred seat. (F2, F3 and F4
+   *are* repaired retroactively, because those are reconstructions from registers the checkpoint
+   kept.)
+2. **`oplog.js#compact()` at `TAIL_COMPACT_AT` (5 000 lines)** drops the retained link from the log,
+   and `bodiesObject()` then lists its fingerprint, so `load()` would answer a re-appended copy
+   `duplicate`. A circle that reaches 5 000 tail lines loses a *transferred* seat again.
+   `_retainedTailLines` reads `_log.lines()` precisely so it never writes bytes that cannot come
+   back. **Owner: `src/js/core/oplog.js`.**
+
+Also: step ④ truncates then re-appends. A crash between the two lands on the *old* behaviour
+(genesis rebuilt, transfer lost) and can lose no content, because step ③ has already folded them.
+`storage` offers append and truncate and no rewrite.
+
+<details><summary>The paragraph this replaces, as it was written on 2026-09-03</summary>
+
 ### R-1b · A TRANSFERRED admin seat is still not rebuilt after compaction ⚠ OPEN
 `store.js#_absorbedChainOps` closed R-1 for a circle whose admin seat has never moved: it rebuilds
 ONE **genesis-shaped** `space.set{admin, adminPrev:null}` link (`cell.author === cell.value`, ADR
@@ -414,6 +486,8 @@ the rootless assertion `core/ops.js#transferAdmin` refuses to mint. `tests/fleet
 stays **silent**, so the wrong repair cannot land quietly. **The right one:** keep `space.set`
 chain links (and `member.set{dev.*}`) out of compaction in `store.js#_persistOps` — bounded at one
 op per transfer and per (member, device). **Owner: `src/js/store.js#_persistOps`.**
+
+</details>
 
 ### R-6 · §A4 and §E3 — the two reds that are not code defects
 - **§A4** — the 9 px ink floor. A **PO ruling**: it may not be closed by editing `palette.js`,
@@ -436,11 +510,29 @@ between two hit sets. Measured hand-off: neutralising the three rules find write
 from 14.8 to **8.6 ms**, while removing any one of them buys ~0.4 ms. That is a change to what
 find looks like, in a file the tier-1 oracle pins. **A PO call, not a code fix.**
 
-### R-7b · The join path has still never crossed the real bridge
+### R-7b · ✅ RETRACTED (AUDIT F12, 2026-09-04) — the join HAS crossed the real bridge
+**This residual was false when it was written, and the evidence was already in the tree.**
+`tests/tier2/shell-family-e2e.dom.js:303` drives the real join screen and asserts that
+`POST /api/v1/invites/redeem` crossed `sync_request` with `WIRE.fetch` empty — i.e. over the shell
+bridge, not over `fetch`. It passed three times in the auditor's own reproduction of the acceptance
+run and five times in the fix cycle's (§-1). The four paste defects remain closed and pinned by 42
+rows, and the Mom-test probe's one FAIL is `M2s`, which is red **by design** until the PO claims a
+relay host.
+
+What is still true, and is a different sentence: **no join has crossed the bridge to a REMOTE
+host.** Every run so far is against `server/dev-server.mjs` on loopback — a real out-of-process
+relay running the same `server/core/router.js`, but not TLS and not Frankfurt. See R-8b, and the
+audit's §5 item 3: the https-only rule is proven by 28 refusals and never by one successful https
+request.
+
+<details><summary>The paragraph this replaces, as it was written on 2026-09-03</summary>
+
 Unchanged and still true. The four paste defects are closed and pinned by 42 rows, the Mom-test
 probe is green, and the e-mail now carries a relay address — but **no join has ever run over the
 `sync_request` bridge**: the tier-2 relay verifies `SHA-256(proof) === verifier` over real
 WebCrypto and is in-process. `SHELL-VERIFICATION.md` §10's conditional-story list is unchanged.
+
+</details>
 
 ### R-8b · The adapter has met a local cluster, not Frankfurt's pooler ⚠ THE ONE THAT MATTERS
 `server/adapters/prisma.js` now runs against a real PostgreSQL 17.10 — **66 of 66 contract cases,
@@ -537,7 +629,7 @@ including all of this pass's. Not reachable from anything edited here.
 | LZP-1006 | E10 | 3 | "Mom test" beta | 22.1 22.2 15.3 | built |
 | LZP-1007 | E10 | 3 | Perf pass | 17.4 | built |
 | LZP-1008 | E10 | 2 | Ops runbook | — | built |
-| LZP-1009 | E10 | — | Feedback button | 21.3 21.4 21.5 | **NOT BUILT** |
+| LZP-1009 | E10 | 2 | Feedback button | 21.3 21.4 21.5 | **built** (AUDIT F12, corrected 2026-09-04: `server/core/handlers/feedback.js`, `family/mount.js#bindFeedback`, `feedback` is the 24th name in `ROUTE_NAMES`; §-1 and §1 of this file already described it as shipped) |
 | LZP-201 | E2 | 3 | Schema & DB setup | — | built |
 | LZP-202 | E2 | 5 | Op endpoints | 19.1 19.2 21.1 | built |
 | LZP-203 | E2 | 5 | Space & invite endpoints | 15.2 15.3 15.4 15.5 15.6 | built |

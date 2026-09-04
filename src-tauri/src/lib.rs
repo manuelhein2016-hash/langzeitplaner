@@ -693,6 +693,24 @@ fn clear_staged_marker_if_applied(app: &AppHandle) {
 /// PLACEHOLDER, checked at runtime rather than hoped about. ADR 003 §1 names
 /// `https://<vercel-app>.vercel.app` and no such app exists. Empty means every `sync_request` is
 /// refused locally, which is the correct behaviour for a build with nowhere to sync to.
+///
+/// ██ AUDIT F1 · SUBSTITUTING THIS IS HALF AN ACT, AND HALF IS WORSE THAN NONE ██
+///
+/// The finding was never that this constant is empty — empty is correct for a build with nowhere
+/// to sync to. It was that **no release gate named it**, while the checklist *did* force the
+/// releaser to substitute a relay address into four invitation mails that nothing reads. So the
+/// two substitutions are now one act, held by one row:
+///
+///   1. this constant, and `SYNC_ORIGIN_BUILTIN` in `shell-macos/main.swift` — byte for byte;
+///   2. the `SERVERADRESSE` / `SERVER ADDRESS` line in all four
+///      `docs/v2/email/invitation.{de,en}.{txt,html}` files.
+///
+/// `tests/tier1/release-gate.test.js` §1c fails when those halves are in different states. It
+/// runs inside `npm test`, which `docs/v2/RELEASE-CHECKLIST.md` §B requires green before a tag.
+///
+/// While this is `""` the invitations carry `https://serveradresse-fehlt.invalid`; RFC 2606 §2
+/// reserves `.invalid` so no registry can delegate it. `is_reserved_sync_host` below refuses it
+/// here too, so pasting the placeholder in by mistake is a named local refusal.
 const SYNC_ORIGIN_BUILTIN: &str = "";
 
 const SYNC_PREFS_FILE: &str = "sync.json";
@@ -727,6 +745,7 @@ mod sync_refusal {
     pub const NO_ORIGIN: &str = "no_origin_configured";
     pub const ORIGIN_NOT_HTTPS: &str = "origin_is_not_https";
     pub const ORIGIN_IS_LOCAL: &str = "origin_host_is_local_private_or_an_ip_literal";
+    pub const ORIGIN_IS_RESERVED: &str = "origin_host_is_a_reserved_name_that_cannot_resolve";
     pub const ORIGIN_SHAPE: &str = "origin_is_not_scheme_host_port";
     pub const URL_UNPARSABLE: &str = "url_did_not_parse";
     pub const URL_OFF_ORIGIN: &str = "url_is_not_the_pinned_origin";
@@ -822,6 +841,19 @@ fn is_private_or_local_sync_host(host: &str) -> bool {
     !h.contains('.') || h.ends_with('.')
 }
 
+/// Is this host a name the DNS root will never delegate? The Rust half of the Swift shell's
+/// `isReservedSyncHost`, rule for rule.
+///
+/// RFC 2606 §2 reserves `.invalid` so no registry can sell it and no resolver will answer it —
+/// which is what a placeholder has to be (AUDIT F13: a *claimable* `*.vercel.app` placeholder in
+/// a shipped invitation lets whoever registers it collect a redeemable invite token in the
+/// clear). Deliberately narrow: `.invalid` only, because `https://relay.example.org` is the
+/// origin the tier-2 SSRF table drives a SUCCESSFUL request against.
+fn is_reserved_sync_host(host: &str) -> bool {
+    let h = host.trim_matches(|c| c == '[' || c == ']').to_ascii_lowercase();
+    h == "invalid" || h.ends_with(".invalid")
+}
+
 /// Normalise the CONFIGURED origin to `scheme://host[:port]`, or say which rule refused it.
 fn normalize_sync_origin(raw: &str) -> Result<String, &'static str> {
     let trimmed = raw.trim();
@@ -844,6 +876,10 @@ fn normalize_sync_origin(raw: &str) -> Result<String, &'static str> {
     let host = u.host_str().ok_or(sync_refusal::ORIGIN_SHAPE)?.to_ascii_lowercase();
     if is_private_or_local_sync_host(&host) {
         return Err(sync_refusal::ORIGIN_IS_LOCAL);
+    }
+    // AFTER the local check, so `localhost` keeps the name the SSRF table already gives it.
+    if is_reserved_sync_host(&host) {
+        return Err(sync_refusal::ORIGIN_IS_RESERVED);
     }
     Ok(match u.port() {
         Some(p) => format!("{}://{}:{}", u.scheme(), host, p),

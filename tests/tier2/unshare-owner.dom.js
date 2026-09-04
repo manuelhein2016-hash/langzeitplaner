@@ -206,22 +206,46 @@ const pubOf = (key) => {
 };
 const noteOf = (uuid) => store.state.notes.find((n) => n && n.id === uuid) || null;
 
+/**
+ * IMPOSE THE ABSORPTION FOR THE LENGTH OF ONE CALL — `_log.ops()` answers without the `space.set`
+ * lines, which is precisely and only what a checkpoint that has absorbed them returns.
+ *
+ * 2026-09-04, R-1b's repair. §3 and §4 used to get this state for free: `_persistOps` step ①
+ * skipped every line at or below the horizon, so a reboot simply left the genesis link out of
+ * `ops.jsonl`. The repair RETAINS the admin-chain lines across the horizon — retention prevents
+ * the loss it cannot repair — so after a reboot the link is a LINE again and `_absorbedChainOps`
+ * correctly rebuilds NOTHING beside it (rebuilding a link that is still a line is the
+ * envelope-splice defect, ADR 002 §5.1).
+ *
+ * That is the repair working, and it is also why these two rows stopped being tested: their
+ * PRECONDITION evaporated, not their claim. The reconstruction is the SECOND defence, for a log
+ * an OLDER build already compacted and for `oplog.js#compact()` at `TAIL_COMPACT_AT` — the two
+ * named residuals in `_absorbedChainOps`'s own docblock. Nothing else is shaped: the registers,
+ * the checkpoint and the reconstruction are the ones the real reboot produced.
+ */
+function withSpaceSetAbsorbed(fn) {
+  const log = store._log;
+  const realOps = log.ops.bind(log);
+  log.ops = (opts) => realOps(opts).filter((o) => o.k !== 'space.set');
+  try { return fn(); } finally { log.ops = realOps; }
+}
+
 /** `store.applyRemote`'s own fold input on this Mac — see `store.js#applyRemote`, minus the arriving batch. */
-const foldInput = () => [
+const foldInput = () => withSpaceSetAbsorbed(() => [
   ...store._absorbedAttestOps(),
   ...store._absorbedChainOps(),
   ...store._log.ops({ includeParked: true }),
-];
+]);
 
 /**
  * The fold input as it stood BEFORE `store.js#_absorbedChainOps` landed. §4 needs it to keep both
  * arms of its contrast: with the repair in `src/` the ordinary input already carries the link, and
  * comparing a set against itself proves nothing.
  */
-const foldInputWithoutChain = () => [
+const foldInputWithoutChain = () => withSpaceSetAbsorbed(() => [
   ...store._absorbedAttestOps(),
   ...store._log.ops({ includeParked: true }),
-];
+]);
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // §1 · NON-VACUITY — with no reboot, 18.3 holds in this engine
@@ -277,11 +301,15 @@ test('§2 · CLOSED · after a reboot the same retraction still lands, and her e
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 test('§3 · CLOSED · the reboot still empties the LOG, and the reconstruction refills the FOLD', () => {
-  // NON-VACUITY FIRST: the absorption is unchanged and still total. If a `space.set` line ever
-  // survives compaction, this row would go green for the other reason and test nothing.
-  assert.deepEqual(store._log.ops({ includeParked: true }).filter((o) => o.k === 'space.set'), [],
-    'a `space.set` line survived the reboot — the absorption this row is about did not happen, '
-    + 'so the reconstruction below is not being tested');
+  // NON-VACUITY FIRST, in the direction that now matters. R-1b's repair RETAINS the chain line
+  // across the horizon, so after a reboot it is a line again — the FIRST defence, asserted here
+  // so an edit that drops the retention is caught by this row and not only by the fleet's E13
+  // §0b. The reconstruction is the SECOND defence, for a log an older build already compacted,
+  // and it is what the rest of this row is about; `foldInput()` therefore imposes the absorption
+  // rather than waiting for it (see `withSpaceSetAbsorbed`).
+  assert.equal(store._log.ops({ includeParked: true }).filter((o) => o.k === 'space.set').length, 1,
+    'the reboot did not keep the admin-chain line — R-1b\'s retention is the first defence and it '
+    + 'is gone, so a Mac with no reconstruction path loses the seat again');
 
   const ops = foldInput();
   // The attestation half of the same defect IS repaired, and `_absorbedAttestOps` is why. Without
@@ -356,7 +384,10 @@ test('§4 · handing the fold ONE reconstructed `space.set` link admits the very
   // AND THE SHIPPED RECONSTRUCTION IS THIS ONE, FIELD FOR FIELD. This row builds the link by hand
   // to prove the mechanism; `store.js#_absorbedChainOps` now builds it in `src/`, and the two must
   // be the same op or the proof is about something the product does not do.
-  const shipped = store._absorbedChainOps();
+  // The absorption is imposed — see `withSpaceSetAbsorbed`. R-1b's repair keeps the line, and a
+  // link that is still a line is correctly NOT rebuilt beside itself; this row is about what
+  // the reconstruction produces for a log that no longer carries it.
+  const shipped = withSpaceSetAbsorbed(() => store._absorbedChainOps());
   assert.equal(shipped.length, 1, `the store rebuilt ${shipped.length} chain links, not one`);
   assert.deepEqual({ ...shipped[0] }, { ...rebuilt },
     'the store\'s reconstruction is not the one this row proves admissible');

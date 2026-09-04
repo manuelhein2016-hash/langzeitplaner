@@ -71,8 +71,13 @@
 //                                                            → §18.1 and §18.2 go RED
 //   M-B5  `store.js:undo()` — one ⌘Z pops TWO steps          → §18.4 and §18.6 go RED
 //   M-B6  `core/materialize.js:isNewOf` — returns `true` when no hook is supplied
-//                                                            → §17.5 goes RED (it is the
-//                                                              inversion this OPEN row expects)
+//                                                            → §17.5 was OPEN then and this was
+//                                                              its expected inversion. §17.5 is
+//                                                              CLOSED since 2026-09-04 (F6); the
+//                                                              mutant that bites it now is
+//                                                              `store.js#_exposureCtx` losing its
+//                                                              `seqOf` producer — measured in
+//                                                              `e13-relaunch-sweep.test.js` §4.
 //
 // ⚠ §18.4's ISOLATION HALF HAS NO SURVIVING-CODE MUTANT, AND THAT IS WORTH SAYING. Two mutants
 // were run against it and BOTH LEFT THE ROW GREEN:
@@ -283,32 +288,37 @@ describe('F17 · others\' entries arrive quietly and render as people', () => {
   });
 
   // 17.5 ────────────────────────────────────────────────────────────────────
-  // ⚠ OPEN FINDING · E10-1 · THIS ROW IS GREEN BECAUSE THE STORY IS NOT WIRED.
+  // ✅ CLOSED · E10-1, INVERTED 2026-09-04 · F6.
   //
-  // `core/materialize.js:isNewOf` implements 17.5's rule exactly as ADR 004 §7.2 states it, and
-  // `tests/tier1/core-materialize.test.js` proves the rule against injected hooks. But the rule
-  // needs `ctx.seqOf` / `ctx.isNew` / `ctx.lastSeenSeq` / `ctx.levelDecreased`, and
-  // `store.js:_project` supplies NONE of them — it passes `me`, `familySpaceId`, `_memberCtx`,
-  // `_exposureCtx` and `defaultSettings`, and nothing else. So on every real Mac, for every
-  // peer's brand-new entry, `isNew` is `false` and the quiet „neu" dot never lights.
+  // This row used to be green BECAUSE the story was not wired, and its own comment said so and
+  // asked to be inverted rather than repaired. It is now inverted, on that instruction.
   //
-  // `settings.lastSeenSeq.<spaceId>` exists as a pref (it is in `materialize.js`'s PREF list and
-  // `core/replace.js` preserves it across an import), and `store.noteCursor` moves a cursor — so
-  // the two halves exist and are not joined. The owner of `store.js` is a parallel workflow.
+  // What was missing was never the RULE: `core/materialize.js:isNewOf` implements ADR 004 §7.2
+  // exactly, and `tests/tier1/core-materialize.test.js` proved it against injected hooks. What
+  // was missing was the PRODUCER — `store.js:_project` passed `me`, `familySpaceId`,
+  // `_memberCtx`, `_exposureCtx` and `defaultSettings`, and none of `seqOf`, `isNew`,
+  // `lastSeenSeq`, `levelDecreased`. `store.js#_exposureCtx` now supplies `seqOf` and
+  // `levelDecreased`, `store.js#_lastSeenSeqCtx` supplies the baseline, and
+  // `main.js#armFamilySeen` calls `store.markFamilySeen()` on the first deliberate look, which
+  // is §7.2's "the dot fades once seen".
   //
-  // IF THIS ROW GOES RED THE STORY WAS PROBABLY WIRED: invert it, do not repair it.
-  test('§17.5 · OPEN — the „neu" dot never lights, because `_project` supplies no seq hook', async () => {
+  // The two arms below are kept exactly as they were and now read as controls: the rule still
+  // answers the same way under injected hooks, so a regression in the PRODUCER is distinguishable
+  // from a regression in the RULE.
+  test('§17.5 · CLOSED — a peer\'s brand-new entry carries the „neu" dot on a real Mac', async () => {
     const fresh = await makeNote(C, C.mama, { text: 'Ganz neu', date: '2026-12-24' });
     await converge(C, [C.papa]);
 
     await on(C.papa, () => {
       const e = seen(C.papa, fresh.fk);
       assert.ok(e, 'the entry arrived');
-      assert.equal(e.isNew, false,
-        'E10-1 — a peer\'s brand-new entry does not carry the dot on a real Mac');
+      assert.equal(e.isNew, true,
+        'E10-1 — a peer\'s brand-new entry does not carry the dot on a real Mac; `_project` has '
+        + 'stopped supplying the seq hook and 17.5 is unwired again');
 
-      // The rule itself is fine. Given the hook the store does not pass, it answers correctly —
-      // which is what makes this a WIRING defect and not a logic one.
+      // CONTROL, unchanged: given the hooks injected by hand the rule answers the same way. If
+      // this arm ever disagrees with the arm above, the defect is in `materialize.js`, not in the
+      // wiring.
       const regs = C.papa.store.registers();
       const withHook = materialize(regs, {
         me: C.papa.forStore.memberId,
@@ -318,7 +328,7 @@ describe('F17 · others\' entries arrive quietly and render as people', () => {
         defaultSettings: C.papa.store.state.settings,
       });
       assert.equal(withHook.notes.find((n) => n.entityKey === fresh.fk).isNew, true,
-        'materialize.js implements 17.5; store.js does not call it');
+        'materialize.js no longer implements 17.5 — the RULE regressed, not the wiring');
 
       // And the suppression clauses hold, so wiring it will not make a downgrade blink.
       const suppressed = materialize(regs, {

@@ -139,6 +139,11 @@ export const currentModel = () => model;
 // The scratchpad is the third: its `<textarea>` carries uncommitted typing in a
 // PROPERTY, which no attribute comparison would see, so `patchPad` reconciles
 // `value` and the `empty` class on every render rather than trusting the sig.
+// It has ONE deliberate exception, and it is a principle rather than a tuning:
+// KEYSTROKES THE MODEL HAS NOT BEEN TOLD ABOUT ARE HERS (P3). `patchPad` does not
+// write over them and the full path carries them across the rebuild. It is
+// narrow on purpose — see `unsent`: a box she is merely sitting in, having typed
+// nothing since it and the model last agreed, still takes the model's value.
 // ═════════════════════════════════════════════════════════════════════════════
 
 /** Field separator inside a signature — a byte no board string can contain. */
@@ -303,6 +308,11 @@ export function renderBoard(root) {
 
   // ── the full path, which is also the first one ─────────────────────────────
   const scrollLeft = root.parentElement ? root.parentElement.scrollLeft : 0;
+  // P3, the other path. `patchPad` leaves unsent typing alone; this one is about
+  // to DELETE the box it is in, so the sentence and the caret are carried over
+  // and put back. The rebuild a person can actually reach while typing is a
+  // language switch (13.7), which bumps `copyEpoch` and lands here.
+  const ink = liveInk(root);
   root.textContent = '';
   const frag = document.createDocumentFragment();
   const recs = [];
@@ -314,9 +324,55 @@ export function renderBoard(root) {
   root.appendChild(frag);
   cache = { root, epoch, cols: recs };
 
+  restoreInk(root, ink);
   if (root.parentElement) root.parentElement.scrollLeft = scrollLeft;
   return model;
 }
+
+/**
+ * The UNSENT typing the caret is in, if there is any: its month, the text, and
+ * where in it she is. Read BEFORE the root is emptied.
+ *
+ * It answers `null` unless `unsent()` is true of that box in the cache this render
+ * is about to replace — the same question `patchPad` asks, so the two paths keep
+ * the same thing and drop the same thing. With no cache to ask (the first render of
+ * a process, or a test that dropped it) there is nothing to preserve and nothing is
+ * claimed: the model wins, which is what v1 did on every render.
+ */
+function liveInk(root) {
+  const a = root.ownerDocument.activeElement;
+  if (!a || a.tagName !== 'TEXTAREA' || !root.contains(a)) return null;
+  if (!a.parentElement || !a.parentElement.classList.contains('pad')) return null;
+  if (!cache || cache.root !== root) return null;
+  const rec = cache.cols.find((c) => c.padTa === a);
+  if (!rec || !unsent(rec)) return null;
+  return { month: a.dataset.month, value: a.value, start: a.selectionStart, end: a.selectionEnd };
+}
+
+/**
+ * Put it back on the rebuilt board — same month, same text, same caret.
+ *
+ * `preventScroll` because focusing scrolls the box into view, and the scroll
+ * position this render restores one line later is the one the user left.
+ *
+ * The month can be off the board by now — the window rolled past it while she was
+ * typing in it (8.2's midnight, or a settings change). There is then nothing to
+ * restore to, nothing is focused, and the sentence goes with the box. That is
+ * v1's outcome for every render and it is not made worse here; it is stated
+ * rather than hidden, because it is the one case this function cannot answer.
+ */
+function restoreInk(root, ink) {
+  if (!ink || !ink.month) return;
+  const ta = root.querySelector(`.pad > textarea[data-month="${cssQuote(ink.month)}"]`);
+  if (!ta) return;
+  if (ta.value !== ink.value) ta.value = ink.value;
+  padEmptyClass(ta.parentElement, ink.value);
+  ta.focus({ preventScroll: true });
+  try { ta.setSelectionRange(ink.start, ink.end); } catch { /* not a text range; the value is what matters */ }
+}
+
+/** `CSS.escape` is not in every engine this file has to run in; a month key is `YYYY-MM`. */
+const cssQuote = (s) => String(s).replace(/["\\]/g, '\\$&');
 
 const setVar = (name, value) => {
   if (document.documentElement.style.getPropertyValue(name) !== value) {
@@ -563,6 +619,8 @@ function renderColumn(col) {
   return {
     el: c, head, rows, days, tail, horizon,
     pad: pad.el, padTa: pad.ta,
+    // `renderPad` built the box FROM the model, so this is where they agree. See `unsent`.
+    padShown: col.pad,
     sHead: headSig(col), sPad: padSig(col),
   };
 }
@@ -597,24 +655,83 @@ function patchColumn(rec, col) {
   patchPad(rec, col);
 }
 
+/**
+ * ═══ P3 — A RENDER NEVER WRITES INTO THE TEXTAREA THAT HOLDS THE CARET ═══════
+ *
+ * `interact.js` commits a scratchpad to the store on a 600 ms pause or on blur
+ * (rule U9), so for up to 600 ms at a time the live element holds a sentence the
+ * model has not got. v1 could discard it safely: every redraw came from a
+ * gesture of the user's own, and every one of those moves focus out of the
+ * textarea first, so `focusout` → `onPadBlur` → `commitPad` had already run. v2
+ * added a caller v1 did not have — `store.emit('remote')` when a peer's ops fold
+ * in — which needs no gesture and no focus change. **The user's own ink wins**,
+ * and there is no reading of that principle under which another person's
+ * arriving op outranks the sentence she is typing. Nothing is recoverable
+ * afterwards either: the text was never committed, so ⌘Z has nothing to restore.
+ *
+ * So the rule is the one line below, and `unsent` is what makes it narrow: this
+ * file does not write over keystrokes the model has not been told about.
+ * Everything else about the pad is still reconciled, the model still wins the
+ * moment the caret leaves — which is exactly the state `e1-incremental.dom.js`
+ * §I4 pins, and it stays pinned — and it still wins in a box she has typed
+ * nothing into. The wider rule (the caret alone) was measured and rejected: it
+ * makes an untouched box hold a change out, and it turns `retrofit-probe3.dom.js`
+ * R3 red. `tests/tier2/e13-glass.dom.js` §G6 is the row that keeps it narrow.
+ *
+ * THE PAD ELEMENT IS NEVER REPLACED, which is the other half of the same
+ * principle. A page turn or a committed keystroke moves `padSig`, and rebuilding
+ * the block for it would rip the textarea out from under the caret while she is
+ * mid-word — the more reachable half of the defect, because it needs only one
+ * 600 ms pause in a long paragraph. Every input `renderPad` reads is patched in
+ * place instead: the two `data-month`s, the `aria-label`, the value and the
+ * `empty` class. The label text is language-only and a language change bumps
+ * `copyEpoch`, which is a full rebuild, so it can never be stale here.
+ *
+ * Patched in place, the attributes keep the positions `renderPad` gave them, so
+ * the serialisation is byte-identical to the from-scratch one. The one thing that
+ * can differ is downstream of a value `outerHTML` does not carry at all: a box
+ * holding unsent typing is not `empty` and a from-scratch box built from the same
+ * model is. `e13-glass.dom.js` §G5 asserts that difference and that there is no
+ * other; §I4 never meets it, because a box with no caret in it has no unsent ink.
+ */
 function patchPad(rec, col) {
   const sp = padSig(col);
   if (sp !== rec.sPad) {
-    const pad = renderPad(col);
-    rec.el.replaceChild(pad.el, rec.pad);
-    rec.pad = pad.el;
-    rec.padTa = pad.ta;
+    if (rec.pad.dataset.month !== col.key) rec.pad.dataset.month = col.key;
+    if (rec.padTa.dataset.month !== col.key) rec.padTa.dataset.month = col.key;
+    const label = `${t('scratchpad')} ${col.fullLabel}`;
+    if (rec.padTa.getAttribute('aria-label') !== label) rec.padTa.setAttribute('aria-label', label);
     rec.sPad = sp;
-    return;
   }
-  // `interact.js` writes both of these on every keystroke and commits the text
-  // to the store only after a 600 ms pause (rule U9), so between renders the
-  // live element can hold text the model does not. A full rebuild reset it; so
-  // does this. The `!==` guard is what keeps the caret still when there is
-  // nothing to reset — assigning `value` moves it to the end.
-  if (rec.padTa.value !== col.pad) rec.padTa.value = col.pad;
-  rec.pad.classList.toggle('empty', !col.pad.trim());
+  // The `!==` guard is what keeps the caret still when there is nothing to reset
+  // — assigning `value` moves it to the end even when the string is the same.
+  if (!unsent(rec) && rec.padTa.value !== col.pad) rec.padTa.value = col.pad;
+  // 10.1's „empty" is about what is IN the box, which is why `interact.js`
+  // toggles it from the live value on every keystroke. Her first character must
+  // not leave a pad that still calls itself empty.
+  padEmptyClass(rec.pad, rec.padTa.value);
+  // THE AGREEMENT, recorded whenever there is one. `padShown` is the last value on
+  // which this box and the model agreed, and `unsent` is the difference between
+  // "she has typed since then" and "this box merely lags a change made elsewhere".
+  // Only the first is ink; the second is a stale box, and a stale box has no claim.
+  if (rec.padTa.value === col.pad) rec.padShown = col.pad;
 }
+
+/**
+ * Does this box hold keystrokes the model has not been told about?
+ *
+ * Both halves are load-bearing. THE CARET, because a box she is not in has already
+ * committed — `interact.js:onPadBlur` fires on the way out — so anything it holds
+ * that the model does not is a leftover, not a sentence. AND THE LAST AGREEMENT,
+ * because "the box differs from the model" is also true when the model moved under
+ * a box nobody has touched, and reaching in there would then be the board
+ * preserving something the user never typed.
+ */
+const unsent = (rec) =>
+  rec.padTa.ownerDocument.activeElement === rec.padTa && rec.padTa.value !== rec.padShown;
+
+/** The one class `renderPad` and `patchPad` must agree on, in one place. */
+const padEmptyClass = (pad, text) => pad.classList.toggle('empty', !text.trim());
 
 // ── day rows ─────────────────────────────────────────────────────────────────
 
@@ -720,7 +837,33 @@ function patchBody(rec, d) {
     const key = n.note.id;
     const sig = noteSig(n);
     const prev = byKey.get(key);
-    if (prev && prev.sig === sig && !keep.has(key)) { keep.add(key); next.push(prev); continue; }
+    if (prev && prev.sig === sig && !keep.has(key)) {
+      // ═══ THE ONE THING `renderNote` WRITES THAT IS NOT A NOTE FIELD ═══════
+      //
+      // `node.dataset.date = d.date` — the DAY's date, not the entry's. It is
+      // in `bodySig`'s prefix, so this function is reached whenever it can have
+      // moved, but it is deliberately NOT in `noteSig`: a row whose date
+      // changed keeps every note that did not otherwise change, which is the
+      // whole point of keying this list. What it must not keep is last year's
+      // attribute.
+      //
+      // It moves under a kept node exactly once: `entities.js:noteOccurrences`
+      // pushes THE SAME note object once per year, so a yearly repeat (9.5)
+      // carries one `note.id` across every year, and the „‹ ›" year pager
+      // (`main.js:page`) changes a column's YEAR while keeping its month and
+      // its rows. A one-off entry cannot do it — it belongs to one date and
+      // leaves the row with it.
+      //
+      // `interact.js:onPointerDown` reads this attribute as the drag ORIGIN
+      // while `dateUnderPointer` reads the row, so a stale one turns picking an
+      // entry up and putting it back down into a move: an op in the log, a step
+      // on the undo stack, and on a shared entry a `pub.date` published to the
+      // whole circle for a day on which nothing happened. Principle 10 — the
+      // board is not a messenger — and the guarded attribute write is the same
+      // one `applyMore` makes for the same attribute two functions down.
+      if (prev.el.dataset.date !== d.date) prev.el.dataset.date = d.date;
+      keep.add(key); next.push(prev); continue;
+    }
     next.push({ key, sig, el: renderNote(n, d) });
   }
   for (const r of old) if (!keep.has(r.key)) r.el.remove();
@@ -1125,7 +1268,7 @@ function renderPad(col) {
   ta.rows = 5;
   ta.setAttribute('aria-label', `${t('scratchpad')} ${col.fullLabel}`);
   pad.appendChild(ta);
-  if (!col.pad.trim()) pad.classList.add('empty');
+  padEmptyClass(pad, col.pad);
   return { el: pad, ta };
 }
 

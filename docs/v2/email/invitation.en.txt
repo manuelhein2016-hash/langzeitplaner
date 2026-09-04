@@ -75,7 +75,7 @@ AND THE SERVER ADDRESS THAT GOES WITH IT
 
 The app asks for this too — it has no address built into it. Here it is:
 
-    https://lzp-sync-po.vercel.app
+    https://serveradresse-fehlt.invalid
 
 
 In the app: Settings -> "Join family circle". The easiest way: select this

@@ -571,6 +571,17 @@ function finishDrag(e) {
     // 9.3 — one object per series: keep the series' first year, move the month/day the whole
     // series lands on. The op carries the ABSOLUTE resulting date either way.
     const moved = n.repeatsYearly ? reanchorRepeat(n.date, target) : target;
+    // NOTHING MOVED — v1's own second `return false` from the resize branch below, applied to
+    // the move. The guard above compares the two DOM reads (`.note[data-date]` against the day
+    // row under the pointer); this one compares the RESULT against the entry, which is the
+    // question the op would answer. Unreachable in v1: a window holds twelve consecutive months,
+    // so no two rows share a month and day, and a repeat could not reanchor onto its own date
+    // from a different row. It is reachable the moment those two DOM reads can disagree, and a
+    // gesture that changes nothing must not write: an op in the log, a step on the undo stack,
+    // and on a shared entry a `pub.date` published to the whole circle for a day on which
+    // nothing happened. Principle 10 — the board is not a messenger, and it does not speak on
+    // her behalf.
+    if (moved === n.date) return;
     commitEntry(n, 'moveNote', { id, date: moved }, { 'pub.date': moved });
     return;
   }

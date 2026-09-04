@@ -48,7 +48,6 @@
 import '../helpers/env.js';
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
-
 import {
   parseInvitePaste, formatInviteCode, inviteCodeChars, newInviteCode,
   pasteRefusalSentence, pasteOriginSentence, INVITE_UI,
@@ -58,7 +57,27 @@ import { CROCKFORD_ALPHABET } from '../../src/js/core/b64.js';
 /** The fixture `scripts/mom-test-probe.mjs` uses, so a failure here reads the same way there. */
 const MINTED = 'J17Z-XSXN-7CSQ';
 const RELEASE_URL = 'https://github.com/OWNER/REPO/releases/latest';
-const RELAY = 'https://lzp-sync-po.vercel.app';
+// A PARSER FIXTURE ONLY — this file reads no invitation and no config; `RELAY` is a string
+// `parseInvitePaste` is asked to find an origin in. It named `lzp-sync-po.vercel.app` until
+// 2026-09-04, a host the project abandoned (AUDIT F13: unclaimed, HTTP 404, registrable by
+// anyone). Green here never meant that name was right, but a fixture is also documentation, so
+// it no longer spells a name the project has walked away from.
+//
+// ⚠ AND IT CONTAINS NO LABEL WORD, WHICH IS NOT AN AESTHETIC CHOICE. `ORIGIN_LABEL_RE` scans the
+// raw text for „serveradresse" / „server" / „relay" and anchors the address that follows within
+// `LABEL_WINDOW`. A label word inside a HOSTNAME anchors the NEXT url, so §5c's two-address
+// ambiguity refusal silently becomes a confident wrong answer. Measured twice on 2026-09-04:
+// `serveradresse-fehlt.invalid` (the slot the four shipped invitations now carry) and
+// `relay.invalid` BOTH make §5c pick `other.example`. `.invalid` is RFC 2606 §2 — undelegatable,
+// so no fixture here can ever name something a stranger could register.
+//
+// The product is not affected and that is asserted rather than assumed — but NOT here: tier 1 may
+// not import `node:fs` (`suite-integrity.test.js`), so the four shipped mails are read where
+// reading them is somebody's job, by `tests/tier1/release-gate.test.js` §1b through the probe.
+// That row drives THIS parser over the real files and requires exactly one address out of each.
+// A fixture that quietly stops testing what its name says is the trap this whole file exists to
+// catch, and the first draft of this note walked straight into it.
+const RELAY = 'https://vermittlung.invalid';
 
 const N = INVITE_UI.codeChars;
 

@@ -1,12 +1,95 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-03 (closing pass) · **Stopped at:** **the acceptance run is clean —
-`unshare-owner` completed 10 of 10, and the refusal ledger is 0.** Full record:
-`docs/v2/V2-FINAL.md`; findings in `FINDINGS.md` §22.
+**Last session:** 2026-09-04 (the audit fix cycle + integration) · **Stopped at:** **every finding
+the independent audit called BLOCKS is closed, and what remains between here and a family release
+is a domain registration and one PO ruling.** Full record: `docs/v2/AUDIT.md` (the audit, with each
+finding marked and its evidence) and `docs/v2/V2-FINAL.md`; findings in `FINDINGS.md` §23.
 
 ---
 
-## THE HEADLINE: the refusal ledger is **0**, and it had never once been flat
+## THE HEADLINE: the Familienkreis can ship, once the PO claims a host
+
+```
+npm test 2249/2249 · test:property 101/101 · test:attack 977/977
+test:server 1009/1009 + 1 stated skip · test:fleet 476/476
+test:dom 904 pass / 3 fail / 36 skip (57 files, per-file `# pass`)
+```
+
+**5 716 green rows, 3 red** — the same three named residuals as before, and nothing else:
+`e8-density-legibility` §A4 (the 9 px ink floor, a PO ruling on `palette.js`), `e8-density-perf`
+§E1 (`findWorst` straddling the 60 fps frame) and §E3 (the saturated poster, a spec threshold error
+where 48 % is the mathematical ceiling and the row asks 75 %). None is new. **Zero npm
+dependencies, `node_modules/` absent.**
+
+### The acceptance run — FIVE consecutive runs, 35 launches of the shipped binary each
+
+| Run | Phases failed | Founder got a joiner's entry | Refusal ledger | Relaunch battery |
+|---|---|---|---|---|
+| 1–5 (ports 8801–8805) | **0 of 35**, every run | **YES**, every run | **0**, every run | **8 of 8**, every run |
+
+The driver grew from 27 launches to 35: six new phases close the coverage hole the audit
+identified. **Co-editing works on the second launch and the fifth** — Oma folds a peer's co-edit on
+her *fifth* launch, Mama writes one on her seventh, and Papa — the entry's owner, who granted the
+permission and then quit twice — folds it on his eighth. The exposure badge reads `geteilt` after a
+relaunch, the „neu" dot lights (`isNew=true`, `.neu-dot=1` in the DOM), and a removed Mac gets
+`pushed=0 rosterOk=false` with the remaining Mac reporting `onBoard=false inRegisters=false`.
+
+### What the audit found, and where it stands
+
+The audit's verdict was *"ship solo, hold the Familienkreis for one fix cycle."* That cycle ran:
+
+- **F1, F13 — the release gate.** The shipped constant is still `""`, which is *correct* for a solo
+  release. What was missing was a gate that names it. `tests/tier1/release-gate.test.js` (20 rows)
+  now fails on a half-done substitution in **either** direction, demonstrated in four tree states.
+  The invitation placeholder is `https://serveradresse-fehlt.invalid` — RFC 2606 §2,
+  **undelegatable**, so unlike the abandoned `lzp-sync-po.vercel.app` (HTTP 404, claimable by
+  anyone) no stranger can stand it up and harvest a joiner's invite token.
+- **F2, F3, F4, F9 — the compaction class.** Closed by one general statement: a question about the
+  PRESENT is answered by the register (`_absorbedGovernanceOps`, a 2-row table), a question about
+  HISTORY belongs outside compaction (`_persistOps` retains the admin-chain lines). All seven
+  red-on-arrival rows in `tests/audit/compaction-sweep.test.js` turned green.
+- **F5 — the Datenschutz screen.** Four false sentences replaced, five disclosures added, both
+  languages, 19 rows at the glass and 7 new `tests/server/` rows binding the numbers on the screen
+  to the live server enums.
+- **F6, F7, F8, F11 — the glass.** The „neu" dot lights and fades, a peer's op no longer discards
+  uncommitted typing, a year page turn no longer leaves a stale `data-date` (and a no-op drag no
+  longer publishes a phantom `pub.date`), and a peer's new *bar* dropped by the lane cap is now
+  counted into the „+n" badge's „neu" tell.
+
+**Still open:** F14 (0 tags, 0 remotes, `release.yml` has never run), every F15 item, F12's
+remaining doc drift, and F10 — 18.5's inconsistent interval — which is a **PO decision (D-G)**, not
+a defect, and was deliberately not decided by engineering.
+
+### ⚠ TWO THINGS ONLY THE PO CAN DO
+
+1. **Claim a relay host** and substitute it in one act: the four invitations *and*
+   `SYNC_ORIGIN_BUILTIN` in both shells. `RELEASE-CHECKLIST.md` §A forces both halves.
+2. **Decide D10 / story 21.5.** The amendment was justified as *"the second refuses the report from
+   the only tester who has no Familienkreis"* — and as shipped, the code refuses her anyway,
+   because the feedback port is bound only inside the family door. Either the gate is wrong (the
+   button should work solo) or the amendment bought nothing. The screen now says what the code
+   does, so it is honest either way. See `AUDIT.md` §D10.
+
+### The re-pricing worth knowing before F2/F3/F4 are described to anyone
+
+The audit predicted a real relaunch would lose *more* than the rig. Measured, it loses **less** —
+on the shipped `.app` the fold never reaches the absorbed state at all, because the app re-pulls
+from the relay and the lines come back *as lines*. The fleet rig, which quits and reopens with **no
+relay in between**, is the *stricter* environment. So F2/F3/F4 were real for a Mac that quits and
+opens with nothing to re-pull — offline, a pruned relay, a peer whose `since` cursor has moved past
+the op — and were never reachable in the acceptance topology. **F6 is the exception**: it was wrong
+with *and* without a relaunch, and it reproduced on the shipped binary every time.
+
+---
+
+# ═══ THE PREVIOUS SESSION (2026-09-03), KEPT AS THE RECORD ═══
+
+Everything from here on is the closing pass that preceded the independent audit. Its numbers were
+correct when written and are superseded by the block above; it is kept because the *reasoning* in
+it — R-1's three defects, the refusal ledger's history, the shell verification — is still the
+account of how the acceptance run got to zero.
+
+## THE HEADLINE OF 2026-09-03: the refusal ledger is **0**, and it had never once been flat
 
 ```
 npm test 2229/2229 · test:property 101/101 · test:attack 970/970

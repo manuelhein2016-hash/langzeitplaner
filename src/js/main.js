@@ -293,6 +293,63 @@ function redraw() {
     boardEl.classList.add('roll-anim');
     setTimeout(() => boardEl.classList.remove('roll-anim'), 340);
   }
+  armFamilySeen();
+}
+
+// ── 17.5 · „DER PUNKT VERBLASST, WENN MAN IHN GESEHEN HAT" ───────────────────
+//
+// ADR 004 §7.2: *"The dot fades once seen. No popups, no counters, no push."*
+// `store.markFamilySeen()` records the baseline and `store._lastSeenSeqCtx()`
+// reads it back; `board.js` paints the dot and `layout.js` gates it on
+// `foreign`. This is the one call that was missing, and the decision it encodes
+// is a view decision, which is why it lives here and not in the store.
+//
+// WHAT COUNTS AS A LOOK, AND WHY NOT THE OBVIOUS TWO
+//
+//  · NOT the render. Fading inside `redraw()` erases the dot before a single
+//    frame carries it — the dot would be structurally invisible, which is the
+//    defect F6 names with an extra step.
+//  · NOT window focus alone. A Mac left focused overnight is not a person
+//    looking at a board, and clearing on focus would swallow every entry that
+//    arrived while she was in the kitchen. That is principle 10's whole point:
+//    *"you notice when you look."*
+//  · A deliberate gesture, on a visible document: a press, a key, a scroll.
+//    That is the cheapest signal that a person is in front of the board with
+//    the dot already painted, and it cannot fire before the paint because the
+//    listener is armed by the render that painted it.
+//
+// Solo mode never arms: with no family entries there is no `.neu-dot` in the
+// DOM, `querySelector` answers null, and no listener is attached. P7 holds —
+// the whole mechanism costs a solo launch one failed selector per redraw.
+//
+// Termination: `markFamilySeen()` re-projects and emits `'remote'`, so it
+// redraws once. That redraw finds no dot and does not re-arm.
+let seenArmed = null;
+
+function armFamilySeen() {
+  if (seenArmed) return;
+  // `.d-more.has-new` is 17.4's badge carrying a peer's change inside the „+n" —
+  // it is the same signal in a crowded day and must fade on the same look.
+  if (!boardEl.querySelector('.neu-dot, .d-more.has-new')) return;
+
+  const look = () => {
+    // A key or a wheel reaching a hidden document is not a person looking.
+    if (document.hidden) return;
+    disarm();
+    store.markFamilySeen();
+  };
+  const disarm = () => {
+    if (!seenArmed) return;
+    seenArmed = null;
+    window.removeEventListener('pointerdown', look, true);
+    window.removeEventListener('keydown', look, true);
+    window.removeEventListener('scroll', look, true);
+  };
+
+  seenArmed = disarm;
+  window.addEventListener('pointerdown', look, true);
+  window.addEventListener('keydown', look, true);
+  window.addEventListener('scroll', look, true);
 }
 
 function onChange(reason) {

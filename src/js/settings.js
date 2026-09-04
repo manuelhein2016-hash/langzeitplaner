@@ -496,7 +496,8 @@ export function applyShellPref(cmd, value) {
 // A10 puts the 21.3 text in the *Familie* section. Built that way it would be invisible to
 // exactly the reader who needs three of its paragraphs most: a SOLO Mac, which never loads
 // `family/mount.js` and therefore never draws that section, and whose backup file, key-loss
-// consequence and „dieser Mac spricht mit niemandem" are all still true and still worth reading.
+// consequence and „ohne Familienkreis bleibt jeder Eintrag auf diesem Mac" are all still true and
+// still worth reading.
 // So it is a section of its own, drawn on every launch. That is a deviation from A10's placement
 // and nothing else; the family-specific paragraphs name their condition in their first clause.
 //
@@ -509,6 +510,8 @@ export function applyShellPref(cmd, value) {
 //                                   EU/Frankfurt; `server/core` `meta.region === 'fra1'`
 //   · what the relay sees ......... ADR 003 §5.2's inventory, verbatim in substance, and
 //                                   `docs/v2/server-metadata.md`
+//   · what it can INFER ........... `docs/v2/server-metadata.md` §7, "Five things the tables above
+//                                   imply and never say out loud" — `infer1`…`infer5`, `inferIp`
 //   · what it never sees .......... ADR 004's redaction boundary — six adversary rounds, zero
 //                                   bytes of a Privat entry
 //   · retention ................... `docs/v2/RUNBOOK.md` §7.2. It is uncomfortable and it is said
@@ -530,6 +533,74 @@ export function applyShellPref(cmd, value) {
 // NO URL LITERAL APPEARS IN THIS BLOCK, deliberately: `tests/attack/e10-network-scope.test.js`
 // §2e reads "no shipped module names a resolvable remote host" over code, and a Datenschutz
 // paragraph is not the place to be the first exception. The processors are named by NAME.
+//
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+// ██ F5 · THE FOUR SENTENCES THE AUDIT MEASURED FALSE, AND WHAT REPLACED THEM ██
+// ══════════════════════════════════════════════════════════════════════════════════════════════
+//
+// `docs/v2/AUDIT.md` F5. Each was reproduced against the shipped code before it was rewritten;
+// `tests/tier2/e13-datenschutz.dom.js` is the row set that keeps each replacement true.
+//
+// (a) `soloBody` PROMISED A SOLO MAC AN EXCEPTION IT CANNOT TAKE.
+//     „Genau eine Ausnahme … die Rückmeldung unter ‚Hilfe'." Measured: `setFeedbackPort` has ONE
+//     caller in the product, `family/mount.js#bindFeedback`, reachable only through the ONE
+//     dynamic `import()` in `main.js`, and that door is behind
+//     `if (!hasPersonal && !hasCircle) return;`. On a Mac with neither, nothing binds the port,
+//     `canSend()` is false, „Senden" is disabled. The product already ships the true sentence one
+//     module over — `feedback/copy.js#noRelay` — and this paragraph now says the same thing.
+//
+//     ⚠ THAT HAS A CONSEQUENCE OUTSIDE THE COPY, AND IT IS THE PO'S, NOT THIS FILE'S. D10 and
+//     ADR 003 §7.5 amended story 21.5 — a MEASURED property — and justified the amendment with:
+//     *"the second refuses the report from the only tester who has no Familienkreis — the person
+//     the feature exists for."* As shipped, that is what the code does anyway. So either the gate
+//     is wrong (the button should work solo, which is what the amendment was bought for) or the
+//     amendment bought nothing and D10 should be revisited. Until that is decided, the screen
+//     says what the code does. Whichever way it goes, `soloBody` changes with it.
+//
+// (b) THE „VON ALLEIN … NICHTS" CLAIM WAS FALSE THE MOMENT F22 IS CONFIGURED.
+//     ⚠ THE OLD SENTENCE IS NOT QUOTED HERE, AND THAT IS THE POINT. `network-scope.test.js` §5e
+//     and `pass4-conformance.test.js:157` match it against the RAW SOURCE of this file, so a
+//     comment quoting it verbatim would hold both rows green over copy that no longer says it —
+//     the exact rot `e10-network-scope.test.js`'s own header warns about. The two rows must go
+//     red; the verbatim strings live in `tests/tier2/e13-datenschutz.dom.js`'s mutant table,
+//     which is where a string that must never render belongs.
+//     `main.js`'s `boot()` runs `runLaunchCheck(); startDailyTimer();` on every launch of every
+//     install, solo included, and `update-ui.js#startDailyTimer` is a bare `setInterval`. In
+//     `shell-macos/main.swift#updaterFetchManifest` the two 21.5 consent gates are checked at
+//     +110 and the `OWNER-PLACEHOLDER` refusal at +308 — gates FIRST, so no packet leaves today
+//     only because the release host is still a placeholder. A sentence that is true until the
+//     product is released properly is not true. The update check is now named in `soloBody` as
+//     the one thing that happens unbidden, pointing at `updateBody`, which was already honest —
+//     both sentences used to sit on one screen, contradicting each other, in both languages.
+//
+// (c) `lossBody` TOLD A PERSON HOLDING A BOARD-ONLY EXPORT THAT HER ENTRIES WERE GONE.
+//     „…und du keine Sicherung MIT PASSWORT hast, kann niemand deine Daten wiederherstellen."
+//     Measured through the real functions: `exportBackup(board, id, null, null, …)` writes note
+//     text, bar labels and scratchpads verbatim into the file, `README.boardOnly` says „Sie
+//     stellt dein Board wieder her", and `importBackup(file, null, null)` hands the board back
+//     with `identityRestored:false`. The condition is „gar keine Sicherung", never „keine mit
+//     Passwort" — this is the one with a data-loss shape, and it pointed the wrong way.
+//
+// (d) „…DASS jemand etwas geändert hat — nicht, was" WAS TRUE OF THE DATABASE AND FALSE OF THE
+//     RELAY. `server/core/router.js#ROUTE_NAMES` is a closed enum of 24 verbs including
+//     `removeMember`, `transferAdmin`, `renameSpace`, `deleteSpace`, and `LOG_FIELDS` admits
+//     `route`, `spaceId` and `deviceShort` in one line. The content claim survives; the „nicht,
+//     was" claim is now scoped to the ENTRY and the log is named.
+//
+// ── AND F5'S MISSING HALF: `server-metadata.md` §7 ────────────────────────────────────────────
+// §7 says of the five things a dump implies that a page written from the column tables *"would
+// miss every one of them"* — and of the first, that *"the relay can tell which of the five of you
+// is in charge" is exactly the kind of sentence 21.3 exists to say out loud*. None of the five
+// was on this screen in either language. They are `infer1`…`infer5`, plus `inferIp` for §7's own
+// closing point that the realistic re-identification path is the IP address and not the database.
+// Measured, not paraphrased: four admin tells (`Member.joinedAt`, `Invite.createdBy`,
+// `RATE_RULES.memberRemove` keyed `identity:'member'`, the transfer in the log); THREE
+// member-keyed rate rules and not one (`pairSession`, `memberRemove`, `epochRotate`); 24 route
+// names; `Device.sigPubRaw` + `Member.recoveryPubSig`/`recoveryPubKex` as the cross-space joins.
+//
+// The register is the screen's own: no reassurance, no mitigation clause, no „aber keine Sorge".
+// Eight adversary rounds and zero bytes of a Privat entry are what buys the right to be exact
+// about what the relay CAN see, and a page that spends that credit on softening is wasting it.
 
 export const DATENSCHUTZ = Object.freeze({
   de: Object.freeze({
@@ -537,11 +608,14 @@ export const DATENSCHUTZ = Object.freeze({
     lead: 'Ohne Marketing: was dieses Programm über dich weiß, was ein Server davon sieht, wie lange '
       + 'das dort steht — und was niemand zurückholen kann.',
 
-    soloTitle: 'Ohne Familienkreis spricht dieser Mac mit niemandem.',
+    soloTitle: 'Ohne Familienkreis bleibt jeder Eintrag auf diesem Mac.',
     soloBody: 'Solange du keinen Familienkreis nutzt, verlässt kein Eintrag diesen Mac. Es gibt keine '
       + 'Anmeldung, kein Konto, keine Statistik, keine Absturzmeldung und keinen Zähler — auch keinen '
-      + 'anonymen. Genau eine Ausnahme gibt es, und sie geschieht nur, wenn du sie auslöst: die '
-      + 'Rückmeldung unter „Hilfe". Von allein sendet dieses Programm nichts.',
+      + 'anonymen. Von allein geschieht genau eines, und nur, wenn du vorher zugestimmt hast: die '
+      + 'Update-Prüfung weiter unten. Sie fragt nach dem Programm und nie nach deinem Plan. Die '
+      + 'Rückmeldung unter „Hilfe" geht nur, wenn du sie auslöst — und sie braucht einen '
+      + 'Familienkreis: ohne einen gibt es keinen Server, an den etwas gehen könnte, „Senden" ist '
+      + 'abgeschaltet, und du kannst deinen Text nur kopieren oder als Datei sichern.',
 
     privatTitle: 'Was du auf „Privat" stellst, geht nie an die Familie.',
     privatBody: 'Nicht verschlüsselt, sondern gar nicht: für private Einträge gibt es keinen '
@@ -571,7 +645,53 @@ export const DATENSCHUTZ = Object.freeze({
     seesNotBody: 'Keinen Text eines Eintrags, keine Beschriftung eines Balkens, keine Kategorie, keinen '
       + 'Notizzettel, kein Datum und keinen einzigen Namen: die Namen der Mitglieder stehen im '
       + 'verschlüsselten Strom, nicht in der Datenbank. Aus den Zeitpunkten und den gerundeten Größen '
-      + 'lässt sich ablesen, DASS jemand etwas geändert hat — nicht, was.',
+      + 'lässt sich ablesen, DASS jemand etwas geändert hat — nicht, was in dem Eintrag steht. Das '
+      + 'ist aber weniger, als es klingt: der Inhalt bleibt verschlossen, die Handlung nicht. Unser '
+      + 'eigenes Anfrageprotokoll hält bei jeder Anfrage fest, WELCHE Handlung es war — Mitglied '
+      + 'entfernt, Verwaltung übergeben, Familienkreis umbenannt, Gerät angemeldet — und dazu den '
+      + 'Familienkreis und das Gerät, das sie ausgelöst hat. Der Absatz darunter sagt, was daraus '
+      + 'noch folgt.',
+
+    inferTitle: 'Was sich daraus zusammensetzen lässt',
+    inferLead: 'Die beiden Listen oben sind einzelne Spalten, und einzeln sind sie harmlos. '
+      + 'Zusammengenommen ergeben sie fünf Dinge, die in keiner Spalte stehen und trotzdem '
+      + 'ablesbar sind. Wer die Vermittlungsstelle betreibt, kann sie ohne einen einzigen '
+      + 'entschlüsselten Buchstaben herauslesen.',
+    infer1: 'Wer den Familienkreis verwaltet. Es gibt keine Spalte dafür, und trotzdem steht es auf '
+      + 'vier Wegen da: wer zuerst dabei war, hat den Kreis gegründet — alle anderen kamen über eine '
+      + 'Einladung, die später ausgestellt wurde. Jede Einladung merkt sich, wer sie ausgestellt hat, '
+      + 'und einladen darf nur die Verwaltung. Wer ein Mitglied entfernt, hinterlässt eine Zeile, die '
+      + 'auf ihn ausgestellt ist. Und die Übergabe der Verwaltung steht mit beiden Seiten im '
+      + 'Anfrageprotokoll. In einer Familie ist die Verwaltung eine bestimmte Person: die '
+      + 'Vermittlungsstelle kann sagen, wer von euch das Sagen hat.',
+    infer2: 'Wer in einer anderen Zeitzone sitzt. Wann welches Gerät spricht, ergibt für jedes '
+      + 'Mitglied ein Tagesmuster. Ist das Muster eines Mitglieds regelmäßig um Stunden verschoben, '
+      + 'lebt dieses Mitglied woanders — ein Kind im Auslandssemester, jemand, der beruflich weg ist, '
+      + 'ein Au-pair, das über den Sommer zu Hause ist. Dafür braucht es keinen Text und keine '
+      + 'IP-Adresse, nur die Ankunftszeiten.',
+    infer3: 'Was ein einzelnes Mitglied getan hat, dauerhaft. Drei der Zeilen, mit denen Missbrauch '
+      + 'gebremst wird, sind nicht auf einen Anschluss ausgestellt, sondern auf ein Mitglied: ein '
+      + 'Mitglied entfernen, ein Gerät koppeln, die Schlüssel wechseln. Diese Zeilen sagen nicht '
+      + '„von dieser Adresse kam etwas", sondern „dieses Mitglied hat das getan". Sie werden nie '
+      + 'automatisch gelöscht — sie überdauern den Zähler, für den sie angelegt wurden, und die '
+      + 'Mitgliedschaft, die sie festhalten.',
+    infer4: 'Welche Handlung es war, nicht nur dass eine stattfand. Im Anfrageprotokoll stehen die '
+      + 'Handlung, der Familienkreis und das Gerät in einer Zeile; die Handlung ist eine von '
+      + 'vierundzwanzig festen Bezeichnungen, und vom Gerät zum Mitglied ist es ein Schritt. Das '
+      + 'Umbenennen ist das schärfste Beispiel: die Vermittlungsstelle speichert den neuen Namen '
+      + 'nirgends, und im Protokoll steht trotzdem, dass ihr euren Familienkreis am 25. Juli '
+      + 'umbenannt habt.',
+    infer5: 'Dass zwei Familienkreise dieselbe Person sind. Wer in zweien ist — der eigenen Familie '
+      + 'und der der Eltern —, erscheint dort als zwei Mitglieder mit verschiedenen Kennungen. '
+      + 'Verbunden sind sie trotzdem: derselbe Mac trägt in beiden denselben öffentlichen Schlüssel, '
+      + 'weil die Vermittlungsstelle ihn braucht, um eine Unterschrift überhaupt prüfen zu können, '
+      + 'und dasselbe gilt für den Wiederherstellungsschlüssel eines Mitglieds. Selbst ohne beides '
+      + 'genügen die Ankunftszeiten. Wer beide Kreise auf demselben Server betreibt, kann sie '
+      + 'derselben Person zuordnen.',
+    inferIp: 'Und der Weg, der in der Praxis zählt, führt an alledem vorbei: eine Wohnung hat meist '
+      + 'einen Anschluss, und ein Anschluss mit dem Tagesrhythmus einer fünfköpfigen Familie ist für '
+      + 'jemanden, der auch die Unterlagen des Anbieters sehen kann, nicht anonym. Dass die '
+      + 'Kennungen Zufallsnummern sind, stimmt — und es ist nicht die ganze Geschichte.',
 
     retentionTitle: 'Wie lange das dort steht',
     retentionBody: 'Ehrlich: unbefristet. Es gibt keine automatische Löschung. Die Zeilen, mit denen '
@@ -582,7 +702,9 @@ export const DATENSCHUTZ = Object.freeze({
 
     updateTitle: 'Die zweite Gegenstelle: die Update-Prüfung',
     updateBody: 'Etwa einmal täglich fragt die App-Hülle — nicht das Board — bei GitHub nach, ob es '
-      + 'eine neuere Version gibt, und holt dafür eine einzige kleine Datei. Diese Anfrage enthält '
+      + 'eine neuere Version gibt, und holt dafür eine einzige kleine Datei. Das ist die eine '
+      + 'Anfrage, die ohne dein Zutun geschieht: beim Start, wenn die letzte Prüfung mehr als vier '
+      + 'Stunden her ist, und danach im Tagesabstand, solange das Programm läuft. Diese Anfrage enthält '
       + 'keine Kennung, keinen Namen und nichts von deinem Plan. Sie läuft nur, wenn du der '
       + 'Update-Prüfung zugestimmt hast, und lässt sich oben unter „Updates" wieder abschalten. GitHub '
       + 'gehört zu Microsoft und steht nicht in der EU.',
@@ -603,11 +725,14 @@ export const DATENSCHUTZ = Object.freeze({
       + 'kann, und es macht die Datei fälschungssicher — es macht sie nicht unlesbar. Bewahre sie so '
       + 'auf, wie du deinen Kalender aufbewahren würdest, und nicht offen in einer geteilten Cloud.',
 
-    lossTitle: 'Ist der Schlüssel weg, sind die Daten weg.',
+    lossTitle: 'Ohne Sicherung holt niemand deine Einträge zurück.',
     lossBody: 'Es gibt kein Zurücksetzen des Passworts, weil es kein Konto gibt. Wenn alle deine Macs '
-      + 'verloren gehen und du keine Sicherung mit Passwort hast, kann niemand deine Daten '
-      + 'wiederherstellen — wir nicht, Vercel nicht, Prisma nicht. Das ist der Preis dafür, dass sonst '
-      + 'niemand mitlesen kann. Wenn du noch keine Sicherung hast: jetzt eine machen.',
+      + 'verloren gehen und du gar keine Sicherung hast, kann niemand deine Daten wiederherstellen — '
+      + 'wir nicht, Vercel nicht, Prisma nicht. Das ist der Preis dafür, dass sonst niemand mitlesen '
+      + 'kann. Eine Sicherung OHNE Passwort genügt dafür trotzdem: sie bringt deine Einträge zurück, '
+      + 'ganz ohne Passwort. Was sie nicht zurückbringt, ist deine Mitgliedschaft im Familienkreis — '
+      + 'dafür musst du neu eingeladen werden, und nur eine Sicherung mit Passwort erspart dir das. '
+      + 'Wenn du noch keine Sicherung hast: jetzt eine machen.',
 
     thirdTitle: 'Sonst nichts',
     thirdBody: 'Keine Analyse-Werkzeuge, keine Tracker, keine Werbung, keine Schriften von fremden '
@@ -620,11 +745,14 @@ export const DATENSCHUTZ = Object.freeze({
     lead: 'No marketing: what this program knows about you, what a server sees of it, how long that '
       + 'stays there — and what nobody can get back.',
 
-    soloTitle: 'Without a Familienkreis this Mac talks to nobody.',
+    soloTitle: 'Without a Familienkreis every entry stays on this Mac.',
     soloBody: 'As long as you use no Familienkreis, no entry leaves this Mac. There is no sign-in, no '
-      + 'account, no statistics, no crash report and no counter — not even an anonymous one. There is '
-      + 'exactly one exception, and it happens only when you trigger it: the feedback screen under '
-      + '"Help". On its own this program sends nothing.',
+      + 'account, no statistics, no crash report and no counter — not even an anonymous one. Exactly '
+      + 'one thing happens on its own, and only if you agreed to it beforehand: the update check '
+      + 'further down. It asks about the program and never about your plan. The feedback screen under '
+      + '"Help" goes only when you trigger it — and it needs a Familienkreis: without one there is no '
+      + 'server anything could go to, "Send" is switched off, and all you can do is copy your text or '
+      + 'save it to a file.',
 
     privatTitle: 'What you mark "Privat" never goes to the family.',
     privatBody: 'Not encrypted — not at all: private entries have no key any other member holds, and '
@@ -650,7 +778,46 @@ export const DATENSCHUTZ = Object.freeze({
     seesNotTitle: 'What it never sees',
     seesNotBody: 'No entry text, no bar label, no category, no scratchpad, no date and not one name: '
       + 'member names travel inside the encrypted stream, not in the database. The timings and the '
-      + 'rounded sizes show THAT somebody changed something — never what.',
+      + 'rounded sizes show THAT somebody changed something — never what the entry says. That is '
+      + 'less than it sounds, though: the content stays sealed, the action does not. Our own request '
+      + 'log records, for every request, WHICH action it was — member removed, admin handed over, '
+      + 'circle renamed, device registered — along with the circle and the device that triggered it. '
+      + 'The paragraph below says what else follows from that.',
+
+    inferTitle: 'What can be put together from that',
+    inferLead: 'The two lists above are single columns, and one at a time they are harmless. Taken '
+      + 'together they yield five things that stand in no column and can be read off anyway. '
+      + 'Whoever operates the relay can read them out without a single decrypted letter.',
+    infer1: 'Who administers the Familienkreis. There is no column for it, and it is there four ways '
+      + 'regardless: whoever was there first created the circle — everybody else arrived through an '
+      + 'invitation issued later. Every invitation remembers who issued it, and only the '
+      + 'administrator may invite. Whoever removes a member leaves behind a row made out in their '
+      + 'name. And handing over the administration stands in the request log with both sides. In a '
+      + 'family the administrator is a particular person: the relay can say which of you is in '
+      + 'charge.',
+    infer2: 'Who sits in another time zone. When each device speaks gives every member a daily '
+      + 'pattern. If one member’s pattern is regularly shifted by hours, that member lives somewhere '
+      + 'else — a child on a semester abroad, somebody posted away for work, an au pair home for the '
+      + 'summer. This needs no text and no IP address, only the arrival times.',
+    infer3: 'What one particular member did, permanently. Three of the rows used to throttle abuse '
+      + 'are made out not to a connection but to a member: removing a member, pairing a device, '
+      + 'changing the keys. Those rows do not say "something came from this address", they say "this '
+      + 'member did this". They are never deleted automatically — they outlive the counter they were '
+      + 'created for, and the membership they record.',
+    infer4: 'Which action it was, not merely that one happened. The request log holds the action, the '
+      + 'circle and the device in one line; the action is one of twenty-four fixed names, and from '
+      + 'the device to the member is one step. Renaming is the sharpest example: the relay stores the '
+      + 'new name nowhere, and the log still says that you renamed your Familienkreis on 25 July.',
+    infer5: 'That two circles are the same person. Whoever is in two of them — your own family and '
+      + 'your parents’ — appears there as two members with different ids. They are connected all the '
+      + 'same: the same Mac carries the same public key in both, because the relay needs it in order '
+      + 'to check a signature at all, and the same holds for a member’s recovery key. Even without '
+      + 'either, the arrival times are enough. Whoever runs both circles on one server can attach '
+      + 'them to one person.',
+    inferIp: 'And the route that matters in practice goes past all of it: a home usually has one '
+      + 'connection, and a connection with the daily rhythm of a household of five is not anonymous '
+      + 'to anyone who can also see the provider’s records. That the ids are random numbers is true '
+      + '— and it is not the whole story.',
 
     retentionTitle: 'How long that stays there',
     retentionBody: 'Honestly: indefinitely. There is no automatic deletion. The rows used to throttle '
@@ -660,7 +827,9 @@ export const DATENSCHUTZ = Object.freeze({
 
     updateTitle: 'The second counterpart: the update check',
     updateBody: 'About once a day the app shell — not the board — asks GitHub whether a newer version '
-      + 'exists, fetching one small file. That request carries no identifier, no name and nothing from '
+      + 'exists, fetching one small file. This is the one request that happens without you doing '
+      + 'anything: at launch, if the last check is more than four hours old, and then at daily '
+      + 'intervals for as long as the program runs. That request carries no identifier, no name and nothing from '
       + 'your plan. It runs only if you agreed to the update check, and it can be switched off again '
       + 'under "Updates" above. GitHub belongs to Microsoft and is not in the EU.',
 
@@ -679,11 +848,14 @@ export const DATENSCHUTZ = Object.freeze({
       + 'the file tamper-evident — it does not make it unreadable. Keep it the way you would keep your '
       + 'calendar, and not openly in a shared cloud.',
 
-    lossTitle: 'If the key is gone, the data is gone.',
+    lossTitle: 'Without a backup nobody gets your entries back.',
     lossBody: 'There is no password reset, because there is no account. If all your Macs are lost and '
-      + 'you hold no password-protected backup, nobody can restore your data — not us, not Vercel, not '
-      + 'Prisma. That is the price of nobody else being able to read along. If you have no backup yet: '
-      + 'make one now.',
+      + 'you hold no backup at all, nobody can restore your data — not us, not Vercel, not Prisma. '
+      + 'That is the price of nobody else being able to read along. A backup made WITHOUT a password '
+      + 'is still enough for this: it brings your entries back, with no password at all. What it does '
+      + 'not bring back is your membership in the Familienkreis — for that you have to be invited '
+      + 'again, and only a backup with a password spares you that. If you have no backup yet: make '
+      + 'one now.',
 
     thirdTitle: 'Nothing else',
     thirdBody: 'No analytics tooling, no trackers, no advertising, no fonts from foreign servers, no '
@@ -750,6 +922,26 @@ export function buildDatenschutzSection(body) {
   body.appendChild(ul);
 
   block('seesNotTitle', 'seesNotBody');
+
+  // ── F5's missing half · `docs/v2/server-metadata.md` §7 ──────────────────────────────────────
+  // Five paragraphs and not a second `<ul>`, for two reasons. (1) Each of these is a CLAIM PLUS
+  // ITS MECHANISM — „vier Wegen: wer zuerst dabei war …" does not survive being cut to a bullet,
+  // and a bullet that says only „die Vermittlungsstelle erkennt die Verwaltung" is the reassuring
+  // half of the sentence. (2) `tests/tier2/datenschutz.dom.js` §1b counts `[data-ds] li` against
+  // `sees.length`; a second list would fail that row for a reason that has nothing to do with
+  // what it is checking. Paragraphs keep it honest AND keep it green.
+  heading('inferTitle');
+  const inferLead = el('p', 'hint', d.inferLead);
+  inferLead.style.cssText = `${PROSE}margin-top:0`;
+  inferLead.dataset.ds = 'inferLead';
+  body.appendChild(inferLead);
+  for (const key of ['infer1', 'infer2', 'infer3', 'infer4', 'infer5', 'inferIp']) {
+    const p = el('p', 'hint', d[key]);
+    p.style.cssText = `${PROSE}margin:6px 0 0`;
+    p.dataset.ds = key;
+    body.appendChild(p);
+  }
+
   block('retentionTitle', 'retentionBody');
   block('updateTitle', 'updateBody');
   block('feedbackTitle', 'feedbackBody');

@@ -78,7 +78,7 @@ UND DIE SERVERADRESSE DAZU
 Die App fragt auch danach — sie hat keine Adresse fest eingebaut. Hier
 steht sie:
 
-    https://lzp-sync-po.vercel.app
+    https://serveradresse-fehlt.invalid
 
 
 In der App: Einstellungen -> „Familienkreis beitreten". Am einfachsten
