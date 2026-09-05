@@ -569,10 +569,28 @@ func updaterFetchManifest(_ done: @escaping (String) -> Void) {
         done(updaterJSON(["ok": false, "error": "disabled"]))
         return
     }
+    // NO KEY, NO REQUEST — and this guard replaced a sentinel that evaporated.
+    //
+    // Until 2026-09-05 the only guard here was `urlString.contains("OWNER-PLACEHOLDER")`, which
+    // was correct while no repository existed and became a no-op the moment one did. Substituting
+    // the real slug silently turned a hermetic test suite into one that reaches github.com on
+    // every CI run, and `tests/tier2/shell-updater.dom.js:78` said so in its own words: "the
+    // placeholder guard is what keeps this test hermetic".
+    //
+    // The invariant underneath was always this one: a manifest we cannot verify is a manifest we
+    // have no business fetching. `UPDATER_PUBLIC_KEY_B64` is empty until the PO generates the
+    // updater keypair, and with no key every signature check would fail anyway — so the request
+    // buys nothing and costs the user a network call she did not ask for. Refusing here is the
+    // same fail-closed direction the empty key was always meant to express, stated as a fact
+    // about the key rather than as a string match on the URL.
+    guard !UPDATER_PUBLIC_KEY_B64.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        done(updaterJSON(["ok": false, "error": UpdaterError.noKey.rawValue]))
+        return
+    }
     let urlString = updateManifestURLString()
     guard !urlString.contains("OWNER-PLACEHOLDER") else {
-        // No repository exists yet (PLAN.md §4). Refusing beats resolving some
-        // unrelated host that happens to answer.
+        // Kept: a placeholder can be reintroduced by a fork or a rename, and resolving whatever
+        // host happens to answer is worse than refusing.
         done(updaterJSON(["ok": false, "error": UpdaterError.noReleaseHost.rawValue]))
         return
     }
@@ -2690,10 +2708,14 @@ func runUpdaterSelftest(_ dirPath: String) -> Never {
     let sem3 = DispatchSemaphore(value: 0)
     DispatchQueue.global().async { updaterFetchManifest { r in reply3 = r; sem3.signal() } }
     _ = sem3.wait(timeout: .now() + 5)
-    // Both gates open, but the release host is still a placeholder: it must
-    // refuse rather than resolve some unrelated host that happens to answer.
-    ok(reply3.contains("no-release-host"),
-       "with both gates open it still refuses while the release host is a placeholder",
+    // Both gates open — and it must STILL refuse, without touching the network. The reason moved
+    // on 2026-09-05: it used to be the `OWNER-PLACEHOLDER` sentinel, which stopped meaning
+    // anything the moment the real repository slug was substituted. It is now the updater public
+    // key, which is empty until the PO generates the keypair. That is the stronger statement —
+    // a manifest nobody can verify is one we have no business fetching — and unlike the sentinel
+    // it cannot be switched off by an unrelated edit.
+    ok(reply3.contains("no-updater-key"),
+       "with both gates open it still refuses while there is no updater key to verify with",
        reply3)
 
     // ── 5 · status JSON is the shape src/js/platform/updater.js expects ───────

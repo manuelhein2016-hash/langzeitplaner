@@ -1,10 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "regions": ["fra1"],
+  "regions": [
+    "fra1"
+  ],
   "framework": null,
   "installCommand": "npm ci",
   "buildCommand": "npx prisma generate && if [ \"$VERCEL_ENV\" = \"production\" ] || [ \"$LZP_PREVIEW_DB_IS_ISOLATED\" = \"true\" ]; then npx prisma migrate deploy; else echo 'SKIPPING prisma migrate deploy: this is a preview and LZP_PREVIEW_DB_IS_ISOLATED is not true. See docs/v2/RELEASE.md.'; fi",
-  "_comment_ignoreCommand": "R-9.2. Exit 0 SKIPS the build; any non-zero builds. The old form was `git diff --quiet HEAD^ HEAD -- .` — ONE commit — so a push whose LAST commit missed server/ skipped the deployment even when an earlier commit in the same push carried a migration: the schema landed in main and Frankfurt stayed on the old one, with no deployment_status and therefore no smoke run either. VERCEL_GIT_PREVIOUS_SHA is the last commit Vercel actually deployed, so the window is now the whole range. Both guards fail OPEN: an unset variable and a SHA this (possibly shallow) checkout cannot resolve each exit non-zero, which BUILDS. A needless build costs a minute; a skipped one costs a migration nobody notices is missing. .github/scripts/check-deploy-window.mjs reads this very string and fails if it goes back to a single-commit window.",
   "ignoreCommand": "[ -n \"$VERCEL_GIT_PREVIOUS_SHA\" ] && git cat-file -e \"$VERCEL_GIT_PREVIOUS_SHA^{commit}\" 2>/dev/null && git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" HEAD -- .",
   "functions": {
     "api/**": {
@@ -16,10 +17,22 @@
     {
       "source": "/api/(.*)",
       "headers": [
-        { "key": "Cache-Control", "value": "no-store" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "Referrer-Policy", "value": "no-referrer" },
-        { "key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains" }
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "no-referrer"
+        },
+        {
+          "key": "Strict-Transport-Security",
+          "value": "max-age=63072000; includeSubDomains"
+        }
       ]
     }
   ]

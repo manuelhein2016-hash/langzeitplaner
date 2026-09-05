@@ -395,8 +395,23 @@ test('1.2 · weekends are shaded, plain weekdays are not, void rows have their o
     const w = dowISO(node.dataset.date);
     assert.ok(w === 0 || w === 6, node.dataset.date + ' is shaded but is not a weekend');
   }
-  const sat = weekend.find((d) => dowISO(d) === 6);
-  const sun = weekend.find((d) => dowISO(d) === 0);
+  // `x !== M.today` — WITHOUT IT THIS ROW FAILS EVERY SATURDAY AND SUNDAY.
+  //
+  // The window is rolling, so it STARTS at today: on a Saturday the first Saturday it finds is
+  // today, and `app.css:265` gives `.day.day.today` its own `--bg-today` which correctly wins over
+  // the weekend shade. The row then reports "Saturday" and looks like a rendering regression.
+  // Caught on 2026-09-05, a Saturday, on CI and locally at the same moment — the second row in
+  // this suite to read the wall clock without saying so (the first was fixed earlier the same
+  // week). `plainDate()` above has always had this exclusion; these two lines did not, and the
+  // asymmetry is the entire defect.
+  //
+  // The non-vacuity assertions matter as much as the exclusion: a `find` that returns undefined
+  // would make `dayNode(undefined)` throw somewhere unhelpful instead of saying what is missing.
+  const notToday = (d) => d !== m.today;
+  const sat = weekend.filter(notToday).find((d) => dowISO(d) === 6);
+  const sun = weekend.filter(notToday).find((d) => dowISO(d) === 0);
+  assert.ok(sat, 'no Saturday other than today in the visible window');
+  assert.ok(sun, 'no Sunday other than today in the visible window');
   assert.equal(bg(dayNode(sat)), SHADE.weekend, 'Saturday');
   assert.equal(bg(dayNode(sun)), SHADE.weekend, 'Sunday');
   assert.equal(bg(dayNode(plainDate())), SHADE.none, 'a plain weekday carries no fill');

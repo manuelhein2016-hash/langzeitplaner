@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 // R-9.2 — the deploy that does not happen, and that nobody knows did not happen.
 //
+// ⚠ THIS FILE IS WHERE THE REASONING LIVES, BECAUSE `server/vercel.json` CANNOT HOLD IT.
+// It used to carry an 822-character `_comment_ignoreCommand` key. Vercel's config schema is
+// `additionalProperties: false`, so that key made the project impossible to redeploy by hand:
+// "Invalid request: should NOT have additional property `_comment_ignoreCommand`". Git-triggered
+// builds tolerated it; the Redeploy button did not — which is the worst kind of difference,
+// because it only appears when someone is trying to recover. Removed 2026-09-05. Do not
+// reintroduce a comment key: JSON has no comments, and the enforcement is here anyway.
+//
 // `server/vercel.json` decides whether to build with an `ignoreCommand`: exit 0
 // SKIPS the deployment, any non-zero builds. It USED to be
 //

@@ -75,14 +75,24 @@ test('the welcome card / settings disclosure is what opens the gate (LZP-103 →
   assert.equal(on.enabled, true);
 });
 
-test('with both gates open the shell still refuses while the release host is a placeholder', async () => {
-  // PLAN.md §4: there is no GitHub repository yet, so UPDATE_MANIFEST_URL in
-  // main.swift is a marked placeholder. Refusing beats resolving whatever host
-  // happens to answer — and it means this suite performs no real network I/O.
+test('with both gates open the shell still refuses, and this suite still touches no network', async () => {
+  // INVERTED 2026-09-05, and the reason is worth keeping. This row used to assert
+  // `no-release-host`, because UPDATE_MANIFEST_URL was a marked placeholder — and its own comment
+  // named what that bought: "it means this suite performs no real network I/O".
+  //
+  // Substituting the real repository slug would have quietly turned that into a suite that GETs
+  // github.com on every CI run. The hermeticity was never really about the URL; it was about
+  // there being nothing worth fetching yet. So the guard in `updaterFetchManifest` now refuses on
+  // the EMPTY UPDATER KEY instead: a manifest that cannot be verified is one we have no business
+  // fetching, which is true permanently rather than only until someone creates a repository.
+  //
+  // When the PO generates the keypair this row goes red, and that is correct — it is the point at
+  // which this suite would start making real requests, and it must become a decision (pass
+  // `--updater-manifest-url` at a local fixture) rather than a silent network dependency.
   const r = JSON.parse(await invoke('update_fetch_manifest'));
   assert.equal(r.ok, false);
-  assert.equal(r.error, 'no-release-host',
-    'the placeholder guard is what keeps this test hermetic; LZP-101 replaces it');
+  assert.equal(r.error, 'no-updater-key',
+    'the empty updater key is what keeps this suite hermetic now that the release host is real');
 });
 
 test('the runner turns that refusal into a visible error state, never an exception', async () => {

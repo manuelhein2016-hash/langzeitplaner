@@ -28,7 +28,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # fetch-depth: 0 — THE ORACLE IS IN THE HISTORY, NOT IN THE TREE.
+      #
+      # `tests/attack/v1-frozen-store.test.js:34` re-derives the frozen v1 store by shelling out
+      # to `git show 66126e9:src/js/store.js` and comparing it byte-for-byte with the vendored
+      # copy. That is what stops the v1 characterization oracle from quietly drifting into
+      # agreement with whatever v2 happens to do — the whole regression argument rests on it.
+      #
+      # `actions/checkout@v4` clones at depth 1 by default, so the baseline commit is simply not
+      # there and the row fails with a git error rather than a drift report. Found on the second
+      # push, 2026-09-05. A shallow clone would have let the oracle rot invisibly on CI while
+      # every developer machine kept checking it.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
