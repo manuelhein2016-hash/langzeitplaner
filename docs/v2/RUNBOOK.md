@@ -38,7 +38,7 @@ no on-call rotation, no dashboard and no second opinion, and it says plainly whe
 ```
    Mom's Mac ─┐
    PO's Mac  ─┼─► HTTPS ─► Vercel Function (fra1)  ─►  Prisma Postgres (eu-central-1)
-   PO's Mac 2─┘             server/api/v1/[...path].js        server/prisma/schema.prisma
+   PO's Mac 2─┘             server/api/v1/index.js        server/prisma/schema.prisma
                                      │
                                      └─ one entry point, 23 handlers, no CORS, no cache
 

@@ -133,7 +133,7 @@ const STORE_ADAPTERS = {
   prismaStore: { name: 'prisma', file: 'server/adapters/prisma.js', needsSchema: true,  note: 'Prisma Postgres in eu-central-1 — the only adapter with a schema to create' },
 };
 
-const ENTRY = 'server/api/v1/[...path].js';
+const ENTRY = 'server/api/v1/index.js';
 let judged = null;      // the resolved store adapter, or null if the chain could not be read
 let httpAdapter = null; // the adapter that owns the request/response normalisation
 

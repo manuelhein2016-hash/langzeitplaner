@@ -235,7 +235,7 @@ export function responseHeaders(extra) {
 const route = createHandlers();
 
 /**
- * The Vercel function body. `server/api/v1/[...path].js` is a one-line re-export of this.
+ * The Vercel function body. `server/api/v1/index.js` is a one-line re-export of this.
  *
  * @param {import('node:http').IncomingMessage} nodeReq
  * @param {import('node:http').ServerResponse} nodeRes

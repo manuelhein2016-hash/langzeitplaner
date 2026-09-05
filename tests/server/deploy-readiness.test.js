@@ -284,10 +284,10 @@ for (const c of NAME_CASES) {
 
 const CONFIG_CASES = [
   mutantCase({ what: 'the Vercel entry point is deleted', row: 'A1',
-    mutate: (d) => rm(d, 'server/api/v1/[...path].js'),
+    mutate: (d) => rm(d, 'server/api/v1/index.js'),
     because: 'the filesystem router matches no function; every route 404s and a smoke test reads that as "not deployed yet"' }),
   mutantCase({ what: 'the entry point no longer re-exports from an adapter', row: 'A1b',
-    mutate: (d) => wr(d, 'server/api/v1/[...path].js', 'export default function h(){}\nexport const config={};\n'),
+    mutate: (d) => wr(d, 'server/api/v1/index.js', 'export default function h(){}\nexport const config={};\n'),
     because: 'the check cannot name the adapter it is judging, and a check that cannot name its subject must not answer for it' }),
   mutantCase({ what: 'the http adapter imports two store factories', row: 'A3',
     mutate: (d) => wr(d, 'server/adapters/vercel.js', `import { memoryStore } from './memory.js';\n${rd(d, 'server/adapters/vercel.js')}`),

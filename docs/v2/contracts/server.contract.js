@@ -120,7 +120,7 @@ export async function adoptDevice(req, ctx) { throw new Error('not implemented')
 /** POST /api/v1/pair/deliver @type {Handler} */        export async function pairDeliver(req, ctx) { throw new Error('not implemented'); }
 
 /**
- * (method, path) → Handler. SHARED by api/v1/[...path].js and by tests/helpers/loopback.js,
+ * (method, path) → Handler. SHARED by api/v1/index.js and by tests/helpers/loopback.js,
  * so the fleet suite exercises the real handlers with no sockets.
  * @param {ServerCtx} ctx @param {ServerReq} req @returns {Promise<ServerRes>}
  */

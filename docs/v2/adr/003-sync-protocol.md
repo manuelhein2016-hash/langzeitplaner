@@ -1328,7 +1328,7 @@ implement it:
 | `server/adapters/file.js` | `server/dev-server.mjs` — a zero-dependency `node:http` host | lets **two real app windows** sync on this machine over real HTTP, with no Vercel and no Postgres |
 | `server/adapters/prisma.js` | production only | `$transaction`, Prisma connection pooling **from day one** (Risk R3) |
 
-`api/v1/[...path].js` is the only Vercel-aware file, ~15 lines: normalise `Request` →
+`api/v1/index.js` is the only Vercel-aware file, ~15 lines: normalise `Request` →
 `ServerReq`, build `ctx` with `prismaStore()`, run `router`, write `ServerRes` back. **A bug in it
 cannot be a bug in a handler.**
 

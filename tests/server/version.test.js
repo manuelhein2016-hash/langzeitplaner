@@ -361,7 +361,7 @@ async function loadHandlers() {
     const mod = await import(real);
     if (mod && mod.handlers && typeof mod.handlers.pushOps === 'function') {
       // The REAL composition, not a reassembly of it: `createHandlers` is the function
-      // `server/api/[...path].js` and `server/dev-server.mjs` both call, so the ordering
+      // `server/api/index.js` and `server/dev-server.mjs` both call, so the ordering
       // decision it encodes (version gate outermost, NO `withLimits` over self-limiting
       // handlers) is the one under test here rather than one this file invented.
       return { mode: 'real', handlers: mod.handlers, make: ({ gate }) => mod.createHandlers({ version: { gate } }) };
