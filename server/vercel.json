@@ -7,6 +7,12 @@
   "installCommand": "npm ci",
   "buildCommand": "bash vercel-build.sh",
   "outputDirectory": "public",
+  "rewrites": [
+    {
+      "source": "/api/v1/probetest/(.*)",
+      "destination": "/api/v1/spaces/probe"
+    }
+  ],
   "ignoreCommand": "[ -n \"$VERCEL_GIT_PREVIOUS_SHA\" ] && git cat-file -e \"$VERCEL_GIT_PREVIOUS_SHA^{commit}\" 2>/dev/null && git diff --quiet \"$VERCEL_GIT_PREVIOUS_SHA\" HEAD -- .",
   "functions": {
     "api/**": {
