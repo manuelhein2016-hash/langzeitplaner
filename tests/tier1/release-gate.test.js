@@ -557,9 +557,20 @@ function sources() {
 }
 
 /** The shipped §5/§6 rows over supplied sources. Anything omitted falls back to the real tree. */
-function preflightRows(state = {}) {
+/**
+ * @param {object} [state] sources to substitute; anything omitted falls back to the real tree
+ * @param {{GITHUB_REPOSITORY?: string|null}} [envOverride]
+ *   `SH-SLUG` reads `process.env.GITHUB_REPOSITORY` as its fallback comparand, so a test that
+ *   INHERITS the environment asserts a different thing on a laptop than it does on a runner.
+ *   Pass `null` to unset it. Every SH-SLUG case names the value it means; see §6e.
+ */
+function preflightRows(state = {}, envOverride = {}) {
+  const env = { ...process.env };
+  for (const [k, v] of Object.entries(envOverride)) {
+    if (v === null || v === undefined) delete env[k]; else env[k] = v;
+  }
   const out = execFileSync('node', [PREFLIGHT, '--simulate', '-'], {
-    cwd: ROOT, encoding: 'utf8', input: JSON.stringify(state), maxBuffer: 64 * 1024 * 1024,
+    cwd: ROOT, encoding: 'utf8', input: JSON.stringify(state), maxBuffer: 64 * 1024 * 1024, env,
   });
   return JSON.parse(out).rows;
 }
@@ -895,19 +906,58 @@ describe('§6 · the Swift shell\'s hand-substituted constants are gated', () =>
     assert.equal(agree.status, 'PASS',
       'the shipped pair of slugs is refused — this row would block the release it is meant to guard');
 
-    // And the unresolved case is reported, not passed: tauri.conf.json still holds OWNER/REPO in
-    // the tree, and release.yml rewrites it before the strict pre-flight ever runs.
-    const unresolved = nRow(preflightRows({ endpoints: ['https://github.com/OWNER/REPO/releases/latest/download/latest.json'] }), 'SH-SLUG');
-    assert.equal(unresolved.status, 'SKIP',
-      'an unresolved endpoint is silently compared to nothing and reported as a pass');
+    // ── the unresolved endpoint, and the environment it is read in ────────────────────────────
+    //
+    // ██ CORRECTED 2026-09-05, integration pass. What stood here, verbatim: ██
+    //
+    //   > const unresolved = nRow(preflightRows({ endpoints: ['…/OWNER/REPO/…'] }), 'SH-SLUG');
+    //   > assert.equal(unresolved.status, 'SKIP',
+    //   >   'an unresolved endpoint is silently compared to nothing and reported as a pass');
+    //
+    // That INHERITED the environment, so it asserted a different thing on a laptop than on a
+    // runner — and it went red on its first CI run, because `ci.yml` sets `GITHUB_REPOSITORY`
+    // while leaving tauri.conf.json's OWNER/REPO placeholder in place. The row was right and the
+    // test was wrong: with the endpoint unresolved the pre-flight falls back to that variable,
+    // which is the whole point of the fallback, and PASS is the correct verdict there.
+    //
+    // The contract is three cases, and each one now NAMES the environment it means.
+    const OURS = 'manuelhein2016-hash/langzeitplaner';
+    const PLACEHOLDER = { endpoints: ['https://github.com/OWNER/REPO/releases/latest/download/latest.json'] };
+
+    // (a) nothing to compare against at all — reported, never passed.
+    assert.equal(nRow(preflightRows(PLACEHOLDER, { GITHUB_REPOSITORY: null }), 'SH-SLUG').status, 'SKIP',
+      'with the endpoint unresolved AND no GITHUB_REPOSITORY there is nothing to compare the '
+      + 'shell against, and a row that answers PASS there is answering about nothing');
+
+    // (b) the runner's own repository is the fallback comparand — this is ordinary CI.
+    assert.equal(nRow(preflightRows(PLACEHOLDER, { GITHUB_REPOSITORY: OURS }), 'SH-SLUG').status, 'PASS',
+      'on a runner the placeholder endpoint falls back to GITHUB_REPOSITORY, and that is what '
+      + 'release.yml will rewrite the endpoint to. Refusing here would fail every ordinary CI run.');
+
+    // (c) and the fallback still DECIDES — it is a comparand, not a waiver.
+    const wrongRunner = nRow(preflightRows(PLACEHOLDER, { GITHUB_REPOSITORY: 'someone-else/other' }), 'SH-SLUG');
+    assert.equal(wrongRunner.status, 'FAIL',
+      'a fork or a renamed repository builds a Tauri app pointing at ITSELF while the Swift shell '
+      + 'still polls the original. That is the half-updated fleet this row exists for, and the '
+      + 'placeholder branch must not be the way around it.');
+    assert.match(wrongRunner.detail, /someone-else\/other/);
   });
 
   test('§6f · the pre-flight blocks a release on this, and does NOT block ordinary CI', () => {
     // Two exit codes, measured through the real CLI rather than the row list, because they are
     // what ci.yml:209 and release.yml step 4 actually consult.
+    //
+    // ██ THE ENVIRONMENT IS PINNED, ADDED 2026-09-05 ██ `SH-SLUG` falls back to
+    // `GITHUB_REPOSITORY` when the Tauri endpoint still holds OWNER/REPO — which is the state of
+    // the tree — so an inherited variable decides these two exit codes. Unpinned, this test asks
+    // "does the pre-flight block CI *here*", and "here" is a laptop, our runner, or a fork,
+    // depending on who is running it. This assertion is about THIS repository's pipeline, which
+    // is what `ci.yml:209` and `release.yml` step 4 consult, so it says which repository it means.
+    // A fork's disagreeing slug is a real finding and it has its own case, §6e(c).
+    const CI_ENV = { ...process.env, GITHUB_REPOSITORY: 'manuelhein2016-hash/langzeitplaner' };
     const runCli = (extra) => {
       try {
-        return { code: 0, out: execFileSync('node', [PREFLIGHT, ...extra], { cwd: ROOT, encoding: 'utf8' }) };
+        return { code: 0, out: execFileSync('node', [PREFLIGHT, ...extra], { cwd: ROOT, encoding: 'utf8', env: CI_ENV }) };
       } catch (e) {
         if (e.status === undefined) throw e;
         return { code: e.status, out: e.stdout || '' };

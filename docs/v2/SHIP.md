@@ -4,7 +4,7 @@
 |---|---|
 | **Written** | 2026-09-04, at the end of the integration pass that built and mounted the artifacts |
 | **Re-issued** | **2026-09-05** — §0, §1, §2, §3 and §5 step 5. Five of the six blockers below fell in one day. Every superseded paragraph is quoted where it stood, not deleted. |
-| **Re-issued again** | **2026-09-05, integration pass** — the measurement block, §5 (two steps were missing entirely), the new **§7**, and the short version, which is now *the* ordered list of what only the PO can do. Two defects in the release wiring were found by running it and are fixed; see §7. |
+| **Re-issued again** | **2026-09-05, integration pass** — the measurement block, §5 (two steps were missing entirely), the new **§7**, and the short version, which is now *the* ordered list of what only the PO can do. **Three** defects in the release wiring were found by running it — two here, one by the first CI run that had ever executed these tests — and all three are fixed; see §7. |
 | **Audience** | the PO, and nobody else |
 | **Companion to** | `RELEASE-CHECKLIST.md` — the mechanical sheet. This is the *order*, and the *why*. |
 | **Scope** | everything between "the tree is green" and "she is using it" |
@@ -114,8 +114,11 @@ xcrun stapler validate         The validate action worked!     ← the ticket is
    ship plan and it is now written into `.github/workflows/release.yml` — step 9b *"Notarize the
    rewritten DMG, staple it, and prove both tickets"*, plus a hard `spctl` gate that requires
    `accepted` **and** `source=Notarized Developer ID` on **both** the app and the downloaded image,
-   plus eight pre-flight rows (`N-SUBMIT`, `N-ORDER`, `N-STAPLE`, `N-VALIDATE`, `N-RUNTIME`, `N-SPCTL-APP`, `N-SPCTL-DMG`, `N-NOTARIZED`)
-   that fail in seconds if the sequence is ever removed or reordered. **None of it has ever run.**
+   plus **ten** pre-flight rows (`N-SUBMIT`, `N-ORDER`, `N-STAPLE`, `N-STAPLE-LOUD`, `N-VALIDATE`,
+   `N-RUNTIME`, `N-SIGPIPE`, `N-SPCTL-APP`, `N-SPCTL-DMG`, `N-NOTARIZED`) that fail in seconds if
+   the sequence is ever removed or reordered. **None of it has ever run against Apple** — but the
+   two steps that carry it have now been executed against real fixtures, and **two of them were
+   broken**; the last two rows in that list are the ones that came out of it. See §7.
    `RELEASE.md` §8.2 is the step-by-step; §8.3 is what is still unproven.
 
 ---
@@ -560,7 +563,8 @@ this Mac against real fixtures: the real notarized-and-stapled `/Applications/La
 real DMGs built around it, real `codesign`, real `hdiutil`, real `stapler`, real `spctl`. Only
 `notarytool` was scripted, because it needs an Apple account.
 
-**A gate nobody has seen fail is not a gate. Two of these had never been seen at all.**
+**A gate nobody has seen fail is not a gate. Two of these had never been seen at all — and a
+third was found by the first CI run that had ever executed these tests.**
 
 ### The two defects, both fatal, both found by using a real tool instead of a stub
 
@@ -686,6 +690,29 @@ is gone rather than narrowed.
 - **The fixture harness is not committed.** Tier 1 bans `node:fs`, so a repo version needs a file
   outside the four this pass owns. The *predicates* are committed (`N-SIGPIPE`, `N-STAPLE-LOUD`,
   §5l–§5p); the fixtures are not. Worth a ticket.
+
+### And a third defect, which only the first push could find
+
+The two above were found on this Mac. **The third was found by CI, on the first run that had ever
+seen these tests** — `release-gate.test.js` §5/§6 and `release-staging.test.js` were both
+uncommitted until this pass, so no runner had executed a line of them.
+
+`§6e` asserted that an unresolved updater endpoint makes `SH-SLUG` report **SKIP**. True on a
+laptop. **False on a runner**, because `ci.yml` sets `GITHUB_REPOSITORY` while `tauri.conf.json`
+still holds `OWNER/REPO`, and the pre-flight then falls back to that variable — which is the whole
+purpose of the fallback, and `PASS` is the correct verdict there. **The row was right and the test
+was wrong:** it inherited the environment, so it asserted a different thing depending on who ran it.
+
+Both `§6e` and `§6f` now name the environment they mean, and `preflightRows` takes an override.
+Verified under all three: `GITHUB_REPOSITORY` unset, set to this repository, and set to a fork —
+**42/42 in every one**. A fork's disagreeing slug is a real finding and it is now its own case,
+`§6e(c)`, which asserts `SH-SLUG` **FAIL**s there: a fork builds a Tauri app pointing at itself
+while the Swift shell still polls the original, and that is exactly the half-updated fleet the row
+exists for.
+
+> The lesson is the same one as the SIGPIPE defect, in a different costume: **a gate is only as
+> good as the environment it was last run in.** These three were all found by running the thing
+> rather than reading it, and two of the three could not have been found any other way.
 
 ### One latent hazard, named and not fixed
 
