@@ -55,6 +55,16 @@ The three reds, named: `e8-density-legibility` §A4 (the 9 px ink floor, a PO ru
 saturated poster, a spec threshold error where 48 % is the mathematical ceiling and the row asks
 75 %). None is new and none is this pass's.
 
+⚠ **ON CI, TIER 2 SHOWS FOUR, AND THE FOURTH IS NOT REPRODUCIBLE ON THIS MAC.**
+`e8-density-truncation` §C2 (*"at the 92 px minimum column the badges are a tax, and the line is
+still a line"*) fails on the GitHub runner and passes locally, and it **already failed on the
+runner at `21de06a`, before this pass touched anything** — it is a font-metric difference between
+the runner's WebKit and this machine's, not a defect this pass introduced. §E1 is the flakiest of
+the three named residuals and is a frame-budget row: it went green on one runner pass and red on
+the next two, with no code between them. Measured on two consecutive runs of the same commit.
+**The tier-2 job is therefore red on CI and has been since before this pass**; the three local
+residuals plus §C2 are the whole of it, and each is named.
+
 ### The acceptance run — FIVE consecutive runs, 35 launches of the shipped binary each
 
 | Run | Phases failed | Founder got a joiner's entry | Refusal ledger | Relaunch battery |
