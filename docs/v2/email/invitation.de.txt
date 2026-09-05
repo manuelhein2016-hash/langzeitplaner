@@ -78,7 +78,7 @@ UND DIE SERVERADRESSE DAZU
 Die App fragt auch danach — sie hat keine Adresse fest eingebaut. Hier
 steht sie:
 
-    https://serveradresse-fehlt.invalid
+    https://langzeitplaner.vercel.app
 
 
 In der App: Einstellungen -> „Familienkreis beitreten". Am einfachsten

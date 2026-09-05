@@ -207,34 +207,53 @@ describe('§1 · 21.5 — every socket in the product, and who is allowed to ope
       'the shell sync pref does not default to false');
   });
 
-  test('§1g · the WHOLE PRODUCT names exactly ONE remote URL, and it is the update manifest', () => {
-    // The strongest single sentence available about 21.5, and the one that closes the
-    // `Data(contentsOf:)` class: a primitive that can fetch only if handed a remote URL is safe
-    // when there is no remote URL to hand it. The sync URL is not here because it is not a
-    // literal — it is built by `assertReachable` from the origin the user typed at „Beitreten".
-    const urls = remoteUrlLiterals();
-    assert.equal(urls.length, 1,
-      'the shells name more than one remote host:\n' + urls.map((u) => `  ${u.file}:${u.line} ${u.url}`).join('\n'));
-    assert.match(urls[0].url, /^https:\/\//, 'the one remote URL is not https');
-    assert.match(urls[0].url, /latest\.json$/, 'the one remote URL is not the update manifest');
-    // INVERTED 2026-09-05. This assertion used to require `OWNER-PLACEHOLDER`, and its failure
-    // message was a REVIEW TRIGGER rather than a bug report: "the release host is now real —
-    // check that RELEASE-CHECKLIST §A and the Datenschutz text (21.3) name it". It fired on the
-    // first push, exactly as designed. Both were checked before this line changed:
-    //   · RELEASE-CHECKLIST §A now records the repository, the visibility decision and this URL;
-    //   · the Datenschutz copy (21.3) already named the operator in both languages — „bei GitHub
-    //     nach", and that GitHub belongs to Microsoft and is not in the EU. It deliberately does
-    //     not print the URL, and `e13-datenschutz.dom.js:301` is the row that keeps the operator
-    //     named there.
+  test('§1g · the WHOLE PRODUCT names exactly TWO remote hosts, and both are sanctioned', () => {
+    // ── INVERTED TWICE, AND THE SECOND TIME IS THE REAL ONE ──────────────────────────────────
     //
-    // What the row protects has NOT moved: the product still names exactly ONE remote host, it is
-    // still https, and it is still the update manifest. The placeholder check is replaced by the
-    // stronger statement it was standing in for — the host is the one the release actually
-    // publishes to, so a typo here cannot ship a fleet that updates from somewhere else.
-    assert.match(urls[0].url,
+    // (1) It first required `OWNER-PLACEHOLDER`, as a REVIEW TRIGGER whose failure message read
+    //     "the release host is now real — check that RELEASE-CHECKLIST §A and the Datenschutz text
+    //     (21.3) name it". It fired on the first push, exactly as designed, and both were checked.
+    //
+    // (2) It then required exactly ONE remote URL, on the strongest sentence available about 21.5:
+    //     a primitive that can fetch only if handed a remote URL is safe when there is no remote
+    //     URL to hand it. That rested on the sync origin NOT being a literal — "it is built by
+    //     `assertReachable` from the origin the user typed at „Beitreten"".
+    //
+    //     **That premise died on 2026-09-05**, and not by accident: AUDIT F1 found that a build
+    //     whose `SYNC_ORIGIN_BUILTIN` is empty refuses every family request locally, so the origin
+    //     HAS to be pinned in both shells for a Familienkreis to work at all. The relay is now
+    //     `https://langzeitplaner.vercel.app`, deployed, and named in six files as one act.
+    //
+    // So the count moves from one to two, and the row states what actually protects the user now:
+    // there are exactly TWO sanctioned remotes, each is https, each is the one the product is
+    // supposed to talk to, and there is no third. Both are disclosed on the Datenschutz screen —
+    // GitHub for updates ("und ist nicht in der EU"), Vercel/Prisma in Frankfurt for sync — which
+    // is the property 21.3 exists to keep true. A third host appearing here is still the finding
+    // this row was written to produce.
+    const urls = remoteUrlLiterals();
+    const hosts = [...new Set(urls.map((u) => new URL(u.url).origin))].sort();
+    const shown = urls.map((u) => `  ${u.file}:${u.line} ${u.url}`).join('\n');
+    assert.equal(hosts.length, 2, `the shells name ${hosts.length} remote hosts, not two:\n${shown}`);
+    for (const u of urls) assert.match(u.url, /^https:\/\//, `not https: ${u.file}:${u.line}`);
+
+    const manifest = urls.filter((u) => /latest\.json$/.test(u.url));
+    assert.equal(manifest.length, 1, `expected exactly one update manifest URL:\n${shown}`);
+    assert.match(manifest[0].url,
       /^https:\/\/github\.com\/manuelhein2016-hash\/langzeitplaner\/releases\/latest\/download\/latest\.json$/,
       'the update manifest URL is not the repository the release workflow publishes to — a fleet '
       + 'that updates from a host nobody controls is the worst outcome in this file');
+
+    // The relay, named identically by BOTH shells. `release-gate.test.js` §1a already requires the
+    // two constants to be equal; this says the same thing from the other side — from what a
+    // scanner finds in the shipped source rather than from what a regex reads out of a constant.
+    const relay = urls.filter((u) => !/latest\.json$/.test(u.url));
+    assert.equal(relay.length, 2, `both shells must pin the relay, and only the relay:\n${shown}`);
+    assert.equal(new Set(relay.map((u) => u.url)).size, 1,
+      `the two shells pin DIFFERENT relay origins — every family request would work on one Mac `
+      + `and be refused on the other:\n${shown}`);
+    assert.match(relay[0].url, /^https:\/\/[a-z0-9.-]+$/,
+      'the relay origin is not a bare ASCII https origin — an IDN makes Swift\'s URLComponents.host '
+      + 'return the U-label against net.js\'s A-label, and every family request is refused for ever');
   });
 
   test('§1h · the second class is reported, not ignored: contentsOf: sites are enumerated', () => {

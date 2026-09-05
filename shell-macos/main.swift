@@ -823,7 +823,7 @@ func updaterDownload(version: String, urlString: String, signature: String, expe
 /// 2026-09-03: HTTP 404 `x-vercel-error: DEPLOYMENT_NOT_FOUND`, i.e. free for anyone to claim).
 /// `isReservedSyncHost` below refuses it here too, by name, so pasting the placeholder in here
 /// by mistake is a named local refusal rather than a DNS failure blamed on the connection.
-let SYNC_ORIGIN_BUILTIN = ""
+let SYNC_ORIGIN_BUILTIN = "https://langzeitplaner.vercel.app"
 
 let SYNC_PREFS_FILE = "sync.json"
 

@@ -733,7 +733,7 @@ fn clear_staged_marker_if_applied(app: &AppHandle) {
 /// While this is `""` the invitations carry `https://serveradresse-fehlt.invalid`; RFC 2606 §2
 /// reserves `.invalid` so no registry can delegate it. `is_reserved_sync_host` below refuses it
 /// here too, so pasting the placeholder in by mistake is a named local refusal.
-const SYNC_ORIGIN_BUILTIN: &str = "";
+const SYNC_ORIGIN_BUILTIN: &str = "https://langzeitplaner.vercel.app";
 
 const SYNC_PREFS_FILE: &str = "sync.json";
 
