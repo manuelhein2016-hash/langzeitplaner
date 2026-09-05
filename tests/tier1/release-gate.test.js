@@ -493,3 +493,443 @@ describe('§4 · the refusal is launch-invariant; the switch that precedes it is
       + 'be a property of the order these checks run in');
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §5 · THE PIPELINE CANNOT LIE ABOUT NOTARIZATION — LZP-1010, 2026-09-05
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHAT WAS ACTUALLY WRONG, STATED PRECISELY, BECAUSE THE OBVIOUS VERSION IS WRONG
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Tauri's bundler DOES set the hardened runtime and DOES invoke `notarytool` when the
+// `APPLE_API_*` variables are present. Nobody needed to teach the pipeline to notarize. Two
+// other things were true and neither had a row:
+//
+//   1. NOTHING IN THIS REPOSITORY ASSERTED IT WORKED. The only Gatekeeper check was
+//      `release.yml`'s `spctl --assess --type execute … || true` — seven characters that turn
+//      the one command able to tell a notarized build from an unsigned one into a comment. A
+//      notarization that silently failed would publish a DMG that presents to the PO's mother
+//      exactly as the D1 build did: „Apple konnte nicht überprüfen…". The 99 € would have
+//      bought a green tick and nothing else.
+//
+//   2. `dmg-add-readme.sh:122-136` REWRITES THE IMAGE AFTER TAURI BUILT IT — `hdiutil convert`
+//      to UDZO and then `mv` over the original — and re-signs it. `codesign --force --sign`
+//      puts a signature back. It cannot put a staple back. That branch had never run: it was
+//      dead under D1 because the identity was the ad-hoc "-", and it stopped being dead the
+//      moment `ENABLE_APPLE_SIGNING` became `true`. Its own warning said the staple must be
+//      produced after it, addressed to nobody.
+//
+// The fix is three steps of shell (`release.yml` step 9b, and the branch in step 10) and it is
+// not testable from here: no runner, no certificate, no notarytool. What IS testable — and what
+// this section does — is that the steps exist, in the one order that works, with no `|| true`
+// on the branch where a rejection is a lie, and with the `|| true` intact on the branch where
+// `rejected` is the honest answer.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// WHY THESE ROWS GO THROUGH `check-release-config.mjs`
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Same reason §2 goes through `mom-test-probe.mjs`: tier 1 may not touch the filesystem, and a
+// predicate written twice goes green against itself. The pre-flight is the instrument that
+// already runs in `ci.yml:209` and in `release.yml`'s step 4, so putting the rows there means
+// the mutants below kill the thing that actually gates a release. `--dump` hands this file the
+// real sources; `--simulate -` runs the shipped rows over a mutated copy.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// TWO WAYS THIS SECTION WAS ALREADY WRONG ONCE, BOTH FOUND BY RUNNING THE MUTANTS
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//  · The first predicate counted `spctl --assess` occurrences in the whole step and reported
+//    "2 hard, 2 informational" over a step that runs two commands: it was counting the
+//    `::error` messages that NAME the command, and the comment block that quotes the old line
+//    verbatim. Deleting the real invocation left the row green. `commandLines()` in the
+//    pre-flight is that fix, and §5k below is the row that keeps it.
+//  · The first mutants were no-ops. `src.replace('--options runtime ', '')` hit the sentence in
+//    a COMMENT that explains why the flag is there, left the command untouched, and reported a
+//    dead mutant as a live one. `mutate()` below only edits lines that run.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+const PREFLIGHT = path.join(ROOT, '.github', 'scripts', 'check-release-config.mjs');
+
+/** The four sources the pre-flight reads, verbatim, without this file opening a file. */
+function sources() {
+  return JSON.parse(execFileSync('node', [PREFLIGHT, '--dump'], {
+    cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  }));
+}
+
+/** The shipped §5/§6 rows over supplied sources. Anything omitted falls back to the real tree. */
+function preflightRows(state = {}) {
+  const out = execFileSync('node', [PREFLIGHT, '--simulate', '-'], {
+    cwd: ROOT, encoding: 'utf8', input: JSON.stringify(state), maxBuffer: 64 * 1024 * 1024,
+  });
+  return JSON.parse(out).rows;
+}
+
+/**
+ * Replace `find` with `replace`, but ONLY on lines that run — never inside a comment.
+ *
+ * Both files quote their own commands in their comments (the inverted `|| true` line, the
+ * sentence explaining `--options runtime`), so a plain `String.replace` edits the prose and
+ * leaves the command alone: a mutant that changes nothing and reports success.
+ */
+const mutate = (src, find, replace) =>
+  src.split('\n').map((l) => (/^\s*#/.test(l) ? l : l.split(find).join(replace))).join('\n');
+
+const nRow = (rows, id) => rows.find((r) => r.id === id);
+
+describe('§5 · the notarization chain exists, in order, and nothing swallows its verdict', () => {
+  test('§5a · CONTROL · every notarization row is green on the tree as it stands', () => {
+    const rows = preflightRows().filter((r) => r.id.startsWith('N-'));
+    assert.ok(rows.length >= 7, `only ${rows.length} pipeline rows — the section moved or shrank`);
+    assert.deepEqual(rows.filter((r) => r.status !== 'PASS'), [],
+      'the honest path is refused. Whatever else these mutants prove, a gate that cannot go green '
+      + 'over the shipping tree blocks the release it exists to protect:\n'
+      + rows.map((r) => `  ${r.id} ${r.status}: ${r.detail}`).join('\n'));
+  });
+
+  test('§5b · MUTANT · the notarytool submission is gone — N-SUBMIT dies', () => {
+    const wf = mutate(sources().workflow, 'xcrun notarytool submit', 'true # submit');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-SUBMIT').status, 'FAIL',
+      'a release.yml with no notarytool submission passes. That is the state this file was written '
+      + 'in: the bundler may still notarize the .app, and the DMG that ships is a DIFFERENT FILE, '
+      + 'rewritten afterwards, with no ticket of its own.');
+    assert.match(nRow(rows, 'N-SUBMIT').detail, /notarytool submit/);
+  });
+
+  test('§5c · MUTANT · notarization moved BEFORE the read-me injection — N-ORDER dies', () => {
+    // ██ THE SUBTLE ONE ██ Every command is still present and every other row stays green. The
+    // image is notarized, stapled, validated — and then `dmg-add-readme.sh` rewrites it and the
+    // `mv` at line 123 drops the stapled copy in $TMPDIR. Order is the whole content of the fix.
+    const wf = sources().workflow;
+    const nStart = wf.indexOf('      # ── 9b.');
+    const nEnd = wf.indexOf('      # ── 10. Gate:');
+    const iStart = wf.indexOf('      # ── 8b.');
+    assert.ok(nStart > 0 && nEnd > nStart && iStart > 0 && iStart < nStart,
+      'the 8b / 9b / 10 section markers moved; this mutant slices on them');
+    const step = wf.slice(nStart, nEnd);
+    const moved = wf.slice(0, iStart) + step + wf.slice(iStart, nStart) + wf.slice(nEnd);
+    const rows = preflightRows({ workflow: moved });
+    assert.equal(nRow(rows, 'N-ORDER').status, 'FAIL',
+      'notarizing before the step that rewrites the image is accepted. The published DMG would '
+      + 'carry a valid signature, no ticket, and a workflow log full of green notarization output.');
+    assert.equal(nRow(rows, 'N-SUBMIT').status, 'PASS',
+      'the ordering mutant also killed N-SUBMIT, so this row is not measuring what it claims to');
+  });
+
+  test('§5d · MUTANT · the DMG staple is validated and swallowed by `|| true` — N-VALIDATE dies', () => {
+    const wf = mutate(sources().workflow, 'if ! xcrun stapler validate "$DMG"', 'xcrun stapler validate "$DMG" || true #');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-VALIDATE').status, 'FAIL',
+      'the release continues after `stapler validate` says the ticket did not take. A validation '
+      + 'whose result is discarded is a slower way of not checking.');
+    assert.match(nRow(rows, 'N-VALIDATE').detail, /swallowed/);
+  });
+
+  test('§5e · MUTANT · only the DMG is validated, not the .app — N-VALIDATE dies', () => {
+    const wf = mutate(sources().workflow, 'xcrun stapler validate "$APP"', 'true');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-VALIDATE').status, 'FAIL',
+      'validating the image alone is accepted. The .app is what she actually launches after the '
+      + 'drag to Programme, and it carries its own ticket — stapled by the bundler, before the '
+      + 'image existed. The two can disagree and only one of them was checked.');
+    assert.match(nRow(rows, 'N-VALIDATE').detail, /the \.app/);
+  });
+
+  test('§5f · MUTANT · the hard Gatekeeper gate gets its `|| true` back — N-SPCTL-APP dies', () => {
+    // Literally the diff this ticket reverses, applied one branch over.
+    const wf = mutate(sources().workflow,
+      'spctl --assess --type execute --verbose=4 "$INNER" > "$APP_OUT" 2>&1 || RC=$?',
+      'spctl --assess --type execute --verbose=4 "$INNER" > "$APP_OUT" 2>&1 || true');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-SPCTL-APP').status, 'FAIL',
+      'a signed release whose Gatekeeper assessment cannot fail the build is accepted — which is '
+      + 'exactly the state the tree was in before 2026-09-05, and the reason a notarization that '
+      + 'silently failed would have shipped.');
+    assert.match(nRow(rows, 'N-SPCTL-APP').detail, /0 hard/);
+  });
+
+  test('§5g · MUTANT · the ad-hoc branch is made hard too — N-SPCTL-APP dies', () => {
+    // ██ THE INVERSION ██ `rejected` is the CORRECT answer without a Developer ID. A gate that
+    // fails on it would mean no build at all on the fallback branch — the one that exists for the
+    // day the certificate expires, which is a certainty rather than a risk. So this row refuses
+    // over-correction in the same breath as it refuses the original defect.
+    const src = sources().workflow;
+    const adhoc = 'spctl --assess --type execute --verbose=4 "$INNER" 2>&1 | sed \'s/^/  /\' || true';
+    assert.ok(mutate(src, adhoc, adhoc) === src && src.includes(adhoc),
+      'the ad-hoc assessment line moved; this mutant edits it by exact text');
+    const wf = mutate(src, adhoc, adhoc.replace(' || true', ''));
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-SPCTL-APP').status, 'FAIL',
+      'making the unsigned branch fail on `rejected` is accepted. Every ad-hoc build would stop '
+      + 'producing a DMG, and LZP-106 exists precisely because that DMG is still shippable.');
+    assert.match(nRow(rows, 'N-SPCTL-APP').detail, /0 informational/);
+  });
+
+  test('§5h · MUTANT · the image itself is never assessed — N-SPCTL-DMG dies', () => {
+    const wf = mutate(sources().workflow, 'spctl --assess --type open --context context:primary-signature', 'true #');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-SPCTL-DMG').status, 'FAIL',
+      'assessing only the .app is accepted. `--type open --context context:primary-signature` is '
+      + 'what a downloaded file receives, and it is the ONLY assessment that sees the read-me '
+      + 'injection: the app inside can be perfectly notarized while the image around it is not.');
+    assert.equal(nRow(rows, 'N-SPCTL-APP').status, 'PASS',
+      'the mutant also broke the app assessment, so this row is not isolating the DMG one');
+  });
+
+  test('§5i · MUTANT · `accepted` is taken at face value — N-NOTARIZED dies', () => {
+    const wf = mutate(sources().workflow, "grep -q 'source=Notarized Developer ID'", 'true');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-NOTARIZED').status, 'FAIL',
+      'a bare `accepted` is accepted. AUDIT already measured why that is not enough: on the build '
+      + 'machine an assessment can pass for reasons that do not travel — a locally trusted '
+      + 'certificate, a Developer Tools exemption. `source=Notarized Developer ID` is the line the '
+      + 'PO actually saw by hand, and the only one that means anything on a stranger\'s Mac.');
+  });
+
+  test('§5j · MUTANT · the DMG re-sign drops `--options runtime` — N-RUNTIME dies', () => {
+    const rows = preflightRows({ dmgScript: mutate(sources().dmgScript, '--options runtime ', '') });
+    assert.equal(nRow(rows, 'N-RUNTIME').status, 'FAIL',
+      'the rewritten image is re-signed without the hardened runtime and without a secure '
+      + 'timestamp. Apple issues no ticket for either, so the next step fails — loudly now, which '
+      + 'is the point, but the flag is one word and the failure costs a 40-minute build.');
+    assert.match(nRow(rows, 'N-RUNTIME').detail, /MISSING/);
+  });
+
+  // ── the two rows added by the integration pass, both from MEASUREMENT ───────────────────────
+  //
+  // ██ WHY THESE TWO EXIST AND THE EIGHT ABOVE DID NOT CATCH THEM ██
+  // §5a-§5k all ask "is the command there, and is its verdict unswallowed?". Both defects below
+  // answered YES to that and were still fatal, because the question they fail is "does the
+  // command's PLUMBING carry its verdict?". They were found by running the shipped step text
+  // against the real, really-notarized /Applications/LangzeitPlaner.app instead of a stub — a
+  // stub `codesign` exits before its reader does and never raises SIGPIPE, which is precisely
+  // why a stub harness reported twelve of twelve green over a step that could not ship.
+
+  test('§5l · MUTANT · the runtime assertion goes back to `| grep -q` — N-SIGPIPE dies', () => {
+    // The shipped defect, restored. `codesign -d --verbose=2` prints sixteen lines, the flags
+    // line is the fourth, `grep -q` exits on the match and closes the pipe, codesign takes
+    // SIGPIPE on the fifth: PIPESTATUS=(141 0). Under this step's `set -euo pipefail` the
+    // pipeline is 141 and `if !` fires — so the gate hard-fails a CORRECTLY hardened bundle,
+    // printing "carries no hardened-runtime flag" above a dump reading flags=0x10000(runtime).
+    const src = sources();
+    const wf = mutate(src.workflow,
+      'codesign -d --verbose=2 "$APP" > "$SIGINFO" 2>&1 || true',
+      'codesign -d --verbose=2 "$APP" 2>&1 | grep -q \'flags=.*runtime\' || true');
+    assert.notEqual(wf, src.workflow, 'the mutation did not apply — the assertion was rewritten again');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-SIGPIPE').status, 'FAIL',
+      'a pipefail step may pipe an assertion into `grep -q`. That construction fails when it '
+      + 'succeeds, and it would have stopped the first signed release with the opposite of the truth.');
+    assert.match(nRow(rows, 'N-SIGPIPE').detail, /SIGPIPE|141/);
+  });
+
+  test('§5m · MUTANT · the notarization step drops pipefail — N-SIGPIPE dies', () => {
+    // The other half. Without pipefail, `xcrun stapler validate "$DMG" | sed` reports SED's
+    // status, so N-VALIDATE reads as satisfied over a staple that did not take.
+    const wf = mutate(sources().workflow, 'set -euo pipefail', 'set -eu');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-SIGPIPE').status, 'FAIL');
+    assert.match(nRow(rows, 'N-SIGPIPE').detail, /pipefail/);
+  });
+
+  test('§5n · MUTANT · the staple runs bare again — N-STAPLE-LOUD dies', () => {
+    // Measured, not imagined: `xcrun stapler staple` against a DMG Apple has no record of prints
+    //   CloudKit query … failed due to "Record not found".
+    //   The staple and validate action failed! Error 65.
+    // and `bash -e` — GitHub's default shell for a `run:` block with no `shell:` key — ends the
+    // step at 65 with no ::error. The likeliest real cause after an Accepted verdict is CDN
+    // propagation lag, which is a RE-RUN and not a rebuild. Nobody re-runs a raw 65.
+    const src = sources();
+    const wf = src.workflow.split('\n').map((l) => (/^\s*#/.test(l) ? l : l))
+      .join('\n')
+      .replace(/ +if ! xcrun stapler staple "\$DMG" 2>&1 \| sed 's\/\^\/  \/'; then\n[\s\S]*?\n {10}fi\n/,
+        '          xcrun stapler staple "$DMG"\n');
+    assert.notEqual(wf, src.workflow, 'the mutation did not apply — the staple guard was rewritten');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-STAPLE-LOUD').status, 'FAIL',
+      'the staple may fail with no named error. N-STAPLE still passes — the command is there — '
+      + 'which is exactly why this is a second row and not a clause of that one.');
+    assert.equal(nRow(rows, 'N-STAPLE').status, 'PASS',
+      'N-STAPLE should be unmoved: the staple is still present, it is only its failure that is mute');
+  });
+
+  test('§5o · MUTANT · the staple is guarded and then swallowed by `|| true` — N-STAPLE-LOUD dies', () => {
+    const wf = mutate(sources().workflow,
+      'if ! xcrun stapler staple "$DMG" 2>&1 | sed \'s/^/  /\'; then',
+      'if ! xcrun stapler staple "$DMG" 2>&1 | sed \'s/^/  /\' || true; then');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-STAPLE-LOUD').status, 'FAIL',
+      'an `|| true` on the staple reads as guarded. The row must anchor on the staple line ITSELF: '
+      + 'its first version used a 4-line `exit 1` window and passed the bare-staple mutant, because '
+      + 'the very next command is `if ! xcrun stapler validate` and that gate\'s exit is two lines down.');
+  });
+
+  test('§5p · NEGATIVE CONTROL · a COMMENT naming `| grep -q` does not kill N-SIGPIPE', () => {
+    // Without this, the fix could not explain itself: the corrected step quotes the defective
+    // line verbatim in its inversion comment, and that comment must stay legal.
+    const src = sources();
+    const wf = src.workflow.replace(
+      '          # ── submit the image that will actually ship ────────────────────────',
+      '          # never write this: codesign -d --verbose=2 "$APP" 2>&1 | grep -q \'flags\'\n'
+      + '          # ── submit the image that will actually ship ────────────────────────');
+    assert.notEqual(wf, src.workflow, 'the mutation did not apply');
+    const rows = preflightRows({ workflow: wf });
+    assert.equal(nRow(rows, 'N-SIGPIPE').status, 'PASS',
+      'the row reads comments. The corrected step QUOTES the defective line to explain itself, so '
+      + 'a comment-blind row would forbid the file from documenting its own repair.');
+  });
+
+  test('§5k · MUTANT · the commands are deleted and every comment kept — every N row dies', () => {
+    // ██ THE ROW THAT KEEPS THIS SECTION FROM BEING SATISFIED BY ITS OWN PROSE ██
+    // This is not hypothetical: the first version of the pre-flight's §6 passed this mutant,
+    // because release.yml quotes its old `spctl … || true` line verbatim in an inversion comment
+    // and every `::error` message names the command it guards. A workflow of nothing but
+    // comments describes a perfect notarization chain and performs none of it.
+    const src = sources();
+    const commentsOnly = src.workflow.split('\n').map((l) => (/^\s*#/.test(l) ? l : '')).join('\n');
+    const rows = preflightRows({ workflow: commentsOnly, dmgScript: src.dmgScript }).filter((r) => r.id.startsWith('N-'));
+    assert.ok(rows.length > 0, 'no pipeline rows came back at all');
+    assert.deepEqual(rows.filter((r) => r.status === 'PASS'), [],
+      'a workflow that only TALKS about notarizing satisfies these rows:\n'
+      + rows.map((r) => `  ${r.id} ${r.status}: ${r.detail}`).join('\n'));
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §6 · THE TWO PLACEHOLDERS NOTHING REWRITES — main.swift, and the gate that never read it
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// `release.yml:122-132` rewrites `tauri.conf.json`'s OWNER/REPO from `github.repository`. THE
+// SWIFT SHELL IS NOT BUILT BY THAT WORKFLOW, so its two constants have to be right in the file:
+//
+//   UPDATE_MANIFEST_URL     substituted by hand on 2026-09-05 when the repo was made public
+//   UPDATER_PUBLIC_KEY_B64  still ""
+//
+// `check-release-config.mjs` read NEITHER — it looked only at package.json, Cargo.toml and
+// tauri.conf.json — which is the same shape of hole `shell-macos/build.sh:18` records for the
+// version number. An empty key is the correct FAILURE MODE (no key, no installs: the shell
+// refuses before it fetches) and a DEAD UPDATER: a Swift-shell copy installed from this build
+// can never be fixed remotely, and nothing anywhere said so.
+describe('§6 · the Swift shell\'s hand-substituted constants are gated', () => {
+  test('§6a · ██ ASSERTED AS A FUNCTION, NOT AS A TREE STATE ██ empty key FAILS, real key PASSES', () => {
+    // The F13 trap, one file over: pinning "SH-KEY is FAIL" would make `npm test` go red on the
+    // day the PO generates the keypair and does the right thing. So both branches are driven
+    // through the shipped predicate and this row is green in either state of the tree.
+    const swift = sources().swift;
+    const real = Buffer.alloc(32, 7).toString('base64');
+    const withKey = swift.replace('let UPDATER_PUBLIC_KEY_B64 = ""', `let UPDATER_PUBLIC_KEY_B64 = "${real}"`);
+    assert.notEqual(withKey, swift, 'the empty-key declaration moved; this row edits it by exact text');
+
+    const empty = nRow(preflightRows({ swift: swift.replace(/let UPDATER_PUBLIC_KEY_B64 = "[^"]*"/, 'let UPDATER_PUBLIC_KEY_B64 = ""') }), 'SH-KEY');
+    assert.equal(empty.status, 'FAIL',
+      'an empty UPDATER_PUBLIC_KEY_B64 passes the release pre-flight. The Swift shell then ships '
+      + 'with an updater that refuses every download, and 22.3/22.5 are dead in it.');
+    assert.equal(empty.strictOnly, true,
+      'the empty key is a HARD failure on ordinary days too. It must block a release and not an '
+      + 'afternoon: ci.yml:209 runs this pre-flight lenient on every push, and a one-time PO '
+      + 'action that turns the whole suite red gets worked around rather than done.');
+
+    const filled = nRow(preflightRows({ swift: withKey }), 'SH-KEY');
+    assert.equal(filled.status, 'PASS',
+      'a real 32-byte key is refused, so doing the work would turn this gate red — the F13 failure '
+      + 'rebuilt one row over.');
+  });
+
+  test('§6b · a set-but-unusable key is refused, and the tree\'s own row agrees with the function', () => {
+    const swift = sources().swift;
+    const junk = nRow(preflightRows({ swift: swift.replace('let UPDATER_PUBLIC_KEY_B64 = ""', 'let UPDATER_PUBLIC_KEY_B64 = "not-a-key"') }), 'SH-KEY');
+    assert.equal(junk.status, 'FAIL',
+      'a non-empty string that is not a key passes. That is worse than the empty case: the updater '
+      + 'would fetch, download, verify against nonsense and discard every release in silence.');
+    assert.equal(junk.strictOnly, undefined,
+      'a junk key is treated as the one-time-PO-action case and demoted to a note in lenient CI. '
+      + 'Empty is "not done yet"; junk is a mistake, and it should be red every day.');
+
+    // Consistency with the tree, both branches legal — the same shape as §3b2.
+    const tree = nRow(preflightRows(), 'SH-KEY');
+    const isEmpty = /is empty/.test(tree.detail);
+    assert.equal(tree.status, isEmpty ? 'FAIL' : 'PASS',
+      `SH-KEY says ${tree.status} while its own detail reads ${JSON.stringify(tree.detail.slice(0, 90))}`);
+  });
+
+  test('§6c · MUTANT · the manifest URL goes back to OWNER-PLACEHOLDER — SH-URL dies', () => {
+    const swift = sources().swift.replace(
+      /"https:\/\/github\.com\/[^"]*latest\.json"/,
+      '"https://github.com/OWNER-PLACEHOLDER/langzeitplaner/releases/latest/download/latest.json"');
+    const row = nRow(preflightRows({ swift }), 'SH-URL');
+    assert.equal(row.status, 'FAIL',
+      'the state this constant was in until 2026-09-05 passes the release pre-flight. Nothing '
+      + 'rewrites it — the workflow only rewrites tauri.conf.json — so a Swift shell built '
+      + 'from that tree checks for updates against a host that does not exist, for ever. '
+      + '(The line break in this message is deliberate: suite-integrity scans every tier-1 file '
+      + 'for `from \'…\'` to catch a test importing a double, and a sentence ending in the word '
+      + '"from" at a line break reads as an import of a newline.)');
+    assert.match(row.detail, /NOTHING REWRITES THIS ONE/);
+  });
+
+  test('§6d · MUTANT · either declaration is renamed — the row FAILS rather than reading "unset"', () => {
+    // The §2h lesson: a gate that silently reads `null` as "fine" goes green the day somebody
+    // renames a constant, and nobody finds out until an update is needed and does not arrive.
+    const src = sources().swift;
+    const noUrl = nRow(preflightRows({ swift: src.replace('let UPDATE_MANIFEST_URL', 'let UPDATE_MANIFEST_URL_V2') }), 'SH-URL');
+    assert.equal(noUrl.status, 'FAIL', 'a missing UPDATE_MANIFEST_URL declaration reads as absent-and-fine');
+    assert.match(noUrl.detail, /no longer declares/);
+    const noKey = nRow(preflightRows({ swift: src.replace('let UPDATER_PUBLIC_KEY_B64', 'let UPDATER_KEY') }), 'SH-KEY');
+    assert.equal(noKey.status, 'FAIL', 'a missing UPDATER_PUBLIC_KEY_B64 declaration reads as absent-and-fine');
+    assert.equal(noKey.strictOnly, undefined,
+      'a vanished declaration is demoted to a note in lenient CI, exactly like a key nobody has '
+      + 'generated yet. The two are not the same thing: one is a task, the other is a broken gate.');
+  });
+
+  test('§6e · the two shells must poll ONE repository — SH-SLUG dies when they do not', () => {
+    const mismatch = nRow(preflightRows({
+      endpoints: ['https://github.com/someone-else/other/releases/latest/download/latest.json'],
+    }), 'SH-SLUG');
+    assert.equal(mismatch.status, 'FAIL',
+      'the Swift shell and the Tauri updater may poll different repositories. One release would '
+      + 'then update half the fleet and strand the other half, with nothing to see in either log.');
+
+    const agree = nRow(preflightRows({
+      endpoints: ['https://github.com/manuelhein2016-hash/langzeitplaner/releases/latest/download/latest.json'],
+    }), 'SH-SLUG');
+    assert.equal(agree.status, 'PASS',
+      'the shipped pair of slugs is refused — this row would block the release it is meant to guard');
+
+    // And the unresolved case is reported, not passed: tauri.conf.json still holds OWNER/REPO in
+    // the tree, and release.yml rewrites it before the strict pre-flight ever runs.
+    const unresolved = nRow(preflightRows({ endpoints: ['https://github.com/OWNER/REPO/releases/latest/download/latest.json'] }), 'SH-SLUG');
+    assert.equal(unresolved.status, 'SKIP',
+      'an unresolved endpoint is silently compared to nothing and reported as a pass');
+  });
+
+  test('§6f · the pre-flight blocks a release on this, and does NOT block ordinary CI', () => {
+    // Two exit codes, measured through the real CLI rather than the row list, because they are
+    // what ci.yml:209 and release.yml step 4 actually consult.
+    const runCli = (extra) => {
+      try {
+        return { code: 0, out: execFileSync('node', [PREFLIGHT, ...extra], { cwd: ROOT, encoding: 'utf8' }) };
+      } catch (e) {
+        if (e.status === undefined) throw e;
+        return { code: e.status, out: e.stdout || '' };
+      }
+    };
+    const lenient = runCli([]);
+    assert.equal(lenient.code, 0,
+      'the lenient pre-flight fails, so ci.yml:209 is red on every push. A one-time PO action must '
+      + 'not turn everyday CI red — that is how a gate gets commented out:\n' + lenient.out);
+
+    const strictRun = runCli(['--strict']);
+    const treeKeyIsEmpty = /is empty/.test(nRow(preflightRows(), 'SH-KEY').detail);
+    if (treeKeyIsEmpty) {
+      assert.equal(strictRun.code, 1,
+        'UPDATER_PUBLIC_KEY_B64 is empty and the strict pre-flight still exits 0, so a tag would '
+        + 'cut a release whose Swift shell can never be updated');
+      assert.match(strictRun.out, /SH-KEY/,
+        'the strict run fails without naming the row, so the releaser is told a release is blocked '
+        + 'and not which one thing to do');
+    } else {
+      assert.ok(!/SH-KEY/.test(strictRun.out),
+        'the key is real now and the strict pre-flight still reports SH-KEY as a problem');
+    }
+  });
+});

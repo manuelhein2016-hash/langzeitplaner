@@ -9,6 +9,22 @@ This header is the disposition and the evidence for it.
 
 ## THE ANSWER
 
+> ### ██ RE-ISSUED 2026-09-05 · THE TWO ACTS WERE PERFORMED. THE OLD ANSWER IS BELOW, UNEDITED. ██
+>
+> **Both things "nobody but the PO can do" were done on 2026-09-05**, and the answer they gated is
+> now spent. Item 1 — *claim a relay host and substitute it in one act* — is done:
+> `https://langzeitplaner.vercel.app`, in all six files, in one commit, pure ASCII, with
+> `release-gate.test.js` accepting only *all unset* or *all set*, and `mom-test-probe.mjs` at
+> **exit 0 · 41 rows · 39 pass · 2 note · 0 FAIL** (`M2s` was the reserved slot and is now a pass).
+> Item 2 — *decide D10* — was ruled on 2026-09-04/05: **a solo Mac may send**, and the amendment
+> stops being vacuous. The dispositions those two moved are re-issued in the block **⟦ SHIP DAY ⟧**
+> below; every other finding's disposition stands exactly as written.
+>
+> **The answer that replaces it: ship the Familienkreis — after the PIPELINE does once what the PO
+> did by hand.** `cargo tauri build` has never run anywhere, `git tag` is empty, and the app that
+> is signed, notarized and stapled today was made by a person. That is one `workflow_dispatch`,
+> and it is the only thing between here and a tag.
+
 **Ship the Familienkreis — after the PO does two things nobody but the PO can do.**
 
 The audit's verdict was *"ship solo, hold the Familienkreis for one fix cycle covering the four
@@ -161,6 +177,39 @@ value-identical — *a loop with a lucky base case, with a network request insid
 `feedback/admin.js` §3b now caches the rows for one open of Einstellungen and `openSettings()`
 clears them; `tests/tier2/lzp1009-dot.dom.js` §1 counts the request and §2 proves the ⚙ dot adds
 none of them.
+
+### ⟦ SHIP DAY · 2026-09-05 ⟧ — the dispositions this work closed, and the ones it deliberately did not
+
+Every row below names what moved, the evidence, and — where the old disposition was a *gate* over a
+*deferred act* — which half of it was actually spent. Findings not listed here are unchanged.
+
+| # | was | now | the evidence |
+|---|---|---|---|
+| **F1** | CLOSED (gate) · **PO-DECISION (act)** | **CLOSED · both halves** | the act was performed. `shell-macos/main.swift:845` and `src-tauri/src/lib.rs:749` both hold `https://langzeitplaner.vercel.app` byte for byte, and all four invitation mails carry it — six files, one commit, which is what `release-gate.test.js` §1c forces. **The constant is no longer `""`**, so the disposition's own sentence *"the constant is still `""`, which is correct for a solo release"* has expired with the solo release |
+| **F13** | CLOSED (gate) · **PO-DECISION (claim the host)** | **CLOSED · both halves** | `https://serveradresse-fehlt.invalid` is gone from the mails. The host is claimed, deployed and answering — `curl -si …/api/v1/meta` → **200**, `x-vercel-id: fra1::fra1::…`, `{"region":"fra1","minProto":1,"maxProto":1,…}`. The probe's `M2s` FAIL, which was **correct** while the slot was reserved, is a pass: `41 rows · 39 pass · 2 note · 0 FAIL`, exit 0 |
+| **F14** | PARTLY CLOSED · **the tag is still OPEN** | **PARTLY CLOSED · the tag is STILL OPEN**, and three of its four sub-items closed | *"0 tags, 0 remotes, `release.yml` has never run, `cargo tauri build` has never run anywhere"* — **remotes** is closed (`origin`, public, `main` pushed, `ci.yml` green including `shell-rust` on macos-14). **Tags: still 0. `release.yml`: still never run. `cargo tauri build`: still never run anywhere** — no universal binary, no bundler, no DMG from the real path. This finding does not close until one `workflow_dispatch` is green |
+| **F12** (doc drift) | PARTLY CLOSED · doc work outstanding | **the release-document half CLOSED** | `RELEASE.md` §2.1/§2.5/§7.4/§8/§11, `SHIP.md` §0–§5, `V2-FINAL.md` §−3/§8, `STATUS.md`'s headline and this file — each corrected **with the superseded text quoted in place**, per ADR 003 §7.5's rule. The `MOM-TEST.md` / `RUNBOOK.md` / `SHELL-VERIFICATION.md` / `traceability.json` drift listed below is **untouched and still open** |
+| **D1** | not a finding — a standing PO decision the audit priced | **REVERSED and EXECUTED** | Developer ID `ZZ77R3LWS4`. `spctl --assess --type execute /Applications/LangzeitPlaner.app` → **accepted**, `source=Notarized Developer ID`; `xcrun stapler validate` → *"The validate action worked!"*; `codesign -dv` → `flags=0x10000(runtime)`, `TeamIdentifier=ZZ77R3LWS4`; one valid identity in the keychain. **This changes the audit's pricing of the first run**: §0d's *"the dialog she actually sees"* and the „beschädigt" wording are no longer on the normal path — they are the certificate-expiry fallback, and LZP-106 is re-framed rather than retired (`RELEASE.md` §8.4, `SHIP.md` §3) |
+| **repository visibility** | *"decide before the mail is designed"* | **RULED: public** | and the *stated* reason (the mail's fallback link) turned out to be the smaller one. `RELEASE.md:61-64`'s *"Nothing in the pipeline needs it to be public"* was **measured false**: the updater's manifest fetch is an unauthenticated GET with no token in either shell, so a private repo 404s for every client and kills 22.3/22.5 **silently**; and `release.yml`'s last step probes that same URL with a token-less `curl` and hard-fails every non-prerelease tag |
+
+**What this block did NOT close, and would be dishonest to imply:**
+
+- **`U-RAWBODY`.** The relay answered **202** to a real report. That settles the sink, not this
+  claim: an *unsigned* report never reaches `verifySignature`, so a platform body parser would
+  produce a byte-identical `JSON.parse` and the same 202. `U-RAWBODY` needs one **signed** request.
+- **`U-REPORTONCE` / `U-REPORTTTL`** (`server/adapters/prisma.js:938-939`) — **no database witness
+  at all.** The `Report` table is migrated in Frankfurt and has never been asked whether Prisma
+  binds a `Date` against `TIMESTAMP(3)` in UTC, or whether a duplicate id raises `P2002`.
+- **L1 and L2** are still *stated skips*: `check-server-config.mjs` reads **40 passed · 0 failed ·
+  2 not checked here**, and `--deep` has never run against the deployed database. Nor has
+  `RUNBOOK.md` §2.5.1 met Frankfurt's pooler (R-8b).
+- **The notarization steps in `release.yml` have never executed.** They exist now — step 9b, a hard
+  `spctl` gate requiring `accepted` **and** `source=Notarized Developer ID` on the app *and* the
+  image, and the eight `N-*` pre-flight rows (`N-SUBMIT`, `N-ORDER`, `N-STAPLE`, `N-VALIDATE`, `N-RUNTIME`, `N-SPCTL-APP`, `N-SPCTL-DMG`, `N-NOTARIZED`) — and
+  the DMG re-sign branch in `dmg-add-readme.sh` that they depend on has **still never run**,
+  because it was dead under D1.
+- **F10 / D-G** — untouched by design, and still the PO's.
+- **LZP-1006.** A person, a clean Mac, unassisted. Nothing here moves it.
 
 ### What is genuinely still open
 

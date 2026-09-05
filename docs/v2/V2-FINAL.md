@@ -16,6 +16,38 @@ stays 0 across a quit-and-open, which is the thing this project could not previo
 
 ---
 
+## −3. The ship day (2026-09-05) — five of the six blockers, in one day
+
+Everything below §−2 was written while nothing was deployed. On 2026-09-05 that stopped being
+true. **What is DONE, each with the evidence rather than the assertion:**
+
+| | done | the evidence, reproducible |
+|---|---|---|
+| **The repository** | `origin` → `github.com/manuelhein2016-hash/langzeitplaner`, **public**, `main` | `git remote -v`; unauthenticated `GET api.github.com/repos/…` → 200, `"private": false`. Public is not a preference: the updater's manifest fetch carries no token in **either** shell (`grep -n Authorization shell-macos/main.swift` → nothing), so a private repo answers 404 to every client and deletes the self-update channel silently |
+| **CI** | green on the runner, including the only proof `src-tauri` compiles | `ci.yml`'s `shell-rust` job on macos-14. Tier 2 is red on CI with **four**: the three named local residuals (§A4, §E1, §E3) plus §C2, which is the runner's font metrics and was red before this work |
+| **The origin substitution** | six files, one commit, pure ASCII | `main.swift:845` and `lib.rs:749` both `https://langzeitplaner.vercel.app`, byte for byte; all four invitation mails carry it. `release-gate.test.js` accepts only *all unset* or *all set to one https origin* |
+| **The database** | Prisma Postgres, `eu-central-1`, migrated | `vercel-build.sh` runs `prisma migrate deploy` only when `VERCEL_ENV=production`; `20260903092140_init` and `20260905101500_report` are the two applied |
+| **The relay** | **answering**, 200 from `fra1` | `curl -si …/api/v1/meta` → `HTTP/2 200`, `x-vercel-id: fra1::fra1::…`, `{"region":"fra1","minProto":1,"maxProto":1,…}`, `no-store` + HSTS + `nosniff` + `no-referrer`, and — asked with an explicit `Origin:` header — **no CORS header of any kind** |
+| **A real report** | **202**, with the honest `provesNot` on the wire | the PO's own measurement, 2026-09-05, against production. Recorded as his |
+| **Signing** | Developer ID `ZZ77R3LWS4`; the app is signed, notarized, **stapled** | `spctl --assess --type execute /Applications/LangzeitPlaner.app` → `accepted` / `source=Notarized Developer ID`; `xcrun stapler validate` → *"The validate action worked!"*; `codesign -dv` → `flags=0x10000(runtime)`, `TeamIdentifier=ZZ77R3LWS4`. **By hand.** |
+| **Suites at HEAD** | `npm test` **2323/2323** (2283 before the release wiring landed 40 rows), attack **986/986**, server **1094/1094 + 1 stated skip**, fleet **482/482**, property **101/101**, `test:dom` 930 pass / 3 fail; `check-server-config.mjs` **40 pass · 0 fail · 0 warnings · 2 stated skips** | all re-run 2026-09-05 |
+
+**And what a day like this does NOT buy — every line here stays named:**
+
+1. **`cargo tauri build` has never run anywhere.** No universal binary (the x86_64 half has never
+   been compiled by anybody), no bundler, no DMG from the real path. `git tag` is empty and the
+   release workflow has never executed. The signing above was performed by a person, not by a
+   pipeline — the pipeline now contains the same sequence (`release.yml` step 9b, plus a hard
+   `spctl` gate and five pre-flight rows) and **has never been asked to perform it**.
+2. **`U-REPORTONCE` and `U-REPORTTTL` have no database witness** (`server/adapters/prisma.js:938-939`).
+   Whether Prisma binds a JS `Date` against `TIMESTAMP(3)` correctly decides whether the 90-day
+   retention is off by Frankfurt's summer hour — and nothing visibly fails when it is.
+3. **L1 and L2 are still stated skips.** `check-server-config.mjs --deep` has never run against the
+   deployed database, and `RUNBOOK.md` §2.5.1 has never met Frankfurt's **pooler** (R-8b).
+4. **LZP-1006, the Mom test, is a person on a clean Mac.** Nothing in this record moves it.
+
+---
+
 ## −2. LZP-1009's second pass (2026-09-05), in five lines
 
 The feedback channel composed a report, redacted the board by re-rendering it with **no glyph path
@@ -49,8 +81,31 @@ Driven end to end against `node server/dev-server.mjs`: solo unsigned send → *
 `proves: unsigned`**; the report in the admin view, prose verbatim, image byte-identical;
 `expiresAt − receivedAt` = exactly **90 days**; a 91-day-old report swept and **404** to both list
 and get; „Löschen" removes one; a family device credential → **401** on every admin route. The ⚙
-dot costs **zero** requests, measured as a difference. ⚠ The LIVE relay is behind this tree and has
-no operator key: `GET /api/v1/feedback` → 405, `POST` → 501.
+dot costs **zero** requests, measured as a difference.
+
+> ### ██ SUPERSEDED 2026-09-05 — THE RELAY CAUGHT UP THE SAME DAY ██
+>
+> **What this paragraph ended with, from earlier on 2026-09-05:**
+>
+> > "⚠ The LIVE relay is behind this tree and has no operator key: `GET /api/v1/feedback` → 405,
+> > `POST` → 501."
+>
+> **It is no longer behind.** The relay was commissioned the same day: `main` is public and pushed,
+> Vercel deploys `server/` from it to `fra1`, and `vercel-build.sh` applied both migrations —
+> `20260903092140_init` and `20260905101500_report`. Measured against the live host:
+>
+> | request | then | now |
+> |---|---|---|
+> | `GET /api/v1/meta` | 200 | **200**, `{"region":"fra1",…}`, served by `fra1::fra1::…` |
+> | `POST /api/v1/feedback` (malformed) | 501 `not_implemented` | **400 `bad_request unexpectedField:"v"`** — the closed-shape validator is what runs, so the route is deployed |
+> | `POST /api/v1/feedback` (a real report) | 501 | **202**, with `provesNot` on the wire — *the PO's own measurement, 2026-09-05* |
+> | `GET /api/v1/feedback` | 405 (the old route table) | **404** — the designed answer of a relay with no `LZP_REPORTS_ADMIN_PUB`; identical to `/api/v1/nope` |
+>
+> **Two honest boundaries on that table.** A `404` on the admin routes is *by design*
+> indistinguishable from "not deployed", so it is evidence of nothing either way about whether the
+> operator key is enrolled. And **a 202 on an *unsigned* report does not settle `U-RAWBODY`** — an
+> unsigned report never reaches `verifySignature`, so a platform body parser would produce a
+> byte-identical `JSON.parse` and the same 202. That claim needs one **signed** request.
 
 ---
 
@@ -572,7 +627,7 @@ WebCrypto and is in-process. `SHELL-VERIFICATION.md` §10's conditional-story li
 
 </details>
 
-### R-8b · The adapter has met a local cluster, not Frankfurt's pooler ⚠ THE ONE THAT MATTERS
+### R-8b · The adapter has met a local cluster, not Frankfurt's pooler ⚠ STILL THE ONE THAT MATTERS
 `server/adapters/prisma.js` now runs against a real PostgreSQL 17.10 — **66 of 66 contract cases,
 1069 rows, 0 fail, 0 skip** — and four defects were found by doing it, one of which (no retry for
 a `Serializable` abort) no single-process test could ever have found. But Frankfurt is Prisma
@@ -582,8 +637,75 @@ one. **Run `RUNBOOK.md` §2.5.1 against the deployed database before it holds a 
 
 Beside it: after 5 retries the adapter re-throws and nothing above maps `P2034`/`P2010` to a
 status code, so a still-conflicting transaction becomes an undefined 500 (**R8-R2**, one line in
-`server/core/router.js` + `errors.js`: answer 503 with `retryAfter`). And
-`server/adapters/vercel.js` is still unexecuted (**R8-R4**).
+`server/core/router.js` + `errors.js`: answer 503 with `retryAfter`).
+
+> **RE-ISSUED 2026-09-05 — one half of this closed, and the important half did not.**
+>
+> **R8-R4 is closed.** What this paragraph ended with: *"And `server/adapters/vercel.js` is still
+> unexecuted (**R8-R4**)."* It is executed now, in production, on every request — the relay
+> answers 200 at `/api/v1/meta` and 400/404 from the real router, and the path is
+> `api/v1/index.js` → `adapters/vercel.js` → `adapters/prisma.js`. `LZP_REPORTS_ADMIN_PUB` is read
+> in `vercel.js#buildCtx`, the second and last `process.env` read in the whole server, which is
+> what keeps `server/core/` env-free.
+>
+> **R-8b itself is unchanged and is now MORE urgent, not less**, because the database it is about
+> is live and will hold a family. `check-server-config.mjs --deep` has never been run against it,
+> so **L1** (migrations applied, adapter reachable) and **L2** (schema-vs-migration drift) remain
+> honest skips rather than passes, and the 1,068-row contract suite has never met the pooler.
+>
+> **And a new row of the same shape, which the `Report` table brought with it.** The Prisma
+> adapter carries two claims in the ledger with **no database witness at all**
+> (`server/adapters/prisma.js:938-939`):
+>
+> - **`U-REPORTTTL`** — that Prisma binds a JS `Date` correctly against this schema's
+>   `TIMESTAMP(3)` columns, so `expiresAt: { gt: new Date(t) }` compares in UTC with no `naiveUtc`
+>   cast, and `@@index([expiresAt])` makes the lazy sweep a range scan. **If it is wrong the
+>   90-day retention is off by the session's timezone offset — an hour in Frankfurt for half the
+>   year, which is D2's own region — and nothing visibly fails:** reports live an hour longer or
+>   vanish an hour early, and the number in the Datenschutz copy (21.3) is quietly false. The
+>   R8-TZ measurement is why this is a stated claim and not an assumption: the identical mistake
+>   made every pairing attempt read as expired.
+> - **`U-REPORTONCE`** — that the `Report` primary key surfaces a duplicate INSERT as `P2002` and
+>   that `deleteMany` on an unknown id returns count 0 rather than raising `P2025`. Two failures in
+>   opposite directions: a rewritable report the operator has already read, or „Löschen" pressed
+>   twice answering 500 on a row that is already gone.
+>
+> Both are settled by the same act as L1/L2 and R-8b: run the contract suite against the deployed
+> database, with `LZP_CONTRACT_DATABASE_URL` — **never** `DATABASE_URL`, the harness `TRUNCATE`s.
+
+### R-9b · ✅ CLOSED 2026-09-05 — both lines were written, and the relay is running
+
+> ### ██ RE-ISSUED. THE PARAGRAPH THIS REPLACES IS QUOTED IN FULL BELOW. ██
+
+**Both halves are done, and neither was an engineering act — which is exactly what this residual
+said.**
+
+1. **A production `feedbackSink` — bound.** `vercel.js#buildCtx` binds `store.putReport`, and the
+   deployed relay is answering: a malformed report gets **400 `bad_request unexpectedField:"v"`**
+   from `handlers/feedback.js`'s closed-shape check, not the old 501, and a real report POSTed to
+   production by the PO on 2026-09-05 returned **202** with the honest `provesNot` on the wire.
+   The `Report` table exists in Frankfurt (`20260905101500_report`).
+   **Two things this does not settle**, and they are stated rather than assumed: the admin routes
+   answer **404**, which is by design the same answer `/api/v1/nope` gets on a relay with no
+   `LZP_REPORTS_ADMIN_PUB` — so from outside it is indistinguishable from "not deployed", and
+   proves nothing either way about whether the operator key is enrolled; and a 202 on an
+   **unsigned** report does not settle `U-RAWBODY`, because an unsigned report never reaches
+   `verifySignature`.
+2. **The real relay origin — substituted, in all six files, in one commit.**
+   `https://langzeitplaner.vercel.app`. `main.swift:845` and `lib.rs:749` carry it byte for byte
+   and all four invitation mails carry it; `release-gate.test.js` accepts only *all unset* or *all
+   set to one https origin*, which is what forced the two halves to move together. It is **pure
+   ASCII**, so the IDN divergence that would have refused every family request in the Swift shell
+   for ever (`URLComponents.host` returns the U-label against `net.js:265`'s A-label) never fired.
+   `mom-test-probe.mjs` now exits **0** — `41 rows · 39 pass · 2 note · 0 FAIL` — and `M2s`, red
+   *by design* while the slot was reserved, is a pass.
+
+**The disclosure this residual attached to the address is unchanged and still applies**: before it,
+the e-mail alone was not enough to join; now it is. That is inside the accepted model (ADR 002
+§8.4 and §5's residual-risk paragraph), with the member list 15.4 and epoch-rotating removal 20.2
+as the controls, and *"what they cannot do is read anything from the email alone"* is untouched.
+
+<details><summary>The paragraph this replaces, as it was written on 2026-09-03</summary>
 
 ### R-9b · Two deployment lines nobody can write from here
 1. **A production `feedbackSink`.** „Rückmeldung senden" is bound in the app
@@ -605,6 +727,8 @@ Now it is. That is inside the accepted model (ADR 002 §8.4 and §5's residual-r
 already say whoever reads the mail within 7 days can consume the invite and become a member, with
 the member list 15.4 and epoch-rotating removal 20.2 as the controls), and „what they cannot do is
 read anything from the email alone" is unchanged.
+
+</details>
 
 ### R-10b · `storage.js#quarantineLogAside` still has no native command
 `_persistOps` step ⓪b stops a Mac **manufacturing** a permanent quarantine — the F-SHELL-4 cause —
@@ -939,3 +1063,16 @@ What is left is not a defect anybody has reproduced. It is: one circle shape nob
 (an admin seat that has been handed over, R-1b), a database this code has met on a laptop and not
 in Frankfurt (R-8b), a millisecond that is a decision about what find looks like (R-5b), and two
 lines only the PO can write — where feedback reports go, and what the relay is actually called.
+
+> **Re-issued 2026-09-05.** The last clause of that sentence is spent: **both lines are written**
+> (R-9b above). What replaces it is shorter and harder, and none of it is a defect either:
+>
+> - **`cargo tauri build` has never run anywhere.** No universal binary, no bundler, no DMG from
+>   the real path, `git tag` empty, the release workflow never executed. The app that is signed,
+>   notarized and stapled today was made **by hand**; the pipeline now holds the same sequence and
+>   has never been asked to perform it.
+> - **The relay's database has still never been asked the questions that matter.** L1, L2, R-8b's
+>   pooler, and the two ledger rows `U-REPORTONCE` / `U-REPORTTTL`, which have no witness at all.
+> - **`U-RAWBODY` needs one *signed* request.** A 202 on an unsigned report is not it.
+> - **LZP-1006 is a person on a clean Mac, unassisted.** Nothing in this file moves it, and nothing
+>   in this file ever will.

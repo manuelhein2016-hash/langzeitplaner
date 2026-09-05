@@ -7,21 +7,42 @@ name: Release
 # GitHub Releases. Every device on the single "stable" channel then converges
 # on it by itself (22.5).
 #
-# THREE THINGS IN HERE ARE LOAD-BEARING AND SHOULD NOT BE "SIMPLIFIED":
+# FOUR THINGS IN HERE ARE LOAD-BEARING AND SHOULD NOT BE "SIMPLIFIED":
 #
 #  1. The updater key is REQUIRED. The very first step fails if the secret is
 #     missing, and the manifest generator has no code path that produces an
 #     entry without a verified signature. An app that reaches Mom as an email
 #     attachment must not grow a hijackable update path (22.6).
 #
-#  2. Apple signing is a FLAG THAT IS OFF (PO decision D1 — ship unsigned).
-#     Every signing step is `if: vars.ENABLE_APPLE_SIGNING == 'true'`. Turning
-#     it on later is a repository variable plus secrets — no edit to this file,
-#     no edit to tauri.conf.json. See docs/v2/RELEASE.md § "Turning signing on".
+#  2. Apple signing is a FLAG. ██ D1 WAS REVERSED ON 2026-09-05 ██ — the
+#     Developer ID was bought and the app was signed, notarized and stapled by
+#     hand that day. What this note said before the reversal, verbatim:
+#
+#       > 2. Apple signing is a FLAG THAT IS OFF (PO decision D1 — ship
+#       >    unsigned). Every signing step is
+#       >    `if: vars.ENABLE_APPLE_SIGNING == 'true'`. Turning it on later is a
+#       >    repository variable plus secrets — no edit to this file, no edit to
+#       >    tauri.conf.json.
+#
+#     The promise held: turning it on cost secrets and a variable, no code
+#     change. The half that did NOT hold is that the file then verified nothing
+#     about what signing produced — see 4. The `if:` conditions stay exactly as
+#     they were, and the ad-hoc branch stays fully supported, because the day a
+#     certificate expires is a certainty and that branch is the fallback.
+#     See docs/v2/RELEASE.md § "Turning Apple signing on".
 #
 #  3. The DMG size gate. Story 22.1's "≈15 MB" is not an aesthetic; it is the
 #     German mail-provider attachment ceiling once base64 encoding is applied.
 #     See the budget step for the arithmetic.
+#
+#  4. The notarization chain, steps 8b -> 9b -> 10, IN THAT ORDER. The read-me
+#     injection REWRITES the image Tauri built and re-signs it; a signature can
+#     be put back and a staple cannot. So the rewritten DMG is submitted to
+#     notarytool and stapled in 9b, and 10's `spctl` is a hard gate on the
+#     signed branch (and still `|| true` ad hoc, where `rejected` is correct).
+#     Remove or reorder any of it and the pipeline goes back to being able to
+#     publish an unnotarized DMG under a green tick.
+#     `.github/scripts/check-release-config.mjs` fails the pre-flight if so.
 
 on:
   push:
@@ -169,7 +190,10 @@ jobs:
 
       # ── 6. Apple signing — THE FLAG, AND IT IS OFF (decision D1) ──────────
       #
-      # Nothing below runs today. To turn signing and notarization on:
+      # ██ "Nothing below runs today" — that sentence stood here until 2026-09-05
+      # and is now false: D1 was reversed, the certificate exists, and everything
+      # below runs on a release. It is kept as a record of why the steps are
+      # written the way they are. The recipe is unchanged and still correct:
       #   1. buy a Developer ID (99 EUR/yr) and export the certificate as .p12
       #   2. create an App Store Connect API key (Developer -> Integrations)
       #   3. add the secrets and variables listed in docs/v2/RELEASE.md
@@ -298,12 +322,20 @@ jobs:
           ls -l "$DMG" "$ARCHIVE" "$ARCHIVE.sig" 2>&1 || true
 
       # ── 8b. The page that reaches her before macOS refuses the app ────────
-      # D1 ships unsigned on purpose, so the Gatekeeper rejection two steps down is
-      # the expected state — and it is why LZP-106's guided unlock screen exists. But
-      # that screen is inside the app she cannot open yet. The DMG window is the one
-      # surface that reaches her first, so the standalone page rides on the image next
-      # to the app; double-clicking an HTML file opens Safari, which Gatekeeper does
-      # not block.
+      # ██ INVERTED 2026-09-05 ██ This read: "D1 ships unsigned on purpose, so the
+      # Gatekeeper rejection two steps down is the expected state — and it is why
+      # LZP-106's guided unlock screen exists." D1 is reversed, so on the signed
+      # branch that rejection is now a BUILD FAILURE (step 10) rather than an
+      # expectation. The page stays, and not out of sentiment: it is the fallback
+      # for the day the certificate expires, and the ad-hoc branch still produces
+      # exactly the rejection it was written for. The screen it duplicates is
+      # inside the app macOS would refuse, so the DMG window is the one surface
+      # that reaches her first; double-clicking an HTML file opens Safari, which
+      # Gatekeeper does not block.
+      #
+      # ⚠ THIS STEP REWRITES THE IMAGE (hdiutil convert + mv, dmg-add-readme.sh:123).
+      # Any notarization ticket Tauri stapled to the DMG is discarded here. Step 9b
+      # is what puts one back, and it must stay between this step and the gates.
       #
       # This is a post-bundle step because Tauri offers nothing else, and that was
       # checked rather than assumed: bundle.macOS.dmg is "additionalProperties": false
@@ -327,10 +359,158 @@ jobs:
           fi
           codesign -dv --verbose=2 "$APP" 2>&1 | sed 's/^/  /'
 
+      # ── 9b. Gate: notarization happened, and the ticket is ON these files ─
+      #
+      # ██ THE STEP THIS FILE WAS MISSING UNTIL 2026-09-05 ██
+      #
+      # Tauri's bundler does set the hardened runtime and does invoke notarytool
+      # when APPLE_API_* are present. That was never the problem. The problem was
+      # that NOTHING IN THIS REPOSITORY ASSERTED IT WORKED — the only Gatekeeper
+      # check was the informational `spctl … || true` in the step below — and that
+      # one step actively broke it: `dmg-add-readme.sh` rewrites the image AFTER
+      # the bundler built it (hdiutil convert + mv) and re-signs it.
+      # `codesign --force --sign` puts a signature back. IT CANNOT PUT A STAPLE
+      # BACK. A notarization that silently fails ships a DMG that presents to a
+      # non-technical family member exactly as the unsigned build did — the one
+      # outcome the 99 EUR was spent to avoid, arriving as a green pipeline.
+      #
+      # So the rewritten image gets its OWN ticket, here, after the rewrite, and
+      # every failure below is hard. This sequence is not invented: it is what the
+      # PO performed by hand on 2026-09-05 (codesign --options runtime --timestamp,
+      # notarytool submit --wait, stapler staple, spctl --assess -> accepted /
+      # source=Notarized Developer ID). It lived in his head and in one brief. Now
+      # it lives here, where `git tag` can repeat it and where it fails loudly
+      # instead of quietly.
+      #
+      # Ordering matters twice over and both are load-bearing:
+      #   · AFTER  the read-me injection (step 8b) — the image it stapled would
+      #            otherwise be thrown away by the `mv` at dmg-add-readme.sh:123.
+      #   · BEFORE the mount gate (step 10) — so the DMG every gate below inspects,
+      #            measures, hashes and uploads is the stapled one.
+      - name: Notarize the rewritten DMG, staple it, and prove both tickets
+        if: vars.ENABLE_APPLE_SIGNING == 'true'
+        env:
+          DMG: ${{ steps.art.outputs.dmg }}
+          APP: ${{ steps.art.outputs.app }}
+          API_KEY_ID: ${{ vars.APPLE_API_KEY_ID }}
+          API_ISSUER: ${{ vars.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+
+          # ── the hardened runtime, asserted rather than assumed ──────────────
+          # Notarization REFUSES a bundle without it, so a missing runtime flag
+          # here is the cause of the notarytool rejection three lines down — and
+          # saying so now costs a second and saves reading a submission log.
+          #
+          # ██ CORRECTED 2026-09-05, integration pass ██
+          # What stood here, verbatim, and what was wrong with it:
+          #
+          #   > if ! codesign -d --verbose=2 "$APP" 2>&1 | grep -q 'flags=.*runtime'; then
+          #
+          # THAT LINE FAILED ON A CORRECTLY HARDENED BUNDLE. Measured against the
+          # real notarized /Applications/LangzeitPlaner.app, not against a stub:
+          # `codesign -d --verbose=2` prints sixteen lines, `flags=0x10000(runtime)`
+          # is the fourth, `grep -q` exits the instant it matches and closes the
+          # read end, and codesign takes SIGPIPE on the fifth line —
+          #
+          #     pipeline rc=141   PIPESTATUS=(141 0)      141 = 128 + SIGPIPE
+          #
+          # This step runs `set -euo pipefail`, so 141 is the pipeline's status and
+          # `if !` takes the failure branch. The gate would have hard-failed the
+          # FIRST signed release, printing "carries no hardened-runtime flag"
+          # immediately above a dump containing `flags=0x10000(runtime)` — a gate
+          # that fails closed on the honest path is not a stricter gate, it is a
+          # pipeline that cannot ship. It survived review because a stubbed
+          # `codesign` exits before the reader does and never raises SIGPIPE.
+          #
+          # Capture once, then grep the file. That is already how step 10 reads
+          # `spctl`, for this exact reason, and it drops the second codesign run.
+          SIGINFO="$RUNNER_TEMP/codesign-app.txt"
+          codesign -d --verbose=2 "$APP" > "$SIGINFO" 2>&1 || true
+          if ! grep -q 'flags=.*runtime' "$SIGINFO"; then
+            echo "::error title=No hardened runtime::$APP is signed but carries no hardened-runtime flag, and Apple will not notarize such a bundle. Tauri sets it when APPLE_SIGNING_IDENTITY names a real Developer ID; check the 'Enable signing and notarization' step actually exported it, and see docs/v2/RELEASE.md section 'Turning Apple signing on'."
+            sed 's/^/  /' "$SIGINFO"
+            exit 1
+          fi
+          echo "  hardened runtime: present on $(basename "$APP")"
+
+          # ── submit the image that will actually ship ────────────────────────
+          OUT="$RUNNER_TEMP/notarize.json"
+          RC=0
+          xcrun notarytool submit "$DMG" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$API_KEY_ID" \
+            --issuer "$API_ISSUER" \
+            --wait --timeout 30m \
+            --output-format json > "$OUT" 2>"$RUNNER_TEMP/notarize.err" || RC=$?
+          sed 's/^/  /' "$RUNNER_TEMP/notarize.err" || true
+          STATUS="$(node -p "try{JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).status||''}catch(e){''}" "$OUT")"
+          SUBMISSION="$(node -p "try{JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')).id||''}catch(e){''}" "$OUT")"
+          echo "  notarytool: status=${STATUS:-<none>} id=${SUBMISSION:-<none>} rc=$RC"
+          if [ "$RC" != "0" ] || [ "$STATUS" != "Accepted" ]; then
+            if [ -n "$SUBMISSION" ]; then
+              echo "--- notarization log ---"
+              xcrun notarytool log "$SUBMISSION" \
+                --key "$APPLE_API_KEY_PATH" --key-id "$API_KEY_ID" --issuer "$API_ISSUER" 2>&1 | sed 's/^/  /' || true
+            fi
+            echo "::error title=Notarization failed::Apple did not accept $(basename "$DMG") (status ${STATUS:-unknown}, exit $RC). Publishing anyway would ship a DMG that Gatekeeper refuses exactly as it refused the unsigned build — the failure the Developer ID was bought to remove. The submission log is printed above; the usual causes are a missing hardened runtime, an unsigned nested binary, or an expired certificate."
+            exit 1
+          fi
+
+          # ── staple, so a first launch works with no network ─────────────────
+          # Without the ticket ON the file, Gatekeeper must ask Apple online. The
+          # person this release is for opens the DMG on a hotel wifi captive portal
+          # and meets the same wall the ticket was bought to remove.
+          #
+          # ██ CORRECTED 2026-09-05, integration pass ██  What stood here, verbatim:
+          #
+          #   > xcrun stapler staple "$DMG"
+          #
+          # The one bare command in a step where every other failure is named. Run
+          # for real against a DMG Apple has no record of, it prints
+          #
+          #     CloudKit query for … failed due to "Record not found".
+          #     The staple and validate action failed! Error 65.
+          #
+          # and `set -e` ends the step at exit 65 with no ::error annotation — so
+          # GitHub shows "Process completed with exit code 65" and the cause is
+          # four lines up in a collapsed log. And this failure is NOT hypothetical
+          # after an Accepted status: the ticket is fetched from Apple's CDN, and
+          # "Record not found" moments after acceptance is propagation lag, which
+          # is a retry, not a rebuild. Say which it is.
+          if ! xcrun stapler staple "$DMG" 2>&1 | sed 's/^/  /'; then
+            echo "::error title=Stapling the DMG failed::Apple accepted $(basename "$DMG") (submission $SUBMISSION) but 'xcrun stapler staple' could not attach the ticket. If the log above says \"Record not found\", the ticket simply has not propagated to Apple's CDN yet — RE-RUN THIS JOB in a few minutes, do not rebuild and do not resubmit. Any other error means the file changed after it was submitted, and the fix is upstream of here."
+            exit 1
+          fi
+
+          # ── validate BOTH, and hard-fail on either ──────────────────────────
+          if ! xcrun stapler validate "$DMG" 2>&1 | sed 's/^/  /'; then
+            echo "::error title=DMG staple did not take::xcrun stapler validate failed on $(basename "$DMG") immediately after stapling it. The image would be published without a ticket."
+            exit 1
+          fi
+          if ! xcrun stapler validate "$APP" 2>&1 | sed 's/^/  /'; then
+            echo "::error title=The .app carries no notarization ticket::stapler validate failed on $APP. Tauri notarizes and staples the .app during 'cargo tauri build' when APPLE_API_* are set; if that did not happen, the copy INSIDE the DMG has no ticket either — and stapling this outer .app now cannot reach it, because the image was built from a copy taken before this step. Do not patch it here: fix the bundler step and rebuild. Check the 'Build universal bundle' log for notarytool output."
+            exit 1
+          fi
+          {
+            echo "### Notarization"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| submission | \`$SUBMISSION\` |"
+            echo "| status | **$STATUS** |"
+            echo "| stapled | \`$(basename "$DMG")\` and \`$(basename "$APP")\`, both validated |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # ── 10. Gate: the DMG mounts, and what is inside is the app ───────────
       # A DMG that will not mount is a total failure that no unit test can see
       # and that the PO would discover by watching Mom double-click it.
       - name: The DMG mounts and contains the app
+        env:
+          # Read inside the script rather than as a step-level `if:`, because this
+          # step runs on both branches and only the Gatekeeper verdict at the end
+          # of it differs between them. `rejected` is the CORRECT answer ad hoc.
+          SIGNED: ${{ vars.ENABLE_APPLE_SIGNING }}
         run: |
           DMG='${{ steps.art.outputs.dmg }}'
           MNT="$RUNNER_TEMP/dmgcheck"
@@ -384,10 +564,58 @@ jobs:
           fi
           echo "  read-me: $READ_NAME present ($(stat -f%z "$MNT/$READ_NAME") bytes)."
           codesign --verify --verbose=2 "$INNER" 2>&1 | sed 's/^/  /'
-          # Diagnostic only. Unsigned, this WILL say "rejected" — that is the
-          # expected state under D1 and exactly the wall LZP-106 walks Mom past.
-          echo "Gatekeeper assessment (informational):"
-          spctl --assess --type execute --verbose=4 "$INNER" 2>&1 | sed 's/^/  /' || true
+
+          # ── the Gatekeeper verdict, and it is a GATE now on one branch ──────
+          #
+          # ██ INVERTED 2026-09-05 ██  What stood here, verbatim:
+          #
+          #   > # Diagnostic only. Unsigned, this WILL say "rejected" — that is the
+          #   > # expected state under D1 and exactly the wall LZP-106 walks Mom past.
+          #   > echo "Gatekeeper assessment (informational):"
+          #   > spctl --assess --type execute --verbose=4 "$INNER" 2>&1 | sed 's/^/  /' || true
+          #
+          # That reasoning was RIGHT under D1 and is still right on the ad-hoc
+          # branch, where it is kept below unchanged: with no Developer ID the
+          # only honest answer is `rejected`, and failing the build on it would
+          # mean no build at all. D1 is reversed. On the signed branch the same
+          # `|| true` turns the ONE command that can tell a stapled DMG from an
+          # unstapled one into a comment — the pipeline's whole capacity to lie
+          # about notarization was in those seven characters.
+          #
+          # Two assessments, because a Mac performs two:
+          #   --type execute   the app, once she has dragged it to Programme
+          #   --type open --context context:primary-signature
+          #                    the DOWNLOADED IMAGE, which is the first thing
+          #                    macOS judges and the one nothing here ever ran
+          if [ "$SIGNED" = "true" ]; then
+            APP_OUT="$RUNNER_TEMP/spctl-app.txt"
+            RC=0
+            spctl --assess --type execute --verbose=4 "$INNER" > "$APP_OUT" 2>&1 || RC=$?
+            sed 's/^/  /' "$APP_OUT"
+            if [ "$RC" != "0" ]; then
+              echo "::error title=Gatekeeper rejects the app::spctl --assess --type execute said no (exit $RC) on a build that signing and notarization were switched on for. Shipping this DMG puts the PO's mother in front of exactly the wall the Developer ID was bought to remove, with nothing in the release notes warning her. Check the notarization step above and 'stapler validate'."
+              exit 1
+            fi
+            if ! grep -q 'source=Notarized Developer ID' "$APP_OUT"; then
+              echo "::error title=Accepted, but not as a notarized app::spctl accepted $INNER without saying 'source=Notarized Developer ID'. That is what a locally-trusted or developer-exempt assessment looks like on a build machine — it does NOT transfer to a stranger's Mac. The verdict this release needs is 'accepted' AND 'source=Notarized Developer ID'."
+              sed 's/^/  /' "$APP_OUT"
+              exit 1
+            fi
+            DMG_OUT="$RUNNER_TEMP/spctl-dmg.txt"
+            RC=0
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG" > "$DMG_OUT" 2>&1 || RC=$?
+            sed 's/^/  /' "$DMG_OUT"
+            if [ "$RC" != "0" ] || ! grep -q 'source=Notarized Developer ID' "$DMG_OUT"; then
+              echo "::error title=Gatekeeper rejects the downloaded image::spctl --assess --type open --context context:primary-signature failed on $(basename "$DMG") (exit $RC). This is the assessment a file that arrived by download or e-mail actually receives, and it is the only one that sees the read-me injection's rewrite: the .app can be perfectly notarized while the image around it is not."
+              exit 1
+            fi
+            echo "  Gatekeeper: accepted, notarized Developer ID, both the app and the image."
+          else
+            # Ad-hoc: `rejected` is the correct answer and must not fail the build.
+            # This is the wall LZP-106's guided unlock screen walks Mom past.
+            echo "Gatekeeper assessment (informational — no Developer ID, rejection expected):"
+            spctl --assess --type execute --verbose=4 "$INNER" 2>&1 | sed 's/^/  /' || true
+          fi
 
       # ── 11. Gate: the size budget (22.1) ──────────────────────────────────
       - name: DMG size budget
@@ -418,21 +646,76 @@ jobs:
           fi
 
       # ── 12. Stage artifacts under names the manifest can point at ─────────
+      #
+      # THE STAGING DIRECTORY IS NOT `dist/`, AND THAT IS THE WHOLE POINT.
+      #
+      # `src-tauri/tauri.conf.json` runs `node scripts/build-frontend.mjs` as its
+      # beforeBuildCommand, and that script owns `<repo>/dist`: it `rm -rf`s the
+      # directory and refills it with the web payload (`index.html` and `src/`,
+      # 3 598 KiB in 83 files, measured 2026-09-05). So by the time step 7
+      # finishes, `dist/` is FULL — of the
+      # frontend, not of anything a human downloads. Staging release artifacts
+      # into the same directory produced three real defects, all of them shipped:
+      #
+      #   · `shasum -a 256 dist/*` hashed `dist/index.html`, and SHA256SUMS.txt is
+      #     pasted verbatim into the public release notes below. The notes told
+      #     the reader the checksum of a file that is not in the release.
+      #   · the same glob handed `shasum` the `dist/src` DIRECTORY, which exits
+      #     non-zero with `Is a directory` — invisible, because the step ended in
+      #     `| tee` and GitHub runs `run:` as `bash -e {0}`, NOT `pipefail`, so
+      #     the pipeline's status was tee's zero. See the checksum block below.
+      #   · `upload-artifact` took `path: dist/`, so every rehearsal shipped the
+      #     entire web payload beside the DMG.
+      #
+      # The fix is a directory the frontend build never touches — NOT a narrower
+      # glob, which the next artifact re-opens. `build/` is already gitignored and
+      # already the release's scratch space (build/dmg, build/email), so the
+      # staged tree lives at `build/release`. `tests/tier1/release-staging.test.js`
+      # fails if this directory and `build-frontend.mjs`'s output are ever the
+      # same, or nested one inside the other, from EITHER side.
+      #
+      # `dir` is a step output so that every consumer below names the directory
+      # once, from here. There is exactly one literal in this workflow.
       - name: Stage release artifacts
-        id: dist
+        id: stage
         run: |
+          # A checksum step that cannot fail is not a checksum step. Everything
+          # below runs with pipefail on, so a broken producer at the head of a
+          # pipeline fails the step instead of being swallowed by its tail.
+          set -o pipefail
           V='${{ steps.v.outputs.version }}'
-          mkdir -p dist
+          STAGE=build/release
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
           DMG_NAME="LangzeitPlaner-$V-universal.dmg"
           ARCHIVE_NAME="LangzeitPlaner-$V-universal.app.tar.gz"
-          cp '${{ steps.art.outputs.dmg }}' "dist/$DMG_NAME"
-          cp '${{ steps.art.outputs.archive }}' "dist/$ARCHIVE_NAME"
-          cp '${{ steps.art.outputs.archive }}.sig' "dist/$ARCHIVE_NAME.sig"
+          cp '${{ steps.art.outputs.dmg }}' "$STAGE/$DMG_NAME"
+          cp '${{ steps.art.outputs.archive }}' "$STAGE/$ARCHIVE_NAME"
+          cp '${{ steps.art.outputs.archive }}.sig' "$STAGE/$ARCHIVE_NAME.sig"
           {
             echo "dmg_name=$DMG_NAME"
             echo "archive_name=$ARCHIVE_NAME"
+            echo "dir=$STAGE"
           } >> "$GITHUB_OUTPUT"
-          shasum -a 256 dist/* | tee dist/SHA256SUMS.txt
+
+          # Only regular files, and only the ones put here on purpose. This is the
+          # `Is a directory` failure made loud: a directory in the staging tree is
+          # a mistake upstream, and it must stop the release rather than produce a
+          # checksum list with a hole in it.
+          for f in "$STAGE"/*; do
+            if [ ! -f "$f" ]; then
+              echo "::error title=Staging tree has a non-file::'$f' is not a regular file. The staging directory holds exactly the assets that get published; a directory in it means something copied a tree in here, and 'shasum' would exit non-zero on it. Do not widen the glob — find what put it there."
+              exit 1
+            fi
+          done
+
+          # Checksums are taken FROM INSIDE the staging directory so the public
+          # release notes carry bare asset names — the names a reader actually
+          # downloads — and no internal build path. Written with a redirect, not
+          # `| tee`: the redirect makes shasum's own exit status the step's.
+          ( cd "$STAGE" && shasum -a 256 -- * ) > "$RUNNER_TEMP/SHA256SUMS.txt"
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" "$STAGE/SHA256SUMS.txt"
+          cat "$STAGE/SHA256SUMS.txt"
 
       # ── 13. The update manifest — signed, or it does not exist (22.6) ────
       # The generator verifies the .sig against the public key embedded in the
@@ -449,7 +732,10 @@ jobs:
           # Set ONLY for a key-rotation release, and unset again straight after.
           # See docs/v2/RELEASE.md § "Rotating the updater key".
           ROTATION_PUBKEY: ${{ vars.LZP_ROTATION_VERIFY_PUBKEY }}
+          # Named once, in step 12. Never spelled again.
+          STAGE: ${{ steps.stage.outputs.dir }}
         run: |
+          set -o pipefail
           EXTRA=()
           if [ -n "$ROTATION_PUBKEY" ]; then
             EXTRA+=(--pubkey "$ROTATION_PUBKEY")
@@ -460,26 +746,30 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --tag '${{ steps.v.outputs.tag }}' \
             --archive '${{ steps.art.outputs.archive }}' \
-            --asset-name '${{ steps.dist.outputs.archive_name }}' \
+            --asset-name '${{ steps.stage.outputs.archive_name }}' \
             --min-client-version "${{ vars.LZP_MIN_CLIENT_VERSION || '0.0.0' }}" \
             --notes "LangzeitPlaner ${{ steps.v.outputs.version }}" \
-            --out dist/latest.json \
+            --out "$STAGE/latest.json" \
             "${EXTRA[@]}"
           echo '### Update manifest' >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           node -e '
-            const m = require("./dist/latest.json");
+            const m = JSON.parse(require("node:fs").readFileSync(process.env.STAGE + "/latest.json", "utf8"));
             for (const k of Object.keys(m.platforms)) m.platforms[k].signature = m.platforms[k].signature.slice(0, 24) + "… (verified)";
             console.log(JSON.stringify(m, null, 2));
           ' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       # ── 14. Keep the build even when nothing is published ────────────────
+      # `path:` is the staging directory, so a rehearsal's artifact is the five
+      # files a human would download and nothing else. It used to be `dist/`,
+      # which is the frontend build's output — every rehearsal carried the whole
+      # 3 598 KiB web payload beside the DMG.
       - name: Upload build output to the workflow run
         uses: actions/upload-artifact@v4
         with:
           name: langzeitplaner-${{ steps.v.outputs.version }}-macos-universal
-          path: dist/
+          path: ${{ steps.stage.outputs.dir }}/
           retention-days: 14
           if-no-files-found: error
 
@@ -495,7 +785,10 @@ jobs:
           TAG: ${{ steps.v.outputs.tag }}
           VERSION: ${{ steps.v.outputs.version }}
           PRERELEASE: ${{ steps.v.outputs.prerelease }}
+          # Named once, in step 12. Never spelled again.
+          STAGE: ${{ steps.stage.outputs.dir }}
         run: |
+          set -o pipefail
           NOTES="$RUNNER_TEMP/notes.md"
           {
             echo "**LangzeitPlaner $VERSION** — macOS 12 or newer, Intel and Apple silicon."
@@ -510,7 +803,10 @@ jobs:
             echo "Already installed? Do nothing — the app updates itself."
             echo ""
             echo '```'
-            cat dist/SHA256SUMS.txt
+            # Bare asset names, because step 12 hashed from inside the staging
+            # directory. This block is public, and it used to carry a line for
+            # `dist/index.html` — a file that is not in the release at all.
+            cat "$STAGE/SHA256SUMS.txt"
             echo '```'
           } > "$NOTES"
 
@@ -521,11 +817,11 @@ jobs:
           fi
 
           gh release create "$TAG" \
-            "dist/${{ steps.dist.outputs.dmg_name }}" \
-            "dist/${{ steps.dist.outputs.archive_name }}" \
-            "dist/${{ steps.dist.outputs.archive_name }}.sig" \
-            dist/latest.json \
-            dist/SHA256SUMS.txt \
+            "$STAGE/${{ steps.stage.outputs.dmg_name }}" \
+            "$STAGE/${{ steps.stage.outputs.archive_name }}" \
+            "$STAGE/${{ steps.stage.outputs.archive_name }}.sig" \
+            "$STAGE/latest.json" \
+            "$STAGE/SHA256SUMS.txt" \
             "${ARGS[@]}"
 
       # ── 16. Prove the published manifest is reachable ─────────────────────
@@ -537,7 +833,10 @@ jobs:
         if: github.ref_type == 'tag' && steps.v.outputs.prerelease != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Named once, in step 12. Never spelled again.
+          STAGE: ${{ steps.stage.outputs.dir }}
         run: |
+          set -o pipefail
           URL="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
           for attempt in 1 2 3 4 5; do
             if curl -fsSL "$URL" -o "$RUNNER_TEMP/published.json"; then break; fi
@@ -551,7 +850,7 @@ jobs:
           node -e '
             const fs = require("fs");
             const published = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-            const local = JSON.parse(fs.readFileSync("dist/latest.json", "utf8"));
+            const local = JSON.parse(fs.readFileSync(process.env.STAGE + "/latest.json", "utf8"));
             if (published.version !== local.version) {
               console.error(`::error::published manifest says ${published.version}, this build is ${local.version}`);
               process.exit(1);

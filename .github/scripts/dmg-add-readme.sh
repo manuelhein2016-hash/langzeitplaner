@@ -130,9 +130,39 @@ mv "$WORK/out.dmg" "$DMG"
 IDENT="${APPLE_SIGNING_IDENTITY:-}"
 if [ -n "$IDENT" ] && [ "$IDENT" != "-" ]; then
   echo "▸ re-signing the rewritten image as '$IDENT'"
-  codesign --force --sign "$IDENT" --timestamp "$DMG"
+  # `--options runtime --timestamp` is the PO's hand incantation of 2026-09-05,
+  # the one that ended in `accepted / source=Notarized Developer ID`, and both
+  # flags are load-bearing at the NEXT step rather than at this one: Apple
+  # refuses to notarize a submission whose signature carries no secure timestamp,
+  # and the hardened-runtime flag is what the notarization service checks for
+  # before it will issue a ticket at all. Signing without them produces a valid
+  # signature and an unnotarizable file — which is precisely the shape of failure
+  # this whole path exists to make impossible.
+  codesign --force --options runtime --timestamp --sign "$IDENT" "$DMG"
   codesign --verify --verbose=2 "$DMG" 2>&1 | sed 's/^/  /'
-  echo "::warning title=DMG notarization staple::The disk image was rewritten after Tauri built it. If this release notarizes and staples the DMG (not just the .app), that staple must be produced AFTER this step — see docs/v2/RELEASE.md 'Turning signing on'. UNVERIFIED: signing has never been switched on."
+
+  # ██ INVERTED 2026-09-05 ██  What this line emitted, verbatim:
+  #
+  #   > ::warning title=DMG notarization staple::The disk image was rewritten
+  #   > after Tauri built it. If this release notarizes and staples the DMG (not
+  #   > just the .app), that staple must be produced AFTER this step — see
+  #   > docs/v2/RELEASE.md 'Turning signing on'. UNVERIFIED: signing has never
+  #   > been switched on.
+  #
+  # The warning was correct, it was the only place in the tree that knew this,
+  # and it was addressed to nobody: a warning in a step that had never run,
+  # naming a staple that did not exist anywhere in the repository. The `mv` four
+  # lines above replaces the file Tauri built, so any ticket Tauri stapled to the
+  # old image is now in $TMPDIR; `codesign --force --sign` puts a signature back
+  # and CANNOT put a staple back. The instruction is now executed instead of
+  # printed — `release.yml` step 9b ("Notarize the rewritten DMG, staple it, and
+  # prove both tickets") runs immediately after this script and hard-fails if
+  # either `stapler validate` says no. This echo is what makes that dependency
+  # legible in the log, and `check-release-config.mjs` (rows N-ORDER / N-STAPLE /
+  # N-RUNTIME) fails the pre-flight if the step is ever removed or reordered.
+  echo "  ▸ this image now has NO notarization ticket, by construction."
+  echo "    release.yml step 9b submits it to notarytool and staples it, after this script and"
+  echo "    before every gate that inspects the DMG. If that step is gone, the release is lying."
 fi
 
 # ── the file is on the image, proved by mounting the finished artifact ─────────

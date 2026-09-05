@@ -1,10 +1,60 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-05 (LZP-1009's second pass, integrated) · **Stopped at:** **the feedback
-channel works from the Mac it was written for, the operator can read it, and the one thing left
-before it works in production is one environment variable.** Previous session: 2026-09-04, the
+**Last session:** 2026-09-05 (**the ship day** — repo, relay, database, origin, signing) ·
+**Stopped at:** **everything a person could do by hand is done and measured; the pipeline has
+never once done any of it.** Previous entries: LZP-1009's second pass (same day), and 2026-09-04's
 audit fix cycle. Full record: `docs/v2/AUDIT.md` (the audit, with each finding marked and its
-evidence) and `docs/v2/V2-FINAL.md`; findings in `FINDINGS.md` §23.
+evidence) and `docs/v2/V2-FINAL.md` §−3; findings in `FINDINGS.md` §23.
+
+---
+
+## ██ THE SHIP DAY (2026-09-05) — WHAT IS DEPLOYED, AND WHAT IS STILL UNPROVEN ██
+
+**DONE, with the evidence and not the assertion:**
+
+```
+repo      github.com/manuelhein2016-hash/langzeitplaner · PUBLIC · main pushed · CI green
+          (incl. shell-rust on macos-14 — the only proof src-tauri compiles)
+origin    https://langzeitplaner.vercel.app — six files, one commit, PURE ASCII
+          main.swift:845 · lib.rs:749 · all four invitation mails · release-gate.test.js green
+database  Prisma Postgres, eu-central-1 · both migrations applied by vercel-build.sh
+          20260903092140_init · 20260905101500_report
+relay     GET /api/v1/meta -> HTTP/2 200 · x-vercel-id fra1::fra1 · {"region":"fra1",...}
+          no-store · HSTS · nosniff · no-referrer · and NO Access-Control-* even when asked
+          with an explicit Origin: header
+report    a real report POSTed to production -> 202, with the honest provesNot on the wire
+          (the PO's own measurement)
+signing   Developer ID ZZ77R3LWS4 · /Applications/LangzeitPlaner.app:
+          spctl -> accepted / source=Notarized Developer ID · stapler validate -> worked
+          codesign -> flags=0x10000(runtime) · TeamIdentifier=ZZ77R3LWS4      — BY HAND
+probe     mom-test-probe.mjs -> exit 0 · 41 rows · 39 pass · 2 note · 0 FAIL   (M2s is a pass)
+readiness check-server-config.mjs -> 40 passed · 0 failed · 0 warnings · 2 not checked here
+suites    npm test 2323/2323 · attack 986/986 · server 1094/1094 +1 stated skip
+          fleet 482/482 · property 101/101 · test:dom 930 pass / 3 fail (the named residuals)
+          all re-run 2026-09-05. tier 1 was 2283 before this pass; the release wiring added 40.
+```
+
+**NOT PROVEN, and each one stays named:**
+
+1. **`cargo tauri build` has never run anywhere.** No universal binary — the x86_64 half has never
+   been compiled by anybody — no bundler, no DMG from the real path. `git tag` is empty and
+   `release.yml` has never executed. **The signing above was done by a person.** The pipeline now
+   holds the same sequence (step 9b: `notarytool submit --wait` → `stapler staple` → `stapler
+   validate` on **both** the DMG and the `.app`; a hard `spctl` gate demanding `accepted` **and**
+   `source=Notarized Developer ID` on the app *and* the downloaded image; pre-flight rows
+   the eight `N-*` rows: `N-SUBMIT`, `N-ORDER`, `N-STAPLE`, `N-VALIDATE`, `N-RUNTIME`, `N-SPCTL-APP`, `N-SPCTL-DMG`, `N-NOTARIZED`) — **and has never been asked to
+   perform it.** The DMG re-sign branch it depends on has never run either; it was dead under D1.
+2. **The Prisma adapter's `U-REPORTONCE` and `U-REPORTTTL` have no database witness**
+   (`server/adapters/prisma.js:938-939`). If `U-REPORTTTL` is wrong the 90-day retention is off by
+   Frankfurt's summer hour and **nothing visibly fails** — reports live an hour longer or vanish an
+   hour early, and the number in the Datenschutz copy is quietly false.
+3. **L1 and L2 remain stated skips** until `--deep` runs against the deployed database; and
+   `RUNBOOK.md` §2.5.1 has never met Frankfurt's **pooler** (R-8b), where every atomicity guarantee
+   rests on getting an interactive `$transaction`.
+4. **`U-RAWBODY` is not settled by that 202.** An unsigned report never reaches `verifySignature`,
+   so a platform body parser would produce a byte-identical `JSON.parse` and the same answer. The
+   claim needs one **signed** request, and its failure mode is a total outage.
+5. **LZP-1006, the Mom test.** A person, a clean Mac, unassisted. Nothing here moves it.
 
 ---
 
@@ -45,10 +95,26 @@ gets **200 then 401 `replay`**. On a relay with **no operator configured** all t
 opening ⚙ makes exactly **one** request (`GET /api/v1/feedback`, on a human press) and makes the
 **same one** with the dot lit and with it dark.
 
-⚠ **THE LIVE RELAY IS BEHIND THIS TREE.** `https://langzeitplaner.vercel.app` answers `GET
-/api/v1/feedback` with **405** (the old route table) and `POST` with **501 `not_implemented`**. The
-three admin routes are not deployed and no operator key is enrolled. Nothing in this pass has met
-Postgres.
+> ### ██ SUPERSEDED LATER THE SAME DAY — THE RELAY CAUGHT UP ██
+>
+> **What stood here, verbatim:**
+>
+> > "⚠ **THE LIVE RELAY IS BEHIND THIS TREE.** `https://langzeitplaner.vercel.app` answers `GET
+> > /api/v1/feedback` with **405** (the old route table) and `POST` with **501
+> > `not_implemented`**. The three admin routes are not deployed and no operator key is enrolled.
+> > Nothing in this pass has met Postgres."
+>
+> **Re-measured against production, 2026-09-05:** `POST /api/v1/feedback` with a malformed body →
+> **400 `{"error":"bad_request","unexpectedField":"v"}"`** — the closed-shape validator in
+> `handlers/feedback.js:187` is what runs, so the route table is deployed — and a **real** report
+> POSTed by the PO → **202** with `provesNot` on the wire. `/api/v1/nope` → 404. The tree has met
+> Postgres: `20260905101500_report` is applied in Frankfurt.
+>
+> **`GET /api/v1/feedback` now answers 404**, and that is the *designed* answer of a relay with no
+> `LZP_REPORTS_ADMIN_PUB` — byte-identical to `/api/v1/nope`, because the operator surface must not
+> advertise that it exists. **So 404 is evidence of nothing either way** about whether the operator
+> key is enrolled, and this document will not read it as either. The sentence *"nothing in this
+> pass has met Postgres"* is the only one here that is now simply false.
 
 The three reds, named: `e8-density-legibility` §A4 (the 9 px ink floor, a PO ruling on
 `palette.js`), `e8-density-perf` §E1 (`findWorst` straddling the 60 fps frame) and §E3 (the
@@ -82,12 +148,14 @@ relaunch, the „neu" dot lights (`isNew=true`, `.neu-dot=1` in the DOM), and a 
 
 The audit's verdict was *"ship solo, hold the Familienkreis for one fix cycle."* That cycle ran:
 
-- **F1, F13 — the release gate.** The shipped constant is still `""`, which is *correct* for a solo
-  release. What was missing was a gate that names it. `tests/tier1/release-gate.test.js` (20 rows)
-  now fails on a half-done substitution in **either** direction, demonstrated in four tree states.
-  The invitation placeholder is `https://serveradresse-fehlt.invalid` — RFC 2606 §2,
-  **undelegatable**, so unlike the abandoned `lzp-sync-po.vercel.app` (HTTP 404, claimable by
-  anyone) no stranger can stand it up and harvest a joiner's invite token.
+- **F1, F13 — the release gate.** ~~The shipped constant is still `""`, which is *correct* for a
+  solo release.~~ **Amended 2026-09-05: it is no longer `""`.** The gate did its job and the act
+  it was gating was performed — `tests/tier1/release-gate.test.js` (20 rows) fails on a half-done
+  substitution in **either** direction, demonstrated in four tree states, and it is green over
+  `https://langzeitplaner.vercel.app` in all six files. The undelegatable placeholder
+  `https://serveradresse-fehlt.invalid` — RFC 2606 §2, so unlike the abandoned
+  `lzp-sync-po.vercel.app` (HTTP 404, claimable by anyone) no stranger could stand it up and
+  harvest a joiner's invite token — has done its work and is gone from the mails.
 - **F2, F3, F4, F9 — the compaction class.** Closed by one general statement: a question about the
   PRESENT is answered by the register (`_absorbedGovernanceOps`, a 2-row table), a question about
   HISTORY belongs outside compaction (`_persistOps` retains the admin-chain lines). All seven
@@ -100,19 +168,44 @@ The audit's verdict was *"ship solo, hold the Familienkreis for one fix cycle."*
   longer publishes a phantom `pub.date`), and a peer's new *bar* dropped by the lane cap is now
   counted into the „+n" badge's „neu" tell.
 
-**Still open:** F14 (0 tags, 0 remotes, `release.yml` has never run), every F15 item, F12's
-remaining doc drift, and F10 — 18.5's inconsistent interval — which is a **PO decision (D-G)**, not
-a defect, and was deliberately not decided by engineering.
+**Still open:** F14 — **amended 2026-09-05**, its *remotes* half is closed (`origin`, public, `main`
+pushed, CI green) and its sharp half is untouched: **0 tags, `release.yml` has never run,
+`cargo tauri build` has never run anywhere** — every F15 item, F12's remaining doc drift outside the
+release documents (`MOM-TEST.md`, `RUNBOOK.md`, `SHELL-VERIFICATION.md`, `traceability.json`), and
+F10 — 18.5's inconsistent interval — which is a **PO decision (D-G)**, not a defect, and was
+deliberately not decided by engineering.
 
-### ⚠ TWO THINGS ONLY THE PO CAN DO
+### ✅ THE TWO THINGS ONLY THE PO COULD DO — BOTH DONE 2026-09-05
 
-1. **Claim a relay host** and substitute it in one act: the four invitations *and*
-   `SYNC_ORIGIN_BUILTIN` in both shells. `RELEASE-CHECKLIST.md` §A forces both halves.
-2. **Decide D10 / story 21.5.** The amendment was justified as *"the second refuses the report from
-   the only tester who has no Familienkreis"* — and as shipped, the code refuses her anyway,
-   because the feedback port is bound only inside the family door. Either the gate is wrong (the
-   button should work solo) or the amendment bought nothing. The screen now says what the code
-   does, so it is honest either way. See `AUDIT.md` §D10.
+> **What stood here:**
+>
+> > "### ⚠ TWO THINGS ONLY THE PO CAN DO
+> >
+> > 1. **Claim a relay host** and substitute it in one act: the four invitations *and*
+> >    `SYNC_ORIGIN_BUILTIN` in both shells. `RELEASE-CHECKLIST.md` §A forces both halves.
+> > 2. **Decide D10 / story 21.5.** The amendment was justified as *"the second refuses the report
+> >    from the only tester who has no Familienkreis"* — and as shipped, the code refuses her
+> >    anyway, because the feedback port is bound only inside the family door. Either the gate is
+> >    wrong (the button should work solo) or the amendment bought nothing. The screen now says
+> >    what the code does, so it is honest either way. See `AUDIT.md` §D10."
+
+1. **Host claimed, substitution whole.** `https://langzeitplaner.vercel.app` in all six files, one
+   commit, pure ASCII. `release-gate.test.js` green; `mom-test-probe.mjs` exit 0, 0 FAIL.
+2. **D10 ruled: a solo Mac may send.** `feedback/relay.js#bindSoloSender`, the second dynamic door,
+   onto `platform/net.js` and nothing else. The amendment stops being vacuous.
+
+**And a third the PO also did, which was not on this list because nobody expected it this week:
+D1 is reversed.** The app is signed, notarized and stapled under Developer ID `ZZ77R3LWS4`.
+
+**What is left that only the PO can do, and it is now one item plus a person:**
+
+- **Run `workflow_dispatch` and get it green** — the pipeline has never built anything, and
+  `cargo tauri build` has never run anywhere.
+- **Tag `v2.0.0-rc.1` — `git push origin v2.0.0-rc.1`, never `git push --tags`** (which would start
+  a release run for every tag in the local repository), install it yourself, then tag `v2.0.0`.
+- **Run the deep database checks** — `--deep` for L1/L2, `RUNBOOK.md` §2.5.1 for the pooler.
+- **Rule on D-G / F10**, the backwards-folded interval. Untouched, still yours.
+- **LZP-1006.** A real person, a clean Mac, unassisted, you not touching the keyboard.
 
 ### The re-pricing worth knowing before F2/F3/F4 are described to anyone
 
@@ -236,10 +329,14 @@ The full list with owners is `docs/v2/V2-FINAL.md` §8, re-issued. The three tha
    interactive `$transaction` or silently downgrade `Serializable`, and every atomicity guarantee
    rests on getting one. Run `RUNBOOK.md` §2.5.1 against the deployed database first.
 2. **R-1b · a transferred admin seat.** Above.
-3. **R-9b · two deployment lines nobody can write from here** — a production `feedbackSink`, and
+3. ~~**R-9b · two deployment lines nobody can write from here** — a production `feedbackSink`, and
    the real relay origin substituted into the four invitation files (which today carry the
    literal `https://lzp-sync-po.vercel.app`, a name nobody has claimed). Both are now checkboxes
-   in `RELEASE-CHECKLIST.md` §A.
+   in `RELEASE-CHECKLIST.md` §A.~~ **✅ CLOSED 2026-09-05 — both lines were written.** The sink is
+   bound in `vercel.js#buildCtx` and production answered **202** to a real report; the origin is
+   `https://langzeitplaner.vercel.app` in all six files. **What replaces it as the third item is
+   worse and is above:** the pipeline has never built, signed, notarized or published anything,
+   and the `Report` table has no witness for `U-REPORTONCE`/`U-REPORTTTL`.
 
 ---
 
