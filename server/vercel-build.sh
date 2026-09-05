@@ -30,6 +30,20 @@
 #    build if that ever changes.
 set -euo pipefail
 
+# THE RELAY HAS NO WEBSITE, AND `public/` IS HOW WE SAY SO TO VERCEL.
+#
+# Vercel requires an output directory after a build and fails with
+# "No Output Directory named "public" found after the Build completed" without one. This project
+# is serverless functions and nothing else: every route lives under `api/`, and `/` should answer
+# 404 because a blind relay is not a page anyone should land on.
+#
+# So the directory is created here, EMPTY, and never committed. That matters — whatever is in the
+# output directory is published as static files. The tempting one-line fix is
+# `"outputDirectory": "."`, which would serve this entire directory: schema.prisma, every adapter,
+# core/, and anything a future contributor drops beside them. `check-server-config.mjs` row V11
+# refuses that value by name so it cannot be reintroduced as a quick fix during an outage.
+mkdir -p public
+
 npx prisma generate
 
 if [ "${VERCEL_ENV:-}" = "production" ] || [ "${LZP_PREVIEW_DB_IS_ISOLATED:-}" = "true" ]; then

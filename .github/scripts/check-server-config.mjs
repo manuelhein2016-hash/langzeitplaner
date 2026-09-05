@@ -267,6 +267,36 @@ if (require_('V1', 'server/vercel.json', 'LZP-109 has nothing to deploy with')) 
       }
     }
 
+    // V11 — the output directory is PUBLISHED. Whatever it contains is served as static files.
+    //
+    // Vercel fails a build with no output directory ("No Output Directory named \"public\" found
+    // after the Build completed"), and the one-line fix that suggests itself under time pressure
+    // is `"outputDirectory": "."` — which would publish this whole directory: schema.prisma, every
+    // adapter, core/, and whatever a future contributor leaves beside them. That is a source
+    // disclosure dressed as a build fix, and it would arrive during an outage, which is exactly
+    // when nobody is reading carefully.
+    //
+    // The relay has no website. The correct answer is an EMPTY directory the build creates, so `/`
+    // answers 404 and nothing static exists to serve. This row refuses the dangerous values by
+    // name and checks the build actually creates the one that is declared.
+    const outDir = String(v.outputDirectory ?? '');
+    const outBad = ['', '.', './', '..', '../', '/'];
+    if (outBad.includes(outDir.trim())) {
+      fail('V11', 'server/vercel.json',
+        `outputDirectory is ${JSON.stringify(outDir)}, which publishes the Vercel root directory `
+        + 'as static files — schema.prisma, adapters/ and core/ would all be downloadable. Point it '
+        + 'at an empty directory the build creates (see server/vercel-build.sh).');
+    } else if (!new RegExp(`mkdir\\s+-p\\s+${outDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(build)
+               && !has(`server/${outDir}`)) {
+      fail('V11', 'server/vercel.json',
+        `outputDirectory is ${JSON.stringify(outDir)}, but the build neither creates it nor is it `
+        + 'committed. Vercel fails the deployment after a successful migrate, which is the worst '
+        + 'place to stop: the database has already moved and the code has not.');
+    } else {
+      pass('V11', 'server/vercel.json',
+        `outputDirectory ${JSON.stringify(outDir)} — created empty by the build, so the relay serves no static file`);
+    }
+
     // V10 — `npm ci` is not `npm install`: it refuses to run without a lockfile, and it fails the
     // build outright when the lockfile and the manifest disagree. See P5.
     if (String(v.installCommand || '').includes('npm ci') && !has('server/package-lock.json')) {
