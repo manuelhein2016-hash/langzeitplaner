@@ -22,6 +22,7 @@
 
 import {
   MODEL_COLUMNS, normalizeRow, StoreShapeError, STORE_METHODS,
+  normalizeReportInput, reportExpired,
 } from '../core/store-interface.js';
 
 /** Op columns a caller may supply. `spaceId`, `seq` and `receivedAt` are assigned by the store. */
@@ -78,6 +79,11 @@ function emptyState() {
     pairs: new Map(),       // rid -> PairSessionRow
     nonces: new Map(),      // deviceShort\0nonce -> expiresAtMs (number)
     rates: new Map(),       // key -> {count, windowStart}
+    // LZP-1009 second pass. A FLAT map keyed by report id — no space index, no member index, and
+    // deliberately not reachable from `state.spaces`: `deleteSpace`'s cascade below walks named
+    // collections, and this one is not among them because a report belongs to no circle. There is
+    // no key here a board could be joined on.
+    reports: new Map(),     // id -> ReportRow
   };
 }
 
@@ -603,7 +609,52 @@ export function createStoreEngine(opts) {
       b.count += 1;
       return true;
     },
+
+    // reports ─────────────────────────────────────────────────────────────
+    // LZP-1009 second pass. Four methods that name no space, over a table that has no space
+    // column — see `store-interface.js` REPORTS. Nothing in this block reads `state.spaces`,
+    // `state.ops` or `state.members`, and nothing in the rest of this file reads `state.reports`.
+    // That mutual ignorance is the guarantee; the tests that hold it are C64 and blindness §9.
+
+    putReport(input) {
+      const t = now();
+      sweepReports(t);
+      const row = normalizeReportInput(input, t);
+      // REFUSED, never overwritten. The id is what the admin view's „Löschen" addresses, so a
+      // second write under a live id would change the sentence he is looking at.
+      if (state.reports.has(row.id)) throw new StoreShapeError(`report ${row.id} already exists`);
+      state.reports.set(row.id, row);
+      return copy(row);
+    },
+
+    listReports(limit) {
+      const t = now();
+      sweepReports(t);                                   // the READ-path sweep: Hobby has no cron
+      const cap = Math.max(0, Number(limit) || 0);
+      const live = [...state.reports.values()].filter((r) => !reportExpired(r, t));
+      // Newest first, and `id` breaks a tie inside one millisecond so the order is total rather
+      // than insertion-dependent — two adapters that disagree about "newest" are two adapters.
+      live.sort((a, b) => (b.receivedAt.getTime() - a.receivedAt.getTime()) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+      return copies(live.slice(0, cap));
+    },
+
+    /** null for unknown AND for expired — indistinguishable, and it does NOT sweep. */
+    getReport(id) {
+      const row = state.reports.get(id);
+      if (!row || reportExpired(row, now())) return null;
+      return copy(row);
+    },
+
+    /** Idempotent: true when a row went, false when there was nothing to remove. Never a throw. */
+    deleteReport(id) {
+      return state.reports.delete(id);
+    },
   };
+
+  /** The 90-day sweep. Lazy, on put and on list (ADR 003 §10 weakness 2 — Hobby has no cron). */
+  function sweepReports(t) {
+    for (const [id, row] of [...state.reports]) if (reportExpired(row, t)) state.reports.delete(id);
+  }
 
   function minOver(spaceId, field) {
     const members = memberIdsOf(spaceId);
@@ -637,6 +688,9 @@ export function createStoreEngine(opts) {
     'listMembers', 'colorFree', 'getDevice', 'getDeviceByShort', 'listDevices',
     'minLastSeenSeq', 'minLastPushedSeq',
     'getKeyWraps', 'getInvite', 'listOpenInvites', 'getPairSession',
+    // `getReport` reads one row and writes nothing. `listReports` is NOT here on purpose: it
+    // sweeps, and the sweep is the whole reason the read path exists as a retention mechanism.
+    'getReport',
   ]);
   const mutates = (name) => !READ_ONLY.has(name);
 

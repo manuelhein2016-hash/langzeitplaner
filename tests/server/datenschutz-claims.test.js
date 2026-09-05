@@ -38,10 +38,14 @@ import { DATENSCHUTZ } from '../../src/js/settings.js';
 
 /** German numerals as the screen spells them — it writes words, not digits, and should. */
 const DE_NUMERAL = Object.freeze({
-  3: 'drei', 4: 'vier', 5: 'fünf', 23: 'dreiundzwanzig', 24: 'vierundzwanzig', 25: 'fünfundzwanzig',
+  3: 'drei', 4: 'vier', 5: 'fünf', 6: 'sechs',
+  23: 'dreiundzwanzig', 24: 'vierundzwanzig', 25: 'fünfundzwanzig',
+  26: 'sechsundzwanzig', 27: 'siebenundzwanzig', 28: 'achtundzwanzig',
 });
 const EN_NUMERAL = Object.freeze({
-  3: 'three', 4: 'four', 5: 'five', 23: 'twenty-three', 24: 'twenty-four', 25: 'twenty-five',
+  3: 'three', 4: 'four', 5: 'five', 6: 'six',
+  23: 'twenty-three', 24: 'twenty-four', 25: 'twenty-five',
+  26: 'twenty-six', 27: 'twenty-seven', 28: 'twenty-eight',
 });
 
 const de = DATENSCHUTZ.de;
@@ -49,8 +53,36 @@ const en = DATENSCHUTZ.en;
 
 describe('the Datenschutz screen agrees with the live server enums', () => {
   test('§1 · infer4 — the route enum\'s SIZE is the number on the screen, in both languages', () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // ██ THE REVIEW TRIGGER FIRED, AND THIS IS THE REVIEW · 2026-09-05 · LZP-1009 second pass ██
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // The number below was 24. The message this row carries calls itself a REVIEW TRIGGER and
+    // asks, of every new verb, "is it as telling as `renameSpace`?" — so it is answered here
+    // rather than bumped, which is the whole difference between honouring the row and defeating
+    // it. The three new verbs are the operator's reports routes:
+    //
+    //   · `reportsList`    GET  /api/v1/feedback
+    //   · `reportsGet`     GET  /api/v1/feedback/:id
+    //   · `reportsDelete`  POST /api/v1/feedback/:id/delete
+    //
+    // ARE THEY AS TELLING AS `renameSpace`? **No, and for a structural reason, not a careful one.**
+    // `renameSpace` is telling because the log line carries `spaceId` and `deviceShort` beside the
+    // verb: it says THIS member did THIS to THIS circle. None of the three above carries either.
+    // They have no `spaceParam` (`router.js`), they are not in `SPACE_SCOPED`, and their rate
+    // rules are `identity:'ip'` (`limits.js` E10-L4/E10-L5) — so the log line reads "somebody at
+    // some address read the operator's inbox", and the only person who can produce one is the
+    // holder of the private half of `LZP_REPORTS_ADMIN_PUB`, which is the operator himself.
+    // Their presence in the enum widens the count; it does not widen what the enum can say about
+    // a family.
+    //
+    // ⚠ WHAT IS GENUINELY NEW IS NOT IN THIS ROW. It is `Report.devicePub`: on a SIGNED report it
+    // is byte-identical to `Device.sigPubRaw`, so a retained report joins to a circle and one join
+    // names the member, her circle and her household. That is a sixth inference, it is stated in
+    // `docs/v2/server-metadata.md` §7 and on the screen, and it is checked by §7 below. Bumping
+    // this count without adding that disclosure would have been exactly the drift F12 found.
     const n = ROUTE_NAMES.length;
-    assert.equal(n, 24,
+    assert.equal(n, 27,
       `ROUTE_NAMES now holds ${n} verbs. That is not a defect — it is a REVIEW TRIGGER. Story 21.3 `
       + 'promises the screen names how precisely the relay can see what you did, so a new verb has '
       + 'to be looked at before this number is bumped: is it as telling as `renameSpace`? Then '
@@ -121,8 +153,10 @@ describe('the Datenschutz screen agrees with the live server enums', () => {
     assert.match(en.infer1, /four ways/, 'the English no longer counts four');
   });
 
-  test('§6 · both languages carry all six disclosures, and neither is a stub', () => {
-    for (const key of ['infer1', 'infer2', 'infer3', 'infer4', 'infer5', 'inferIp']) {
+  test('§6 · both languages carry all seven disclosures, and neither is a stub', () => {
+    // Was six. `infer6` — the report/device join — is the seventh entry and the sixth INFERENCE;
+    // `inferIp` has never been one of the numbered five and still is not.
+    for (const key of ['infer1', 'infer2', 'infer3', 'infer4', 'infer5', 'infer6', 'inferIp']) {
       for (const [lang, table] of [['de', de], ['en', en]]) {
         const v = table[key];
         assert.equal(typeof v, 'string', `${lang}.${key} is not a string`);
@@ -155,5 +189,72 @@ describe('the Datenschutz screen agrees with the live server enums', () => {
     for (const r of ['removeMember', 'transferAdmin', 'renameSpace']) {
       assert.ok(ROUTE_NAMES.includes(r), `the screen's example "${r}" is not a route`);
     }
+  });
+
+  test('§8 · infer6 — the retained report joins to a circle, and BOTH halves are on the screen', () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // LZP-1009 SECOND PASS · 2026-09-05 · the SIXTH inference, and the reason §1's count moved.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // THE FACT: `Report.devicePub` on a SIGNED report is the raw uncompressed P-256 point — the
+    // same bytes `Device.sigPubRaw` already holds for that device, because it has to be, or the
+    // signature could not be checked. So `SELECT … FROM Report JOIN Device ON …` names the
+    // member, and the member names the circle, and the circle names the household. Nothing is
+    // decrypted and nothing is guessed.
+    //
+    // THIS ROW IS NOT A GREP FOR THE WORD „90". It requires both halves of the disclosure,
+    // because half of it is a scare and the other half alone is a footnote:
+    //   (a) the join — the same key, in two places, deliberately;
+    //   (b) the limit — an UNSIGNED report carries no key at all, which is the honest shape of a
+    //       solo send and the thing that makes (a) a bounded claim rather than a general one.
+    //
+    // ⚠ AND IT IS NOT DEFENDED AGAINST. The operator is the intended reader of the report; a
+    // report he cannot attribute is a report he cannot answer. §5b of `e13-datenschutz.dom.js`
+    // holds the register — no mitigation clause — and this row holds the content.
+    assert.match(de.infer6, /unterschrieben/, 'the German no longer says a family report is signed');
+    assert.match(de.infer6, /derselbe, den die[\s\S]{0,60}Vermittlungsstelle für dein Gerät ohnehin gespeichert hat/,
+      'the German no longer states the JOIN — that the key is the same key the relay already holds');
+    assert.match(de.infer6, /Ohne Familienkreis gibt es[\s\S]{0,40}keine Unterschrift/,
+      'the German no longer states the limit: an unsigned report carries no key');
+    assert.match(de.infer6, /90 Tagen/, 'the German no longer names the retention');
+
+    assert.match(en.infer6, /signed/, 'the English no longer says a family report is signed');
+    assert.match(en.infer6, /the very one the relay already stores[\s\S]{0,40}for your device/,
+      'the English no longer states the join');
+    assert.match(en.infer6, /Without a Familienkreis there is no[\s\S]{0,20}signature/,
+      'the English no longer states the limit');
+    assert.match(en.infer6, /90[\s\S]{0,10}days/, 'the English no longer names the retention');
+
+    // The lead counts the inferences and must count them right — the old „fünf Dinge" would now
+    // be a screen that names six and promises five.
+    assert.match(de.inferLead, /sechs Dinge/, 'the German lead no longer counts six');
+    assert.match(en.inferLead, /six things/, 'the English lead no longer counts six');
+  });
+
+  test('§9 · retention — the 90 days reach the copy, and the unbounded claim is SCOPED', () => {
+    // `retentionBody` said, verbatim: „Ehrlich: unbefristet. Es gibt keine automatische Löschung."
+    // `Report.expiresAt` and `store-interface.js#REPORT_RETENTION_DAYS = 90` make the second
+    // sentence false. It is not softened and it is not deleted — the rate rows and the change
+    // rows really are unbounded, and that is the harsher half. It is SCOPED, and the exception
+    // carries its number.
+    for (const [lang, body, unbounded, ninety, byHand] of [
+      ['de', de.retentionBody, /für fast alles unbefristet/, /90 Tagen automatisch gelöscht/, /von Hand/],
+      ['en', en.retentionBody, /for almost everything, indefinitely/, /automatically after\s+90 days/, /by hand/],
+    ]) {
+      assert.match(body, unbounded, `${lang}: the unbounded claim has been dropped rather than scoped`);
+      assert.match(body, ninety, `${lang}: retentionBody does not name the 90-day expiry`);
+      assert.match(body, byHand, `${lang}: the manual half of retention is no longer mentioned`);
+      assert.equal(/Es gibt keine automatische Löschung|There is no automatic deletion/.test(body), false,
+        `${lang}: the flat "there is no automatic deletion" sentence is back, and Report.expiresAt `
+        + 'makes it false');
+    }
+    // …and the feedback paragraph says the report is KEPT, not merely readable in transit.
+    assert.match(de.feedbackBody, /gespeichert[\s\S]{0,120}90 Tagen/,
+      'the German feedback paragraph still describes only the journey, not the storage');
+    assert.match(en.feedbackBody, /stored[\s\S]{0,120}90\s*\n?\s*days|stored[\s\S]{0,120}90 '\s*\+\s*'days/,
+      'the English feedback paragraph still describes only the journey, not the storage');
+    // …and the solo paragraph no longer claims „Senden" is off without a Familienkreis.
+    assert.equal(/„Senden" ist\s+abgeschaltet|"Send" is switched off/.test(de.soloBody + en.soloBody), false,
+      'the solo paragraph still says „Senden" is switched off — the PO reversed that on 2026-09-04');
   });
 });

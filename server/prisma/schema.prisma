@@ -15,8 +15,15 @@
 // times; which device deposited each key wrap; per-space op counts; padded envelope sizes; op
 // ARRIVAL times; chain hashes; invite id hashes, epochs and expiry.
 //
-// Nothing else. No entry text, no bar caption, no category, no scratchpad, no date, no display
-// name, no authoring time. Story 21.1.
+// Nothing else of a family's board. No entry text, no bar caption, no category, no scratchpad,
+// no date, no display name, no authoring time. Story 21.1.
+//
+// AND, SINCE THE LZP-1009 SECOND PASS, ONE THING THAT IS NOT A BOARD: the `Report` table at the
+// bottom of this file holds the sentence somebody typed into „Rückmeldung senden", verbatim and
+// in the clear, for 90 days. That sentence is READ by the operator — it is the entire product —
+// so this paragraph's "nothing else" is about the family's board and always was. The report
+// table can be joined to nothing here: it has no spaceId and no relation, which is what keeps a
+// report off the family's board structurally. Read its own header before adding a column to it.
 //
 // THE STRUCTURAL RULE, not a convention: every ciphertext-bearing column below is `Bytes`, and
 // `server/core/store-interface.js` REFUSES a String in any of them at the adapter boundary. The
@@ -25,10 +32,14 @@
 // there too — which is the only way "a future handler cannot store a readable note" stays true
 // after this file stops being read.
 //
-// The ONE deliberate plaintext String that is not an id: `Member.colorRef`. Story 15.3 needs
-// `@@unique([spaceId, colorRef])` server-side to stop two members choosing the same colour, and
-// that check cannot be done inside the ciphertext. It reveals one palette index per member and
-// it appears verbatim in the Datenschutz copy.
+// TWO deliberate plaintext Strings that are not ids, and they are different in kind:
+//   · `Member.colorRef` — story 15.3 needs `@@unique([spaceId, colorRef])` server-side to stop
+//     two members choosing the same colour, and that check cannot be done inside the ciphertext.
+//     It reveals one palette index per member and it appears verbatim in the Datenschutz copy.
+//   · `Report.prose` — her sentence, verbatim, because the operator READS it. This one is not a
+//     side effect of a constraint; it is the point of the table. It arrived with the LZP-1009
+//     second pass, `tests/server/blindness.test.js` §2 is where the second row was forced to be
+//     a decision rather than a diff, and the Datenschutz copy (21.3) states it and its 90 days.
 //
 // TWO COLUMNS THE §3 SKETCH HAD AND THIS DOES NOT:
 //   · `Member.displayNameCipher` — display names travel as `member.set` ops inside the encrypted
@@ -343,4 +354,75 @@ model RateBucket {
   key         String   @id
   count       Int
   windowStart DateTime
+}
+
+/// ═════════════════════════════════════════════════════════════════════════════════════════════
+/// A REPORT — „Rückmeldung senden".  LZP-1009 second pass; PO decisions of 2026-09-04/05.
+/// ═════════════════════════════════════════════════════════════════════════════════════════════
+///
+/// ── WHAT IS ABSENT, AND WHY THE ABSENCE IS THE DESIGN ────────────────────────────────────────
+/// There is NO `spaceId`, NO relation to `Space`, and no column any other model can be joined to.
+/// That is what keeps *"a report can never appear on the family's board"* STRUCTURAL rather than
+/// careful — the same sentence `server/core/handlers/feedback.js` promise 1 has always made,
+/// now about a table instead of a sink. `listOps` has no path here, `deleteSpace`'s cascade has
+/// no path here, and a future handler that wanted to publish a report onto a board would have to
+/// invent the relation first, in this file, where the tests would see it (Principle 10 — the
+/// board is not a messenger; there is no reply path, ever).
+///
+/// The reverse also holds and is deliberate: a family that deletes its circle (story 20.4) does
+/// NOT delete the reports its members sent. A bug report is not the circle's to withdraw, and it
+/// is addressed to the operator rather than held on the family's behalf.
+///
+/// ── WHAT THIS TABLE CAN SEE, AND IT IS MORE THAN ANY OTHER ───────────────────────────────────
+/// `prose` is HER SENTENCE, VERBATIM, IN THE CLEAR. It is the second readable String in the whole
+/// store that is not an id — `Member.colorRef` is the other — and the first that is prose. It is
+/// deliberate and it is unavoidable: the product is that the operator reads what she wrote. Every
+/// consequence is written into the Datenschutz copy (21.3) rather than left to be inferred, and
+/// `tests/server/blindness.test.js` §2 is where the decision was forced to be a decision rather
+/// than a diff.
+///
+/// The column is called `prose` and not `text`, `body` or `message` on purpose: all three read as
+/// "somewhere content may go", and `store-interface.js#FORBIDDEN_COLUMN_TOKENS` exists to keep a
+/// column like that from arriving by good intentions. `receivedAt` is ARRIVAL, exactly as `Op`'s
+/// is — when she wrote it is not the relay's business, and `authoredat` is a forbidden token.
+///
+/// ── 90 DAYS, AND WHO ENFORCES THEM ───────────────────────────────────────────────────────────
+/// `expiresAt` is `receivedAt` + 90 days, STAMPED BY THE STORE (`store-interface.js`
+/// REPORT_RETENTION_DAYS, `normalizeReportInput`) and never supplied by a caller, so no handler
+/// can file a report that outlives the number in the German copy. The sweep is LAZY, on put and
+/// on list, because Vercel Hobby has no cron (ADR 003 §10 weakness 2) and reports arrive rarely —
+/// a write-only sweep would leave rows for months, and he reads when the ⚙ dot appears, so the
+/// READ path is the real cadence. Expiry is enforced AT READ as well, the way `getPairSession`
+/// and `consumeInvite` already are: a retention promise that only holds once somebody writes to
+/// the relay is not a retention promise. `@@index([expiresAt])` is the `Nonce`/`PairSession`
+/// pattern; `@@index([receivedAt])` serves the admin view's newest-first read.
+///
+/// ── THE SIXTH INFERENCE ──────────────────────────────────────────────────────────────────────
+/// `devicePub` is a 65-byte raw P-256 point the client MINTED ITSELF and never enrolled, so it
+/// proves continuity between two reports and nothing else (`handlers/feedback.js` PROVES /
+/// PROVES_NOT). But it is byte-identical to `Device.sigPubRaw` when the same Mac is in a circle,
+/// so a RETAINED report is joinable to a circle — one join names the member, her circle and her
+/// household. That is new because retention is new, it is not defended against, the operator is
+/// the intended reader, and it is stated as the sixth inference in `docs/v2/server-metadata.md`
+/// §7 rather than discovered later.
+model Report {
+  /// 'rep_' + 22 b64url, minted by the relay. The admin view's handle for one row: what „Löschen"
+  /// addresses, and the reason a re-put under a live id is refused rather than an overwrite.
+  id         String    @id
+  /// HER SENTENCE, VERBATIM. See the header. The one readable prose column in this schema.
+  prose      String
+  /// The redacted PNG — produced by re-rendering the board with NO GLYPH PATH IN THE PRODUCT AT
+  /// ALL, and opaque here: the relay checks eight signature bytes at the door and never parses one.
+  image      Bytes?
+  signed     Boolean
+  /// 65-byte raw P-256, self-minted, NEVER ENROLLED. Absent when the Mac could not sign — which
+  /// is the report the endpoint most exists for („mein Schlüsselbund ist kaputt").
+  devicePub  Bytes?
+  /// ARRIVAL time. Not authoring time; that is hers and the relay is not told it.
+  receivedAt DateTime  @default(now())
+  /// receivedAt + 90 days. Stamped by the store, never by a caller.
+  expiresAt  DateTime
+
+  @@index([expiresAt])
+  @@index([receivedAt])
 }

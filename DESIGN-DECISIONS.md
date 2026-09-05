@@ -360,6 +360,114 @@ are untouched, the CSP diff is still empty, and the native-socket exception coun
 in about/marketing copy."* On its own the app still does nothing, and the Datenschutz copy (D11)
 states it in that scoped form rather than as an absolute.
 
+---
+
+### D10 EXTENDED — 2026-09-05 · the amendment stops being vacuous
+
+**Decided by the PO, 2026-09-04/05, at the LZP-1009 second pass.**
+
+D10 as written above was **true and unreachable**. It amended 21.5 so that a solo copy could
+originate one request — and the shell refused it anyway. `syncPreflight` read the `sync_enabled`
+switch first and returned `sync_disabled` for every request a Mac with no Familienkreis could
+make, so „Senden" was disabled on exactly the Mac D10's own argument is about:
+
+> *"The second refuses the report from the only tester who has no Familienkreis — the person the
+> feature exists for, and the person whose report will say „ich komme nicht mehr rein"."*
+
+That paragraph was the reason for the amendment and it described a product that did not exist.
+**A solo Mac may now send**, and D10's amendment becomes load-bearing rather than aspirational.
+
+**What changed, and what did not.**
+
+| | before | after |
+|---|---|---|
+| the shell gate | switch → pin → rebuild → method | pin → rebuild → method → **switch, as a conjunction** |
+| the sync-off surface | nothing | **exactly one (method, path)**: `POST /api/v1/feedback`, exact equality, no query |
+| the binder | `family/mount.js#bindFeedback` only | **plus** `feedback/relay.js#bindSoloSender`, and only when `canSend()` is already false |
+| dynamic doors out of the boot graph | one (`main.js -> family/mount.js`) | **two** — the second reaches `platform/net.js` and nothing else |
+| the ORIGINATOR | one human press | **unchanged, and re-measured over a wider scan** |
+
+**The reorder is not a weakening, and the reason it happened is worth keeping.** The carve-out has
+to be decided on a **canonical** URL — `/api/v1/%66eedback` and `/api/v1/feedback/../feedback` are
+one path to a server and two strings to a comparison — so deciding it before the rebuild would
+decide it on the string the page sent, which is the class of bug the pin and the rebuild exist to
+close. Everything above the switch is pure and local: a compiled-in constant, `URLComponents`,
+string comparison. No name is resolved and no `URLSession` is allocated, so moving the switch down
+three steps costs **no request**. `tests/tier1/release-gate.test.js` §4b carried the opposite
+claim — *"solo mode makes zero requests BECAUSE the switch is first"* — and that claim was never
+measured; it is now inverted, with the mechanism written where the number is.
+
+**The exception still may not widen, and the scan that holds it got wider, not looser.**
+`tests/tier1/network-scope.test.js` §5b used to match `/\.send\(/` and nothing else. The
+operator's reader calls `transport.request(`, so that row would have stayed green over an entire
+new transport — the E10-1009-B failure for the third time. It now matches every dispatcher
+spelling over the **solo-reachable tree** (everything outside `sync/`, `crypto/`, `family/`, which
+are the three directories gate 2 proves a solo launch cannot evaluate), **enumerates the three
+call sites by file and line**, and classifies a dispatcher handed on under a property name as
+`handed-on` rather than as a trigger. Measured: **0 automatic, 1 human, 4 handed-on**.
+
+---
+
+## D12 — a report is KEPT for 90 days, and the operator is a server-configured key
+
+**Decided by the PO, 2026-09-04/05.** Two decisions that only make sense together: the channel is
+useless without somewhere to read it, and a place to read it is a place the report is stored.
+
+**D12a — the admin view is a screen inside the app, on his Mac only.** Not e-mail (a report would
+then be in a mailbox at a third party, and the relay would need a credential to send with), not a
+web page (the relay ships `public/` precisely to say it has no website, and a web page is a second
+authentication surface on the open internet). It is a section in Einstellungen, after Hilfe, gated
+on `reportsAdmin === true` — a local pref **nothing under `src/js/` ever writes**, so no sequence
+of clicks reaches it on anybody else's Mac.
+
+**D12b — the operator identity is `LZP_REPORTS_ADMIN_PUB`, a P-256 public key in the relay's
+environment.** The private half is his existing device signing key. **This is not `Member.role`
+returning.** ADR 003 §5.1 removed `Member.role` because *the admin of a circle* must be resolved
+from the log; *who operates this relay* is server configuration, exactly like `feedbackSink` —
+no column, no row, no body field, nothing a client can send to become it, and `'role'` stays in
+`FORBIDDEN_COLUMN_TOKENS`. The variable is read in `adapters/vercel.js` and nowhere else, so
+`server/core/` stays free of `process.env`.
+
+Scheme `LZPADMIN`, domain prefix `lzp/reports/v1\n`, **no body hash — because a body is refused
+outright**: a field that cannot be present cannot be unsigned. Replay goes through the existing
+`Nonce` table, so there is no schema change for it. A relay with **no operator configured answers
+404** on all three routes — the same answer `/api/v1/nope` gets — before the credential is parsed,
+so the reply cannot depend on what was presented.
+
+**What it does NOT defend against, stated on the wire as `ADMIN_PROVES_NOT[0]` and not only here:**
+whoever can set this relay's environment variables can read its database directly and can set the
+variable to a key of their own. It is a control against the internet, not against Vercel.
+
+**D12c — 90 days, plus manual delete.** Copies the `Nonce`/`PairSession` `@@index([expiresAt])`
+pattern, with a lazy sweep on both put and list because Vercel Hobby has no cron, and expiry
+enforced **at read** as well — the way `getPairSession` and `consumeInvite` already do. `Report`
+has **no `spaceId` and no relation to `Space`**, so *"a report can never appear on the family's
+board"* stays structural rather than careful; `deleteSpace` deliberately does not cascade into it.
+
+**THE PRICE, AND IT IS A NEW DISCLOSURE.** A **signed** report's `Report.devicePub` is
+byte-identical to `Device.sigPubRaw` — it has to be, or the signature could not be verified — so a
+retained report is **joinable to a circle**: one equality join names the member, her circle and her
+household, and `Report.prose` is plaintext. That is not defended against and must not pretend to
+be; the operator is the intended reader. It is **said** instead: `server-metadata.md` §7.6,
+`DATENSCHUTZ.*.infer6` in both languages, and `tests/server/datenschutz-claims.test.js` §8. The
+bound is stated with it: an **unsigned** report — every report a solo Mac sends, which is the case
+D10's extension exists for — carries no key at all, and there is nothing to join.
+
+**D12d — the signal is a quiet 5px dot on ⚙**, reusing the updater's existing hint (17.5 / 19.3).
+No count, no banner, no sound, **never on the board** (P9). It is a pure function of two local
+prefs — `reportsKnown \ reportsSeen ≠ ∅` — so it survives a relaunch with **zero network
+requests**, measured in `tests/tier2/lzp1009-dot.dom.js` §2 as a difference: the same gesture costs
+the same number of requests with the dot lit and with it dark. A once-per-launch poll was
+considered and rejected: it would be a second automatic originator and would spend exactly the
+bound D10 exists to hold.
+
+**P10 IS UNTOUCHED AND IS NOW GUARDED BY AN ENUMERATION.** The board is not a messenger and there
+is no reply path, ever. `tests/attack/e10-network-scope.test.js` §2c no longer counts the
+reporting routes — a count would pass over a fifth one with the wrong shape — it asserts that the
+**mutating** verbs on that surface are exactly two, the write and the delete. A reply route, an
+answer route, a `PATCH` that adds a field the client could poll: every one of them is a third
+mutating verb, whatever it is called.
+
 ## D11 — the Datenschutz section is a section of its own, not part of „Familienkreis"
 
 **Built 2026-09-03, LZP-1001, story 21.3 · amendment A10 places it differently and this is the

@@ -734,18 +734,21 @@ func updaterDownload(version: String, urlString: String, signature: String, expe
 //
 // The rest, in the order the checks run:
 //
-//   1. `sync_enabled` must be on. It is a shell pref, defaulting to FALSE, written only by
-//      `set_shell_pref` at the family opt-in moment — ADR 003 §7 gate 3's own switch.
-//   2. An origin must be configured, and it must be `https:` to a public DNS name. No IP
+//   1. An origin must be configured, and it must be `https:` to a public DNS name. No IP
 //      literal of ANY kind (which is a superset of "no private ranges" — 10/8, 172.16/12,
 //      192.168/16, 127/8, 169.254/16, 100.64/10 and every IPv6 literal are refused by the same
 //      rule), no `.local`/`.lan`/`.internal`/`.home.arpa`, no single-label LAN name, no
 //      loopback — **even if configuration named one.**
-//   3. The URL the page sent must re-serialise, byte for byte, to `pinned + path + ?query`.
+//   2. The URL the page sent must re-serialise, byte for byte, to `pinned + path + ?query`.
 //      A path is `/api/v1/…` in the narrow shape `PATH_RE` allows and nothing else.
-//   4. GET or POST. Headers off a four-name allowlist, printable-ASCII values only, so the page
-//      cannot smuggle a `Cookie`, a `Host` or a header-injection newline.
-//   5. A 4 MiB request cap and an 8 MiB response cap, both enforced as the bytes move.
+//   3. GET or POST.
+//   4. `sync_enabled` must be on — a shell pref defaulting to FALSE, written only by
+//      `set_shell_pref` at the family opt-in moment — **OR** the request must be the one pair
+//      `SYNC_SOLO_PATH` names: `POST` to `/api/v1/feedback`, exact path equality, no query.
+//      LZP-1009, and the reasoning for why one carve-out widens nothing is on `syncPreflight`.
+//   5. Headers off a four-name allowlist, printable-ASCII values only, so the page cannot
+//      smuggle a `Cookie`, a `Host` or a header-injection newline. A 4 MiB request cap and an
+//      8 MiB response cap, both enforced as the bytes move.
 //   6. No redirect is followed — `willPerformHTTPRedirection` answers `nil` and the reply is
 //      `blocked`. `URLSession` follows redirects by default; refusing takes this delegate. This
 //      is FINDING P-5's shell half: a signed request replayed at a destination the relay chose
@@ -754,10 +757,24 @@ func updaterDownload(version: String, urlString: String, signature: String, expe
 //   7. An ephemeral session with no cookie jar, no credential storage and no cache. This
 //      transport carries a signed request and NOTHING ambient.
 //
-// **SOLO MODE MAKES ZERO REQUESTS, AND THAT IS A PROPERTY OF THE ORDER ABOVE.** Steps 1 and 2
-// are pure, local and cheap; no `URLSession` object exists until step 7. With `sync_enabled` off
-// — or with no origin configured, which is every build shipped so far — this command refuses
-// without a socket, without a DNS lookup, and without allocating a session.
+// **SOLO MODE ORIGINATES NOTHING, AND THAT IS STILL A PROPERTY OF THE ORDER ABOVE.** Steps 1
+// through 4 are pure, local and cheap — a constant, `URLComponents`, string comparison, one
+// small JSON file — and no `URLSession` object exists until step 7. With `sync_enabled` off,
+// every request but the one in step 4 is refused without a socket, without a DNS lookup and
+// without allocating a session.
+//
+// ██ LZP-1009 · THE CLAIM THAT USED TO BE HERE, AND WHY IT IS NOT ANY MORE ██
+//
+// This paragraph read "SOLO MODE MAKES ZERO REQUESTS". It is now false by design, so it is
+// replaced rather than softened. The PO amended story 21.5 on 2026-09-04 because the report that
+// matters most — „ich kann nicht mitmachen" — can only be written by someone who is solo, and a
+// promise that silences exactly the person it was written to protect is the wrong promise.
+//
+// What survives, unweakened, is the property a person actually cares about: **this Mac
+// originates nothing by itself.** The one request a solo Mac can make is the one a person just
+// pressed a button to make. There is no timer, no retry, no poll and no automatic caller —
+// `tests/tier1/network-scope.test.js` §5b holds that from the page side, and it is the half of
+// 21.5 the amendment does not touch.
 //
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // THE ADR IS WRONG HERE, AND THIS IS THE AMENDMENT (ADR 003 §7 gate 3)
@@ -777,7 +794,9 @@ func updaterDownload(version: String, urlString: String, signature: String, expe
 //
 // So gate 3 as built is: **the navigation delegate stays shut — `app://` and `about:`, forever
 // — and the pinned-origin bridge command below is the gate.** `sync_enabled` is real and is
-// this section's first check. `docs/v2/adr/003-sync-protocol.md` §7 is amended to match.
+// step 4 above (it was step 1 until LZP-1009 moved it below the pin and the rebuild; the switch
+// is no less real for running fourth — nothing above it reaches a network).
+// `docs/v2/adr/003-sync-protocol.md` §7 is amended to match, twice now.
 //
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // WHAT THIS DOES NOT DEFEND AGAINST, STATED RATHER THAN IMPLIED
@@ -829,6 +848,18 @@ let SYNC_PREFS_FILE = "sync.json"
 
 /// EVERY path this command may address, mirroring `net.js`'s `PATH_PREFIX`/`PATH_RE`.
 let SYNC_PATH_PREFIX = "/api/v1/"
+
+/// THE ONE ADDRESS A MAC WITH SYNC SWITCHED OFF MAY ADDRESS. LZP-1009, PO decision 2026-09-04/05.
+///
+/// Story 21.5 said a solo Mac makes zero network requests, and until this constant existed that
+/// was true by refusing everything. The report that matters most, though, is „ich kann nicht
+/// mitmachen" — and she can only make it while she is solo. A promise that silences exactly the
+/// person it was written to protect is the wrong promise, so the PO amended it: a solo Mac may
+/// send ONE thing, and only when a person presses the button.
+///
+/// **Exact equality, never a prefix.** `hasPrefix` would accept `/api/v1/feedbackx` and
+/// `/api/v1/feedback/anything`; `==` accepts one string. That distinction is the whole carve-out.
+let SYNC_SOLO_PATH = "/api/v1/feedback"
 
 /// `net.js`'s `DEFAULT_TIMEOUT_MS`. A request that has not answered in this long is a failure,
 /// not a hang — ADR 003 §8.2's backoff counts a timeout as a transport error.
@@ -1064,6 +1095,25 @@ func syncCanonicalURL(_ raw: String, pinned: String) -> Result<URL, SyncRefusal>
     return .success(url)
 }
 
+/// Is this the ONE (method, path) pair a Mac with sync switched off may send? LZP-1009.
+///
+/// Read the argument: `url` is the CANONICAL rebuild. `syncCanonicalURL` has already required it
+/// to equal `pinned + path + ?query` byte for byte, so `/api/v1/feedback/../ops`,
+/// `//api/v1/feedback`, `https://relay.test@evil.example/api/v1/feedback` and a trailing query
+/// were all refused BEFORE this function was reached. What is left to decide is only whether the
+/// canonical path IS the one string — and the comparison is `==`, not `hasPrefix`.
+///
+/// `percentEncodedQuery`/`percentEncodedPath` rather than `url.query`/`url.path`, because
+/// `url.path` DECODES: a path arriving as `/api/v1/%66eedback` would decode to
+/// `/api/v1/feedback` and this would say yes. It cannot arrive — `syncPathIsWellFormed` has no
+/// `%` in its allowed character set — and this function does not lean on that being true.
+func syncSoloSendIsAllowed(_ url: URL, method: String) -> Bool {
+    guard method == "POST" else { return false }
+    guard let c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+    guard c.percentEncodedQuery == nil else { return false }
+    return c.percentEncodedPath == SYNC_SOLO_PATH
+}
+
 /// Everything a `sync_request` is, decided before a socket exists.
 struct SyncPlan {
     let request: URLRequest
@@ -1071,28 +1121,72 @@ struct SyncPlan {
 }
 
 /// The whole gate, in one pure function. Nothing here opens a socket, resolves a name or
-/// allocates a `URLSession` — that is what makes "solo mode makes zero requests" a property of
-/// the code rather than a promise about it, and it is why `syncPerform` below is unreachable
-/// except through a `.success` from here.
+/// allocates a `URLSession` — that is why `syncPerform` below is unreachable except through a
+/// `.success` from here, and it is what makes "nothing leaves this Mac unless every check
+/// passed" a property of the code rather than a promise about it.
+///
+/// ██ LZP-1009 · THE SWITCH MOVED, AND EXACTLY ONE PAIR PASSES WHEN IT IS OFF ██
+///
+/// The `sync_enabled` check used to be step 1. It is now step 4, after the pin and after the
+/// canonical rebuild, and when it is off it refuses everything EXCEPT `POST` to the one path in
+/// `SYNC_SOLO_PATH` with no query. That is a deliberate amendment of ADR 003 §7 gate 2 and of
+/// `tests/tier1/network-scope.test.js` §2, taken by the PO on 2026-09-04: a solo Mac could
+/// compose the report „ich kann nicht mitmachen" and had nowhere to send it, which made the
+/// channel useless for the one person it exists for.
+///
+/// **WHY THIS WIDENS NOTHING, stated so it can be checked rather than believed.** The SSRF
+/// surface is the set of (origin, path, method, headers, body) a page-side bug can cause a native
+/// socket to address. Call the surface with the switch ON `S_on` and with it OFF `S_off`. After
+/// this change:
+///
+///   · same pinned origin — `pinnedSyncOrigin()` runs FIRST for both, off the same constant;
+///   · same canonical rebuild — `syncCanonicalURL` runs for both, before the switch is read;
+///   · `S_off` paths ⊂ `S_on` paths — one exact string, and it is an `/api/v1/…` path `S_on`
+///     already allows;
+///   · `S_off` methods ⊂ `S_on` methods — `{POST}` ⊂ `{GET, POST}`;
+///   · same four-name header allowlist, same printable-ASCII rule, same 4 MiB request cap, same
+///     8 MiB response cap, same redirect refusal — all of them are steps 5 and 6 and
+///     `SyncRequestDelegate`, none of which this change touches;
+///   · **no new `args` key.** The carve-out is decided from `url` and `method`, which the
+///     contract already had. `tests/tier1/headless-shell.test.js` pins the key set at exactly
+///     `['body','headers','method','url']`.
+///
+/// So `S_off ⊊ S_on`, and `S_on ∪ S_off = S_on`. The union — which is what an SSRF review
+/// measures — is unchanged. What changed is only which of two subsets a solo Mac gets.
+///
+/// **And no new refusal name.** A `solo_send_only` case would have been more legible and would
+/// have cost the one property `headless-shell.test.js` uses to hold the Rust shell to this one:
+/// that the two vocabularies are byte-identical. The distinction is tested behaviourally instead
+/// — `POST /api/v1/feedback` with sync off succeeds, `POST /api/v1/ops` with sync off is
+/// `sync_disabled` — in `scripts/shell-ssrf.mjs`'s `carveout` mode.
 func syncPreflight(_ args: [String: Any]) -> Result<SyncPlan, SyncRefusal> {
-    // 1 — the switch. ADR 003 §7 gate 3.
-    guard SyncPrefs.load().enabled else { return .failure(.syncDisabled) }
-    // 2 — the pin. Configuration, never a parameter: there is no `args["origin"]` in this file.
+    // 1 — the pin. Configuration, never a parameter: there is no `args["origin"]` in this file.
     let pinned: String
     switch pinnedSyncOrigin() {
     case .failure(let why): return .failure(why)
     case .success(let o): pinned = o
     }
-    // 3 — the address.
+    // 2 — the address.
     guard let rawURL = args["url"] as? String else { return .failure(.urlUnparsable) }
     let url: URL
     switch syncCanonicalURL(rawURL, pinned: pinned) {
     case .failure(let why): return .failure(why)
     case .success(let u): url = u
     }
-    // 4 — the method.
+    // 3 — the method.
     let method = (args["method"] as? String ?? "").uppercased()
     guard method == "GET" || method == "POST" else { return .failure(.badMethod) }
+
+    // 4 — the switch, ADR 003 §7 gate 3, AS AMENDED. It is read here rather than first so that
+    // the pin and the rebuild have already run: the one pair below is decided on a canonical
+    // URL, never on the string the page sent.
+    //
+    // Everything above this line is pure and local — a constant, `URLComponents`, string
+    // comparison. Nothing has resolved a name or opened a socket, so moving the switch down
+    // three steps costs no request; the refusal below is still a local one.
+    if !SyncPrefs.load().enabled && !syncSoloSendIsAllowed(url, method: method) {
+        return .failure(.syncDisabled)
+    }
 
     // 5 — the body.
     let bodyText = args["body"] as? String ?? ""
@@ -1317,11 +1411,22 @@ func syncStatus() -> [String: Any] {
         o["originConfigured"] = true
         o["reason"] = NSNull()
         if !prefs.enabled {
+            // ██ LZP-1009 · THIS SENTENCE USED TO SAY SOMETHING THAT IS NO LONGER TRUE ██
+            //
+            // It read: „Solange kein Familienkreis besteht, stellt dieser Mac keine einzige
+            // Netzwerkanfrage." `syncPreflight`'s step 4 now lets one pair through with the
+            // switch off, so that sentence became FALSE the moment the carve-out landed — and it
+            // is in Swift, beside the rule, not in the copy tables, which is exactly how a
+            // sentence like this survives a change to the thing it describes.
+            //
+            // It names the exception instead, and names it as a CONDITION ON A PRESS: nothing
+            // here happens by itself. That is the half of story 21.5 the amendment does not
+            // touch, and the half a person actually needs to be told.
             o["message"] = [
-                "de": "Sync ist ausgeschaltet. Solange kein Familienkreis besteht, stellt dieser "
-                    + "Mac keine einzige Netzwerkanfrage.",
-                "en": "Sync is off. Until there is a Familienkreis, this Mac makes no network "
-                    + "request at all.",
+                "de": "Sync ist ausgeschaltet. Dieser Mac ruft nichts ab und sendet nichts — mit "
+                    + "einer einzigen Ausnahme: eine Rückmeldung, die Sie selbst abschicken.",
+                "en": "Sync is off. This Mac fetches nothing and sends nothing — with one single "
+                    + "exception: a report you send yourself.",
             ]
         }
     case .failure(let why):

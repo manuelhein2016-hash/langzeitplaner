@@ -376,10 +376,14 @@ Everything in §2, at once, joined. Concretely, for one household:
 - an **IP address** for any per-IP limiter that fired within the last hour;
 - for each pairing ever attempted: that it happened, how far it got, and whether it burned.
 
-### Five things the tables above imply and never say out loud
+### Six things the tables above imply and never say out loud
 
-§2 and §3 are claims about **columns**, and they are true. These five are claims about the
+§2 and §3 are claims about **columns**, and they are true. These six are claims about the
 **dump**, and a Datenschutz page written only from the column tables would miss every one of them.
+
+*(Was five. The sixth arrived on 2026-09-05 with LZP-1009's second pass, because a report is now
+**kept**. It is §7.6, and it is the one thing about that change that a person is entitled to be
+told before they press „Senden".)*
 Each was demonstrated against the real router in `tests/server/attack-relay-infer.test.js` and
 `tests/server/attack-relay-correlate.test.js`.
 
@@ -414,13 +418,22 @@ Each was demonstrated against the real router in `tests/server/attack-relay-infe
 4. **The application log's `route` is a named per-member event feed.** §8 lists the seven fields
    the log may carry and then says what is *not* in it. It never says what the fields that **are**
    in it mean together: `(route, spaceId, deviceShort)` at a timestamp, with `LOG_ROUTES` a closed
-   enum of 24 verbs (AUDIT F12, corrected 2026-09-04 — `feedback` is the 24th; asserted against the
-   live enum by `tests/server/datenschutz-claims.test.js` §1), is *this machine renamed the circle /
-   invited somebody / removed somebody /
+   enum of 27 verbs (AUDIT F12, corrected 2026-09-04 — `feedback` is the 24th; **LZP-1009 second
+   pass, 2026-09-05 — `reportsList`, `reportsGet` and `reportsDelete` are the 25th, 26th and
+   27th**; asserted against the live enum by `tests/server/datenschutz-claims.test.js` §1), is
+   *this machine renamed the circle / invited somebody / removed somebody /
    handed over the admin role* — and `deviceShort` maps to a member by one join. **The log line
    names the event.** `renameSpace` is the sharpest case: the handler stores nothing, is
    documented as storing nothing, and the log still records that the family renamed its circle on
    25 July.
+
+   ⚠ **The three new verbs are NOT of that kind, and the count moving from 24 to 27 overstates
+   what changed.** `reportsList` / `reportsGet` / `reportsDelete` carry **no `spaceParam`**, are
+   not in `SPACE_SCOPED`, and their rate rules are `identity:'ip'` — so their log lines say
+   "somebody at some address read the operator's inbox" and cannot say more. The only party who
+   can produce one is the holder of the private half of `LZP_REPORTS_ADMIN_PUB`. They widen the
+   enum; they do not widen what the enum can say about a family. **What genuinely changed is
+   §7.6.**
 
 5. **Two circles can be attached to one person — cross-space correlation.** §7's dump list and
    §2's tables were written for a single-space world. Three joins work **across spaces**, and the
@@ -444,6 +457,33 @@ Each was demonstrated against the real router in `tests/server/attack-relay-infe
    - **Timing alone.** §5's rhythm is a link **between households** as well as a portrait of one:
      two circles with no column in common can be attached to one person by arrival times, with no
      cryptography and no IP address.
+
+6. **Who a retained report came from — the report/device join.** *(New, 2026-09-05 · LZP-1009
+   second pass · PO decisions 1 and 4.)* Until now a feedback report took no custody: the relay
+   answered 501 and nothing was written. `Report` changes that — seven columns, a 90-day
+   `expiresAt`, **no `spaceId` and no relation to `Space`**, so a report can never appear on a
+   family's board. That structural guarantee is real, and it is not the guarantee this section is
+   about.
+
+   `Report.devicePub` on a **signed** report is the raw uncompressed P-256 point of the sending
+   device — **byte-identical to `Device.sigPubRaw`**, because it has to be, or the signature could
+   not be verified. `Report` has no foreign key to `Device`, but a foreign key is not what a join
+   needs; equal bytes are. One `JOIN … ON Report.devicePub = Device.sigPubRaw` names the device;
+   `Device.memberId` names the member; `Member.spaceId` names the circle; and §5's rhythm names
+   the household. **The prose is plaintext** (`blindness.test.js:215` pins it as the second and
+   last deliberate content-bearing String, beside `Member.colorRef`), so the result of that join
+   is a named person's own words.
+
+   **This is not defended against and must not pretend to be.** The operator is the intended
+   reader: a report he cannot attribute is a report he cannot answer, and story 21.5's whole
+   argument for keeping a report at all is that somebody reads it. What is owed is that it be
+   **said** — `DATENSCHUTZ.*.infer6`, asserted by `tests/server/datenschutz-claims.test.js` §8.
+
+   The bound, stated with it: an **unsigned** report — every report a solo Mac sends, which is the
+   case the second pass exists for — carries **no `devicePub` at all**. `signed: false`, and
+   `PROVES.unsigned` says so on the wire. There is nothing to join. So the disclosure is exact
+   rather than general: *a report from inside a Familienkreis is attributable; a report from a
+   solo Mac is text, an image and a time.*
 
 What a dump does **not** reveal: a single word anyone wrote, a single date anyone entered, a
 single person's name, or which of the pseudonymous ids is which human. The link from `mem_…` to a
@@ -469,7 +509,7 @@ see the ISP's records. The pseudonymity of `mem_…` is real and it is not the w
   They record method, path, status, timing and source IP for every request. `/api/v1/pair/<rid>`
   puts the pairing rendezvous id — HKDF output of the pairing code — **into a URL path**, and a
   platform request log is exactly where a URL path goes. The application's own log never writes a
-  path (`LOG_ROUTES` is a closed enum of the 23 route names); the platform's does. Retention and
+  path (`LOG_ROUTES` is a closed enum of the 27 route names); the platform's does. Retention and
   access there are Vercel's terms, not ours, and the Datenschutz page must name Vercel and Prisma
   as processors.
 - **Application logs** carry at most `{route, spaceId, deviceShort, opCount, byteCount, status,

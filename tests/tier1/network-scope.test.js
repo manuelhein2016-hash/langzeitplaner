@@ -133,19 +133,83 @@ describe('gate 2 — solo mode cannot even evaluate the module', () => {
     }
   });
 
-  test('there is EXACTLY ONE dynamic door out of the boot graph, and it is family/mount.js', () => {
-    // The failure mode this row exists for is not a missing `if`. It is a SECOND DOOR: one
-    // convenience `await import()` in settings.js "just to draw the section", one in main.js
-    // "just for the glyph", and solo mode is loading crypto/ again with nobody noticing, because
-    // each door on its own looked lazy. One door can be read; three cannot.
+  test('there are EXACTLY TWO dynamic doors out of the boot graph, and each is named', () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // ██ REVERSED 2026-09-05 · LZP-1009 SECOND PASS · PO decision 1 ██
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // WHAT THIS ROW SAID, VERBATIM, AND WHY IT SAID IT:
+    //
+    //   > 'there is EXACTLY ONE dynamic door out of the boot graph, and it is family/mount.js'
+    //   > The failure mode this row exists for is not a missing `if`. It is a SECOND DOOR: one
+    //   > convenience `await import()` in settings.js "just to draw the section", one in main.js
+    //   > "just for the glyph", and solo mode is loading crypto/ again with nobody noticing,
+    //   > because each door on its own looked lazy. One door can be read; three cannot.
+    //
+    // THAT REASONING IS STILL CORRECT AND IS NOT BEING SOFTENED. What changed is the product:
+    // the PO ruled on 2026-09-04/05 that **a solo Mac may send a report**, because the report
+    // that matters most — „ich komme nicht mehr rein" — can only be written by somebody who has
+    // no Familienkreis. A screen that collects that sentence and then greys out „Senden" is a
+    // screen that fails in exactly the case it exists for.
+    //
+    // A solo sender needs a transport. There are only two places to put one:
+    //   (a) behind `family/mount.js` — which would put `crypto/`, `sync/` and the whole of family
+    //       mode on a solo Mac's evaluation path. That is the thing gate 2 forbids, and it would
+    //       have been the ONE-DOOR answer;
+    //   (b) behind a second, NARROWER door that opens onto `platform/net.js` and nothing else.
+    //
+    // (b) is strictly better for the property this gate protects, and the count is the wrong
+    // metric for saying so — which is why the row is now a NAMED SET rather than a number. Two
+    // doors that are each read and each bounded beat one door that leads everywhere. The
+    // convenience-import failure mode the old comment names is caught by the deepEqual below
+    // exactly as it was before: an `await import()` in settings.js "just to draw the section"
+    // adds a third entry and turns this red.
+    //
+    // The next row is what makes this a reversal and not a relaxation: the new door must NOT
+    // reach `crypto/`, `sync/` or `family/`. The old door may; the new one may not.
+    const doors = ['src/js/feedback/relay.js -> src/js/platform/net.js',
+      `src/js/main.js -> ${THE_DOOR}`];
     for (const entry of ENTRIES) {
-      const doors = dynamicDoorsFrom(entry);
       assert.deepEqual(
-        doors.map((d) => `${d.from} -> ${d.to}`),
-        entry === 'src/js/firstrun.js' ? [] : [`src/js/main.js -> ${THE_DOOR}`],
+        dynamicDoorsFrom(entry).map((d) => `${d.from} -> ${d.to}`),
+        entry === 'src/js/firstrun.js' ? [] : doors,
         `${entry}: the dynamic doors out of the eagerly-evaluated graph`,
       );
     }
+  });
+
+  test('the SECOND door is the narrow one: relay.js reaches net.js and nothing else forbidden', () => {
+    // THE NON-VACUITY HALF OF THE REVERSAL, and the row that makes the count above safe to raise.
+    //
+    // `family/mount.js` is allowed to reach crypto/, sync/ and family/ — that is what family mode
+    // IS, and the row below it asserts the door really leads there. `feedback/relay.js` is not.
+    // Its whole justification is that `net.js#buildRequest` with `anonymous: true` skips
+    // `signRequest` AND the `cfg.subtle` check, so a sender that signs nothing needs
+    // `platform/net.js` plus `core/b64.js` and no more. If that ever stops being true — one
+    // static edge into `src/js/crypto/` added "so the report has a thread handle" — this row goes
+    // red and the second door has quietly become the first door again.
+    const NEW_DOOR = 'src/js/feedback/relay.js';
+    for (const prefix of ['src/js/crypto/', 'src/js/sync/', 'src/js/family/']) {
+      const chain = pathToPrefix(NEW_DOOR, prefix);
+      assert.equal(chain, null,
+        chain ? `the solo sender's door now reaches ${prefix}: ${chain.join(' -> ')}` : '');
+    }
+    // …and it is genuinely a door: net.js is reached DYNAMICALLY from it, never statically, so a
+    // Mac with no origin pinned does not evaluate the network stack even once.
+    assert.equal(staticPathToPrefix(NEW_DOOR, 'src/js/platform/net.js'), null,
+      'relay.js now imports net.js statically — the door is propped open');
+    assert.notEqual(pathToPrefix(NEW_DOOR, 'src/js/platform/net.js'), null,
+      'relay.js does not reach net.js at all — the walker has stopped seeing the door');
+    // The whole module graph behind the new door, enumerated rather than bounded, because a set
+    // of five is small enough to read and an assertion about a set cannot rot into a nonempty
+    // check that passes over anything.
+    assert.deepEqual(reachableFrom(NEW_DOOR).reached.slice().sort(), [
+      'src/js/core/b64.js',
+      'src/js/core/ids.js',
+      'src/js/feedback/port.js',
+      'src/js/feedback/relay.js',
+      'src/js/platform/net.js',
+    ]);
   });
 
   test('and the door really does lead somewhere — the gate is not passing over an empty tree', () => {
@@ -437,13 +501,66 @@ function enclosingFn(lines, i) {
   return null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// ██ GENERALISED 2026-09-05 · LZP-1009 SECOND PASS · the third of §4.5's three blind rows ██
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// WHAT THE SCANNER USED TO MATCH, VERBATIM: `/\.\s*send\s*\(/` — and nothing else.
+//
+// That was correct for exactly as long as `port.send` was the only way this product could put
+// bytes on a wire. LZP-1009's second pass adds a second one: the operator's reports reader in
+// `src/js/feedback/relay.js` calls **`transport.request(`**, three times, for three routes. A row
+// that scans for `.send(` cannot see any of them. It would have stayed GREEN over a whole new
+// transport — which is the E10-1009-B failure shape this project has now hit twice, and the
+// reason this comment exists rather than a quiet regex edit.
+//
+// TWO THINGS CHANGE, AND THE SECOND IS WHAT KEEPS THE FIRST HONEST:
+//
+//  1. DISPATCH matches every dispatcher spelling this product has — `.send(` and `.request(`.
+//
+//  2. The SCOPE becomes the SOLO-REACHABLE TREE: every shipped module except `src/js/sync/`,
+//     `src/js/crypto/` and `src/js/family/`. Those three are precisely the directories gate 2
+//     proves a solo launch cannot evaluate, and they are full of legitimately automatic
+//     `.request(` callers — a sync engine that only pushed when someone clicked would not be a
+//     sync engine. They are governed by the OTHER half of story 21.5 ("with a Familienkreis it
+//     talks to exactly one sync endpoint"), which `tests/attack/e10-network-scope.test.js`
+//     bounds. Scoping here is therefore not an exemption: it is naming which promise each module
+//     is under. A module that moves OUT of those three directories moves into this scan.
+//
+// A THIRD CLASSIFICATION arrives with the reader, because the reader has a shape the sender did
+// not: a dispatcher HANDED ON under a property name (`send: async (body) => …`,
+// `list: () => dispatch(…)`). That line is an installation, not a trigger — the trigger is
+// whoever calls the property later. Classifying it `automatic` would make the gate cry wolf,
+// which is how a gate gets deleted; classifying it `human` would be a lie. It is `handed-on`,
+// it is enumerated by name in §5b, and a FOURTH one appearing is a red row.
+
+/** The three directories gate 2 proves solo mode cannot evaluate. Out of scope for §5b — see above. */
+const BEHIND_THE_DOORS = /^src\/js\/(?:sync|crypto|family)\//;
+
+/** Every dispatcher spelling in this product: the feedback port's, and the transport's. */
+const DISPATCH = /\.\s*(?:send|request)\s*\(/;
+
+/** `name: (…) => …` / `name: async (…) => …` — a dispatcher installed under a property name. */
+const HANDED_ON = /^\s*(\w+)\s*:\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>/;
+
+/** Anything that would fire a call without a person. Read on the call site's own few lines. */
+const AUTO_TRIGGER =
+  /\b(?:setInterval|setTimeout|requestIdleCallback|requestAnimationFrame|queueMicrotask)\s*\(|addEventListener\s*\(\s*['"](?:online|offline|visibilitychange|load|DOMContentLoaded|beforeunload|unload|pagehide|error|unhandledrejection|message)['"]/;
+
+/** Does any of the few lines ending at `i` match `re`? The window a wrapper can hide in. */
+function windowHas(lines, i, re) {
+  for (let j = i; j >= 0 && j > i - 4; j--) if (re.test(lines[j])) return true;
+  return false;
+}
+
 /**
  * ██ THE SCANNER THE AMENDMENT RESTS ON ██
  *
- * Every way the injected sender can be reached in one module, and what pulls the trigger.
- * Returns one row per CALL SITE of the function that invokes `port.send`, classified `human`
- * when a click/keyboard listener is what calls it and `automatic` otherwise — a timer, a network
- * or lifecycle event, an error handler, or a bare top-level call.
+ * Every way a dispatcher can be reached in one module, and what pulls the trigger.
+ * Returns one row per CALL SITE of the function that invokes a dispatcher, classified `human`
+ * when a click/keyboard listener is what calls it, `handed-on` when the dispatcher is being
+ * installed under a property name rather than triggered, and `automatic` otherwise — a timer, a
+ * network or lifecycle event, an error handler, or a bare top-level call.
  *
  * Deliberately classifies "anything I do not recognise as a human gesture" as AUTOMATIC, so a
  * novel trigger fails loudly rather than passing quietly. That is the direction this gate has to
@@ -464,14 +581,25 @@ function sendOriginators(src) {
   const raw = src.split('\n');
   const lines = stripCommentsAndStrings(src).split('\n');
   const senders = new Set();
-  lines.forEach((l, i) => {
-    if (/\.\s*send\s*\(/.test(l)) {
-      const fn = enclosingFn(lines, i);
-      if (fn) senders.add(fn);
-    }
-  });
-  const HUMAN = /addEventListener\s*\(\s*['"](?:click|keydown|keypress|keyup|submit|change)['"]|\bonclick\b/;
   const rows = [];
+  const HUMAN = /addEventListener\s*\(\s*['"](?:click|keydown|keypress|keyup|submit|change)['"]|\bonclick\b/;
+  lines.forEach((l, i) => {
+    if (!DISPATCH.test(l)) return;
+    // A TRIGGER WRAPPED AROUND THE CALL IS STILL A TRIGGER, whatever it is bound to. This clause
+    // is here because the mutant `tick: () => setInterval(() => dispatch(…), 1000)` in §5d was
+    // classified `handed-on` by the first draft of this function — the property binding was read
+    // and the timer between it and the call was not. Run, not reasoned: the mutant found it.
+    if (windowHas(lines, i, AUTO_TRIGGER)) {
+      rows.push({ fn: enclosingFn(lines, i) || '<top level>', line: i + 1, kind: 'automatic', text: raw[i].trim() });
+      return;
+    }
+    // Walk back to whichever comes FIRST: a property binding (the dispatcher is being handed on)
+    // or a named function (the dispatcher is being called, and the callers are the originators).
+    const handed = handedOnBinding(lines, i);
+    if (handed) { rows.push({ fn: handed, line: i + 1, kind: 'handed-on', text: raw[i].trim() }); return; }
+    const fn = enclosingFn(lines, i);
+    if (fn) senders.add(fn);
+  });
   for (const fn of senders) {
     const def = new RegExp(`^\\s*(?:export\\s+)?(?:async\\s+)?(?:function\\s+${fn}\\b|const\\s+${fn}\\s*=)`);
     lines.forEach((l, i) => {
@@ -482,10 +610,33 @@ function sendOriginators(src) {
       // shape an "…and retry it in the background" patch takes. The mutant found that, not a
       // review.
       if (!new RegExp(`\\b${fn}\\b`).test(l)) return;
-      rows.push({ fn, line: i + 1, kind: HUMAN.test(raw[i]) ? 'human' : 'automatic', text: raw[i].trim() });
+      // ORDER MATTERS, and the order is the mutant's doing. `handed-on` is checked SECOND, after
+      // the trigger, because `tick: () => setInterval(() => dispatch(…), 1000)` is a property
+      // binding AND a timer, and the first draft of this function reported it as the harmless one.
+      const handed = HANDED_ON.test(lines[i]) ? lines[i].match(HANDED_ON)[1] : null;
+      const kind = AUTO_TRIGGER.test(lines[i]) ? 'automatic'
+        : handed ? 'handed-on'
+          : HUMAN.test(raw[i]) ? 'human' : 'automatic';
+      rows.push({ fn: (kind === 'handed-on' && handed) || fn, line: i + 1, kind, text: raw[i].trim() });
     });
   }
   return rows;
+}
+
+/**
+ * The property name a dispatcher call is being installed under, or `null` when the call is inside
+ * an ordinary named function. Walks back at most a handful of lines: a property binding whose
+ * arrow body contains the call is written immediately above it, whereas a named function may be
+ * many lines up. Stopping at the first `function`/`const` definition is what keeps the two apart.
+ */
+function handedOnBinding(lines, i) {
+  for (let j = i; j >= 0 && j > i - 6; j--) {
+    const m = lines[j].match(HANDED_ON);
+    if (m) return m[1];
+    if (/^\s*(?:export\s+)?(?:async\s+)?function\s+\w+/.test(lines[j])) return null;
+    if (/^\s*(?:export\s+)?const\s+\w+\s*=\s*(?:async\s*)?\(/.test(lines[j])) return null;
+  }
+  return null;
 }
 
 describe('the amendment — the one exception is a human press, and it stays one', () => {
@@ -509,12 +660,35 @@ describe('the amendment — the one exception is a human press, and it stays one
     }
   });
 
-  test('§5b · the sender has exactly ONE originator in the whole shipped tree, and it is a click', () => {
-    // THE AMENDED PROPERTY, MEASURED. Not "the button works" — that is tier 2's. This is: across
-    // every module the product ships, the number of places from which a report can be dispatched
-    // is one, and the thing that dispatches it is a person's finger.
+  test('§5b · every dispatcher in the solo-reachable tree, and what pulls each trigger', () => {
+    // THE AMENDED PROPERTY, MEASURED, over `.send(` AND `.request(` — see the block above the
+    // scanner for what this row used to match and why matching only `.send(` would now be green
+    // over a whole new transport.
+    //
+    // Not "the button works" — that is tier 2's. This is: across every module a solo Mac can
+    // evaluate, no dispatcher can be triggered by anything but a person.
+    const solo = shippedFiles().filter((f) => !BEHIND_THE_DOORS.test(f.rel));
+    assert.ok(solo.length > 25, `only ${solo.length} solo-reachable files — the walker stopped working`);
+
+    // (i) THE CALL SITES, ENUMERATED. This half is new, and it is the half that would have caught
+    // `relay.js#dispatch` arriving unseen: a dispatcher call anywhere in the solo tree that is not
+    // one of these three turns the row red before anybody has to reason about who calls it.
+    const sites = [];
+    for (const f of solo) {
+      stripCommentsAndStrings(f.src).split('\n').forEach((l, i) => {
+        if (DISPATCH.test(l)) sites.push(`${f.rel}:${i + 1}`);
+      });
+    }
+    assert.deepEqual(sites, [
+      'src/js/feedback/relay.js:198',   // the SOLO sender — POST /api/v1/feedback, anonymous
+      'src/js/feedback/relay.js:312',   // the OPERATOR reader — the one dispatcher for all 3 routes
+      'src/js/feedback/ui.js:295',      // the screen, through the port it was handed
+    ], 'the set of places in this product that can put bytes on a wire has changed. Each of these '
+      + 'is one line and each is argued in its own file; a fourth needs the same, not an edit here.');
+
+    // (ii) THE ORIGINATORS. Zero automatic, in the whole solo tree.
     const found = [];
-    for (const f of shippedFiles()) {
+    for (const f of solo) {
       for (const r of sendOriginators(f.src)) found.push({ file: f.rel, ...r });
     }
     const automatic = found.filter((r) => r.kind === 'automatic');
@@ -522,11 +696,24 @@ describe('the amendment — the one exception is a human press, and it stays one
       automatic.map((r) => `${r.file}:${r.line} ${r.fn}() — ${r.text}`), [],
       'SOMETHING OTHER THAN A HUMAN CAN NOW ORIGINATE A REQUEST. That is the regression story '
       + '21.5 was amended to forbid, not the thing the amendment permits.');
-    assert.equal(found.length, 1, `${found.length} originators, expected 1:\n`
-      + found.map((r) => `  ${r.file}:${r.line} ${r.fn}() [${r.kind}]`).join('\n'));
-    assert.equal(found[0].file, THE_SCREEN);
-    assert.equal(found[0].kind, 'human');
-    assert.match(found[0].text, /addEventListener\(\s*'click'/);
+
+    // (iii) THE HUMAN PRESS is still exactly one, and it is still „Senden".
+    const human = found.filter((r) => r.kind === 'human');
+    assert.equal(human.length, 1, `${human.length} human originators, expected 1:\n`
+      + human.map((r) => `  ${r.file}:${r.line} ${r.fn}() [${r.kind}]`).join('\n'));
+    assert.equal(human[0].file, THE_SCREEN);
+    assert.match(human[0].text, /addEventListener\(\s*'click'/);
+
+    // (iv) THE HANDED-ON SET, by name. A dispatcher installed under a property name is not an
+    // originator — but a FOURTH one is a fourth thing that can be triggered from somewhere this
+    // scanner does not read, so it is enumerated rather than counted away.
+    assert.deepEqual(found.filter((r) => r.kind === 'handed-on')
+      .map((r) => `${r.file}:${r.line} ${r.fn}`), [
+      'src/js/feedback/relay.js:198 send',    // installed on the feedback PORT; §5a bounds who holds it
+      'src/js/feedback/relay.js:281 list',    // GET /api/v1/feedback
+      'src/js/feedback/relay.js:283 one',     // GET /api/v1/feedback/:id
+      'src/js/feedback/relay.js:285 remove',  // POST /api/v1/feedback/:id/delete
+    ]);
   });
 
   test('§5c · the module that DOES listen to the machine cannot reach the sender', () => {
@@ -589,6 +776,37 @@ describe('the amendment — the one exception is a human press, and it stays one
     assert.equal(second.filter((r) => r.kind === 'automatic').length, 0,
       'a click listener is being classified as automatic — the gate would cry wolf and be deleted');
     assert.equal(second.length, 2);
+
+    // ─── LZP-1009 SECOND PASS · the SAME battery against the OTHER dispatcher ────────────────
+    // §5b now reads `.request(` as well as `.send(`, and a matcher that is never fired at is a
+    // matcher nobody has checked. These mutants are planted in `relay.js`'s real source: the
+    // reader's `dispatch` is one function and it must not become reachable from a timer either.
+    const relay = shippedFiles().find((f) => f.rel === 'src/js/feedback/relay.js');
+    assert.ok(relay, 'the relay module was not scanned');
+
+    // The honest-path control, again first: four handed-on rows and NOTHING automatic.
+    const relayHonest = sendOriginators(relay.src);
+    assert.deepEqual(relayHonest.map((r) => `${r.kind} ${r.fn}`),
+      ['handed-on send', 'handed-on list', 'handed-on one', 'handed-on remove'],
+      'the control moved — §5b(iv) is measuring something else now');
+
+    for (const [name, line] of [
+      ['R-poll     ', '  setInterval(() => dispatch(t, c, \'GET\', \'/api/v1/feedback\'), 30000);'],
+      ['R-online   ', "  window.addEventListener('online', () => dispatch(t, c, 'GET', '/x'));"],
+      ['R-boot     ', '  const warm = () => dispatch(t, c, \'GET\', \'/x\');\n  warm();'],
+    ]) {
+      const rows = sendOriginators(`${relay.src}\n${line}\n`);
+      assert.ok(rows.some((r) => r.kind === 'automatic'),
+        `${name}: an automatic caller of the READER was not reported`);
+    }
+
+    // And the OTHER direction for the third classification: `handed-on` must not be a hole a
+    // trigger can hide in. A dispatcher call written directly under a property binding is an
+    // installation; a TIMER written under one is still a timer, because the timer line itself is
+    // what the classifier reads.
+    const hole = sendOriginators(`${relay.src}\n  const obj = {\n    tick: () => setInterval(() => dispatch(t, c, 'GET', '/x'), 1000),\n  };\n`);
+    assert.ok(hole.some((r) => r.kind === 'automatic'),
+      'a setInterval hidden inside a property binding is being read as handed-on');
   });
 
   test('§5e · the amendment is on the SCREEN, not only in the ADR, and in both languages', () => {

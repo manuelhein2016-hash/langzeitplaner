@@ -16,6 +16,44 @@ stays 0 across a quit-and-open, which is the thing this project could not previo
 
 ---
 
+## −2. LZP-1009's second pass (2026-09-05), in five lines
+
+The feedback channel composed a report, redacted the board by re-rendering it with **no glyph path
+in the product at all**, previewed exactly what would leave, and POSTed it — and it was unusable,
+for two measured reasons: a **solo** Mac could not send (the port was bound only behind the family
+door, and the report that matters most is *"I cannot join"*), and the deployed relay bound **no
+sink**, so even a family Mac got an honest 501. The PO ruled on both.
+
+1. **A solo Mac may send.** `feedback/relay.js#bindSoloSender` is a second caller of
+   `setFeedbackPort` and the **second dynamic door** out of the boot graph — onto `platform/net.js`
+   and nothing else, never `crypto/`, `sync/` or `family/`. The shell gate is reordered (pin →
+   rebuild → method → **switch**, as a conjunction with one exact-equality carve-out), which costs
+   no request because everything above the switch is pure and local. D10's amendment stops being
+   vacuous.
+2. **The report is KEPT for 90 days**, plus manual delete. `Report` has **no `spaceId` and no
+   relation to `Space`**, so *"a report can never appear on the family's board"* stays structural.
+   `feedbackSink` binds to `store.putReport` in `vercel.js#buildCtx` and in `dev-server.mjs`;
+   `handlers/feedback.js` is **not touched**, so `feedback.test.js` §4 passes unchanged — which is
+   the check that storage did not break promise 1.
+3. **The operator is a server-configured P-256 key** (`LZP_REPORTS_ADMIN_PUB`), read in
+   `adapters/vercel.js` and nowhere else, so `server/core/` stays env-free. Three routes, `24 → 27`.
+   A relay with no operator answers **404** — the same answer `/api/v1/nope` gets. It is **not**
+   `Member.role` returning, and it is **not** a control against the platform; the wire says both.
+4. **Nine pinned rows were inverted with their reasoning, and three rows that were GREEN over a
+   feature they could not see were tightened** — `e10-network-scope` §2a and §2b, `network-scope`
+   §5b. That is E10-1009-B a third time, predicted in the plan rather than found afterwards.
+5. **The redaction boundary was asked an eleventh time**, over the two carriers this pass adds, with
+   the PNG inflated and the raster grepped. Zero bytes of a Privat entry.
+
+Driven end to end against `node server/dev-server.mjs`: solo unsigned send → **202
+`proves: unsigned`**; the report in the admin view, prose verbatim, image byte-identical;
+`expiresAt − receivedAt` = exactly **90 days**; a 91-day-old report swept and **404** to both list
+and get; „Löschen" removes one; a family device credential → **401** on every admin route. The ⚙
+dot costs **zero** requests, measured as a difference. ⚠ The LIVE relay is behind this tree and has
+no operator key: `GET /api/v1/feedback` → 405, `POST` → 501.
+
+---
+
 ## −1. The audit fix cycle (2026-09-04), in five lines
 
 An independent five-pass audit at `2d092a6` said: *"Ship the solo product. Do not ship the

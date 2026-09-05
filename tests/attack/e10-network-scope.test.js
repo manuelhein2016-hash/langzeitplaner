@@ -375,6 +375,55 @@ describe('§2 · the outbound path LZP-1009 adds — bounded, not absent', () =>
     const seamCode = stripCommentsAndStrings(seamSrc);
     assert.equal(/setFeedbackPort|chooseTransport|createBridgeTransport|createFetchTransport/.test(seamCode), false,
       'settings.js binds or builds a sender — the boot graph must not touch a transport');
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // ██ TIGHTENED 2026-09-05 · LZP-1009 SECOND PASS · plan §4.5, the FIRST of three blind rows ██
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // EVERYTHING ABOVE SKIPS `src/js/feedback/` — `if (f.rel.startsWith(ALLOWED_DIR)) continue;`.
+    // That was right for the question it was asking ("which files OUTSIDE the subsystem may
+    // participate") and it left a hole the size of the subsystem: **nothing here looked inside
+    // it at all.** A module in that directory could have grown a `fetch`, an `import` of
+    // `net.js`, a transport of its own, and this row would have stayed green — the E10-1009-B
+    // shape for the third time, and predicted in the plan rather than discovered after the fact.
+    //
+    // `tests/tier1/network-scope.test.js` §1 already forbids a raw `fetch` anywhere but
+    // `platform/net.js`. What was never asserted is the edge: **how the subsystem reaches the
+    // one module that may open a socket.** That is now bounded in both directions.
+    //
+    //   · NO module under `src/js/feedback/` may import `net.js` STATICALLY. A static edge is
+    //     evaluated the moment the boot graph loads — and `settings.js` imports this subsystem
+    //     statically, by the argument in its own header — so one static edge here puts the
+    //     network stack on every solo launch's evaluation path and ADR 003 §7 gate 2 is gone.
+    //   · EXACTLY ONE may import it dynamically, and it is `relay.js`, the second door the PO's
+    //     decision bought. Two doors can be read; three cannot, which is gate 2's own wording.
+    const feedbackMods = shippedFiles().filter((f) => f.rel.startsWith(ALLOWED_DIR));
+    assert.ok(feedbackMods.length >= 7, `only ${feedbackMods.length} modules in the subsystem`);
+    const staticNet = [];
+    const dynamicNet = [];
+    for (const f of feedbackMods) {
+      const code = stripCommentsAndStrings(f.src);
+      // Strings are blanked by `stripCommentsAndStrings`, and an import specifier IS a string —
+      // so the specifier is read off the RAW source and only counted when the `import` keyword
+      // that carries it survives the blanking on the same line. That is what keeps a specifier
+      // quoted inside a docblock from counting as an edge.
+      f.src.split('\n').forEach((line, i) => {
+        const m = line.match(/(await\s+)?import\s*\(?\s*['"]([^'"]+)['"]/);
+        if (!m || !/\bimport\b/.test(code.split('\n')[i])) return;
+        if (!/platform\/net\.js$/.test(m[2])) return;
+        (m[1] ? dynamicNet : staticNet).push(`${f.rel}:${i + 1}`);
+      });
+    }
+    assert.deepEqual(staticNet, [],
+      'a module under src/js/feedback/ imports platform/net.js STATICALLY. settings.js imports '
+      + 'this subsystem statically, so that edge is evaluated on every solo launch and ADR 003 '
+      + '§7 gate 2 no longer holds:\n' + staticNet.join('\n'));
+    assert.deepEqual(dynamicNet.map((s) => s.split(':')[0]), ['src/js/feedback/relay.js'],
+      'the number of dynamic doors out of the feedback subsystem is not one. The PO bought ONE '
+      + 'second door (relay.js -> net.js) and its price is argued in that file; a second one '
+      + 'needs the same argument, not an edit here:\n' + dynamicNet.join('\n'));
+    // NON-VACUITY: the door is really there, so the row above cannot pass over a deleted feature.
+    assert.equal(dynamicNet.length, 1, `the door was not found at all: ${JSON.stringify(dynamicNet)}`);
   });
 
   test('§2a2 · NON-VACUITY — the subsystem exists, and the old scanner could not see it', () => {
@@ -399,34 +448,171 @@ describe('§2 · the outbound path LZP-1009 adds — bounded, not absent', () =>
       + 'still the row that matters, but this note about E10-1009-B can be simplified');
   });
 
-  test('§2b · no bridge command in either shell can send a report', () => {
-    // The door a feedback button would most naturally take, because it is the door `sync_request`
-    // takes: the page hands the shell a payload and the shell opens the socket. Counting the
-    // command names is the only way to see it — no grep over `src/js/` ever would.
+  test('§2b · with sync OFF, exactly ONE (method, path) pair is reachable in either shell', () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // ██ REPLACED 2026-09-05 · LZP-1009 SECOND PASS · plan §4.5, the SECOND of three blind rows ██
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // WHAT THIS ROW SAID, VERBATIM:
+    //
+    //   > '§2b · no bridge command in either shell can send a report'
+    //   > const reporting = cmds.filter((c) => /feedback|report|telemetry|analytics|diagnos|crash/i.test(c));
+    //   > assert.deepEqual(reporting, [], 'INVERT ME — a reporting bridge command exists: …');
+    //
+    // IT IS NOW GREEN AND FALSE, and it was green and false the moment the shell carve-out
+    // landed — before this file was opened. `sync_request` can send a report. Its NAME did not
+    // change, so a filter over command names sees nothing; there is no `send_feedback` command to
+    // catch, and there was never going to be, because the shell's one request primitive already
+    // existed. E10-1009-B for the third time, and the plan named it in advance.
+    //
+    // ⚠ THE ROW'S OWN "INVERT ME" INSTRUCTION WOULD HAVE MADE IT WORSE. Inverting it — expecting
+    // one reporting-named command — would pin a NAME, and a name is exactly what did not change.
+    // What replaces it is the property a name can never encode: **with the sync switch off, the
+    // set of (method, path) pairs that can leave this Mac has exactly one element.**
+    //
+    // Three things must hold, and each is read off both shells, because a claim that holds in
+    // Swift and not in Rust is a claim about one of two shipped products:
+    //   (i)   the gate is a CONJUNCTION — the switch alone no longer refuses, but the switch and
+    //         the carve-out together do, so the sync-off surface is the carve-out and nothing;
+    //   (ii)  the carve-out is EXACT — one method by `==`, one path by `==` on the
+    //         percent-encoded form, and no query. A `hasPrefix` here would admit
+    //         `/api/v1/feedbackx` and `/api/v1/feedback/../ops`;
+    //   (iii) the path is ONE COMPILED-IN CONSTANT, byte-identical in the two shells, and it is
+    //         the route the relay actually receives on.
+    //
+    // The runtime witness is `scripts/shell-ssrf.mjs`'s `carveout` mode — one launch of the
+    // shipped `.app` with the switch off, against a hostile relay, 8 look-alikes refused and the
+    // relay's own log carrying exactly `["POST /api/v1/feedback"]`. This row is the source-level
+    // half, so a build that never runs that script still cannot regress it silently.
+
+    // (iii) — one constant, one value, both shells.
+    const sw = swift();
+    const rs = shellSource('src-tauri/src/lib.rs');
+    const swPath = sw.match(/let SYNC_SOLO_PATH = "([^"]+)"/);
+    const rsPath = rs.match(/const SYNC_SOLO_PATH: &str = "([^"]+)"/);
+    assert.ok(swPath, 'the Swift shell has no SYNC_SOLO_PATH constant — the carve-out is inline');
+    assert.ok(rsPath, 'the Rust shell has no SYNC_SOLO_PATH constant');
+    assert.equal(swPath[1], rsPath[1], 'the two shells carve out DIFFERENT paths');
+    assert.equal(swPath[1], `${API_PREFIX}/feedback`,
+      'the carved-out path is not the relay\'s feedback route');
+    assert.equal(swPath[1], FEEDBACK_PATH, 'the shell and the page disagree about the one path');
+    // …and it is a route the relay really answers, write-only. §2c bounds the rest of the surface.
+    assert.ok(ROUTES.some((r) => r.method === 'POST' && `${API_PREFIX}${r.pattern}` === swPath[1]),
+      'the shells carve out a path the router does not serve');
+
+    // (ii) — EXACT equality, in both shells, on the non-decoding spelling of the path.
+    const swFn = sw.slice(sw.indexOf('func syncSoloSendIsAllowed('));
+    const swBody = swFn.slice(0, swFn.indexOf('\n}\n') + 1);
+    assert.match(swBody, /method == "POST"/, 'the Swift carve-out no longer pins ONE method');
+    assert.match(swBody, /percentEncodedQuery == nil/, 'the Swift carve-out admits a query string');
+    assert.match(swBody, /percentEncodedPath == SYNC_SOLO_PATH/,
+      'the Swift carve-out is not exact-equality on the percent-encoded path. `url.path` DECODES, '
+      + 'so `/api/v1/%66eedback` would compare equal; `hasPrefix` would admit `/feedbackx`.');
+    assert.equal(/hasPrefix|contains|hasSuffix|starts\(with:/.test(swBody), false,
+      'the Swift carve-out matches by prefix or substring — the sync-off surface is then a FAMILY '
+      + 'of paths, not one pair');
+
+    const rsFn = rs.slice(rs.indexOf('fn sync_solo_send_is_allowed('));
+    const rsBody = rsFn.slice(0, rsFn.indexOf('\n}\n') + 1);
+    assert.match(rsBody, /method != "POST"/, 'the Rust carve-out no longer pins ONE method');
+    assert.match(rsBody, /query\(\)\.is_none\(\)/, 'the Rust carve-out admits a query string');
+    assert.match(rsBody, /u\.path\(\) == SYNC_SOLO_PATH/,
+      'the Rust carve-out is not exact-equality — `Url::path()` is the percent-encoded form and '
+      + 'must be compared with `==`');
+    assert.equal(/starts_with|contains|ends_with/.test(rsBody), false,
+      'the Rust carve-out matches by prefix or substring');
+
+    // (i) — the gate is a CONJUNCTION, so sync-off refuses everything the carve-out does not name.
+    for (const [name, src, gate] of [
+      ['swift', sw, /if !SyncPrefs\.load\(\)\.enabled && !syncSoloSendIsAllowed\(url, method: method\) \{/],
+      ['rust', rs, /if !SyncPrefs::load\(app\)\.enabled && !sync_solo_send_is_allowed\(&canonical, &m\) \{/],
+    ]) {
+      assert.match(src, gate,
+        `${name}: the sync-off gate is no longer "switch off AND not the one pair". Either half `
+        + 'alone is a different product: without the switch term a solo Mac syncs; without the '
+        + 'carve-out term the report that matters most cannot be sent.');
+    }
+
+    // AND THE OLD ROW'S TRUE HALF SURVIVES, because it is still worth having: no shell grew a
+    // SECOND, differently-named command for reports. The bridge still has one request primitive.
     const cmds = bridgeCommands();
     assert.ok(cmds.length > 10, `only ${cmds.length} bridge commands found — the enumerator is broken`);
-    // `update_fetch_manifest` is in both shells at every commit; `sync_request` is landing now, so
-    // it is checked by §1c's biconditional rather than asserted present here.
     assert.ok(cmds.includes('update_fetch_manifest') && cmds.includes('load_board'),
       'the enumerator missed commands that certainly exist: ' + cmds.join(' '));
     const reporting = cmds.filter((c) => /feedback|report|telemetry|analytics|diagnos|crash/i.test(c));
     assert.deepEqual(reporting, [],
-      'INVERT ME — a reporting bridge command exists: ' + reporting.join(', '));
+      'a SECOND reporting command exists beside sync_request. One request primitive is what makes '
+      + 'the (method, path) count above the whole story: ' + reporting.join(', '));
   });
 
-  test('§2c · the relay speaks EXACTLY ONE receiving route, and it is write-only', () => {
-    // INVERTED. The relay has grown a route, which is what the old row was watching for. What
-    // replaces "there is none" is the bound: ONE route, POST, and no way to read a report back.
-    // A `GET /feedback` would make this a store of reports addressable by whoever asks, which is
-    // a different product with a different privacy story.
+  test('§2c · the reporting surface is FOUR routes, and only TWO of them mutate anything', () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // ██ REVERSED 2026-09-05 · LZP-1009 SECOND PASS · PO decision 2 ██
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // WHAT THIS ROW SAID, VERBATIM, AND WHY:
+    //
+    //   > '§2c · the relay speaks EXACTLY ONE receiving route, and it is write-only'
+    //   > A `GET /feedback` would make this a store of reports addressable by whoever asks,
+    //   > which is a different product with a different privacy story.
+    //
+    // THAT SENTENCE IS CORRECT AND THE PO HAS CHOSEN THE OTHER PRODUCT. Two things are worth
+    // separating in it, because only one of them was ever the danger:
+    //
+    //   · "a store of reports" — TRUE NOW, deliberately, and disclosed: `Report`, 90 days,
+    //     `server-metadata.md` §7.6, `DATENSCHUTZ.*.retentionBody`. The alternative was a channel
+    //     the operator could not read, which is not a channel.
+    //   · "addressable by whoever asks" — **STILL FALSE, and now structurally.** The three read
+    //     routes verify a P-256 signature over `lzp/reports/v1\n` + method + path + ts + nonce
+    //     against `LZP_REPORTS_ADMIN_PUB`, and on a relay with no operator configured they answer
+    //     **404** before the credential is even parsed. "Whoever asks" gets the same answer as
+    //     `/api/v1/nope`.
+    //
+    // ██ AND THIS ROW NOW GUARDS SOMETHING SHARPER THAN A COUNT. ██
+    //
+    // The count is no longer the interesting bound — four routes is not more dangerous than one.
+    // What a reader of this file must be able to check in one glance is **PRINCIPLE 10**: the
+    // board is not a messenger, and there is NO REPLY PATH, EVER. The regression P10 would take
+    // is not a fifth route; it is a route that WRITES a report the other way — `POST
+    // /feedback/:id/reply`, `POST /feedback/:id/answer`, a `PATCH` that adds a field the client
+    // then polls for. Every one of those is a mutating verb, and a mutating verb is a thing this
+    // row can enumerate exactly. So: the reporting surface's mutating routes are exactly TWO —
+    // the write (a person's own report, outbound) and the delete (retention's manual half) — and
+    // any third mutating verb here is P10's regression, whatever it is called.
     const names = ROUTES.map((r) => `${r.method} ${API_PREFIX}${r.pattern}`);
     assert.ok(names.length >= 15, `only ${names.length} routes — the table was not read`);
     const receiving = ROUTES.filter((r) => /feedback|report|telemetry|analytics|crash/i.test(r.pattern));
-    assert.deepEqual(receiving.map((r) => `${r.method} ${r.pattern}`), ['POST /feedback'],
-      'the relay\'s reporting surface is no longer exactly one write-only route: '
+    assert.deepEqual(receiving.map((r) => `${r.method} ${r.pattern}`), [
+      'POST /feedback',                 // the write — a person's own report, and the ONLY inbound one
+      'GET /feedback',                  // the operator's list, signed, 404 when unconfigured
+      'GET /feedback/:id',              // one report's image, signed
+      'POST /feedback/:id/delete',      // retention's manual half, signed
+    ], 'the relay\'s reporting surface changed shape: '
       + receiving.map((r) => `${r.method} ${r.pattern}`).join(', '));
-    assert.equal(receiving[0].spaceParam, undefined,
-      'the feedback route names a space — a report could then be joined to a family');
+
+    // ██ P10, AS AN ENUMERATION. ██ Two mutating verbs, and each is named with what it is for.
+    // A reply route would be a third, and there is no wording it could take that would not be one.
+    const mutating = receiving.filter((r) => r.method !== 'GET' && r.method !== 'HEAD');
+    assert.deepEqual(mutating.map((r) => `${r.method} ${r.pattern}`),
+      ['POST /feedback', 'POST /feedback/:id/delete'],
+      'PRINCIPLE 10 REGRESSION. The reporting surface has grown a mutating verb that is neither '
+      + 'the write nor the delete. The board is not a messenger: a report goes ONE way and there '
+      + 'is no reply path, ever. A route that writes back to a report — a reply, an answer, a '
+      + 'status the client could poll — is the exact shape P10 forbids, and it is this row\'s job '
+      + 'to name it: ' + mutating.map((r) => `${r.method} ${r.pattern}`).join(', '));
+    // …and the delete is a delete: it removes, it does not annotate. A `POST /feedback/:id/note`
+    // would pass the count above and fail here, which is why the verbs are named and not counted.
+    assert.equal(mutating.filter((r) => /\/delete$/.test(r.pattern)).length, 1);
+    assert.equal(receiving.filter((r) => /repl|answer|respond|note|comment|message/i.test(r.pattern)).length, 0,
+      'a reply-shaped route name appeared on the reporting surface');
+
+    // NOT ONE of the four names a space. This is what keeps "a report can never appear on the
+    // family\'s board" structural rather than careful — it is the routing half of `Report` having
+    // no `spaceId` column and no relation to `Space`.
+    for (const r of receiving) {
+      assert.equal(r.spaceParam, undefined,
+        `${r.method} ${r.pattern} names a space — a report could then be joined to a family`);
+    }
     // and no OTHER route grew a reporting shape while nobody was looking.
     const others = names.filter((n) => /log|diagnos/i.test(n));
     assert.deepEqual(others, [], 'a second reporting route appeared: ' + others.join(', '));
@@ -498,23 +684,36 @@ describe('§2 · the outbound path LZP-1009 adds — bounded, not absent', () =>
       'a host named in a line comment is counted');
   });
 
-  test('§2d · the ONE new path is reachable and every look-alike is still refused', () => {
-    // INVERTED, and this is the row that shows how narrowly the surface widened. The transport's
-    // one call site now accepts exactly one more path than it did — `/api/v1/feedback` — and
-    // every neighbouring spelling that an attacker or a bug would produce is refused by name,
-    // before a byte leaves the process.
-    assert.equal(PATH_RE.test(FEEDBACK_PATH), true,
-      'the shipped feedback path is refused by the transport — the feature cannot work');
+  test('§2d · the THREE reporting paths are reachable and every look-alike is still refused', () => {
+    // INVERTED AGAIN, 2026-09-05. This row counted ONE path; the operator's reader addresses two
+    // more. It shows how narrowly the surface widened: the transport's one call site accepts
+    // three paths beyond the sync set, all under `/api/v1/feedback`, and every neighbouring
+    // spelling an attacker or a bug would produce is refused by name, before a byte leaves the
+    // process. Note that only the FIRST of the three is reachable from a solo Mac at all — the
+    // shell's carve-out (§2b) is a single (method, path) pair, so the two reader paths require
+    // the sync switch on as well as a signed operator credential.
+    const ID = 'rep_AAAAAAAAAAAAAAAAAAAAAA';   // the shape `handlers/reports.js#REPORT_ID_RE` fixes
+    const PATHS = [FEEDBACK_PATH, `${FEEDBACK_PATH}/${ID}`, `${FEEDBACK_PATH}/${ID}/delete`];
     assert.equal(FEEDBACK_PATH, `${API_PREFIX}/feedback`, 'the client and the router disagree');
-    assert.doesNotThrow(() => assertReachable('https://relay.example.com', FEEDBACK_PATH, ''));
+    for (const p of PATHS) {
+      assert.equal(PATH_RE.test(p), true, `${p} is refused by the transport — the feature cannot work`);
+      assert.doesNotThrow(() => assertReachable('https://relay.example.com', p, ''), p);
+    }
     for (const p of ['/feedback', '/api/v1/../feedback', '/api/feedback', '/api/v2/feedback',
-      '/api/v1/feedback/../ops', '/api/v1/./feedback', 'https://elsewhere.example/api/v1/feedback']) {
+      '/api/v1/feedback/../ops', '/api/v1/./feedback', 'https://elsewhere.example/api/v1/feedback',
+      `/api/v1/feedback/${ID}/../../ops`, `/api/v1/feedback/${ID}/reply`.replace('reply', '../ops')]) {
       assert.throws(() => assertReachable('https://relay.example.com', p, ''),
         (e) => e instanceof NetError, `${p} was not refused by the one call site`);
     }
-    // The path widened by ONE. `PATH_RE` itself did not change: it always admitted any
-    // `/api/v1/<word>`, and what bounds the surface is the ROUTE TABLE, which §2c counts.
-    assert.equal(ROUTES.filter((r) => r.pattern === '/feedback').length, 1);
+    // The path set widened by TWO. `PATH_RE` itself did not change: it always admitted a
+    // multi-segment `/api/v1/…`, and what bounds the surface is the ROUTE TABLE, which §2c reads.
+    assert.equal(ROUTES.filter((r) => /^\/feedback/.test(r.pattern)).length, 4);
+    // …and the DEPTH the router will match is bounded too: `/feedback/:id/delete` is three
+    // segments and nothing in the reporting surface is deeper, so a report id cannot become a
+    // path prefix under which further verbs are hung.
+    const depths = ROUTES.filter((r) => /^\/feedback/.test(r.pattern))
+      .map((r) => r.pattern.split('/').filter(Boolean).length);
+    assert.deepEqual(depths.slice().sort(), [1, 1, 2, 3]);
   });
 });
 

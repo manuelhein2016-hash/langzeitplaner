@@ -887,6 +887,20 @@ export const S5 = deep([
     + 'why `UNSHARE_BLOCKERS.NO_ADMIN_CHAIN` exists) and no notification of any kind '
     + '(Principle 9). The still-better affordance — the same call from a foreign entry\'s popover '
     + '— is owed by `popover.js`/`board.js` and is a second caller, not a replacement.'),
+  MOD('src/js/feedback/admin.js', 'live',
+    'LZP-1009 SECOND PASS · PO decision 2 — „BERICHTE", THE OPERATOR\'S SCREEN, AND IT DRAWS ONLY '
+    + 'ON HIS MAC. `settings.js#build` calls `buildReportsSection` on every open of ⚙, so the '
+    + 'module is reachable on every install; what is gated is what it DRAWS. Two conditions, both '
+    + 'local: `reportsAdmin === true` — a pref NOTHING under `src/js/` ever writes, so no sequence '
+    + 'of clicks reaches the section — and a configured origin. It holds no transport (that is '
+    + '`relay.js`) and no key: `family/mount.js#bindFeedback` injects `(devicePub, sign)` through '
+    + '`setReportsCredential`, the same pair it hands `setFeedbackPort`, because that module is '
+    + 'the only one in the product already holding both and it sits behind gate 2\'s one door. '
+    + 'THE ROLE IS `live` RATHER THAN `defence` BECAUSE THE BINDER LANDED IN THIS PASS: for one '
+    + 'draft it was a seam with no caller — the shape `port.js` had for a whole round — and the '
+    + 'honest role would have been `defence` then. It is not now. '
+    + 'P10 IS ON THE SCREEN AND NOT ONLY IN THIS NOTE: no textarea, no compose field, no reply '
+    + 'control, and a sentence saying so where a person would look for one.'),
   MOD('src/js/feedback/copy.js', 'live'),
   MOD('src/js/feedback/events.js', 'live'),
   MOD('src/js/feedback/geometry.js', 'live'),
@@ -916,6 +930,19 @@ export const S5 = deep([
     + 'poses, and pinning it here would make this row read STALE the moment it is measured.',
     null),
   MOD('src/js/feedback/redact.js', 'live'),
+  MOD('src/js/feedback/relay.js', 'live',
+    'LZP-1009 SECOND PASS · PO decision 1 — THE SECOND DYNAMIC DOOR, and the only one outside '
+    + '`family/mount.js`. `feedback/ui.js#openFeedback` calls `bindSoloSender()` on every open, so '
+    + 'it is reachable on every install and in every space kind. It is the ONE module in this '
+    + 'subsystem that may reach `platform/net.js`, and only through `await import()` behind a '
+    + 'configured origin — a Mac with nothing pinned never evaluates the network stack, which is '
+    + 'the observable property ADR 003 §7 gate 2 had before this file existed, held by a different '
+    + 'fact. `anonymous: true` is what makes the door affordable: `buildRequest` then skips '
+    + '`signRequest` AND the `cfg.subtle` check, so the graph behind the door is `net.js` plus '
+    + '`core/b64.js` and nothing under `crypto/`, `sync/` or `family/` — asserted, both ways, by '
+    + '`tests/tier1/network-scope.test.js` §2. It also holds the operator reader\'s ONE dispatcher, '
+    + 'so "from how many places can this product reach the relay" stays a question with a countable '
+    + 'answer: three call sites, enumerated by name in §5b of the same file.'),
   MOD('src/js/feedback/report.js', 'live'),
   MOD('src/js/feedback/ui.js', 'live'),
   MOD('src/js/ferien.js', 'live'),
@@ -1012,5 +1039,5 @@ export const DOMAINS = deep({
 
 /** Counts, so a truncated file is a loud failure rather than a quiet one. */
 export const DOMAIN_SIZES = deep({
-  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 78,   // S5 70 -> 78: LZP-1009's src/js/feedback/
+  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 80,   // S5 70 -> 78: LZP-1009's src/js/feedback/; 78 -> 80: its second pass (relay.js, admin.js)
 });

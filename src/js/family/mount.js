@@ -58,6 +58,13 @@ import { chooseTransport } from '../platform/net.js';
 // module that already owns a transport binds it, and that module is this one — the single dynamic
 // door ADR 003 §7 gate 2 allows. `port.js` is a leaf: importing it here adds no reachability.
 import { setFeedbackPort, FEEDBACK_PATH } from '../feedback/port.js';
+// LZP-1009 SECOND PASS — the OPERATOR'S credential, and the same seam discipline one file over.
+// `feedback/admin.js` draws the reports screen and holds no transport and no key; `relay.js`
+// holds the transport; the private half of the operator key is the device signing key, which
+// lives behind ADR 003 §7 gate 2's one dynamic door — this module. So the credential is INJECTED
+// from here, exactly as `setFeedbackPort` is, and for the same reason: this is the only module
+// in the product that already holds both.
+import { setReportsCredential } from '../feedback/admin.js';
 import { exportRawPublic, signBytes } from '../crypto/identity.js';
 import { b64u } from '../core/b64.js';
 
@@ -564,6 +571,14 @@ async function bindFeedback(parts, spaceKind) {
       appVersion: CLIENT_V,
       spaceKind,
     });
+    // THE SAME `(devicePub, sign)` PAIR, HANDED TO THE READER. It is not a second credential and
+    // not a second key: `LZP_REPORTS_ADMIN_PUB` on the relay is this very `devicePub`, which is
+    // why „Berichte" carries a copy button — that string is the enrolment path. On every Mac but
+    // his the relay simply does not recognise it, and the three routes answer 401; on a relay
+    // with no operator enrolled at all they answer 404. Setting it here costs no request: nothing
+    // is sent until the reports SECTION is drawn, and that section is behind a pref nothing in
+    // `src/js/` writes. See `feedback/admin.js` and `feedback/relay.js#openReportsClient`.
+    if (devicePub && sign) setReportsCredential({ devicePub, sign });
   } catch (e) {
     // A feedback button that cannot be bound is a disabled button with a sentence on screen —
     // never a boot failure. The screen's own `noRelay` line is the honest rendering of this.

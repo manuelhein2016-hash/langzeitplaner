@@ -13,6 +13,27 @@
 // ciphertext column comes back as BYTES and not as a string. That last one is not a formality —
 // a JSON store is precisely where an opaque column quietly becomes text.
 //
+// ONE THING IN THIS FILE IS READABLE ON PURPOSE, SINCE THE LZP-1009 SECOND PASS.
+// `state.reports` holds `Report` rows, and `Report.prose` is somebody's sentence to the operator,
+// verbatim and in the clear — see `server/prisma/schema.prisma` model Report and
+// `store-interface.js` PLAINTEXT_STRINGS. So this file, which is the one place the store's
+// contents become a readable document, now really does contain readable text, and that is the
+// product rather than a defect: he is the intended reader. Everything above still holds for every
+// other table, and `tests/server/blindness.test.js` §9b asserts BOTH halves against these bytes —
+// that a report is findable in them, and that nothing a family typed onto a board is.
+//
+// Nothing here needed changing to carry the new table: `emptyState()` names it, `hydrate` copies
+// across every key of `emptyState` that arrives as a Map, and a store file written before the
+// table existed therefore loads with an empty `reports` map rather than failing. The format
+// version stays 1 for exactly that reason — nothing about the existing encoding changed, and a
+// bump would have refused every dev-server store on the machine to add a table to them.
+//
+// The 90-day sweep is DURABLE here because `listReports` and `putReport` are both outside
+// `createStoreEngine`'s READ_ONLY set, so each is flushed. A sweep that were not flushed would be
+// the worst shape a retention promise can take: every read answers "gone" and the bytes are still
+// on the disk. `tests/server/store-contract.test.js` asserts it against the raw file rather than
+// through the store, because the store would answer "expired" either way.
+//
 // CONCURRENCY. Single writer. One process owns the file; the engine's mutex serialises inside it
 // and every commit is a temp-file write plus an atomic rename, so a crash mid-write leaves the
 // previous good state rather than half a file. Two dev-servers on one directory would race, and

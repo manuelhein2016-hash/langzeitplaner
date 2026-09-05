@@ -29,6 +29,18 @@
 //     are fixed in `prisma.js` (R8-TXCLIENT, R8-DEVSPACE, R8-BUMPREAD/R8-TZ). The one case that
 //     still cannot pass is C40, and it is a FIXTURE defect in a file this owner may not edit —
 //     see PRISMA_BLOCKED below, which states it rather than hiding it.
+//
+//     THAT RUN COVERED 66 CASES; THERE ARE NOW 73. The seven added by the LZP-1009 second pass
+//     (C64–C70, the `Report` table) have NEVER been executed against Postgres by anybody — the
+//     table did not exist on 2026-09-03. `prisma.js`'s ledger carries the two claims they rest
+//     on, `U-REPORTTTL` and `U-REPORTONCE`, WITHOUT a witness, and §3 below pins that pair by
+//     name rather than pinning the witness-less list as empty. So the honest sentence today is
+//     "65 of 66 measured, 7 unmeasured", and the row that used to read `deepEqual(…, [])` is the
+//     place that says so out loud instead of averaging them in.
+//
+//  4. THE MUTANTS — §5. Which contract case dies for which defect, RUN rather than reasoned:
+//     five one-defect stores driven by the real cases, plus the honest-path control that makes
+//     the five mean something.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -40,6 +52,7 @@ import { fileURLToPath } from 'node:url';
 import {
   STORE_CONTRACT_CASES, STORE_METHODS, MODEL_COLUMNS, OPAQUE_FIELDS, NULLABLE_FIELDS,
   PLAINTEXT_STRINGS, FORBIDDEN_COLUMN_TOKENS, INTERFACE_EXTENSIONS,
+  REPORT_RETENTION_DAYS, REPORT_RETENTION_MS, REPORT_INPUT_COLUMNS, normalizeReportInput,
   inspectStoreShape, assertStoreShape, normalizeRow, StoreShapeError,
 } from '../../server/core/store-interface.js';
 import { memoryStore } from '../../server/adapters/memory.js';
@@ -142,7 +155,11 @@ async function openContractDatabase() {
   } catch (err) {
     return { ok: false, why: `the Prisma client could not be built: ${err && err.message}` };
   }
-  const TABLES = ['Space', 'Member', 'Device', 'Op', 'Epoch', 'KeyWrap', 'Invite', 'PairSession', 'Nonce', 'RateBucket'];
+  // `Report` is here for the same reason every other table is — a case must start on an empty
+  // database — and NOT because anything relates it to the others: it has no foreign key, so the
+  // CASCADE below reaches it through nothing. Omitting it would have leaked reports between
+  // cases, which is how C69's "a swept id is free again" would have passed for the wrong reason.
+  const TABLES = ['Space', 'Member', 'Device', 'Op', 'Epoch', 'KeyWrap', 'Invite', 'PairSession', 'Nonce', 'RateBucket', 'Report'];
   try {
     // PREFLIGHT: the migration must already be applied. Refusing here rather than letting 66
     // cases fail on "relation does not exist" is the difference between a diagnosis and a wall.
@@ -212,7 +229,7 @@ test('the contract suite is not vacuous and covers the properties LZP-201 is gat
   const ids = STORE_CONTRACT_CASES.map((c) => c.id);
   assert.equal(new Set(ids).size, ids.length, 'duplicate case ids');
   const tags = new Set(STORE_CONTRACT_CASES.flatMap((c) => c.tags));
-  for (const required of ['blind', 'seq', 'concurrency', 'tx', 'idempotency', 'limits', 'pair', 'auth', 'rotation']) {
+  for (const required of ['blind', 'seq', 'concurrency', 'tx', 'idempotency', 'limits', 'pair', 'auth', 'rotation', 'reports', 'ttl']) {
     assert.ok(tags.has(required), `no contract case is tagged "${required}"`);
   }
   // The two design rules of LZP-201 must each be covered by more than one case, and the
@@ -222,6 +239,13 @@ test('the contract suite is not vacuous and covers the properties LZP-201 is gat
   assert.ok(byTag('blind') >= 5, 'RULE 1 needs more than a token case');
   assert.ok(byTag('seq') >= 5, 'RULE 2 needs more than a token case');
   assert.ok(byTag('concurrency') >= 6, 'atomicity is the half that breaks in production');
+  // LZP-1009 second pass. The report table's guarantee is an ABSENCE — no spaceId, no relation —
+  // and an absence is exactly the kind of property that gets covered by one polite case and then
+  // quietly stops being covered. Both halves are required: the structural rows and the retention.
+  assert.ok(byTag('reports') >= 6, 'the Report table needs more than a token case');
+  assert.ok(byTag('ttl') >= 2, 'the 90-day retention is a promise in the Datenschutz copy, not a nicety');
+  assert.ok(STORE_CONTRACT_CASES.some((c) => c.tags.includes('P10')),
+    'no case names Principle 10 — the board is not a messenger, and C64 is where that is enforced');
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -451,15 +475,41 @@ test('prisma.js — every claim in the ledger names what settled it, or is liste
 
   // AND THE MEASURED STATE ITSELF, pinned. The deepEqual above is derived from the same array on
   // both sides, so on its own it is nearly vacuous — a row that quietly loses its witness keeps
-  // it green. This is the row that goes red: as of 2026-09-03 every one of the twenty-two is
-  // settled, and a ledger entry that arrives or reverts without one has to say so out loud.
-  assert.deepEqual(UNVERIFIED_CLAIMS.filter((c) => !c.verifiedOn).map((c) => c.tag), [],
-    'a ledger row with no witness. Either run §1b against a real Postgres and record what settled '
-    + 'it, or — if a local cluster cannot settle it — move it to RESIDUAL_RISKS with a remedy and '
-    + 'an owner. What it may not be is a row nobody has to look at.');
-  assert.equal(UNVERIFIED_CLAIMS.length, 22,
+  // it green. This is the row that goes red.
+  //
+  // ── INVERTED, DELIBERATELY, BY THE LZP-1009 SECOND PASS (2026-09-05) ───────────────────────
+  // It used to read `deepEqual(…, [])`: as of 2026-09-03 every one of the twenty-two rows was
+  // settled, and the empty list was the whole point of R-8. That sentence is now FALSE and the
+  // honest thing is to say which two rows made it false, not to relax the row or delete it.
+  //
+  // `Report` did not exist when this adapter last opened a connection. Its four methods — a lazy
+  // 90-day sweep, an expiry compared through the ORM rather than through `$queryRaw` (R8-TZ), a
+  // create that must refuse a duplicate id, a delete that must be idempotent — have never been
+  // executed against Postgres by anybody. Writing `verifiedOn` beside them would have kept this
+  // assertion green by making the ledger lie, which is the exact failure the ledger exists to
+  // prevent, and it is the failure §4.5 of the plan calls "a row that stays GREEN while its claim
+  // stops holding".
+  //
+  // So the list is pinned BY NAME instead of pinned EMPTY. A third unwitnessed row still fails
+  // here; these two stop failing only when somebody runs §1b against a real database and records
+  // what settled them — at which point this array goes back to `[]` and this comment goes with it.
+  assert.deepEqual(UNVERIFIED_CLAIMS.filter((c) => !c.verifiedOn).map((c) => c.tag).sort(),
+    ['U-REPORTONCE', 'U-REPORTTTL'],
+    'the set of witness-less ledger rows changed. A new claim needs a witness (or a residual with '
+    + 'a remedy and an owner); a row that LOSES its witness is a regression; and a row that gains '
+    + 'one belongs out of this list. What none of them may be is a row nobody has to look at.');
+  assert.equal(UNVERIFIED_CLAIMS.length, 24,
     'the ledger changed size. A new claim needs a witness (or a residual); a deleted one needs a '
-    + 'reason, because deleting a claim is how an unverified property becomes a believed one.');
+    + 'reason, because deleting a claim is how an unverified property becomes a believed one. '
+    + '22 rows were settled by R-8 on 2026-09-03; 2 arrived with the Report table on 2026-09-05.');
+
+  // NOT VACUOUS IN THE OTHER DIRECTION EITHER: the two unwitnessed rows must still be rows, with
+  // a consequence — an "UNVERIFIED" that says nothing about what it costs is decoration, and
+  // these two are the ones a reader with a database in front of them will work from first.
+  for (const c of CLAIMS_STILL_UNVERIFIED) {
+    assert.match(c.method, /Report/i, `${c.tag} has no witness but is not about the new table`);
+    assert.ok(c.breaks.length > 60, `${c.tag} does not say what it costs`);
+  }
 });
 
 test('prisma.js states what a local Postgres could NOT settle, and who owns each remainder', () => {
@@ -601,7 +651,7 @@ test('the file adapter refuses to start on a corrupt store rather than starting 
     'clients would then happily push their whole logs into a store that had merely been broken');
 });
 
-test('the file adapter flushes EVERY mutating method — all 25 survive a restart', async () => {
+test('the file adapter flushes EVERY mutating method — all 28 survive a restart', async () => {
   // The one failure a write-through store can have that no unit test of a single method finds:
   // a method that mutates and is not flushed. The dev-server answers 200, the window shows the
   // change, and the next launch has forgotten it. `createStoreEngine` states the READ-ONLY set
@@ -651,6 +701,10 @@ test('the file adapter flushes EVERY mutating method — all 25 survive a restar
   await a.claimNonce('S1', 'n1', 300000);                                    // 23
   await a.rateAllow('k', 60000, 2);                                          // 24
   await a.deleteSpace('fsp_2');                                              // 25
+  await a.putReport({ id: 'rep_keep', prose: 'Der Balken springt zurück.', image: null, signed: false, devicePub: null });   // 26
+  await a.putReport({ id: 'rep_go', prose: 'Doppelt geschickt.', image: null, signed: false, devicePub: null });
+  await a.deleteReport('rep_go');                                            // 27
+  await a.listReports(10);                                                   // 28 — sweeps, so it writes
 
   const b = fileStore(dir, { now: clock.now });          // a fresh process would see exactly this
   const s = await b.getSpace('fsp_1');
@@ -681,4 +735,174 @@ test('the file adapter flushes EVERY mutating method — all 25 survive a restar
   assert.equal(await b.claimNonce('S1', 'n1', 300000), false, 'claimNonce — a restart must not reopen the replay window');
   assert.equal(await b.rateAllow('k', 60000, 2), true, 'rateAllow — one of the two was already spent');
   assert.equal(await b.rateAllow('k', 60000, 2), false, 'and a restart must not hand out a fresh budget');
+  assert.equal((await b.getReport('rep_keep')).prose, 'Der Balken springt zurück.', 'putReport');
+  assert.equal(await b.getReport('rep_go'), null, 'deleteReport — a delete a restart could undo is not a delete');
+  assert.deepEqual((await b.listReports(10)).map((r) => r.id), ['rep_keep']);
+  // And the report survived a restart with its two stamped times intact — an `expiresAt` that
+  // came back as a String or a number would make every retention comparison silently `false`,
+  // which is the JSON-store failure `file.js`'s tagged encoding exists to prevent.
+  const kept = await b.getReport('rep_keep');
+  assert.ok(kept.receivedAt instanceof Date && kept.expiresAt instanceof Date);
+  assert.equal(kept.expiresAt.getTime() - kept.receivedAt.getTime(), REPORT_RETENTION_MS);
+});
+
+test('the file adapter\'s 90-day sweep is DURABLE — a swept report does not come back on restart', async () => {
+  // The read-path sweep is the one that matters (reports arrive rarely; he reads when the dot
+  // appears), and a sweep that is not flushed is a sweep that undoes itself at the next launch —
+  // the worst shape a retention promise can have, because every read says the row is gone and the
+  // bytes are still on the disk. Asserted on the RAW FILE, not through the store, because the
+  // store would answer "expired" either way and that is precisely the answer that could hide it.
+  const clock = fakeClock(0);
+  const dir = tempDir();
+  const a = fileStore(dir, { now: clock.now });
+  await a.putReport({ id: 'rep_alt', prose: 'Großmutter kommt nicht rein.', image: null, signed: false, devicePub: null });
+  assert.match(fs.readFileSync(path.join(dir, 'sync-store.json'), 'utf8'), /Großmutter kommt nicht rein/,
+    'the sentence really is on the disk in the clear — that is the disclosure, and this row is what makes the next assertion mean something');
+
+  clock.advance(REPORT_RETENTION_MS + 1);
+  assert.deepEqual(await a.listReports(10), [], 'expired at read');
+  const raw = fs.readFileSync(path.join(dir, 'sync-store.json'), 'utf8');
+  assert.equal(raw.includes('Großmutter kommt nicht rein'), false,
+    'the sweep did not reach the disk: after 90 days the relay still holds her sentence, and the '
+    + 'Datenschutz copy (21.3) is false while it does');
+  const b = fileStore(dir, { now: clock.now });
+  assert.equal(await b.getReport('rep_alt'), null);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. THE REPORT TABLE — the retention number, and the mutants that name the row that dies
+//
+// LZP-1009 second pass. §1 already runs C64–C70 against both witnesses; what is here is the part
+// §1 cannot answer — WHICH case each defect kills. A contract case that would stay green under
+// the defect it exists to catch is a case nobody can rely on, and this table is how that is
+// measured rather than reasoned. Every mutant below is RUN: a real store whose report methods
+// carry exactly one defect, driven by the real cases.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REPORT_CASES = STORE_CONTRACT_CASES.filter((c) => c.tags.includes('reports'));
+
+test('the retention number is 90 days, in one place, and the inventory says so', () => {
+  // The PO ruled 90 days on 2026-09-05 and it appears in three documents. The failure this guards
+  // is the cheap one: somebody changes the constant, every test still passes because every test
+  // reads the constant, and the German copy now states a number the code does not honour.
+  assert.equal(REPORT_RETENTION_DAYS, 90, 'the Datenschutz copy (21.3) states 90 days');
+  assert.equal(REPORT_RETENTION_MS, 90 * 24 * 60 * 60 * 1000);
+  assert.match(PLAINTEXT_STRINGS['Report.prose'], /90/,
+    'the retention must be auditable from the metadata inventory alone — the inventory is what '
+    + '21.3 is written from, and a reader of it must not have to open an adapter to learn how '
+    + 'long her sentence is kept');
+  assert.deepEqual([...REPORT_INPUT_COLUMNS], ['id', 'prose', 'image', 'signed', 'devicePub'],
+    'receivedAt and expiresAt are stamped by the store; a caller that could supply either could '
+    + 'file a report that outlives the number above');
+  assert.throws(() => normalizeReportInput({ id: 'r', prose: 'p', signed: false, expiresAt: new Date(0) }, 0), StoreShapeError);
+  const stamped = normalizeReportInput({ id: 'r', prose: 'p', signed: false }, 1000);
+  assert.equal(stamped.expiresAt.getTime() - stamped.receivedAt.getTime(), REPORT_RETENTION_MS);
+});
+
+/**
+ * A memory store whose four report methods are re-implemented over a private Map, with exactly
+ * one defect switched on. Everything else is the shipping adapter, so a case that dies here dies
+ * because of the flag and not because the store is a stub.
+ */
+function reportMutant(flags, clock) {
+  const store = memoryStore({ now: clock.now });
+  const rows = new Map();
+  const gone = (r, t) => r.expiresAt.getTime() <= t;
+  const sweep = (t) => { for (const [id, r] of [...rows]) if (gone(r, t)) rows.delete(id); };
+
+  store.putReport = async (input) => {
+    const t = clock.now();
+    sweep(t);
+    const row = normalizeReportInput(input, t);
+    if (flags.forever) row.expiresAt = new Date(t + REPORT_RETENTION_MS * 10);   // M1
+    if (!flags.overwrite && rows.has(row.id)) throw new StoreShapeError(`report ${row.id} already exists`);
+    rows.set(row.id, row);
+    return { ...row };
+  };
+  store.listReports = async (limit) => {
+    const t = clock.now();
+    if (!flags.noListSweep) sweep(t);                                            // M3
+    const cap = Math.max(0, Number(limit) || 0);
+    const live = [...rows.values()].filter((r) => (flags.noReadFilter ? true : !gone(r, t)));  // M2
+    live.sort((a, b) => (b.receivedAt.getTime() - a.receivedAt.getTime()) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    return live.slice(0, cap).map((r) => ({ ...r }));
+  };
+  store.getReport = async (id) => {
+    const row = rows.get(id);
+    if (!row) return null;
+    if (!flags.noReadFilter && gone(row, clock.now())) return null;              // M2
+    return { ...row };
+  };
+  store.deleteReport = async (id) => rows.delete(id);
+  if (flags.cascade) {                                                            // M5
+    const inner = store.deleteSpace;
+    store.deleteSpace = async (id) => { rows.clear(); return inner(id); };
+  }
+  return store;
+}
+
+/** Run one contract case against a mutant. @returns {Promise<boolean>} true when it FAILED. */
+async function died(caseId, flags) {
+  const c = STORE_CONTRACT_CASES.find((x) => x.id === caseId);
+  assert.ok(c, `${caseId} is not a contract case`);
+  const clock = fakeClock(0);
+  const store = reportMutant(flags, clock);
+  try {
+    await c.run({ makeStore: async () => store, assert, clock });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+test('§5 THE HONEST-PATH CONTROL — with no defect, every report case passes on this harness', async () => {
+  // Without this row the mutants below prove nothing: a harness that fails everything would show
+  // the same five red cases and would mean the opposite.
+  for (const c of REPORT_CASES) {
+    const clock = fakeClock(0);
+    const store = reportMutant({}, clock);
+    await c.run({ makeStore: async () => store, assert, clock });
+  }
+  assert.equal(REPORT_CASES.length, 7, 'the report cases are C64–C70');
+});
+
+test('§5 M1 — keep a report for 900 days instead of 90 ⇒ C65 dies', async () => {
+  // The one-line edit is `expiresAt = receivedAt + REPORT_RETENTION_MS * 10`. It is the mutation
+  // that matters most and the one hardest to notice: nothing throws, nothing is lost, every read
+  // answers, and the only thing that is wrong is the German sentence about how long her words are
+  // kept. C65 is the row, because it asserts the INTERVAL rather than that an interval exists.
+  assert.equal(await died('C65', { forever: true }), true, 'C65 did not catch a tenfold retention');
+  assert.equal(await died('C67', { forever: true }), false, 'listing and ordering are unaffected — the mutant is narrow');
+});
+
+test('§5 M2 — filter expiry only in the sweep, not at read ⇒ C68 dies', async () => {
+  // `if (gone(row)) return null` removed from getReport and from listReports' filter. Green
+  // whenever anything has written to the relay recently, red exactly when nothing has — which on
+  // a relay that receives a report every few weeks is most of the time. C68 is the row, and it is
+  // written so that nothing is called between the clock advance and the read.
+  assert.equal(await died('C68', { noReadFilter: true }), true, 'C68 stopped enforcing expiry at read');
+  assert.equal(await died('C70', { noReadFilter: true }), false, 'the duplicate and delete rules are untouched');
+});
+
+test('§5 M3 — sweep on put only, never on list ⇒ C69 dies', async () => {
+  // The Hobby-tier mistake: a write-only sweep on a table that is written rarely and read when a
+  // dot appears. Every READ still answers correctly — the read filter hides the row — so only a
+  // case that observes the DELETION rather than the visibility can see it. That is C69, which
+  // re-puts the swept id and requires the id to be free.
+  assert.equal(await died('C69', { noListSweep: true }), true, 'C69 stopped proving the read-path sweep');
+  assert.equal(await died('C68', { noListSweep: true }), false, 'expiry at read still holds — the two rows really are different claims');
+});
+
+test('§5 M4 — let a re-put overwrite instead of refusing ⇒ C70 dies', async () => {
+  assert.equal(await died('C70', { overwrite: true }), true, 'C70 stopped protecting the row already on his screen');
+  assert.equal(await died('C64', { overwrite: true }), false, 'the structural rows are unaffected');
+});
+
+test('§5 M5 — make deleteSpace cascade into reports ⇒ C64 dies', async () => {
+  // The mutation a well-meaning reader makes when they notice `Report` has no foreign key and
+  // "fix" it. Story 20.4 purges what a family put in; a report is addressed to the operator and
+  // is not the circle's to withdraw — and a table joined to Space is a table that can be joined
+  // to a board (Principle 10).
+  assert.equal(await died('C64', { cascade: true }), true, 'C64 stopped noticing a relation to Space');
+  assert.equal(await died('C67', { cascade: true }), false, 'nothing else in the report suite depends on it');
 });

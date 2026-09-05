@@ -46,7 +46,10 @@
 //      holds exactly one connection and the pool lives in the platform's connection pooler
 //      rather than in eight copies of this process.
 
-import { STORE_METHODS, normalizeRow, StoreShapeError, MODEL_COLUMNS } from '../core/store-interface.js';
+import {
+  STORE_METHODS, normalizeRow, StoreShapeError, MODEL_COLUMNS,
+  normalizeReportInput, reportExpired,
+} from '../core/store-interface.js';
 
 const OP_INPUT_COLUMNS = MODEL_COLUMNS.Op.filter((c) => !['spaceId', 'seq', 'receivedAt'].includes(c));
 const PAIR_PATCH_COLUMNS = ['boxA', 'boxB', 'delivery'];
@@ -784,6 +787,80 @@ function build(db, now, inTransaction) {
         return true;
       });
     },
+
+    // ── reports (LZP-1009 second pass) ──────────────────────────────────────
+    //
+    // FOUR METHODS THAT NAME NO SPACE, OVER A TABLE WITH NO SPACE COLUMN. Nothing in this block
+    // reads `space`, `member`, `op` or `keyWrap`, and nothing else in this file reads `report`.
+    // That mutual ignorance is what keeps "a report can never appear on the family's board"
+    // structural; the guarantee is the `Report` model's missing relation, not this comment.
+    //
+    // EVERY COMPARISON HERE GOES THROUGH THE ORM, NOT THROUGH `$queryRaw`. That is a direct
+    // consequence of finding R8-TZ (see `naiveUtc` at the top of this file): a JS `Date`
+    // interpolated into a raw template is bound as `timestamptz` and compared against this
+    // schema's `TIMESTAMP(3)` through the SESSION time zone, which in Frankfurt — decision D2's
+    // own region — is an hour out for half the year. An hour of skew on `PairSession.expiresAt`
+    // broke pairing outright; on a 90-day retention it would merely be an hour, but "merely an
+    // hour" is how a retention claim in the Datenschutz copy becomes false, and the fix costs
+    // nothing: Prisma's query builder binds a Date correctly, so `expiresAt: { gt: new Date(t) }`
+    // is exactly right and no raw statement is added by this table.
+    //
+    // UNVERIFIED (U-REPORTTTL, U-REPORTONCE) — see the claim ledger. This file has now run
+    // against a real PostgreSQL, but these four methods have not: they arrived after that run.
+
+    /**
+     * THE 90-DAY SWEEP is `deleteMany({ expiresAt: { lte: now } })`, written inline at both call
+     * sites rather than as a private helper: `inspectStoreShape` refuses a store with any public
+     * member the interface does not name, and a private one on `impl` would be a method the
+     * contract never sees. `@@index([expiresAt])` is what makes it a range scan rather than a
+     * table scan — the same index and the same reasoning as `Nonce` and `PairSession`.
+     */
+    async putReport(input) {
+      const t = now();
+      const row = normalizeReportInput(input, t);
+      return runTx(async (tx) => {
+        await tx.report.deleteMany({ where: { expiresAt: { lte: new Date(t) } } });
+        try {
+          return outRow('Report', await tx.report.create({ data: row }));
+        } catch (err) {
+          // REFUSED, never overwritten — `create` and not `upsert`, and the primary key is what
+          // enforces it. The id is the admin view's handle for „Löschen", so a second write under
+          // a live id would change the sentence already on his screen.
+          if (isUniqueViolation(err)) throw new StoreShapeError(`report ${row.id} already exists`);
+          throw err;
+        }
+      });
+    },
+
+    async listReports(limit) {
+      const t = now();
+      const cap = Math.max(0, Number(limit) || 0);
+      // The sweep is a WRITE, so it opens a transaction; the read that follows filters on
+      // `expiresAt` anyway, so the answer is correct whether or not the sweep found anything —
+      // which is the point of enforcing expiry at read as well as at sweep.
+      await db.report.deleteMany({ where: { expiresAt: { lte: new Date(t) } } });
+      if (cap === 0) return [];
+      const found = await db.report.findMany({
+        where: { expiresAt: { gt: new Date(t) } },
+        orderBy: [{ receivedAt: 'desc' }, { id: 'desc' }],
+        take: cap,
+      });
+      return found.map((r) => outRow('Report', r));
+    },
+
+    /** null for unknown AND for expired, indistinguishably. Does NOT sweep. */
+    async getReport(id) {
+      const row = await db.report.findUnique({ where: { id } });
+      if (!row) return null;
+      const out = outRow('Report', row);
+      return reportExpired(out, now()) ? null : out;
+    },
+
+    /** Idempotent. `deleteMany` rather than `delete` precisely so an unknown id is 0 and not P2025. */
+    async deleteReport(id) {
+      const r = await db.report.deleteMany({ where: { id } });
+      return r.count > 0;
+    },
   };
 
   const store = {};
@@ -850,9 +927,23 @@ export const UNVERIFIED_CLAIMS = Object.freeze([
   { tag: 'U-NONCE', method: 'claimNonce', claim: 'The INSERT itself is the claim; a concurrent duplicate raises P2002.', breaks: 'Two concurrent requests both see the nonce absent and both proceed — a replayed request is accepted, which is ADR 003 §2 step 3 defeated.', verifiedOn: "C46/C47, and a two-client race gave exactly one true." },
   { tag: 'U-RATE', method: 'rateAllow', claim: 'The read-modify-write runs in one transaction, so a burst admits at most max.', breaks: 'Every limit in ADR 003 §6.1 becomes advisory: 10 invite redemptions per IP per hour admits as many as arrive in the same millisecond.', verifiedOn: "C49/C51/C52/C58, and six concurrent requests across two clients against max 3 admitted exactly 3 with the bucket at 3 — but only after R8-RETRY, which is what stopped 3 of the 6 throwing P2034 instead of answering." },
   { tag: 'U-BYTES', method: 'getSpace', claim: 'Prisma returns Bytes columns as Buffer, which is a Uint8Array, so RULE 1 holds on the read side too.', breaks: 'An envelope comes back as a string, a handler concatenates it, and the padding and AAD binding are destroyed.', verifiedOn: "C03/C07/C59 — Bytes come back as Buffer, which is a Uint8Array, and bigint and Date survive the round trip." },
+
+  // ── THE TWO ROWS THAT ARRIVED AFTER THE R-8 RUN, AND HAVE NO WITNESS ────────────────────────
+  // LZP-1009 second pass. The Report table did not exist on 2026-09-03, so no measurement on this
+  // page covers it, and writing "verified" beside a method that has never opened a connection is
+  // the exact rot this ledger exists to prevent. They are entered WITHOUT `verifiedOn`, which
+  // makes `CLAIMS_STILL_UNVERIFIED` non-empty for the first time since R-8 — and the assertion in
+  // tests/server/store-contract.test.js that used to pin that list as EMPTY is inverted to pin
+  // these two BY NAME, so a third unwitnessed row still fails the suite.
+  { tag: 'U-REPORTTTL', method: 'listReports', claim: 'Prisma\'s query builder binds a JS Date correctly against this schema\'s TIMESTAMP(3) columns, so `expiresAt: { gt: new Date(t) }` and `{ lte: new Date(t) }` compare in UTC and need no `naiveUtc` cast — unlike the two `$queryRaw` statements in this file (finding R8-TZ). And `@@index([expiresAt])` makes the lazy sweep a range scan rather than a table scan.', breaks: 'The 90-day retention is off by the session time-zone offset — an hour in Frankfurt for half the year, which is decision D2\'s own region. Nothing visibly fails: reports simply live an hour longer or vanish an hour early, and the number in the Datenschutz copy (21.3) is quietly false. The R8-TZ measurement is the reason this is a stated claim rather than an assumption: the identical mistake made every pairing attempt read as expired.' },
+  { tag: 'U-REPORTONCE', method: 'putReport', claim: 'The `Report` primary key on `id` surfaces a duplicate INSERT as P2002 (as it does for every other model here — U-P2002), so `create` inside the transaction refuses a re-put of a live id and leaves the row already there standing. `deleteMany` on an unknown id returns count 0 rather than raising P2025, which is what makes deleteReport idempotent.', breaks: 'Two failures in opposite directions. If a duplicate did NOT raise, an `upsert`-shaped path could rewrite a report already on the operator\'s screen — the sentence he read would not be the sentence he keeps. If `deleteReport` raised on an unknown id, „Löschen" pressed twice, or in two windows, would answer with a 500 on a row that is already gone.' },
 ]);
 
-/** The rows of the ledger that still have no witness. Empty as of 2026-09-03, and asserted so. */
+/**
+ * The rows of the ledger that still have no witness. It was EMPTY as of 2026-09-03 and is not any
+ * more: the LZP-1009 second pass added four methods over a table that did not exist when this file
+ * last met a database. The two rows are named in the suite so that the list stays a decision.
+ */
 export const CLAIMS_STILL_UNVERIFIED = Object.freeze(UNVERIFIED_CLAIMS.filter((c) => !c.verifiedOn));
 
 /**

@@ -66,8 +66,16 @@ const DE = Object.freeze({
   failedTitle: 'Das Senden hat nicht geklappt.',
   failedBody: 'Dass die Verbindung nicht steht, ist selbst eine nützliche Rückmeldung. '
     + 'Kopier den Text oder sichere ihn als Datei — dann geht er auch von Hand.',
-  noRelay: 'Dieser Mac kennt keine Gegenstelle: Solange du keinen Familienkreis nutzt, gibt es '
-    + 'keinen Server, an den etwas gehen könnte. Kopier den Text oder sichere ihn als Datei.',
+  // ██ REWORDED, LZP-1009 SECOND PASS — THE OLD SENTENCE NAMED THE WRONG CONDITION. ██
+  // It read „Solange du keinen Familienkreis nutzt, gibt es keinen Server, an den etwas gehen
+  // könnte." That was true of the code and false of the world: the relay is one address, pinned
+  // into the build, and it has nothing to do with whether this Mac is in a Familienkreis. The PO
+  // amended story 21.5 on 2026-09-04/05 so that a solo Mac may send — because the report that
+  // matters most is „ich kann nicht mitmachen", and only a solo Mac can write it. So the
+  // remaining reason for a dead „Senden" is the honest one and the only one left: this BUILD has
+  // no address in it. See `feedback/relay.js`.
+  noRelay: 'Dieser Mac kennt keine Gegenstelle: In dieser Version ist keine Adresse hinterlegt, '
+    + 'an die etwas gehen könnte. Kopier den Text oder sichere ihn als Datei.',
   tooLarge: 'Der Bericht ist zu groß (%1 kB, erlaubt sind %2 kB). Er wird nicht gekürzt — '
     + 'in der Vorschau stand, was verschickt wird, und ein gekürzter Bericht wäre gelogen. '
     + 'Schreib den Text etwas kürzer oder lass das Bild weg.',
@@ -90,6 +98,47 @@ const DE = Object.freeze({
   rImageLine: 'Der Plan ohne Text: %1 × %2 Pixel, %3 kB, %4 Kästen für nicht gezeichneten Text.',
   rImageNone: '— kein Bild —',
   rUnknown: 'unbekannt',
+
+  // ── „Berichte" — the OTHER end of the pipe, on one Mac (feedback/admin.js) ─────────────────
+  //
+  // The register changes here and it is allowed to. Everything above is written for the PO's
+  // mother, who is using a calendar; this is written for the person who operates the relay and
+  // who edited a flag into `board.json` by hand to see it at all. It may name
+  // `LZP_REPORTS_ADMIN_PUB`, because he is the one who sets it.
+  //
+  // WHAT IS NOT HERE, AND MUST NEVER BE: a label for a reply box, a „antworten", a „Nachricht an
+  // …". Principle 10 is a claim about the words on this screen as much as about its DOM, and a
+  // copy key is how a feature gets built by accident — somebody adds the string, somebody else
+  // finds it unused and wires it up.
+  aSectionTitle: 'Berichte',
+  aSectionHint: 'Rückmeldungen, die auf der Vermittlungsstelle liegen. Diese Ansicht gibt es nur '
+    + 'auf diesem Mac und sie wird von Hand freigeschaltet — es gibt keinen Schalter dafür.',
+  aMyKey: 'Öffentlicher Schlüssel dieses Macs',
+  aMyKeyHint: 'Dieser Wert gehört als LZP_REPORTS_ADMIN_PUB auf die Vermittlungsstelle. Ohne ihn '
+    + 'antwortet sie auf diese Ansicht mit „nicht gefunden" — sie soll nicht verraten, dass es '
+    + 'sie gibt.',
+  aNoKey: 'Auf diesem Mac liegt kein Geräteschlüssel. Er entsteht erst mit einem Familienkreis, '
+    + 'und ohne ihn lassen sich die Berichte nicht abrufen.',
+  aNoOrigin: 'Diese Version hat keine Gegenstelle hinterlegt — es gibt nichts abzurufen.',
+  aCopyKey: 'Kopieren',
+  aCopied: 'Kopiert.',
+  aCopyFailed: 'Kopieren hat nicht geklappt.',
+  aLoading: 'Wird geladen …',
+  aNone: 'Keine Berichte.',
+  aFailed: 'Die Berichte ließen sich nicht abrufen.',
+  aExpires: 'verfällt am %1',
+  aRetention: 'Berichte werden nach %1 Tagen automatisch gelöscht.',
+  aSigned: 'signiert · %1',
+  aUnsigned: 'ohne Signatur',
+  aImageLoad: 'Bild anzeigen',
+  aImageNone: 'Kein Bild.',
+  aDelete: 'Löschen',
+  aDeleteTitle: 'Diesen Bericht löschen?',
+  aDeleteBody: 'Der Bericht wird auf der Vermittlungsstelle gelöscht, sofort und endgültig. '
+    + 'Rückgängig machen lässt sich das nicht.',
+  aDeleted: 'Gelöscht.',
+  aNoReply: 'Hier gibt es keine Antwortmöglichkeit, und es wird auch keine geben: Der Kalender '
+    + 'ist kein Nachrichtendienst. Wer antworten möchte, ruft an.',
 });
 
 const EN = Object.freeze({
@@ -135,8 +184,8 @@ const EN = Object.freeze({
   failedTitle: 'Sending did not work.',
   failedBody: 'That the connection is down is itself useful feedback. Copy the text or save it as '
     + 'a file — it travels by hand just as well.',
-  noRelay: 'This Mac knows no relay: while you are not using a family circle there is no server '
-    + 'for anything to go to. Copy the text or save it as a file.',
+  noRelay: 'This Mac knows no relay: this build has no address configured for anything to go to. '
+    + 'Copy the text or save it as a file.',
   tooLarge: 'The report is too large (%1 kB; %2 kB allowed). It is not truncated — the preview '
     + 'said what would be sent, and a truncated report would be a lie. Write a little less, or '
     + 'leave the image out.',
@@ -158,6 +207,34 @@ const EN = Object.freeze({
   rImageLine: 'The plan without text: %1 × %2 pixels, %3 kB, %4 boxes where text was not drawn.',
   rImageNone: '— no image —',
   rUnknown: 'unknown',
+
+  aSectionTitle: 'Reports',
+  aSectionHint: 'Feedback held on the relay. This view exists on this Mac only and is switched '
+    + 'on by hand — there is no control for it.',
+  aMyKey: "This Mac's public key",
+  aMyKeyHint: 'This value belongs on the relay as LZP_REPORTS_ADMIN_PUB. Without it the relay '
+    + 'answers this view with "not found" — it should not advertise that the view exists.',
+  aNoKey: 'This Mac holds no device key. One is minted only with a family circle, and without it '
+    + 'the reports cannot be read.',
+  aNoOrigin: 'This build has no relay configured — there is nothing to read.',
+  aCopyKey: 'Copy',
+  aCopied: 'Copied.',
+  aCopyFailed: 'Copying did not work.',
+  aLoading: 'Loading …',
+  aNone: 'No reports.',
+  aFailed: 'The reports could not be read.',
+  aExpires: 'expires on %1',
+  aRetention: 'Reports are deleted automatically after %1 days.',
+  aSigned: 'signed · %1',
+  aUnsigned: 'unsigned',
+  aImageLoad: 'Show image',
+  aImageNone: 'No image.',
+  aDelete: 'Delete',
+  aDeleteTitle: 'Delete this report?',
+  aDeleteBody: 'The report is deleted on the relay, at once and for good. This cannot be undone.',
+  aDeleted: 'Deleted.',
+  aNoReply: 'There is no reply here, and there will not be one: the calendar is not a messenger. '
+    + 'Anyone who wants to answer picks up the telephone.',
 });
 
 const TABLES = { de: DE, en: EN };

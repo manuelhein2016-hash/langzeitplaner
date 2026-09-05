@@ -131,6 +131,20 @@
 // kind. It is absent from MODEL_COLUMNS, so writing one is a throw, not a review comment.
 
 /**
+ * @typedef {Object} ReportRow                LZP-1009 second pass — see THE REPORT TABLE below
+ * @property {string} id                     'rep_' + 22 b64url, minted by the relay
+ * @property {string} prose                  HER SENTENCE, VERBATIM. The second deliberate
+ *                                           plaintext String in the whole store, and the first
+ *                                           one that is prose. See PLAINTEXT_STRINGS.
+ * @property {Uint8Array|null} image         the redacted PNG. Opaque: the relay never parses it.
+ * @property {boolean} signed
+ * @property {Uint8Array|null} devicePub     65-byte raw P-256, SELF-MINTED and NEVER ENROLLED
+ *                                           (handlers/feedback.js PROVES/PROVES_NOT)
+ * @property {Date} receivedAt               stamped by the store, never supplied
+ * @property {Date} expiresAt                receivedAt + REPORT_RETENTION_MS, stamped by the store
+ */
+
+/**
  * @typedef {Object} PairSessionRow
  * @property {string} rid
  * @property {Uint8Array|null} boxA
@@ -162,6 +176,18 @@ export const MODEL_COLUMNS = Object.freeze({
   PairSession: Object.freeze(['rid', 'boxA', 'boxB', 'delivery', 'attempts', 'expiresAt', 'burnedAt']),
   Nonce:       Object.freeze(['deviceShort', 'nonce', 'expiresAt']),
   RateBucket:  Object.freeze(['key', 'count', 'windowStart']),
+  // ── THE REPORT TABLE (LZP-1009 second pass) ─────────────────────────────────────────────────
+  // NO `spaceId`. NO relation to Space. NO path from `listOps` to it. That absence is what keeps
+  // "a report can never appear on the family's board" STRUCTURAL rather than careful — the same
+  // sentence `handlers/feedback.js` promise 1 has always made, now about a table instead of a
+  // sink. A column named here is a column a future handler could join on, so the way this table
+  // stays unjoinable to a board is that there is nothing in it to join on.
+  //
+  // Every name was chosen against FORBIDDEN_COLUMN_TOKENS below rather than in spite of it:
+  // `prose` over `text`/`body`/`message` (all three read as "somewhere to put content", and the
+  // point of the odd word is that it is odd), and `receivedAt` — ARRIVAL, exactly as `Op` — which
+  // does not contain `authoredat`. When she wrote the sentence is not the relay's business.
+  Report:      Object.freeze(['id', 'prose', 'image', 'signed', 'devicePub', 'receivedAt', 'expiresAt']),
 });
 
 /**
@@ -182,6 +208,11 @@ export const OPAQUE_FIELDS = Object.freeze({
   PairSession: Object.freeze(['boxA', 'boxB', 'delivery']),
   Nonce:       Object.freeze([]),
   RateBucket:  Object.freeze([]),
+  // The PNG and the public key are BYTES, so a handler cannot put her sentence in either of them
+  // by mistake: `prose` is the one place text may go, and it is the one place the inventory
+  // below describes. `image` is opaque in the strong sense — the relay checks eight signature
+  // bytes at the door (`handlers/feedback.js#isPng`) and never parses one.
+  Report:      Object.freeze(['image', 'devicePub']),
 });
 
 /** Columns that may be null / absent. Everything else is required on insert. */
@@ -200,6 +231,11 @@ export const NULLABLE_FIELDS = Object.freeze({
   PairSession: Object.freeze(['boxA', 'boxB', 'delivery', 'burnedAt']),
   Nonce:       Object.freeze([]),
   RateBucket:  Object.freeze([]),
+  // A report with no picture and a report from a Mac that cannot sign are both ORDINARY — the
+  // second is the one the endpoint exists for (`handlers/feedback.js`: „mein Schlüsselbund ist
+  // kaputt" is written by a Mac that cannot sign). `signed` is NOT nullable: false is an answer,
+  // null would be a third state nobody has a rule for.
+  Report:      Object.freeze(['image', 'devicePub']),
 });
 
 /**
@@ -235,6 +271,8 @@ export const PLAINTEXT_STRINGS = Object.freeze({
   'Nonce.deviceShort':   'the replay window is per device',
   'Nonce.nonce':         'a b64url random string the client chose',
   'RateBucket.key':      'a limiter key; composed of route + device/IP, never of content',
+  'Report.id':           'a report id — \'rep_\' + 22 b64url, minted by the relay so the admin view can address one row to show and one row to delete. Random; it carries nothing.',
+  'Report.prose':        'DELIBERATE, AND THE SECOND ROW IN THIS TABLE THAT IS A PERSON\'S OWN WORDS RATHER THAN AN ID. Her sentence, verbatim, in the clear — because the whole product is that the operator READS it, and a report he cannot read is not a report. This is not an accident the way a stray column would be: `handlers/feedback.js` has always taken custody of exactly this text; what the LZP-1009 second pass changed is that custody now has a TABLE instead of a sink, so the text is retained rather than passed on. Two consequences follow and both are stated in the Datenschutz copy (21.3) rather than left to be inferred: (a) whoever can read this database can read every sentence anybody sent, and (b) it is not kept for ever — the row is swept 90 days after it arrived, lazily on put AND on list, and it is invisible to `getReport` and `listReports` from the moment `expiresAt` passes, sweep or no sweep. The 90 is REPORT_RETENTION_DAYS and it is enforced by the store, not by the caller, so no handler can file a report that outlives it. A signed report additionally carries `devicePub`, which is byte-identical to `Device.sigPubRaw` and therefore joinable to a circle — stated as the sixth inference in docs/v2/server-metadata.md §7.',
 });
 
 /**
@@ -448,6 +486,43 @@ export function normalizeRow(model, row, opts) {
  *   Sliding-window counter over RateBucket. Atomic: exactly `max` of N concurrent calls in one
  *   window may return true. This is the substrate for EVERY limit in ADR 003 §6.1 — push/pull,
  *   invite redemption (10/IP/hour), pair sessions and pair GETs.
+ *
+ * REPORTS — LZP-1009 second pass.  A TABLE WITH NO SPACE, ON PURPOSE.
+ *
+ *   These four are the only methods in this interface that name no space and touch no space, and
+ *   `Report` is the only model with no `spaceId`. That is not tidiness: it is the mechanism.
+ *   `listOps` cannot reach this table because there is no column joining them, `deleteSpace`'s
+ *   cascade cannot reach it for the same reason (and must not — a family that deletes its circle
+ *   has not asked to un-send a bug report, and a report is not theirs to delete), and a future
+ *   handler cannot accidentally publish a report onto a board because it would first have to
+ *   invent the relation. Compare `handlers/feedback.js` promise 1, which says the same sentence
+ *   about a sink; this says it about storage.
+ *
+ * @property {(input:Object) => Promise<ReportRow>} putReport
+ *   Takes `{id, prose, image, signed, devicePub}` — the five columns a caller may supply — and
+ *   STAMPS `receivedAt` and `expiresAt` itself, exactly as `upsertOps` stamps `seq` and
+ *   `receivedAt` (extension E2-I4, and E10-I1 below). A caller that supplies either throws. So
+ *   the 90 days is a property of the STORE and not a convention every future caller has to
+ *   remember; there is no argument through which a report could be filed to outlive it.
+ *   A re-put of an id that is already there is REFUSED (a throw), never an overwrite: the id is
+ *   the admin view's handle for „Löschen", and a table where a second POST can rewrite a row that
+ *   is already on his screen is a table where the sentence he read is not the sentence he keeps.
+ *   Sweeps expired rows first — Vercel Hobby has no cron (ADR 003 §10 weakness 2).
+ * @property {(limit:number) => Promise<ReportRow[]>} listReports
+ *   Newest first (`receivedAt` desc, `id` desc to break a tie inside one millisecond), at most
+ *   `limit` rows. Expired rows are NOT returned, whether or not the sweep has run — the same
+ *   fail-closed shape `getPairSession` and `consumeInvite` already have, and the reason is the
+ *   same: a promise that a row is gone after 90 days must not depend on somebody having written
+ *   to the relay since. ALSO SWEEPS, which is why it is not on `memory.js`'s READ_ONLY list:
+ *   reports arrive rarely, so a write-only sweep would leave rows standing for months, and the
+ *   read path is the real cadence — he reads when the dot appears.
+ * @property {(id:string) => Promise<ReportRow|null>} getReport
+ *   null for unknown AND for expired, indistinguishably. Does not sweep: a read of one row is
+ *   the one place in this file that must not write.
+ * @property {(id:string) => Promise<boolean>} deleteReport
+ *   Manual „Löschen" (the PO's second retention rule). IDEMPOTENT: true when a row was removed,
+ *   false when there was nothing to remove, and never a throw — the admin view can be open in two
+ *   windows and a delete that 500s the second time is a delete he cannot trust the first time.
  */
 
 /** The complete method set. Frozen; `assertStoreShape` is the gate every adapter passes. */
@@ -462,7 +537,77 @@ export const STORE_METHODS = Object.freeze([
   'putInvite', 'getInvite', 'consumeInvite', 'revokeInvite', 'listOpenInvites', 'refreshInvite',
   'putPairSession', 'getPairSession', 'bumpPairAttempts', 'burnPairSession',
   'claimNonce', 'rateAllow',
+  'putReport', 'listReports', 'getReport', 'deleteReport',
 ]);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4b. RETENTION — the number, in one place, enforced by the store
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The PO's ruling of 2026-09-05: a report is kept for 90 days and then goes, plus a manual
+ * delete. The number lives HERE, in the same file as the inventory that describes it, so that
+ * `PLAINTEXT_STRINGS['Report.prose']` — the sentence the Datenschutz copy (21.3) has to agree
+ * with — and the code that enforces it cannot drift apart without one of them failing a test.
+ *
+ * Days rather than a raw millisecond count because 90 is the number in the German copy, and the
+ * multiplication is the part nobody should be reading off a literal.
+ */
+export const REPORT_RETENTION_DAYS = 90;
+export const REPORT_RETENTION_MS = REPORT_RETENTION_DAYS * 86400000;
+
+/** The columns `putReport` accepts from a caller. `receivedAt`/`expiresAt` are stamped. */
+export const REPORT_INPUT_COLUMNS = Object.freeze(
+  MODEL_COLUMNS.Report.filter((c) => !['receivedAt', 'expiresAt'].includes(c)));
+
+/**
+ * Validate a `putReport` input and stamp the two times. THE ONLY PLACE THE 90 DAYS IS COMPUTED.
+ *
+ * All three adapters call this, so "an expired report is unreadable" and "a report cannot be
+ * filed with a longer life than 90 days" are one implementation checked by one set of contract
+ * cases rather than three that agree today. A caller that supplies `receivedAt` or `expiresAt`
+ * throws rather than being ignored — an ignored field is a field somebody comes to rely on, and
+ * the field they would rely on here is the expiry.
+ *
+ * @param {Object} input `{id, prose, image, signed, devicePub}`
+ * @param {number} atMs  the adapter's injected clock; this file reads no clock of its own
+ * @returns {Object} a full, validated Report row
+ * @throws {StoreShapeError}
+ */
+export function normalizeReportInput(input, atMs) {
+  const raw = input || {};
+  for (const k of Object.keys(raw)) {
+    if (!REPORT_INPUT_COLUMNS.includes(k)) {
+      throw new StoreShapeError(
+        `Report.${k} may not be supplied by a caller. The columns are ${REPORT_INPUT_COLUMNS.join(', ')}; ` +
+        'receivedAt and expiresAt are stamped by the store so that the 90-day retention is a ' +
+        'property of the store and not a convention every caller has to remember.');
+    }
+  }
+  if (typeof raw.id !== 'string' || raw.id.length === 0) throw new StoreShapeError('Report.id must be a non-empty string');
+  if (typeof raw.prose !== 'string' || raw.prose.length === 0) {
+    // Empty is refused at the door too (`handlers/feedback.js` §3), and again here, because a row
+    // with nothing in it is a row the admin view shows him for no reason and then asks him to
+    // decide about.
+    throw new StoreShapeError('Report.prose must be a non-empty string');
+  }
+  if (typeof raw.signed !== 'boolean') {
+    throw new StoreShapeError('Report.signed must be a boolean — false is an answer, undefined is not');
+  }
+  if (!Number.isFinite(atMs)) throw new StoreShapeError('putReport needs a clock reading');
+  return normalizeRow('Report', {
+    id: raw.id,
+    prose: raw.prose,
+    image: raw.image === undefined ? null : raw.image,
+    signed: raw.signed,
+    devicePub: raw.devicePub === undefined ? null : raw.devicePub,
+    receivedAt: new Date(atMs),
+    expiresAt: new Date(atMs + REPORT_RETENTION_MS),
+  });
+}
+
+/** Has this row's 90 days passed? Read-side enforcement, not sweep-side. */
+export const reportExpired = (row, atMs) => !row || row.expiresAt.getTime() <= atMs;
 
 /**
  * Where this interface deliberately differs from docs/v2/contracts/server.contract.js §4, and
@@ -505,6 +650,10 @@ export const INTERFACE_EXTENSIONS = Object.freeze([
   Object.freeze({
     id: 'E6-I1', kind: 'changed', method: 'putKeyWraps',
     why: 'WAS an upsert on (spaceId, epoch, recipientId); is now WRITE-ONCE, and returns {stored, kept, refused} instead of nothing. Finding T5-K3: POST /spaces/:id/epoch admits any current member (ADR 002 §4.2, decision D9) and a rotation names wraps for epochs 1..e+1, so an upsert let ONE ordinary member replace every wrap of every recipient for every epoch below her own with bytes nobody can open — and the relay recorded it as coverage, because coverage counts ROWS and a blind relay cannot open a wrap to check. The loss is invisible to anybody online (a ring lives in localStorage); it lands on every future joiner, every newly paired device, and ADR 002 §7.3 A2 recovery. The refusal is PER ROW and never a thrown request: wrapSpaceKey draws a fresh salt and IV per wrap and wrapRingToRecipients re-wraps 1..e+1 on every rotation, so every honest rotation after the first carries differing bytes for already-filled cells and a batch-level throw would 500 them all. The cell is (spaceId, epoch, recipientId, senderDeviceId): the DEPOSITOR is part of it. Write-once on the narrower triple closed T5-K3 and opened its mirror image — a joiner\'s cells for epochs 1..e are all empty when she arrives, so a hostile member who rotates first owns them for ever and every honest re-delivery is refused BY THE RELAY. Measured in tests/fleet/e6-attack-keydelivery.test.js: she held one epoch, no history, „Omas Geburtstag" never rendered, and her ops quarantined. With the sender in the cell the honest wrap and the junk coexist, admitWraps admits the one that opens, assertCoverage folds a recipient\'s rows into a Set of epoch numbers so duplicates cannot inflate coverage, and no depositor can address another depositor\'s row. What it costs is ROWS and not data — one row per depositing device per (epoch, recipient), bounded by MAX_WRAPS = 1024 per rotation and by the epoch race every rotation must win, so it is attributable and rate-limited rather than free.',
+  }),
+  Object.freeze({
+    id: 'E10-I1', kind: 'added', method: 'putReport / listReports / getReport / deleteReport',
+    why: 'LZP-1009 second pass, and the PO\'s rulings of 2026-09-04/05. The relay used to hand a report to `ctx.feedbackSink` and keep nothing; the deployed relay binds no sink at all and answers an honest 501, so the channel exists and delivers nowhere. The PO chose the other product: reports are KEPT, and he reads them in a screen inside his own app. That needs storage, and storage is where the promise could have been lost — so the table is shaped to keep it. `Report` has NO spaceId and NO relation to Space, which is why "a report can never appear on the family\'s board" stays structural: there is no column to join a report to a board through, no path from `listOps` to this table, and `deleteSpace`\'s cascade cannot reach it. The write-only rule the router used to state — "a read-back turns a relay that takes custody into a relay that stores reports addressably" — is CORRECT and is deliberately reversed rather than softened: the dangerous half was the UNAUTHENTICATED read-back, which a P-256 operator verify closes structurally, and the property that had to survive (a report never enters the op log) is preserved verbatim because the sink writes this table and `handlers/feedback.js` is not touched. The four methods stamp their own times for the same reason `upsertOps` stamps seq (E2-I4): a retention every caller has to remember is a retention the second caller forgets. See REPORT_RETENTION_DAYS.',
   }),
   Object.freeze({
     id: 'E2-I8', kind: 'added', method: 'Device.lastPushedSeq',
@@ -560,6 +709,7 @@ export const fixtures = Object.freeze({
   member: (o) => ({ id: 'mem_AAAAAAAAAAAAAAAAAAAAAA', spaceId: 'fsp_AAAAAAAAAAAAAAAAAAAAAA', colorRef: 'gruen', recoveryPubSig: bytes(65, 1), recoveryPubKex: bytes(65, 2), joinedAt: new Date(0), removedAt: null, ...o }),
   device: (o) => ({ id: 'dev_AAAAAAAAAAAAAAAAAAAAAA', spaceId: 'fsp_AAAAAAAAAAAAAAAAAAAAAA', memberId: 'mem_AAAAAAAAAAAAAAAAAAAAAA', deviceShort: '7QAR2MZ9XKPNC0GV', sigPubRaw: bytes(65, 3), kexPubRaw: bytes(65, 4), attestation: bytes(120, 5), lastSeenSeq: 0n, lastPushedSeq: 0n, addedAt: new Date(0), revokedAt: null, ...o }),
   op: (opId, o) => ({ opId, epoch: 1, deviceShort: '7QAR2MZ9XKPNC0GV', witness: null, chain: bytes(32, 6), envelope: bytes(512, 7), ...o }),
+  report: (o) => ({ id: 'rep_AAAAAAAAAAAAAAAAAAAAAA', prose: 'Ich komme nicht mehr rein.', image: null, signed: false, devicePub: null, ...o }),
   invite: (o) => ({ id: 'inv_AAAAAAAAAAAAAAAAAAAAAA', spaceId: 'fsp_AAAAAAAAAAAAAAAAAAAAAA', verifier: bytes(32, 8), wrapSalt: bytes(32, 9), epoch: 1, createdBy: 'mem_AAAAAAAAAAAAAAAAAAAAAA', expiresAt: new Date(7 * 86400000), usedAt: null, revokedAt: null, ...o }),
 });
 
@@ -1447,11 +1597,16 @@ export const STORE_CONTRACT_CASES = Object.freeze([
         await t.upsertOps(SP, [fixtures.op('b'), fixtures.op('c')]);
         await t.addMember(fixtures.member({ id: 'mem_x' }));
         await t.putKeyWraps([{ spaceId: SP, epoch: 1, recipientId: 'dev_x', wrapped: bytes(16, 41), senderDeviceId: 'dev_sender' }]);
+        await t.putReport(fixtures.report({ id: 'rep_rollback' }));
         throw new Error('handler failed after writing');
       }), 'the transaction must re-throw');
       assert.equal((await store.listOps(SP, 0n, 100)).ops.length, 1, 'the ops rolled back');
       assert.equal((await store.listMembers(SP)).length, 0, 'the member rolled back');
       assert.equal((await store.getKeyWraps(SP, 'dev_x')).length, 0, 'the wrap rolled back');
+      // LZP-1009 second pass. The sink writes a report inside the same request that answers 202;
+      // a report that survived a rolled-back transaction would be a report the sender was told
+      // had failed and the operator can still read.
+      assert.equal(await store.getReport('rep_rollback'), null, 'the report rolled back');
       assert.equal((await store.getSpace(SP)).nextSeq, 1n,
         'and the counter rolled back — ADR 002 §4.2 needs the whole rotation to be one transaction, wraps and epoch together');
     } },
@@ -1522,6 +1677,168 @@ export const STORE_CONTRACT_CASES = Object.freeze([
       assert.ok(s.createdAt instanceof Date);
       assert.ok(o.receivedAt instanceof Date);
       assert.equal(isBytes(o.envelope), true, 'the envelope comes back as bytes, never as a string');
+    } },
+
+  // ── reports (LZP-1009 second pass) ────────────────────────────────────────
+  //
+  // Seven cases, and the first of them is the one that matters: the guarantee is STRUCTURAL, so
+  // it is asserted structurally — over the column set and over the two directions a leak could
+  // travel — rather than by checking that today's `listOps` happens not to return a report.
+
+  { id: 'C64', title: 'STRUCTURAL — a report has no space, and no path connects one to a board', tags: ['reports', 'blind', 'P10'],
+    run: async ({ makeStore, assert }) => {
+      // (a) the column set itself. This is the whole mechanism: a report can only reach a board
+      // through a column that names one, and there is no such column to name.
+      assert.deepEqual(
+        MODEL_COLUMNS.Report.filter((c) => /space|member|board|op/i.test(c)), [],
+        'a Report column that names a space, a member or an op is a column a future handler can '
+        + 'join on, and the day it does, feedback about the family appears on the family\'s board '
+        + '(Principle 10). The absence IS the guarantee.');
+
+      // (b) both directions, on a live store. A space with ops and a report coexist and neither
+      // enumeration can see the other.
+      const store = await withSpace(makeStore);
+      await store.upsertOps(SP, [fixtures.op('op1')]);
+      await store.putReport(fixtures.report());
+      const page = await store.listOps(SP, 0n, 100);
+      assert.equal(page.ops.length, 1);
+      assert.equal(page.ops.map((o) => o.opId).join(' '), 'op1', 'the op log holds ops and nothing else');
+      assert.equal(
+        page.ops.some((o) => new TextDecoder().decode(o.envelope).includes('Ich komme nicht mehr rein')), false,
+        'a report reached the op log — the one place LZP-1009 says it must never be');
+      assert.equal((await store.listReports(10)).length, 1);
+
+      // (c) and a space deletion does not take a report with it. 20.4 purges what a family put
+      // in; a report is not the family\'s to withdraw, and the relay may not lose it because
+      // somebody left a circle.
+      await store.deleteSpace(SP);
+      assert.equal((await store.listReports(10)).length, 1, 'deleteSpace cascaded into a table it has no relation to');
+      assert.ok(await store.getReport('rep_AAAAAAAAAAAAAAAAAAAAAA'));
+    } },
+
+  { id: 'C65', title: 'putReport round-trips, stamps both times itself, and refuses a caller that supplies one', tags: ['reports'],
+    run: async ({ makeStore, assert, clock }) => {
+      const store = await makeStore();
+      const row = await store.putReport(fixtures.report({ prose: 'Der Balken springt zurück.', signed: true, devicePub: bytes(65, 21), image: bytes(64, 22) }));
+      assert.deepEqual(Object.keys(row).sort(), [...MODEL_COLUMNS.Report].sort(),
+        'a report row carries exactly the declared columns and nothing else');
+      assert.ok(row.receivedAt instanceof Date && row.expiresAt instanceof Date);
+      assert.equal(row.receivedAt.getTime(), clock.now(), 'receivedAt is ARRIVAL, read from the store\'s clock');
+      assert.equal(row.expiresAt.getTime() - row.receivedAt.getTime(), REPORT_RETENTION_MS,
+        `the retention must be exactly REPORT_RETENTION_DAYS (${REPORT_RETENTION_DAYS}) — the number the Datenschutz copy (21.3) states`);
+      assert.equal(isBytes(row.image), true);
+      assert.equal(isBytes(row.devicePub), true);
+      assert.equal(row.signed, true);
+
+      // The two stamped columns are not writable, so no caller can file a report that outlives
+      // the number in the German copy — the failure this refusal exists to make impossible.
+      await threw(assert, () => store.putReport(fixtures.report({ id: 'rep_b', expiresAt: new Date(0) })), 'a caller-supplied expiresAt');
+      await threw(assert, () => store.putReport(fixtures.report({ id: 'rep_c', receivedAt: new Date(0) })), 'a caller-supplied receivedAt');
+      await threw(assert, () => store.putReport(fixtures.report({ id: 'rep_d', spaceId: SP })), 'Report.spaceId is not a column and never will be');
+      await threw(assert, () => store.putReport(fixtures.report({ id: 'rep_e', prose: '' })), 'an empty report');
+      await threw(assert, () => store.putReport(fixtures.report({ id: 'rep_f', signed: 'yes' })), 'Report.signed must be a boolean');
+      assert.equal((await store.listReports(50)).length, 1, 'not one refusal landed a row');
+    } },
+
+  { id: 'C66', title: 'RULE 1 — a report\'s picture and public key are BYTES; a String is refused', tags: ['reports', 'blind'],
+    run: async ({ makeStore, assert }) => {
+      const store = await makeStore();
+      // `prose` is the one place text may go. If `image` accepted a string, the redacted PNG
+      // column becomes a second, undocumented text column — and the inventory that story 21.3 is
+      // written from would be describing the wrong table.
+      await threw(assert, () => store.putReport(fixtures.report({ image: 'Zahnarzt 14:30' })), 'Report.image must be bytes');
+      await threw(assert, () => store.putReport(fixtures.report({ devicePub: 'BFy…' })), 'Report.devicePub must be bytes');
+      const row = await store.putReport(fixtures.report());
+      assert.equal(row.image, null, 'a report without a picture is ordinary');
+      assert.equal(row.devicePub, null, 'and so is one from a Mac that cannot sign');
+      assert.equal(row.signed, false);
+    } },
+
+  { id: 'C67', title: 'listReports is newest-first and honours its limit', tags: ['reports'],
+    run: async ({ makeStore, assert, clock }) => {
+      const store = await makeStore();
+      for (const id of ['rep_1', 'rep_2', 'rep_3']) {
+        await store.putReport(fixtures.report({ id, prose: `Bericht ${id}` }));
+        clock.advance(60000);
+      }
+      assert.deepEqual((await store.listReports(10)).map((r) => r.id), ['rep_3', 'rep_2', 'rep_1'],
+        'newest first — the admin view shows him what arrived while he was away, at the top');
+      assert.deepEqual((await store.listReports(2)).map((r) => r.id), ['rep_3', 'rep_2'], 'the limit is a limit');
+      assert.deepEqual(await store.listReports(0), []);
+      assert.equal((await store.getReport('rep_2')).prose, 'Bericht rep_2');
+      assert.equal(await store.getReport('rep_nope'), null, 'an unknown id reads as null, not as an empty row');
+    } },
+
+  { id: 'C68', title: 'THE 90 DAYS — an expired report is invisible to list AND to get, BEFORE any sweep', tags: ['reports', 'ttl'],
+    run: async ({ makeStore, assert, clock }) => {
+      // The shape `getPairSession` and `consumeInvite` already have, and for the same reason: a
+      // retention promise that only holds once somebody else writes to the relay is not a
+      // retention promise. Nothing is called between the advance and the reads here, so the sweep
+      // cannot have run — what is proved is that the READ enforces it.
+      const store = await makeStore();
+      await store.putReport(fixtures.report({ id: 'rep_old' }));
+      clock.advance(60000);
+      await store.putReport(fixtures.report({ id: 'rep_new' }));
+
+      clock.advance(REPORT_RETENTION_MS - 60001);          // rep_old is at its last millisecond
+      assert.equal((await store.getReport('rep_old')) === null, false, 'still inside the window');
+
+      clock.advance(1);
+      assert.equal(await store.getReport('rep_old'), null, 'expired: unknown and expired are one answer');
+      assert.deepEqual((await store.listReports(10)).map((r) => r.id), ['rep_new'],
+        'an expired report must not be listed, sweep or no sweep');
+
+      clock.advance(REPORT_RETENTION_MS);
+      assert.deepEqual(await store.listReports(10), [], 'and then there are none');
+      assert.equal(await store.getReport('rep_new'), null);
+    } },
+
+  { id: 'C69', title: 'the sweep is LAZY, on put AND on list — Hobby has no cron', tags: ['reports', 'ttl'],
+    run: async ({ makeStore, assert, clock }) => {
+      // Reports arrive rarely. A write-only sweep would leave rows standing for months, and he
+      // reads when the ⚙ dot appears — so the READ path is the real cadence (ADR 003 §10
+      // weakness 2). Both paths are asserted, and SEPARATELY, which needs an observable that
+      // distinguishes "the row is gone" from "the row is hidden by the read filter". There is
+      // exactly one: `deleteReport`, the only method that neither sweeps nor filters on expiry.
+      // It answers true for a row that is still there and false for one that is not — so it can
+      // see a sweep that C68's reads cannot, and C68 can see a read filter this cannot. Two
+      // claims, two rows.
+
+      // (a) THE READ PATH. Nothing but `listReports` runs between the advance and the check.
+      const store = await makeStore();
+      await store.putReport(fixtures.report({ id: 'rep_gone' }));
+      clock.advance(REPORT_RETENTION_MS + 1);
+      await store.listReports(10);
+      assert.equal(await store.deleteReport('rep_gone'), false,
+        'listReports did not sweep: the row is merely hidden, and on a relay that is written to '
+        + 'every few weeks it would sit on the disk for months after the 90 days it was promised');
+
+      // (b) THE WRITE PATH, on its own. A second report arrives and the first is swept by it.
+      await store.putReport(fixtures.report({ id: 'rep_a' }));
+      clock.advance(REPORT_RETENTION_MS + 1);
+      await store.putReport(fixtures.report({ id: 'rep_b' }));
+      assert.equal(await store.deleteReport('rep_a'), false, 'putReport did not sweep');
+      assert.deepEqual((await store.listReports(10)).map((r) => r.id), ['rep_b']);
+
+      // (c) and a swept id is free again — the row is gone, not tombstoned.
+      await store.putReport(fixtures.report({ id: 'rep_gone', prose: 'Ein zweiter Bericht.' }));
+      assert.equal((await store.getReport('rep_gone')).prose, 'Ein zweiter Bericht.');
+    } },
+
+  { id: 'C70', title: 'a re-put of a live id is REFUSED, and deleteReport is idempotent', tags: ['reports'],
+    run: async ({ makeStore, assert }) => {
+      const store = await makeStore();
+      await store.putReport(fixtures.report({ id: 'rep_1', prose: 'Die Kategorie fehlt.' }));
+      // Refused, not overwritten: the id is what „Löschen" addresses, and a row a second POST can
+      // rewrite is a row that is not the sentence he read.
+      await threw(assert, () => store.putReport(fixtures.report({ id: 'rep_1', prose: 'etwas anderes' })), 'a duplicate report id');
+      assert.equal((await store.getReport('rep_1')).prose, 'Die Kategorie fehlt.', 'the row already there stands');
+
+      assert.equal(await store.deleteReport('rep_1'), true, 'the manual delete removes it');
+      assert.equal(await store.getReport('rep_1'), null);
+      assert.equal(await store.deleteReport('rep_1'), false, 'and says so the second time');
+      assert.equal(await store.deleteReport('rep_never'), false, 'an unknown id is not an error');
+      assert.deepEqual(await store.listReports(10), []);
     } },
 
   { id: 'C60', title: 'a row handed back is a copy — mutating it cannot corrupt the store', tags: ['shape'],

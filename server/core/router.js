@@ -56,16 +56,49 @@ export const ROUTES = Object.freeze([
   { method: 'POST', pattern: '/pair/deliver',         name: 'pairDeliver' },
 
   // ── LZP-1009 · „Rückmeldung senden" ────────────────────────────────────────
-  // The one route here that is not part of the sync protocol, and the only WRITE-ONLY one: there
-  // is no `GET /feedback` and there must not be. A read-back would turn a relay that takes
-  // custody of a report into a relay that STORES reports addressably, and the two are different
-  // products. The absence is asserted, not merely observed — `tests/server/feedback.test.js` §1
-  // enumerates this table for any other row whose pattern begins `/feedback`.
+  // THE FOUR ROUTES HERE ARE NOT PART OF THE SYNC PROTOCOL. ADR 003 §3 lists 23 endpoints; these
+  // are the 24th through 27th, and the count in `tests/server/router.test.js` is written as
+  // 23 + 4 for that reason.
   //
-  // It is also space-free: it is absent from `SPACE_SCOPED` below because it names no space at
-  // all. That is what makes "a report can never appear on the family's board" structural rather
-  // than careful — the handler is handed no space id and has no way to obtain one.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // ██ THE WRITE-ONLY RULE WAS REVERSED ON 2026-09-05, AND THE OLD SENTENCE WAS NOT WRONG ██
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // Until this pass these lines read: *"there is no `GET /feedback` and there must not be. A
+  // read-back would turn a relay that takes custody of a report into a relay that STORES reports
+  // addressably, and the two are different products."*
+  //
+  // That is a correct sentence, it is quoted rather than deleted so the next reader can weigh
+  // the trade for themselves, and **the PO has chosen the other product.** Three things moved:
+  //
+  //   1. **The dangerous half was the UNAUTHENTICATED read-back.** What the rule protected is
+  //      "nobody can enumerate other people's complaints" — and that property SURVIVES, now held
+  //      by a P-256 verify against a key the relay was configured with instead of by the absence
+  //      of a row. Structural, not careful: without the operator's private key the three new
+  //      routes answer 401, and on a relay with no key configured they answer 404 and do not
+  //      advertise that they exist. `handlers/reports.js` is the whole of the surface.
+  //   2. **The custody claim was ALREADY FALSE in the deployed relay.** langzeitplaner.vercel.app
+  //      binds no `feedbackSink` and answers an honest 501 to every report. The choice was never
+  //      "custody or storage"; it was a store with an operator, or no feature — and the report
+  //      that matters most („ich komme nicht rein") is written by a Mac that has no circle.
+  //   3. **The property that must survive is preserved VERBATIM.** A report never enters the op
+  //      log and can never reach a family's board. That is true because `Report` has no `spaceId`
+  //      and no relation to `Space`, and because the row is written by the **sink** — server
+  //      configuration — and never by a handler. `handlers/feedback.js` is untouched by this
+  //      pass, and `tests/server/feedback.test.js` §4 still runs it against a store whose every
+  //      other property throws. That row is the check that storage did not break promise 1.
+  //
+  // WHAT DID NOT CHANGE. All four rows are space-free: none carries a `spaceParam` and none
+  // appears in `SPACE_SCOPED` below, because none names a space at all. The handlers are handed
+  // no space id and have no way to obtain one. And there is still no reply path of any kind —
+  // Principle 10 — so the operator surface is read and delete, and nothing that writes prose.
   { method: 'POST', pattern: '/feedback',             name: 'feedback' },
+
+  // The operator's three. `LZPADMIN`-credentialled, IP-budgeted before the verify, invisible
+  // (404) on any relay without `LZP_REPORTS_ADMIN_PUB` configured. See `handlers/reports.js`.
+  { method: 'GET',  pattern: '/feedback',             name: 'listReports' },
+  { method: 'GET',  pattern: '/feedback/:id',         name: 'getReport' },
+  { method: 'POST', pattern: '/feedback/:id/delete',  name: 'deleteReport' },
 ]);
 
 /** Every handler name the registry may carry. Frozen; a typo is a startup failure, not a 404. */

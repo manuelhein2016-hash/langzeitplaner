@@ -372,15 +372,91 @@ test('THE FALLBACKS ARE THERE BEFORE THE FIRST ATTEMPT, not only after a failure
   } finally { unseed(); }
 });
 
-test('with no sender bound, „Senden" is DISABLED and the screen says why', async () => {
+test('with NO RELAY CONFIGURED, „Senden" is DISABLED and the screen says why', async () => {
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // ██ REWRITTEN 2026-09-05 · LZP-1009 SECOND PASS · it was GREEN BY A 40 ms RACE ██
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // WHAT IT SAID: 'with no sender bound, „Senden" is DISABLED and the screen says why', opening
+  // with `assert.equal(canSend(), false, 'a sender is bound in this run — the row cannot measure
+  // this')` and then reading the button on the next tick.
+  //
+  // `feedback/ui.js#openFeedback` now calls `bindSoloSender()` and DOES NOT AWAIT IT — the screen
+  // must open at the speed of a screen. In this shell the bind lands about 40 ms later, and this
+  // row read the button before it. It passed 20/20 on three runs, and it would have passed
+  // 20/20 on a machine where the button was live by the time a person could see it. **A row that
+  // is green because it is faster than the thing it measures is not measuring anything**, and
+  // this project has a name for the failure of a green row over a changed product.
+  //
+  // WHAT IS MEASURED NOW is the state the sentence is actually about, made DETERMINISTIC rather
+  // than raced: a build with NO RELAY ADDRESS. `relay.js#bindSoloSender` asks the bridge for
+  // `sync_status` and returns 'no-origin' without opening its door when nothing is pinned — so a
+  // bridge that answers nothing is exactly that build, and the wait below proves the binder ran
+  // and declined rather than proving the scheduler was slow.
+  const core = globalThis.window?.__TAURI__?.core;
+  const real = core && core.invoke;
+  let probed = false;
+  if (core) core.invoke = async (cmd, args) => {
+    if (cmd === 'sync_status') { probed = true; return { configured: false, originConfigured: false, origin: null, enabled: false }; }
+    return real(cmd, args);
+  };
   try {
-    assert.equal(canSend(), false, 'a sender is bound in this run — the row cannot measure this');
     const sheet = await toPreview('Kein Familienkreis hier.');
+    if (core) {
+      await waitFor(() => probed, { what: 'the solo binder to ask the shell' });
+      // …and having asked, it did NOT open its door: no origin, no `net.js`, no port.
+    }
+    assert.equal(canSend(), false,
+      'a sender was bound against a build with no relay address — `bindSoloSender` opened its '
+      + 'door on a `sync_status` that names no origin, which is the one case it must not');
     const send = $$('button', sheet).find((b) => b.textContent.trim() === c('de', 'send'));
     assert.equal(send.disabled, true, '„Senden" is enabled with nothing to send through');
     assert.includes(sheet.textContent, 'Dieser Mac kennt keine Gegenstelle',
       'the screen does not explain why sending is off');
-  } finally { unseed(); }
+    // The REASON moved with the product and the sentence had to move with it: it is no longer
+    // „you have no Familienkreis" (a solo Mac may send now) but „this build has no address".
+    assert.includes(sheet.textContent, 'In dieser Version ist keine Adresse hinterlegt',
+      'the screen still blames the Familienkreis for a missing relay address');
+  } finally {
+    if (core) core.invoke = real;
+    unseed();
+  }
+});
+
+test('with a relay configured, the solo binder makes „Senden" LIVE — and sends nothing', async () => {
+  // The other half of the row above, and the reversal PO decision 1 bought. Same screen, same
+  // absence of a Familienkreis, an origin pinned — and the button lives. Written as a separate
+  // row so that the two outcomes are two named rows rather than one row with a branch in it.
+  const core = globalThis.window?.__TAURI__?.core;
+  if (!core) return;                       // a browser has no bridge; §1a of e13 covers the shell
+  const real = core.invoke;
+  const seen = [];
+  core.invoke = async (cmd, args) => {
+    seen.push(cmd);
+    if (cmd === 'sync_status') {
+      return { configured: true, originConfigured: true, origin: 'https://relay.example.com', enabled: false };
+    }
+    return real(cmd, args);
+  };
+  try {
+    const sheet = await toPreview('Ich komme nicht mehr rein.');
+    await waitFor(() => canSend(), { what: 'the solo sender to be bound' });
+    // The button is read AFTER a rebuild, which is what `openFeedback` schedules on a successful
+    // bind. `waitFor` on the DOM rather than on a timer, for the reason the row above records.
+    const live = await waitFor(() => {
+      const s = $('.scrim:last-of-type .sheet');
+      const b = $$('button', s).find((x) => x.textContent.trim() === c('de', 'send'));
+      return b && !b.disabled ? b : null;
+    }, { what: '„Senden" to become pressable' });
+    assert.ok(live, '„Senden" never became pressable with an origin configured');
+    assert.equal(seen.filter((x) => x === 'sync_request').length, 0,
+      'the binder made a REQUEST. It binds a port; the one thing that sends is the click handler, '
+      + 'and nobody has clicked. `network-scope.test.js` §5b counts the same property in source.');
+    assert.ok(sheet, 'the preview vanished');
+  } finally {
+    core.invoke = real;
+    unseed();
+  }
 });
 
 test('with a sender bound, pressing „Senden" sends EXACTLY the previewed payload, once', async () => {

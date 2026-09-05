@@ -677,24 +677,37 @@ fn clear_staged_marker_if_applied(app: &AppHandle) {
 // So the shell **pins the origin; it does not accept one.** The web view may name a PATH. It may
 // not name a host, a scheme or a port. Then, in the order the checks run:
 //
-//   1. `sync_enabled` must be on — a shell pref defaulting to FALSE, ADR 003 §7 gate 3's switch.
-//   2. An origin must be configured, `https:` to a public DNS name: no IP literal of any kind
+//   1. An origin must be configured, `https:` to a public DNS name: no IP literal of any kind
 //      (a superset of "no private ranges"), no `.local`/`.lan`/`.internal`/`.home.arpa`, no
 //      single-label LAN name, no loopback — even if configuration named one.
-//   3. The URL must re-serialise, byte for byte, to `pinned + path + ?query`, with the path in
+//   2. The URL must re-serialise, byte for byte, to `pinned + path + ?query`, with the path in
 //      the narrow `/api/v1/…` shape `net.js`'s `PATH_RE` allows.
-//   4. GET or POST; headers off a four-name allowlist with printable-ASCII values; no Cookie,
-//      no Host, no header-injection newline.
-//   5. A 4 MiB request cap and an 8 MiB response cap, the latter enforced as the bytes arrive.
+//   3. GET or POST.
+//   4. `sync_enabled` must be on — a shell pref defaulting to FALSE, ADR 003 §7 gate 3's switch
+//      — **OR** the request must be the one pair `SYNC_SOLO_PATH` names: `POST` to
+//      `/api/v1/feedback`, exact path equality, no query. LZP-1009; the argument for why one
+//      carve-out widens nothing is written out on `sync_preflight`, and on `syncPreflight` in
+//      `shell-macos/main.swift`, in the same words.
+//   5. Headers off a four-name allowlist with printable-ASCII values; no Cookie, no Host, no
+//      header-injection newline. A 4 MiB request cap and an 8 MiB response cap, the latter
+//      enforced as the bytes arrive.
 //   6. No redirect followed (`redirect::Policy::none()`), and a 3xx is `blocked` rather than an
 //      answer — FINDING P-5: a signed request replayed at a destination the relay chose is the
 //      attack. The reply names the final URL so the page can check rather than trust.
 //   7. No cookie store, no proxy-supplied credentials, no cache.
 //
-// **Solo mode makes zero requests, and that is a property of the order**: steps 1 and 2 are pure
-// and local, and no HTTP client is constructed until step 7. With `sync_enabled` off — or no
-// origin configured, which is every build shipped so far — this refuses without a socket and
-// without a DNS lookup.
+// **Solo mode originates nothing, and that is still a property of the order**: steps 1 through 4
+// are pure and local, and no HTTP client is constructed until step 7. With `sync_enabled` off,
+// every request but the one in step 4 is refused without a socket and without a DNS lookup.
+//
+// ██ LZP-1009 · THE CLAIM THAT USED TO BE HERE ██
+//
+// This paragraph read "Solo mode makes zero requests". It is now false by design, so it is
+// replaced rather than softened — the PO amended story 21.5 on 2026-09-04, because the report
+// that matters most („ich kann nicht mitmachen") can only be written by someone who is solo.
+// What survives unweakened is the property a person cares about: **this Mac originates nothing
+// by itself.** The one request a solo Mac can make is one a person just pressed a button to
+// make; there is no timer, no retry and no poll behind it.
 //
 // ── WHERE THIS DELIBERATELY DIVERGES FROM THE SWIFT SHELL, AND WHY ───────────────────────────
 //
@@ -739,6 +752,13 @@ const SYNC_PREFS_FILE: &str = "sync.json";
 
 /// EVERY path this command may address — `net.js`'s `PATH_PREFIX`.
 const SYNC_PATH_PREFIX: &str = "/api/v1/";
+
+/// THE ONE ADDRESS A MAC WITH SYNC SWITCHED OFF MAY ADDRESS. LZP-1009, PO decision 2026-09-04/05.
+/// Byte-identical to `SYNC_SOLO_PATH` in `shell-macos/main.swift`.
+///
+/// **Exact equality, never a prefix.** `starts_with` would accept `/api/v1/feedbackx` and
+/// `/api/v1/feedback/anything`; `==` accepts one string. That distinction is the whole carve-out.
+const SYNC_SOLO_PATH: &str = "/api/v1/feedback";
 
 /// `net.js`'s `DEFAULT_TIMEOUT_MS`. ADR 003 §8.2 counts a timeout as a transport error; without
 /// one the backoff loop would simply stop.
@@ -978,6 +998,27 @@ fn sync_canonical_url(raw: &str, pinned: &str) -> Result<String, &'static str> {
     Ok(rebuilt)
 }
 
+/// Is this the ONE (method, path) pair a Mac with sync switched off may send? LZP-1009.
+///
+/// `canonical` is `sync_canonical_url`'s output, which has already been required to equal the
+/// page's string byte for byte, so `/api/v1/feedback/../ops`, `//api/v1/feedback`, a userinfo
+/// host and a trailing query were all refused before this was reached. What is left is whether
+/// the canonical path IS the one string — `==`, not `starts_with`.
+///
+/// `Url::path()` returns the PERCENT-ENCODED path and does not decode, which is the Rust
+/// spelling of the Swift shell's `percentEncodedPath`: a path arriving as `/api/v1/%66eedback`
+/// must not compare equal here. It cannot arrive (`sync_path_is_well_formed` has no `%` in its
+/// allowed set) and this function does not lean on that being true.
+fn sync_solo_send_is_allowed(canonical: &str, method: &str) -> bool {
+    if method != "POST" {
+        return false;
+    }
+    match reqwest::Url::parse(canonical) {
+        Ok(u) => u.query().is_none() && u.path() == SYNC_SOLO_PATH,
+        Err(_) => false,
+    }
+}
+
 /// Everything a `sync_request` is, decided before a socket exists.
 struct SyncPlan {
     url: String,
@@ -987,8 +1028,32 @@ struct SyncPlan {
 }
 
 /// The whole gate, in one pure function. Nothing here opens a socket, resolves a name or builds a
-/// client — that is what makes "solo mode makes zero requests" a property of the code rather than
-/// a promise about it, and it is why `sync_perform` is unreachable except through an `Ok` here.
+/// client — that is why `sync_perform` is unreachable except through an `Ok` here, and it is what
+/// makes "nothing leaves this Mac unless every check passed" a property of the code rather than a
+/// promise about it.
+///
+/// ██ LZP-1009 · THE SWITCH MOVED, AND EXACTLY ONE PAIR PASSES WHEN IT IS OFF ██
+///
+/// The `sync_enabled` check used to be step 1. It is now step 4, after the pin and after the
+/// canonical rebuild, and when it is off it refuses everything EXCEPT `POST` to `SYNC_SOLO_PATH`
+/// with no query. A deliberate amendment of ADR 003 §7 gate 2 and of
+/// `tests/tier1/network-scope.test.js` §2, taken by the PO on 2026-09-04.
+///
+/// **WHY THIS WIDENS NOTHING.** The SSRF surface is the set of (origin, path, method, headers,
+/// body) a page-side bug can cause a native socket to address. Call it `S_on` with the switch on
+/// and `S_off` with it off. After this change: same pinned origin (step 1 runs first for both);
+/// same canonical rebuild (step 2 runs before the switch is read); `S_off` paths ⊂ `S_on` paths
+/// (one exact string, already an allowed `/api/v1/…` path); `S_off` methods ⊂ `S_on` methods
+/// (`{POST}` ⊂ `{GET, POST}`); same four-name header allowlist, same printable-ASCII rule, same
+/// 4 MiB request cap, same 8 MiB response cap, same `redirect::Policy::none()`. And **no new
+/// argument**: the carve-out is decided from `url` and `method`, which the command already took.
+///
+/// So `S_off ⊊ S_on` and `S_on ∪ S_off = S_on`. The union — what an SSRF review measures — is
+/// unchanged; only which of two subsets a solo Mac gets has changed.
+///
+/// **And no new refusal name.** A `solo_send_only` case would read better and would cost the one
+/// property `tests/tier1/headless-shell.test.js` uses to hold this shell to the Swift one: that
+/// the two vocabularies are byte-identical. The distinction is tested behaviourally instead.
 fn sync_preflight(
     app: &AppHandle,
     url: &str,
@@ -996,18 +1061,21 @@ fn sync_preflight(
     headers: &std::collections::HashMap<String, String>,
     body: &str,
 ) -> Result<SyncPlan, &'static str> {
-    // 1 — the switch. ADR 003 §7 gate 3.
-    if !SyncPrefs::load(app).enabled {
-        return Err(sync_refusal::SYNC_DISABLED);
-    }
-    // 2 — the pin. Configuration, never a parameter: this command has no `origin` argument.
+    // 1 — the pin. Configuration, never a parameter: this command has no `origin` argument.
     let pinned = pinned_sync_origin()?;
-    // 3 — the address.
+    // 2 — the address.
     let canonical = sync_canonical_url(url, &pinned)?;
-    // 4 — the method.
+    // 3 — the method.
     let m = method.to_ascii_uppercase();
     if m != "GET" && m != "POST" {
         return Err(sync_refusal::BAD_METHOD);
+    }
+    // 4 — the switch, ADR 003 §7 gate 3, AS AMENDED. Read here rather than first so that the pin
+    // and the rebuild have already run: the one pair below is decided on a canonical URL, never
+    // on the string the page sent. Everything above this line is pure and local, so moving the
+    // switch down three steps costs no request — the refusal is still a local one.
+    if !SyncPrefs::load(app).enabled && !sync_solo_send_is_allowed(&canonical, &m) {
+        return Err(sync_refusal::SYNC_DISABLED);
     }
     // 5 — the body.
     if m == "GET" && !body.is_empty() {
@@ -1198,11 +1266,22 @@ fn sync_status(app: AppHandle) -> serde_json::Value {
                 "reason": serde_json::Value::Null,
             });
             if !prefs.enabled {
+                // ██ LZP-1009 · THIS SENTENCE USED TO SAY SOMETHING THAT IS NO LONGER TRUE ██
+                //
+                // It read: „Solange kein Familienkreis besteht, stellt dieser Mac keine einzige
+                // Netzwerkanfrage." `sync_preflight`'s step 4 now lets one pair through with the
+                // switch off, so that sentence became FALSE the moment the carve-out landed —
+                // and it lives here beside the rule rather than in the copy tables, which is
+                // exactly how a sentence like this survives a change to the thing it describes.
+                //
+                // Byte-identical to the Swift shell's, and it names the exception as a CONDITION
+                // ON A PRESS: nothing here happens by itself.
                 o["message"] = serde_json::json!({
-                    "de": "Sync ist ausgeschaltet. Solange kein Familienkreis besteht, stellt \
-                           dieser Mac keine einzige Netzwerkanfrage.",
-                    "en": "Sync is off. Until there is a Familienkreis, this Mac makes no network \
-                           request at all."
+                    "de": "Sync ist ausgeschaltet. Dieser Mac ruft nichts ab und sendet nichts — \
+                           mit einer einzigen Ausnahme: eine Rückmeldung, die Sie selbst \
+                           abschicken.",
+                    "en": "Sync is off. This Mac fetches nothing and sends nothing — with one \
+                           single exception: a report you send yourself."
                 });
             }
             o

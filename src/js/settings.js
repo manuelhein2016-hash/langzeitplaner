@@ -30,6 +30,11 @@ import { DENSITY, DENSITIES, densityOf } from './layout.js';
 // `tests/tier1/network-scope.test.js` §2 names ("one convenience `await import()` in
 // settings.js 'just to draw the section' … one door can be read; three cannot").
 import { buildHelpSection, initFeedback } from './feedback/ui.js';
+// LZP-1009 SECOND PASS — „Berichte", the other end of the pipe. Static for the same reason: the
+// module draws a screen and holds no transport (`feedback/relay.js` holds the only one in this
+// subsystem), so this edge costs a solo launch a few kilobytes of DOM code and gate 2 nothing.
+// The section itself is gated on a pref NOTHING in `src/js/` writes — see `feedback/admin.js`.
+import { buildReportsSection, refreshReportsChrome, resetReportsCache } from './feedback/admin.js';
 
 initFeedback({ screen: () => (settingsOpen() ? 'settings' : 'board') });
 
@@ -73,6 +78,12 @@ export function applySettingsToBody() {
   // today, to the pixel" checkable rather than merely claimed.
   document.body.classList.toggle('density-komfort', densityOf(s) === 'komfort');
   document.documentElement.lang = s.language || 'de';
+  // LZP-1009 second pass — the ⚙ dot for unopened reports. **This costs zero network requests**:
+  // it is `reportsKnown \ reportsSeen`, two local prefs, so it survives a relaunch without a
+  // poll. Reconciled from here because `main.js:61` already calls this function at boot and on
+  // every language change — the dot needs no caller of its own in the boot path, which is the
+  // difference between a quiet hint and a second automatic originator. See `feedback/admin.js`.
+  refreshReportsChrome();
 }
 
 // The open sheet's api, so a background event that changes what settings SHOWS
@@ -82,6 +93,12 @@ export function applySettingsToBody() {
 let openApi = null;
 
 export function openSettings() {
+  // LZP-1009 second pass · integration. A NEW open of Einstellungen asks the relay for the list
+  // once; every REBUILD of the open sheet — and there is one for every switch on it — redraws
+  // what that one answer returned. `feedback/admin.js` §3b carries the measurement and the loop
+  // it closes: without this, `noteReportsKnown` wrote a pref, the pref triggered a rebuild, and
+  // the rebuild asked again.
+  resetReportsCache();
   const api = openSheet({
     title: t('settings'),
     build: (body, a) => build(body, a),
@@ -432,6 +449,13 @@ function build(body, api) {
   // reaches for when something is wrong, in the one place she will look for them.
   buildHelpSection(body, api);
 
+  // ── LZP-1009 second pass · „Berichte" — the operator's end, on ONE Mac ──────────────────────
+  // Draws NOTHING unless `store.state.settings.reportsAdmin === true`, and nothing under
+  // `src/js/` ever writes that key: it is edited by hand, once, in `board.json`. So on every Mac
+  // but his this call returns before it appends a node, and there is no sequence of clicks that
+  // changes that. It sits after Hilfe because it is the same pipe read from the other end.
+  buildReportsSection(body, api);
+
   body.appendChild(el('p', 'hint', t('shortcutHint')));
   // LZP-106 — the unlock walkthrough, reachable forever and on every platform.
   // Under D1 (unsigned) this is the screen the PO points at over the phone, and
@@ -588,15 +612,30 @@ export function applyShellPref(cmd, value) {
 //     was" claim is now scoped to the ENTRY and the log is named.
 //
 // ── AND F5'S MISSING HALF: `server-metadata.md` §7 ────────────────────────────────────────────
-// §7 says of the five things a dump implies that a page written from the column tables *"would
+// §7 says of the things a dump implies that a page written from the column tables *"would
 // miss every one of them"* — and of the first, that *"the relay can tell which of the five of you
-// is in charge" is exactly the kind of sentence 21.3 exists to say out loud*. None of the five
-// was on this screen in either language. They are `infer1`…`infer5`, plus `inferIp` for §7's own
+// is in charge" is exactly the kind of sentence 21.3 exists to say out loud*. None of them
+// was on this screen in either language. They are `infer1`…`infer6`, plus `inferIp` for §7's own
 // closing point that the realistic re-identification path is the IP address and not the database.
 // Measured, not paraphrased: four admin tells (`Member.joinedAt`, `Invite.createdBy`,
 // `RATE_RULES.memberRemove` keyed `identity:'member'`, the transfer in the log); THREE
-// member-keyed rate rules and not one (`pairSession`, `memberRemove`, `epochRotate`); 24 route
+// member-keyed rate rules and not one (`pairSession`, `memberRemove`, `epochRotate`); 27 route
 // names; `Device.sigPubRaw` + `Member.recoveryPubSig`/`recoveryPubKex` as the cross-space joins.
+//
+// ── LZP-1009 SECOND PASS · 2026-09-05 · A SIXTH, AND FOUR SENTENCES THAT STOPPED BEING TRUE ───
+// The PO ruled that a SOLO Mac may send a report and that a report is now KEPT for 90 days. Four
+// paragraphs on this screen asserted the opposite and had to move, in one commit with the number:
+//   · `soloBody` said „Senden" is switched off without a Familienkreis. It is not, any more.
+//   · `retentionBody` said *„unbefristet. Es gibt keine automatische Löschung."* — a direct
+//     contradiction of `Report.expiresAt`. The unbounded claim is now SCOPED to the rows it is
+//     still true of, and the one exception carries the number.
+//   · `feedbackBody` described a report in transit and said nothing about it at rest. It is at
+//     rest for 90 days and now says so.
+//   · `infer4`'s route numeral, 24 → 27 (`reportsList`, `reportsGet`, `reportsDelete`).
+// And `infer6` is the genuinely new fact: a SIGNED report's `Report.devicePub` is byte-identical
+// to `Device.sigPubRaw`, so a retained report is joinable to a circle and one join names the
+// member, her circle and her household. Not defended against — the operator is the intended
+// reader — which is exactly why it is stated rather than mitigated.
 //
 // The register is the screen's own: no reassurance, no mitigation clause, no „aber keine Sorge".
 // Eight adversary rounds and zero bytes of a Privat entry are what buys the right to be exact
@@ -613,9 +652,10 @@ export const DATENSCHUTZ = Object.freeze({
       + 'Anmeldung, kein Konto, keine Statistik, keine Absturzmeldung und keinen Zähler — auch keinen '
       + 'anonymen. Von allein geschieht genau eines, und nur, wenn du vorher zugestimmt hast: die '
       + 'Update-Prüfung weiter unten. Sie fragt nach dem Programm und nie nach deinem Plan. Die '
-      + 'Rückmeldung unter „Hilfe" geht nur, wenn du sie auslöst — und sie braucht einen '
-      + 'Familienkreis: ohne einen gibt es keinen Server, an den etwas gehen könnte, „Senden" ist '
-      + 'abgeschaltet, und du kannst deinen Text nur kopieren oder als Datei sichern.',
+      + 'Rückmeldung unter „Hilfe" geht nur, wenn du sie auslöst — auch ohne Familienkreis: du '
+      + 'siehst vorher Wort für Wort, was verschickt wird, und nichts geht ohne diesen einen Druck '
+      + 'auf „Senden". Was dann bei der Vermittlungsstelle liegt und wie lange, steht weiter unten '
+      + 'unter „Wie lange das dort steht".',
 
     privatTitle: 'Was du auf „Privat" stellst, geht nie an die Familie.',
     privatBody: 'Nicht verschlüsselt, sondern gar nicht: für private Einträge gibt es keinen '
@@ -654,7 +694,7 @@ export const DATENSCHUTZ = Object.freeze({
 
     inferTitle: 'Was sich daraus zusammensetzen lässt',
     inferLead: 'Die beiden Listen oben sind einzelne Spalten, und einzeln sind sie harmlos. '
-      + 'Zusammengenommen ergeben sie fünf Dinge, die in keiner Spalte stehen und trotzdem '
+      + 'Zusammengenommen ergeben sie sechs Dinge, die in keiner Spalte stehen und trotzdem '
       + 'ablesbar sind. Wer die Vermittlungsstelle betreibt, kann sie ohne einen einzigen '
       + 'entschlüsselten Buchstaben herauslesen.',
     infer1: 'Wer den Familienkreis verwaltet. Es gibt keine Spalte dafür, und trotzdem steht es auf '
@@ -677,7 +717,7 @@ export const DATENSCHUTZ = Object.freeze({
       + 'Mitgliedschaft, die sie festhalten.',
     infer4: 'Welche Handlung es war, nicht nur dass eine stattfand. Im Anfrageprotokoll stehen die '
       + 'Handlung, der Familienkreis und das Gerät in einer Zeile; die Handlung ist eine von '
-      + 'vierundzwanzig festen Bezeichnungen, und vom Gerät zum Mitglied ist es ein Schritt. Das '
+      + 'siebenundzwanzig festen Bezeichnungen, und vom Gerät zum Mitglied ist es ein Schritt. Das '
       + 'Umbenennen ist das schärfste Beispiel: die Vermittlungsstelle speichert den neuen Namen '
       + 'nirgends, und im Protokoll steht trotzdem, dass ihr euren Familienkreis am 25. Juli '
       + 'umbenannt habt.',
@@ -688,16 +728,34 @@ export const DATENSCHUTZ = Object.freeze({
       + 'und dasselbe gilt für den Wiederherstellungsschlüssel eines Mitglieds. Selbst ohne beides '
       + 'genügen die Ankunftszeiten. Wer beide Kreise auf demselben Server betreibt, kann sie '
       + 'derselben Person zuordnen.',
+    // LZP-1009 SECOND PASS · 2026-09-05 · the SIXTH inference, and it is genuinely new.
+    // A signed report's `Report.devicePub` is the raw uncompressed P-256 point — BYTE-IDENTICAL
+    // to `Device.sigPubRaw`, which the relay already holds for every device in every circle. So a
+    // stored report is JOINABLE: one equality join names the member, her circle and her
+    // household. Nothing defends against this and nothing is meant to — the operator is the
+    // intended reader of the report — but it is exactly the kind of fact 21.3 exists to say out
+    // loud, and it did not exist before a report was kept. `docs/v2/server-metadata.md` §7.6.
+    infer6: 'Von wem eine Rückmeldung kam. Eine Rückmeldung aus einem Familienkreis wird '
+      + 'unterschrieben, und der öffentliche Schlüssel, der dabei mitgeht, ist derselbe, den die '
+      + 'Vermittlungsstelle für dein Gerät ohnehin gespeichert hat — Zeichen für Zeichen. Wer '
+      + 'beides sieht, muss nichts entschlüsseln und nichts raten: ein Vergleich verbindet die '
+      + 'Rückmeldung mit dem Gerät, das Gerät mit dem Mitglied und das Mitglied mit dem '
+      + 'Familienkreis. Das ist kein Fehler und wird nicht verhindert — wer die Vermittlungsstelle '
+      + 'betreibt, soll die Rückmeldung ja lesen und beantworten können. Ohne Familienkreis gibt es '
+      + 'keine Unterschrift und keinen Schlüssel: dann steht dort nur der Text, das Bild und der '
+      + 'Zeitpunkt. Nach 90 Tagen wird beides gelöscht.',
     inferIp: 'Und der Weg, der in der Praxis zählt, führt an alledem vorbei: eine Wohnung hat meist '
       + 'einen Anschluss, und ein Anschluss mit dem Tagesrhythmus einer fünfköpfigen Familie ist für '
       + 'jemanden, der auch die Unterlagen des Anbieters sehen kann, nicht anonym. Dass die '
       + 'Kennungen Zufallsnummern sind, stimmt — und es ist nicht die ganze Geschichte.',
 
     retentionTitle: 'Wie lange das dort steht',
-    retentionBody: 'Ehrlich: unbefristet. Es gibt keine automatische Löschung. Die Zeilen, mit denen '
+    retentionBody: 'Ehrlich: für fast alles unbefristet. Die Zeilen, mit denen '
       + 'Missbrauch gebremst wird, enthalten eine IP-Adresse und bleiben gespeichert, bis sie jemand '
       + 'von Hand löscht. Änderungen verschwinden erst, wenn ein Mitglied entfernt oder der '
-      + 'Familienkreis gelöscht wird. Vercel führt zusätzlich ein eigenes Anfrageprotokoll; dafür '
+      + 'Familienkreis gelöscht wird. Genau eine Ausnahme gibt es, und sie ist neu: eine '
+      + 'Rückmeldung wird gespeichert und nach 90 Tagen automatisch gelöscht — vorher, wenn sie '
+      + 'von Hand gelöscht wird. Vercel führt zusätzlich ein eigenes Anfrageprotokoll; dafür '
       + 'gelten Vercels Bedingungen und nicht unsere.',
 
     updateTitle: 'Die zweite Gegenstelle: die Update-Prüfung',
@@ -713,7 +771,9 @@ export const DATENSCHUTZ = Object.freeze({
     feedbackBody: 'Das ist der eine Unterschied, den du kennen solltest. Deine Einträge sind Ende-zu-Ende '
       + 'verschlüsselt — nur die Macs der Familie können sie öffnen. Eine Rückmeldung ist das nicht: sie '
       + 'ist unterwegs geschützt, aber am Ziel lesbar, und wer die Vermittlungsstelle betreibt, liest '
-      + 'sie. Deshalb steht vorher auf dem Bildschirm, was genau verschickt wird, deshalb ist das Bild '
+      + 'sie. Sie wird dort auch aufbewahrt: eine Rückmeldung wird gespeichert, damit sie gelesen '
+      + 'und beantwortet werden kann, und nach 90 Tagen automatisch gelöscht. Deshalb steht vorher '
+      + 'auf dem Bildschirm, was genau verschickt wird, deshalb ist das Bild '
       + 'ohne einen einzigen Buchstaben, und deshalb wird nichts gekürzt. Schreib in eine Rückmeldung '
       + 'nichts, was du in einen Eintrag schreiben würdest.',
 
@@ -750,9 +810,9 @@ export const DATENSCHUTZ = Object.freeze({
       + 'account, no statistics, no crash report and no counter — not even an anonymous one. Exactly '
       + 'one thing happens on its own, and only if you agreed to it beforehand: the update check '
       + 'further down. It asks about the program and never about your plan. The feedback screen under '
-      + '"Help" goes only when you trigger it — and it needs a Familienkreis: without one there is no '
-      + 'server anything could go to, "Send" is switched off, and all you can do is copy your text or '
-      + 'save it to a file.',
+      + '"Help" goes only when you trigger it — with or without a Familienkreis: you see word for '
+      + 'word beforehand what will be sent, and nothing goes without that one press on "Send". What '
+      + 'then sits at the relay, and for how long, is further down under "How long that stays there".',
 
     privatTitle: 'What you mark "Privat" never goes to the family.',
     privatBody: 'Not encrypted — not at all: private entries have no key any other member holds, and '
@@ -786,7 +846,7 @@ export const DATENSCHUTZ = Object.freeze({
 
     inferTitle: 'What can be put together from that',
     inferLead: 'The two lists above are single columns, and one at a time they are harmless. Taken '
-      + 'together they yield five things that stand in no column and can be read off anyway. '
+      + 'together they yield six things that stand in no column and can be read off anyway. '
       + 'Whoever operates the relay can read them out without a single decrypted letter.',
     infer1: 'Who administers the Familienkreis. There is no column for it, and it is there four ways '
       + 'regardless: whoever was there first created the circle — everybody else arrived through an '
@@ -805,7 +865,7 @@ export const DATENSCHUTZ = Object.freeze({
       + 'member did this". They are never deleted automatically — they outlive the counter they were '
       + 'created for, and the membership they record.',
     infer4: 'Which action it was, not merely that one happened. The request log holds the action, the '
-      + 'circle and the device in one line; the action is one of twenty-four fixed names, and from '
+      + 'circle and the device in one line; the action is one of twenty-seven fixed names, and from '
       + 'the device to the member is one step. Renaming is the sharpest example: the relay stores the '
       + 'new name nowhere, and the log still says that you renamed your Familienkreis on 25 July.',
     infer5: 'That two circles are the same person. Whoever is in two of them — your own family and '
@@ -814,15 +874,25 @@ export const DATENSCHUTZ = Object.freeze({
       + 'to check a signature at all, and the same holds for a member’s recovery key. Even without '
       + 'either, the arrival times are enough. Whoever runs both circles on one server can attach '
       + 'them to one person.',
+    infer6: 'Who a feedback report came from. A report sent from inside a Familienkreis is '
+      + 'signed, and the public key that travels with it is the very one the relay already stores '
+      + 'for your device — byte for byte. Anyone who sees both has nothing to decrypt and nothing '
+      + 'to guess: one comparison links the report to the device, the device to the member and the '
+      + 'member to the circle. This is not a bug and is not prevented — whoever operates the relay '
+      + 'is meant to be able to read the report and act on it. Without a Familienkreis there is no '
+      + 'signature and no key: then all that is there is the text, the image and the time. After 90 '
+      + 'days both are deleted.',
     inferIp: 'And the route that matters in practice goes past all of it: a home usually has one '
       + 'connection, and a connection with the daily rhythm of a household of five is not anonymous '
       + 'to anyone who can also see the provider’s records. That the ids are random numbers is true '
       + '— and it is not the whole story.',
 
     retentionTitle: 'How long that stays there',
-    retentionBody: 'Honestly: indefinitely. There is no automatic deletion. The rows used to throttle '
+    retentionBody: 'Honestly: for almost everything, indefinitely. The rows used to throttle '
       + 'abuse contain an IP address and stay stored until somebody deletes them by hand. Changes '
-      + 'disappear only when a member is removed or the Familienkreis is deleted. Vercel additionally '
+      + 'disappear only when a member is removed or the Familienkreis is deleted. There is exactly '
+      + 'one exception, and it is new: a feedback report is stored and deleted automatically after '
+      + '90 days — sooner, if it is deleted by hand. Vercel additionally '
       + 'keeps its own request log; Vercel’s terms apply to it, not ours.',
 
     updateTitle: 'The second counterpart: the update check',
@@ -836,7 +906,9 @@ export const DATENSCHUTZ = Object.freeze({
     feedbackTitle: 'A feedback report is not end-to-end encrypted.',
     feedbackBody: 'This is the one difference worth knowing. Your entries are end-to-end encrypted — '
       + 'only the family’s Macs can open them. A feedback report is not: it is protected in transit '
-      + 'but readable at the far end, and whoever operates the relay reads it. That is why the screen '
+      + 'but readable at the far end, and whoever operates the relay reads it. It is also kept there: '
+      + 'a report is stored so that it can be read and acted on, and deleted automatically after 90 '
+      + 'days. That is why the screen '
       + 'shows you beforehand exactly what will be sent, why the image carries not one letter, and why '
       + 'nothing is truncated. Do not write anything into a report that you would write into an entry.',
 
@@ -935,7 +1007,7 @@ export function buildDatenschutzSection(body) {
   inferLead.style.cssText = `${PROSE}margin-top:0`;
   inferLead.dataset.ds = 'inferLead';
   body.appendChild(inferLead);
-  for (const key of ['infer1', 'infer2', 'infer3', 'infer4', 'infer5', 'inferIp']) {
+  for (const key of ['infer1', 'infer2', 'infer3', 'infer4', 'infer5', 'infer6', 'inferIp']) {
     const p = el('p', 'hint', d[key]);
     p.style.cssText = `${PROSE}margin:6px 0 0`;
     p.dataset.ds = key;

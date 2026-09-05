@@ -205,11 +205,45 @@ test('the gate runs before the socket: no URLSession exists until every check ha
   assert.ok(cmd.indexOf('case .failure') < cmd.indexOf('syncPerform'),
     'the refusal branch must come before the performing one, so a reader cannot miss it');
 
-  // The switch is the FIRST thing the preflight asks. ADR 003 §7 gate 3.
-  const firstCheck = preflight.indexOf('SyncPrefs.load().enabled');
-  assert.notEqual(firstCheck, -1, 'syncPreflight does not consult the sync_enabled pref at all');
-  assert.ok(firstCheck < preflight.indexOf('pinnedSyncOrigin'),
-    'the enabled gate must run before anything else — it is the one story 21.5 names');
+  // ── INVERTED, LZP-1009, AND THE REASONING IS THE POINT ───────────────────────────────────
+  //
+  // This row required the OPPOSITE until 2026-09-05: `firstCheck < indexOf('pinnedSyncOrigin')`,
+  // on the message "the enabled gate must run before anything else — it is the one story 21.5
+  // names". It was a true statement about a design the PO has since changed, so it is inverted
+  // with its reasoning rather than deleted — a deleted row leaves no trace that the order was
+  // ever load-bearing, and the next person to "tidy" the preflight would put the switch back on
+  // top and silently re-break the solo send.
+  //
+  // WHY THE ORDER HAD TO FLIP. The carve-out is `POST` to exactly `/api/v1/feedback` with no
+  // query. Deciding that on the string the PAGE sent would be the parser-differential bug this
+  // whole file exists to prevent: `/api/v1/feedback/../ops`, `/api/v1/%66eedback`,
+  // `//api/v1/feedback` and `https://relay.test@evil.example/api/v1/feedback` all *look* like
+  // the carve-out to a naive comparison. `syncCanonicalURL` refuses every one of them. So the
+  // switch has to run AFTER the rebuild, or the exemption is decided on attacker-shaped input.
+  //
+  // WHY THAT COSTS NOTHING. Story 21.5's zero-request promise was never about which check is
+  // first — it is about no socket existing before every check has passed. `pinnedSyncOrigin`,
+  // `syncCanonicalURL` and the method check are pure string work against a compiled-in constant;
+  // they resolve no name and open nothing. The row below asserts that directly, and
+  // `tests/attack/e10-network-scope.test.js` §1f says it a second way.
+  const enabledAt = preflight.indexOf('SyncPrefs.load().enabled');
+  assert.notEqual(enabledAt, -1, 'syncPreflight does not consult the sync_enabled pref at all');
+  const pinAt = preflight.indexOf('pinnedSyncOrigin');
+  const rebuildAt = preflight.indexOf('syncCanonicalURL');
+  assert.notEqual(pinAt, -1, 'syncPreflight no longer pins the origin');
+  assert.notEqual(rebuildAt, -1, 'syncPreflight no longer rebuilds the URL canonically');
+  assert.ok(pinAt < enabledAt && rebuildAt < enabledAt,
+    'the sync_enabled gate has moved back above the pin or above the canonical rebuild (LZP-1009). '
+      + 'The solo carve-out is an exact-equality test on a path, and it must be applied to the '
+      + 'REBUILT URL — deciding it on the string the page sent makes `/api/v1/feedback/../ops` '
+      + 'and `/api/v1/%66eedback` look like the one address a solo Mac may use.');
+
+  // …and everything the switch now runs behind is still pure. This is what 21.5 actually
+  // promised, and it is the reason the reorder is free.
+  const beforeSwitch = preflight.slice(0, enabledAt);
+  assert.ok(!/URLSession|dataTask|resume\(\)|Data\(contentsOf/.test(beforeSwitch),
+    'something above the sync_enabled gate can now reach a network — the three checks that were '
+      + 'moved above it must stay pure string work against a compiled-in constant');
 });
 
 test('https only, and no loopback, link-local, private range or IP literal — even from config', () => {
@@ -359,13 +393,337 @@ test('gate 3 is the bridge command, not the navigation delegate — the ADR amen
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
+// LZP-1009 · A SOLO MAC MAY SEND ONE THING, AND THE CARVE-OUT MUST WIDEN NOTHING ELSE
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// The PO ruled on 2026-09-04 that a Mac with no Familienkreis may send a Rückmeldung. It had to
+// be ruled on, because the report that matters most — „ich kann nicht mitmachen" — can only be
+// written by someone who is solo, and until this pass `sync_request` refused it with everything
+// else. ADR 003 §7 gate 2 and `tests/tier1/network-scope.test.js` §2 are amended deliberately.
+//
+// WHAT MAKES THIS SAFE IS NOT THAT IT IS SMALL. It is that the sync-OFF surface is a strict
+// SUBSET of the sync-ON surface, so the union — which is what an SSRF review actually measures —
+// is unchanged. Same pinned origin, same canonical rebuild, `{POST}` ⊂ `{GET, POST}`, one path
+// out of a set that already allowed it, the same four-name header allowlist, the same caps, the
+// same redirect refusal, and no new argument to the command.
+//
+// The rows below hold the four ways that subset relation could quietly stop holding:
+//   · the path test becomes a PREFIX test (`/api/v1/feedback/../ops`, `/api/v1/feedbackx`);
+//   · the method stops being pinned to POST;
+//   · a query is allowed through;
+//   · the comparison moves onto the DECODED path (`/api/v1/%66eedback`) or onto the raw string
+//     the page sent, instead of the canonical rebuild.
+//
+// Every one is a change somebody could make while the whole tier-2 suite stayed green, because
+// the behavioural half needs a running shell and a relay (`scripts/shell-ssrf.mjs --only
+// carveout`, which is where "POST /feedback with sync off succeeds, POST /ops does not" lives).
+
+/** Whole-line `//` comments blanked, for an ARBITRARY source — `shellCode()` for a mutant. */
+const blankComments = (src) =>
+  src.split('\n').map((l) => (l.trim().startsWith('//') ? '' : l)).join('\n');
+
+/**
+ * Every way the solo carve-out is broken, as a list. Empty means the gate is the one the PO
+ * ruled on. It takes a whole `main.swift` SOURCE rather than reading the file, so the mutants
+ * below are RUN rather than reasoned about — the failure mode this shape exists for is a
+ * predicate that has silently stopped matching, which is what green looked like when it worked.
+ */
+function soloCarveOutFaults(src) {
+  const code = blankComments(src);
+  const faults = [];
+
+  const c = code.match(/let SYNC_SOLO_PATH = "([^"]*)"/);
+  if (!c) return ['there is no SYNC_SOLO_PATH constant at all'];
+  if (c[1] !== '/api/v1/feedback') faults.push(`SYNC_SOLO_PATH is ${JSON.stringify(c[1])}`);
+
+  let gate;
+  try {
+    gate = swiftFunc('syncSoloSendIsAllowed', code);
+  } catch {
+    return [...faults, 'there is no syncSoloSendIsAllowed — the carve-out is inline or gone'];
+  }
+  if (!/method == "POST"/.test(gate)) faults.push('the carve-out does not pin the method to POST');
+  if (!/percentEncodedPath == SYNC_SOLO_PATH/.test(gate)) {
+    faults.push('the path is not compared for EXACT EQUALITY against SYNC_SOLO_PATH');
+  }
+  if (/hasPrefix|hasSuffix|\.contains\(/.test(gate)) {
+    faults.push('the path comparison is a prefix, suffix or substring test — `/api/v1/feedbackx` '
+      + 'and `/api/v1/feedback/../ops` are not the one address a solo Mac may use');
+  }
+  if (!/percentEncodedQuery == nil/.test(gate)) faults.push('a query string is not refused');
+  if (/\.path\b|\.query\b/.test(gate)) {
+    faults.push('the DECODING accessors url.path / url.query are used — `/api/v1/%66eedback` '
+      + 'decodes to the carve-out path');
+  }
+
+  let pre;
+  try {
+    pre = swiftFunc('syncPreflight', code);
+  } catch {
+    return [...faults, 'there is no syncPreflight'];
+  }
+  const enabledAt = pre.indexOf('SyncPrefs.load().enabled');
+  const pinAt = pre.indexOf('pinnedSyncOrigin');
+  const rebuildAt = pre.indexOf('syncCanonicalURL');
+  const gateAt = pre.indexOf('syncSoloSendIsAllowed');
+  if (enabledAt === -1) faults.push('syncPreflight no longer reads the sync_enabled pref');
+  if (gateAt === -1) faults.push('syncPreflight never consults the carve-out — a solo Mac is '
+    + 'refused again, or worse, nothing is gated at all');
+  if (enabledAt !== -1 && pinAt !== -1 && enabledAt < pinAt) {
+    faults.push('the switch runs before the pin');
+  }
+  if (enabledAt !== -1 && rebuildAt !== -1 && enabledAt < rebuildAt) {
+    faults.push('the switch runs before the canonical rebuild, so the exemption is decided on '
+      + 'the string the PAGE sent');
+  }
+  if (enabledAt !== -1 && !/!\s*SyncPrefs\.load\(\)\.enabled\s*&&\s*!\s*syncSoloSendIsAllowed/.test(pre)) {
+    faults.push('the switch and the carve-out are no longer one conjunction — a solo Mac is '
+      + 'either refused everything or gated by nothing');
+  }
+  return faults;
+}
+
+test('LZP-1009 · the solo carve-out is ONE method and ONE exact path, on the canonical URL', () => {
+  assert.deepEqual(soloCarveOutFaults(shellSource()), [],
+    'the one pair a Mac with sync off may send is no longer the pair the PO ruled on');
+
+  // The subset argument, from the other side: the carve-out adds NO new address to the set the
+  // shell can reach. `/api/v1/feedback` is an ordinary `/api/v1/…` path, so a family Mac could
+  // already POST to it; what changed is only which of two subsets a solo Mac gets.
+  const code = shellCode();
+  const prefix = code.match(/let SYNC_PATH_PREFIX = "([^"]*)"/);
+  const solo = code.match(/let SYNC_SOLO_PATH = "([^"]*)"/);
+  assert.ok(prefix && solo, 'one of the two path constants is gone');
+  assert.ok(solo[1].startsWith(prefix[1]),
+    `SYNC_SOLO_PATH ${JSON.stringify(solo[1])} is outside SYNC_PATH_PREFIX `
+      + `${JSON.stringify(prefix[1])} — the carve-out would reach an address sync mode cannot`);
+});
+
+test('LZP-1009 · the carve-out adds no argument, no header, no method and no refusal name', () => {
+  // FOUR ways a "small" carve-out becomes a real widening, each checked where it would show.
+  const code = shellCode();
+  const pre = swiftFunc('syncPreflight', code);
+
+  // 1 · no new `args` key. The row at the top of this file pins the set; this states WHY it
+  //     matters here — an `args["solo"]` or an `args["path"]` would hand the page a second dial.
+  const argKeys = [...new Set([...pre.matchAll(/args\[\s*"([^"]+)"\s*\]/g)].map((m) => m[1]))].sort();
+  assert.deepEqual(argKeys, ['body', 'headers', 'method', 'url'],
+    'the solo carve-out grew an argument — it must be decided from `url` and `method`, which the '
+      + 'sync_request contract already had');
+
+  // 2 · the method set is unchanged: still exactly GET and POST, and the carve-out's is a subset.
+  const methods = [...new Set([...pre.matchAll(/method == "([A-Z]+)"/g)].map((m) => m[1]))].sort();
+  assert.deepEqual(methods, ['GET', 'POST'], `syncPreflight now names methods ${methods}`);
+  const soloMethods = [...new Set(
+    [...swiftFunc('syncSoloSendIsAllowed', code).matchAll(/method == "([A-Z]+)"/g)].map((m) => m[1]),
+  )];
+  assert.deepEqual(soloMethods, ['POST'], 'the solo carve-out is not pinned to POST alone');
+
+  // 3 · the header allowlist is untouched — four names, and the carve-out does not add a fifth.
+  const at = code.indexOf('let SYNC_HEADER_ALLOWLIST');
+  const decl = code.slice(at, code.indexOf(']', at) + 1);
+  const names = [...decl.matchAll(/"([a-z0-9-]+)"/g)].map((m) => m[1]).sort();
+  assert.deepEqual(names, ['authorization', 'content-type', 'x-lzp-client', 'x-lzp-protocol'],
+    'the header allowlist changed alongside the carve-out — the surfaces must differ in the ONE '
+      + 'dimension the PO ruled on and in no other');
+
+  // 4 · NO NEW REFUSAL NAME, and this is a deliberate cost. A `solo_send_only` case would read
+  //     better at the call site and would break the one property that holds the Rust shell to
+  //     this one: that the two vocabularies are byte-identical, checked by the row further down.
+  //     Keeping the vocabulary frozen is worth more than the legibility, so the distinction is
+  //     tested BEHAVIOURALLY instead — `scripts/shell-ssrf.mjs --only carveout`.
+  const swift = swiftRefusalNames();
+  const rust = rustRefusalNames();
+  assert.deepEqual(rust, swift, 'the two shells no longer refuse in the same words');
+  assert.equal(swift.length, 17,
+    `the refusal vocabulary is now ${swift.length} names, not 17 — LZP-1009 must add none`);
+  for (const n of swift) {
+    assert.ok(!/solo|feedback|report|carve/.test(n),
+      `\`${n}\` names the carve-out. A page could then branch on being solo, and the two shells `
+        + 'would have to grow the name together or drift');
+  }
+});
+
+test('LZP-1009 · ARMED — six mutants of the carve-out, each naming the row that kills it', () => {
+  // THE MUTANTS, RUN RATHER THAN REASONED. Without this row the two above are green the day
+  // `swiftFunc` stops finding the function or a regex stops matching the real shape of the file.
+  const src = shellSource();
+
+  // The honest-path control FIRST: the shipped source, unmutated, has nothing wrong with it.
+  assert.deepEqual(soloCarveOutFaults(src), [], 'the control is not clean — the rest proves nothing');
+
+  const MUTANTS = [
+    ['M-prefix    ', (s) => s.replace('c.percentEncodedPath == SYNC_SOLO_PATH',
+      'c.percentEncodedPath.hasPrefix(SYNC_SOLO_PATH)'), /prefix, suffix or substring/],
+    ['M-anymethod ', (s) => s.replace('guard method == "POST" else { return false }',
+      'guard !method.isEmpty else { return false }'), /pin the method to POST/],
+    ['M-query     ', (s) => s.replace('guard c.percentEncodedQuery == nil else { return false }',
+      'guard true else { return false }'), /query string is not refused/],
+    ['M-decoded   ', (s) => s.replace('c.percentEncodedPath == SYNC_SOLO_PATH',
+      'url.path == SYNC_SOLO_PATH'), /DECODING accessors/],
+    ['M-switchfirst', (s) => s.replace(
+      'func syncPreflight(_ args: [String: Any]) -> Result<SyncPlan, SyncRefusal> {',
+      'func syncPreflight(_ args: [String: Any]) -> Result<SyncPlan, SyncRefusal> {\n'
+        + '    guard SyncPrefs.load().enabled else { return .failure(.syncDisabled) }'),
+      /switch runs before the pin/],
+    // The switch is still read, so a reviewer skimming for `SyncPrefs.load().enabled` sees it —
+    // and it now refuses nothing at all. This is the mutant that looks most like working code.
+    ['M-wideopen  ', (s) => s.replace(
+      '&& !syncSoloSendIsAllowed(url, method: method)', '&& false'), /no longer one conjunction/],
+  ];
+
+  for (const [name, mutate, expected] of MUTANTS) {
+    const mutated = mutate(src);
+    assert.notEqual(mutated, src, `${name}: the mutation did not apply — the source moved`);
+    const faults = soloCarveOutFaults(mutated);
+    assert.ok(faults.length > 0, `${name}: SURVIVED — the rows above do not see it`);
+    assert.ok(faults.some((f) => expected.test(f)),
+      `${name}: died, but of the wrong thing: ${JSON.stringify(faults)}`);
+  }
+});
+
+/** Swift `"a" + "b"` and Rust `"a \<newline> b"` both normalised to one string. */
+function joinLiterals(text) {
+  return [...text.matchAll(/"((?:[^"\\]|\\[\s\S])*)"/g)]
+    .map((m) => m[1])
+    .join('')
+    .replace(/\\\s*\n\s*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** The `de` / `en` sentence a shell shows when the switch is OFF and an origin IS pinned. */
+function syncOffSentences(src) {
+  const at = src.indexOf('if !prefs.enabled');
+  assert.notEqual(at, -1, 'this shell has no sync-off branch in sync_status');
+  const region = src.slice(at, at + 2000);
+  const one = (lang) => {
+    const i = region.indexOf(`"${lang}":`);
+    assert.notEqual(i, -1, `the sync-off message has no ${lang}`);
+    const out = [];
+    for (const line of region.slice(i + lang.length + 3).split('\n')) {
+      const t = line.trim();
+      if (out.length && (t.startsWith(']') || t.startsWith('}') || /^"[a-z]{2}":/.test(t))) break;
+      out.push(line);
+    }
+    return joinLiterals(out.join('\n'));
+  };
+  return { de: one('de'), en: one('en'), deFirst: region.indexOf('"de":') < region.indexOf('"en":') };
+}
+
+test('LZP-1009 · the sentence a solo Mac is shown names the exception, in both shells', () => {
+  // ── THE ROW THAT IS EASY TO MISS, WHICH IS WHY IT IS A ROW ───────────────────────────────
+  //
+  // The sync-off sentence read „Solange kein Familienkreis besteht, stellt dieser Mac keine
+  // einzige Netzwerkanfrage." The carve-out made it FALSE. It is in Swift and in Rust, beside
+  // the rule it explains — deliberately, so the rule and its sentence cannot drift — which also
+  // means it is NOT in the copy tables and NOT on the Datenschutz screen, and no test that reads
+  // those would have caught it.
+  for (const [shell, src] of [['main.swift', shellSource()], ['lib.rs', rustSource()]]) {
+    assert.equal(/keine einzige Netzwerkanfrage/.test(src), false,
+      `${shell} still claims a solo Mac makes not one network request. It makes exactly one, `
+        + 'when a person presses „Senden" — LZP-1009 amended story 21.5 and this sentence has to '
+        + 'say so.');
+    assert.equal(/makes no network request at all/.test(src), false,
+      `${shell}: the English half of the same claim`);
+  }
+
+  const swift = syncOffSentences(shellSource());
+  const rust = syncOffSentences(rustSource());
+
+  // German first, in both shells — the product rule, checked where the string is built.
+  assert.ok(swift.deFirst && rust.deFirst, 'the English sentence is written before the German');
+
+  for (const [shell, s] of [['main.swift', swift], ['lib.rs', rust]]) {
+    assert.match(s.de, /Ausnahme/,
+      `${shell}: the German sentence does not name the exception at all`);
+    assert.match(s.de, /Rückmeldung/,
+      `${shell}: the German sentence does not say WHAT the exception is`);
+    assert.match(s.de, /selbst/,
+      `${shell}: the German sentence does not say the person sends it HERSELF — the half of `
+        + 'story 21.5 that survives is "this Mac originates nothing by itself", and a sentence '
+        + 'that leaves it out reads as if the app sends things on its own');
+    assert.match(s.en, /exception/, `${shell}: the English sentence does not name the exception`);
+    assert.match(s.en, /you send yourself/, `${shell}: the English sentence drops the press`);
+    assert.equal(/fehler|error/i.test(s.de + s.en), false,
+      `${shell}: nothing has gone wrong in solo mode — this is not an error message`);
+  }
+
+  // And the two shells say the SAME thing. A person on his Mac and a person on hers are told
+  // the same sentence about the same rule, or one of the two shells is describing the other.
+  assert.equal(swift.de, rust.de, `the German sentence differs:\n  swift: ${swift.de}\n  rust:  ${rust.de}`);
+  assert.equal(swift.en, rust.en, `the English sentence differs:\n  swift: ${swift.en}\n  rust:  ${rust.en}`);
+});
+
+test('LZP-1009 · ARMED — the old sentence, restored, is caught in either shell', () => {
+  // The control and the mutant for the row above, because that row is a `false` assertion on a
+  // regex and those rot silently.
+  const OLD = 'Sync ist ausgeschaltet. Solange kein Familienkreis besteht, stellt dieser Mac '
+    + 'keine einzige Netzwerkanfrage.';
+  assert.equal(/keine einzige Netzwerkanfrage/.test(shellSource() + rustSource()), false,
+    'the control: neither shell carries the old claim today');
+  assert.equal(/keine einzige Netzwerkanfrage/.test(OLD), true,
+    'the matcher no longer recognises the sentence it was written to forbid');
+});
+
+test('LZP-1009 · the Rust half mirrors the carve-out rule for rule, and adds nothing of its own', () => {
+  // The Rust shell is now COMPILED — `cargo check --manifest-path src-tauri/Cargo.toml` passes on
+  // this machine (measured 2026-09-05, and CI's `shell-rust` job on macos-14 says it too), which
+  // retires PLAN.md risk R8's "there is no cargo on this machine". A compiler still cannot see a
+  // rule that is missing, so these rows stay.
+  const rust = rustSource();
+  assert.match(rust, /const SYNC_SOLO_PATH: &str = "\/api\/v1\/feedback";/,
+    'the Rust shell has no solo path constant, or it names a different address than the Swift '
+      + 'one — a Rückmeldung would send on one shell and be refused on the other');
+  const swiftPath = shellSource().match(/let SYNC_SOLO_PATH = "([^"]*)"/);
+  const rustPath = rust.match(/const SYNC_SOLO_PATH: &str = "([^"]*)"/);
+  assert.ok(swiftPath && rustPath);
+  assert.equal(rustPath[1], swiftPath[1], 'the two shells carve out DIFFERENT paths');
+
+  assert.match(rust, /fn sync_solo_send_is_allowed/, 'the Rust carve-out is inline or absent');
+  const i = rust.indexOf('fn sync_solo_send_is_allowed');
+  const fn = rust.slice(i, rust.indexOf('\n}', i));
+  assert.match(fn, /method != "POST"/, 'the Rust carve-out does not pin the method to POST');
+  assert.match(fn, /u\.path\(\) == SYNC_SOLO_PATH/,
+    'the Rust carve-out does not compare the path for exact equality — `Url::path()` returns the '
+      + 'percent-encoded path and does not decode, which is why it is the right accessor here');
+  assert.match(fn, /u\.query\(\)\.is_none\(\)/, 'the Rust carve-out lets a query through');
+  assert.equal(/starts_with|contains|ends_with/.test(fn), false,
+    'the Rust path comparison is a prefix or substring test');
+
+  // …and the order, the same inversion as the Swift row above.
+  const j = rust.indexOf('fn sync_preflight(');
+  const pre = rust.slice(j, rust.indexOf('\nfn ', j + 10));
+  const enabledAt = pre.indexOf('SyncPrefs::load(app).enabled');
+  const pinAt = pre.indexOf('pinned_sync_origin');
+  const rebuildAt = pre.indexOf('sync_canonical_url');
+  assert.ok(enabledAt > 0 && pinAt > 0 && rebuildAt > 0, 'one of the three checks is gone');
+  assert.ok(pinAt < enabledAt && rebuildAt < enabledAt,
+    'the Rust switch has moved back above the pin or the rebuild — the two shells would then '
+      + 'disagree about which URL the exemption is decided on');
+  assert.match(pre, /!SyncPrefs::load\(app\)\.enabled && !sync_solo_send_is_allowed/,
+    'the Rust switch and carve-out are no longer one conjunction');
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
 // LZP-1002 · ONE CONTRACT, TWO SHELLS — held by a row rather than by hand
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
 // `sync_request` is published once (`src/js/platform/net.js` §6) and implemented twice. The
-// Swift half is verified end to end in the shipped `.app` (`docs/v2/SHELL-VERIFICATION.md`); the
-// Rust half **has never been compiled** — there is no `cargo` on this machine (PLAN.md risk R8)
-// — so nothing but source-level rows can hold it to the contract at all.
+// Swift half is verified end to end in the shipped `.app` (`docs/v2/SHELL-VERIFICATION.md`).
+//
+// ── AMENDED 2026-09-05 (LZP-1009): THE RUST HALF NOW COMPILES ───────────────────────────────
+//
+// This paragraph said the Rust half "has never been compiled — there is no `cargo` on this
+// machine (PLAN.md risk R8)". Measured today: `cargo` is at `~/.cargo/bin/cargo`, and
+// `cargo check --manifest-path src-tauri/Cargo.toml` finishes clean — as does CI's `shell-rust`
+// job on macos-14, which has been green since the first push. R8 is retired.
+//
+// **The rows below do not get smaller for it.** A compiler cannot see a rule that is missing:
+// a Rust shell with no header allowlist, no canonical rebuild and no solo carve-out compiles
+// perfectly and is quietly more permissive than the shell the demonstration ran against. The
+// refusal VOCABULARY is still the right thing to hold, because it is the one thing a test cannot
+// use to tell the two shells apart.
 //
 // The refusal VOCABULARY is the right thing to hold, because it is the one thing a test cannot
 // use to tell the two shells apart. If Swift grows a rule Rust does not have, a build on the

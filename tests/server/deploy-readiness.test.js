@@ -194,7 +194,15 @@ test('§2 an EMPTY migrations directory fails too — the old check would have b
   try {
     // The cheapest possible "fix" for the row above, and it creates exactly as many tables as no
     // directory at all. A check that a `mkdir` can satisfy has taught the operator the wrong move.
-    rm(dir, `${MIGRATIONS}/20260903092140_init`);
+    // ⚠ 2026-09-05 · LZP-1009 second pass. This line used to name the ONE migration directory
+    // by hand (`rm(dir, `${MIGRATIONS}/20260903092140_init`)`). `20260905101500_report` arrived
+    // and the directory stopped being empty, so M2 passed and M5/M7 failed instead — the test
+    // still went red, but over the wrong rows and with a message that pointed at the wrong fix.
+    // A row that hard-codes the contents of the thing it is emptying is a row that breaks on the
+    // next migration, every time. It now empties whatever is there.
+    for (const d of fs.readdirSync(path.join(dir, MIGRATIONS))) {
+      if (fs.statSync(path.join(dir, MIGRATIONS, d)).isDirectory()) rm(dir, `${MIGRATIONS}/${d}`);
+    }
     const r = runCheck(dir);
     assert.ok(r.failed.includes('M2'), `M2 must FAIL on an empty migrations directory. Failed: ${r.failed.join(', ') || 'NONE'}`);
     assert.equal(r.exit, 1);

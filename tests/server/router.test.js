@@ -21,13 +21,45 @@ const req = (method, path, extra) => ({ method, path, query: {}, headers: {}, bo
 // ── the table ────────────────────────────────────────────────────────────────
 
 test('the route table is exactly ADR 003 §3, with unique names and no duplicate (method, path)', () => {
-  // 23 from ADR 003 §3, plus ONE that is not a sync endpoint at all: `POST /feedback`
-  // (LZP-1009). It is counted separately in the message rather than folded into the number,
-  // because "ADR 003 §3 lists 23" is still the true sentence about the ADR and this row is the
-  // place a reader learns that the shipped surface is 23 + 1.
-  assert.equal(ROUTES.length, 24, 'ADR 003 §3 lists 23 endpoints, plus LZP-1009 POST /feedback');
-  assert.equal(ROUTES.filter((r) => r.pattern.startsWith('/feedback')).length, 1,
-    'the feedback surface is exactly one route; a second one would be the read-back it must not have');
+  // 23 from ADR 003 §3, plus FOUR that are not sync endpoints at all (LZP-1009). Counted
+  // separately in the message rather than folded into the number, because "ADR 003 §3 lists 23"
+  // is still the true sentence about the ADR and this row is where a reader learns the shipped
+  // surface is 23 + 4.
+  assert.equal(ROUTES.length, 27, 'ADR 003 §3 lists 23 endpoints, plus LZP-1009\'s four');
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // INVERTED 2026-09-05, WITH ITS REASONING, RATHER THAN DELETED.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // This row used to read:
+  //
+  //     assert.equal(ROUTES.filter((r) => r.pattern.startsWith('/feedback')).length, 1,
+  //       'the feedback surface is exactly one route; a second one would be the read-back it
+  //        must not have');
+  //
+  // The PO reversed the write-only rule (`router.js`'s own comment carries the three grounds).
+  // What the old row protected — nobody can enumerate other people's complaints — is now held by
+  // a P-256 verify in `handlers/reports.js` instead of by the absence of a row, so the assertion
+  // is INVERTED rather than dropped: the surface is exactly FOUR routes, exactly ONE of them is
+  // the unauthenticated write, and the other three are named. A fifth row, or an unauthenticated
+  // fourth, still reddens this test.
+  const feedbackRows = ROUTES.filter((r) => r.pattern.startsWith('/feedback'));
+  assert.equal(feedbackRows.length, 4,
+    'the feedback surface is one write plus the operator\'s three; a fifth row is a new decision');
+  assert.deepEqual(feedbackRows.map((r) => `${r.method} ${r.pattern}`).sort(), [
+    'GET /feedback',
+    'GET /feedback/:id',
+    'POST /feedback',
+    'POST /feedback/:id/delete',
+  ]);
+  assert.equal(feedbackRows.filter((r) => r.name === 'feedback').length, 1,
+    'the ANONYMOUS write path is still exactly one route — that half of the old rule stands');
+  // and none of the four names a space, which is what keeps "a report can never appear on the
+  // family's board" structural rather than careful.
+  for (const r of feedbackRows) {
+    assert.equal(r.spaceParam, undefined, `${r.name} carries a spaceParam`);
+    assert.equal(r.name in SPACE_SCOPED, false, `${r.name} is space-scoped`);
+  }
   assert.equal(new Set(ROUTE_NAMES).size, ROUTE_NAMES.length, 'duplicate handler names');
   const pairs = ROUTES.map((r) => `${r.method} ${r.pattern}`);
   assert.equal(new Set(pairs).size, pairs.length, 'two routes claim the same method and path');
@@ -48,11 +80,19 @@ test('every space-scoped route names where its space id comes from', () => {
   const unscoped = ROUTE_NAMES.filter((n) => !(n in SPACE_SCOPED));
   assert.deepEqual(unscoped.sort(), [
     'adoptDevice', 'createSpace',
+    // LZP-1009 second pass. `deleteReport` and `getReport` carry a `:id` in their PATH and are
+    // still not space-scoped, which is the one entry in this list a reviewer should stop at: the
+    // id is a REPORT id, and a `Report` has no `spaceId` and no relation to `Space` at all. There
+    // is no membership to check because there is no space to check it against — the same reason
+    // `feedback` is here, seen from the read side.
+    'deleteReport',
     // LZP-1009. Unscoped because it names NO space — not because its space check was forgotten,
     // which is the reading this list exists to make impossible. `handlers/feedback.js` is handed
     // no space id and has no way to obtain one, and that is what makes "a report can never reach
     // the family's board" a structural fact rather than a careful omission.
     'feedback',
+    'getReport',
+    'listReports',
     'meta', 'pairAnswer', 'pairDeliver', 'pairGet', 'pairOffer',
     'redeemInvite', 'registerDevice', 'revokeDevice',
   ], 'a route left out of SPACE_SCOPED skips the membership check — this list is the review surface');

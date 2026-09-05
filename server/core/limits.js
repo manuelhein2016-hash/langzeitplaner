@@ -96,6 +96,9 @@ export const LIMITS = Object.freeze({
   feedbackPerIpHour: 5,
   bytesPerFeedback: 262144,
   charsPerFeedbackText: 4000,
+  // ── LZP-1009 second pass — the operator's read surface (E10-L4, E10-L5) ────
+  reportsReadPerIpHour: 120,
+  reportsDeletePerIpHour: 60,
 });
 
 /**
@@ -325,6 +328,60 @@ export const LIMIT_EXTENSIONS = Object.freeze([
       'number the client showed her. Four thousand characters is about two pages; a bug report ' +
       'longer than that is a conversation, and this endpoint deliberately has no reply channel ' +
       'for one (Principle 10 — the board is not a messenger, and neither is this).',
+  }),
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // LZP-1009 SECOND PASS — the operator's read surface, budgeted on the commit that adds it.
+  //
+  // The rule this table has now applied four times: a new route arrives WITH a number, never
+  // with a `why` somebody promises to replace. These two are unauthenticated at the moment the
+  // budget is spent — `handlers/reports.js#requireOperator` charges before it looks at the
+  // credential — so they are exposed exactly the way `feedbackReport` is, and are metered the
+  // same way for the same reason.
+  // ───────────────────────────────────────────────────────────────────────────
+  Object.freeze({
+    tag: 'E10-L4',
+    name: 'reportsReadPerIpHour',
+    value: 120,
+    adr: 'neither ADR — a rate invented by the LZP-1009 second pass and recorded here',
+    reason:
+      'THE BUDGET IS SPENT BEFORE THE P-256 VERIFY, WHICH IS WHY IT EXISTS. `GET /feedback` and ' +
+      '`GET /feedback/:id` cost one signature verification each to REFUSE, so an unmetered pair ' +
+      'of read routes is an amplifier a stranger can point at a free-tier function with no ' +
+      'credential at all. `handlers/reports.js` charges this rule as its FIRST statement, above ' +
+      'the 404-if-unconfigured gate and far above the verify, and `tests/server/reports.test.js` ' +
+      '§5c asserts the ordering by driving a relay with NO operator configured and watching the ' +
+      'budget run out before the 404s do. ' +
+      'WHY ONE HUNDRED AND TWENTY, AND WHY PER IP PER HOUR. There is exactly one honest caller ' +
+      'in the world and his screen makes one list request plus one `getReport` per report whose ' +
+      'picture he opens, so a full open of a screen holding twenty reports is at most 21 ' +
+      'requests; 120 is five such opens an hour and cannot bind him. Keyed on the IP because ' +
+      'before the verify there IS no other identity, and after the verify the identity is a set ' +
+      'of one, which is not a bucket — the same argument `feedbackReport` makes, restated on a ' +
+      'route whose caller happens to be known. ' +
+      'WHAT IT DOES NOT DO: it does not bound the OPERATOR, who could delete a household\'s ' +
+      'reports as fast as he can press the button either way, and it is not a defence against ' +
+      'the platform (ADMIN_PROVES_NOT clause 1). It bounds the cost of refusing strangers.',
+  }),
+  Object.freeze({
+    tag: 'E10-L5',
+    name: 'reportsDeletePerIpHour',
+    value: 60,
+    adr: 'neither ADR — a rate invented by the LZP-1009 second pass and recorded here',
+    reason:
+      'A SEPARATE BUCKET FROM THE READ, so a flood of unauthenticated reads cannot spend the ' +
+      'budget the one honest caller needs to CLEAR a report. That asymmetry is the whole reason ' +
+      'this is a second rule rather than a second call site of the first: the two routes have ' +
+      'the same pre-auth exposure but very different consequences when they are denied — a ' +
+      'refused read is a screen he reloads, a refused delete is a report he cannot get rid of, ' +
+      'and 90-day auto-expiry means the second failure has a floor measured in months. ' +
+      'WHY SIXTY. Deletion is one press per report and the arrival rate is already bounded at ' +
+      'feedbackPerIpHour = 5 per household per hour, so sixty deletions in an hour is far above ' +
+      'anything the inbox can accumulate between two visits and far below a rate at which a ' +
+      'leaked credential could quietly empty the table faster than the operator notices. ' +
+      'A REFUSED DELETE REMOVES NOTHING, so this rule fails in the safe direction: the cost of ' +
+      'the number being too low is an inconvenience, the cost of it being absent is an ' +
+      'unmetered write route on a public relay, which is the one thing this file exists to stop.',
   }),
 ]);
 
@@ -632,6 +689,25 @@ export const RATE_RULES = Object.freeze({
     limit: 'feedbackPerIpHour', windowMs: HOUR, identity: 'ip', phase: 'pre-auth',
     adr: 'ADR 003 §6.1 amendment owed — 5 reports per IP per hour (LZP-1009 / E10-L1)',
   }),
+
+  // ── LZP-1009 SECOND PASS — the operator's three routes (E10-L4, E10-L5) ────
+  // `ip` and `pre-auth` are forced here for a REASON THAT LOOKS BACKWARDS AT FIRST and is worth
+  // reading twice. These routes DO have a strong identity — one P-256 key, held by one person —
+  // but the budget is spent BEFORE it is checked, because the check is a signature verification
+  // and that verification is the expensive thing a stranger would be making this relay do. After
+  // the verify the identity is a set of exactly one, which is not a bucket. So the meter sits
+  // where the cost is, in front, keyed on the only thing known there.
+  //
+  // Two rules and not one: a flood of unauthenticated READS must not be able to spend the budget
+  // the operator needs to DELETE something. See E10-L5.
+  reportsRead: Object.freeze({
+    limit: 'reportsReadPerIpHour', windowMs: HOUR, identity: 'ip', phase: 'pre-auth',
+    adr: 'neither ADR — 120 admin reads per IP per hour (LZP-1009 second pass / E10-L4)',
+  }),
+  reportsDelete: Object.freeze({
+    limit: 'reportsDeletePerIpHour', windowMs: HOUR, identity: 'ip', phase: 'pre-auth',
+    adr: 'neither ADR — 60 admin deletions per IP per hour (LZP-1009 second pass / E10-L5)',
+  }),
 });
 
 /** Rule names, frozen, so a typo is a 500 at composition rather than a silently absent limiter. */
@@ -775,6 +851,17 @@ export const RATE_COVERAGE = Object.freeze({
   // check and above the signature verify — and `tests/server/feedback.test.js` §5 asserts the
   // ordering by handing it a body that would fail three later checks and watching it 429 anyway.
   feedback: cov(['feedbackReport'], [], null),
+
+  // ── LZP-1009 SECOND PASS — the operator's three ────────────────────────────
+  // Every one carries a `pre` rule and none carries a `why`. The route table's write-only rule
+  // was reversed here (see `router.js`), and a reversal that arrived without a number would be
+  // exactly the shape this table's own history warns about: `createSpace` (E2-203-6) and
+  // `rotateEpoch` (T2-E1) both landed with a true sentence in place of a limiter, and both
+  // sentences turned out not to support their conclusion. These three are unauthenticated at the
+  // moment the budget is spent, on a free-tier function, and each costs a P-256 verify to refuse.
+  listReports: cov(['reportsRead'], [], null),
+  getReport: cov(['reportsRead'], [], null),
+  deleteReport: cov(['reportsDelete'], [], null),
 
   leaveSpace: cov([], [], AUTHED_REASON('self-only, idempotent')),
   transferAdmin: cov([], [], AUTHED_REASON('mirrors the in-log chain and is never authoritative (ADR 006 §9)')),

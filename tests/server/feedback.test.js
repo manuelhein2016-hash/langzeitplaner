@@ -104,23 +104,61 @@ const REPORT = 'LangzeitPlaner — Rückmeldung\n\nDer Balken springt beim Ziehe
 // §1 · THE SURFACE
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('§1 · one route, write-only, and it names no space', () => {
-  test('§1a · exactly one /feedback route, and it is a POST', () => {
+describe('§1 · one ANONYMOUS route, and it names no space', () => {
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // §1a AND §1b WERE INVERTED ON 2026-09-05, AND THE OLD ROWS ARE QUOTED, NOT DELETED.
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // They read:
+  //
+  //     §1a  assert.equal(rows.length, 1, 'the feedback surface grew a second route');
+  //     §1b  assert.equal(ROUTES.some((r) => r.method === 'GET' && …), false);
+  //          const res = await call(ctx, null, { method: 'GET' });
+  //          assert.equal(res.status, 405, `a GET /feedback answered ${res.status}`);
+  //
+  // The PO chose the retained inbox; `server/core/router.js` carries the three grounds. The two
+  // rows are inverted rather than dropped because the PROPERTY they held is still live and only
+  // its mechanism moved: it used to be "there is no row", it is now "the rows there are cannot be
+  // reached without the operator's private key". A read-back that answered ANYTHING to an
+  // anonymous caller would still be the defect these rows were written against, so that is what
+  // they assert now.
+  //
+  // ⚠ §4 IS THE ROW THAT MUST NOT MOVE. `handlers/feedback.js` is untouched by the second pass —
+  // storage happens in the SINK, which is server configuration — so §4's hostile store still
+  // proves promise 1 unchanged. If a later edit makes §4 need a new allowance, the write path
+  // has started reaching the store and the reversal has gone further than the PO agreed to.
+
+  test('§1a · exactly ONE anonymous /feedback route, and it is the POST', () => {
     const rows = ROUTES.filter((r) => r.pattern.startsWith('/feedback'));
-    assert.equal(rows.length, 1, 'the feedback surface grew a second route');
-    assert.equal(rows[0].method, 'POST');
-    assert.equal(rows[0].name, 'feedback');
+    assert.equal(rows.length, 4, 'the feedback surface is one write plus the operator\'s three');
+    const anonymous = rows.filter((r) => r.name === 'feedback');
+    assert.equal(anonymous.length, 1, 'a second route reachable without a credential');
+    assert.equal(anonymous[0].method, 'POST');
+    assert.equal(anonymous[0].pattern, '/feedback');
+    // The other three are the operator's, and they are named so a fifth cannot arrive unnoticed.
+    assert.deepEqual(rows.map((r) => r.name).filter((n) => n !== 'feedback').sort(),
+      ['deleteReport', 'getReport', 'listReports']);
   });
 
-  test('§1b · THERE IS NO READ-BACK — no GET anywhere near it', async () => {
-    // The property, from both ends. The table has no GET row, and the running server answers a
-    // GET with 405 rather than with anything at all. A relay that can hand a report back is a
-    // relay that stores reports addressably, and that is a different product with a different
-    // privacy story.
-    assert.equal(ROUTES.some((r) => r.method === 'GET' && r.pattern.startsWith('/feedback')), false);
+  test('§1b · THE READ-BACK EXISTS AND IS SHUT — an anonymous GET gets nothing', async () => {
+    // From both ends, as before. The GET row exists now; what an anonymous caller can do with it
+    // is the assertion. `makeCtx` configures NO operator, which is the ordinary state of a relay
+    // — so the answer is 404 and the surface is not even advertised. A relay WITH an operator
+    // answers 401 to the same request; `tests/server/reports.test.js` §3 owns that half.
+    assert.equal(ROUTES.some((r) => r.method === 'GET' && r.pattern.startsWith('/feedback')), true,
+      'the read-back row is gone again — this test file no longer describes the shipped surface');
     const { ctx } = makeCtx();
-    const res = await call(ctx, null, { method: 'GET' });
-    assert.equal(res.status, 405, `a GET /feedback answered ${res.status}`);
+    for (const [method, path] of [
+      ['GET', `${API_PREFIX}/feedback`],
+      ['GET', `${API_PREFIX}/feedback/rep_AAAAAAAAAAAAAAAAAAAAAA`],
+      ['POST', `${API_PREFIX}/feedback/rep_AAAAAAAAAAAAAAAAAAAAAA/delete`],
+    ]) {
+      const res = await call(ctx, null, { method, path });
+      assert.equal(res.status, 404,
+        `an anonymous ${method} ${path} answered ${res.status} — a stranger reached the inbox`);
+      assert.equal('reports' in (res.body || {}), false);
+      assert.equal('report' in (res.body || {}), false);
+    }
   });
 
   test('§1c · it is absent from SPACE_SCOPED because it HAS no space', () => {

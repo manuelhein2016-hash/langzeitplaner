@@ -3,7 +3,7 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // WHAT THIS FILE IS FOR
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// `router.js` ships the 23-route table and refuses to bind a handler name that is not in it.
+// `router.js` ships the 27-route table and refuses to bind a handler name that is not in it.
 // LZP-202..206 shipped the handlers, in eight files, each owning one clause of ADR 003. Nothing
 // so far has said which function answers which route — deliberately, because `createRouter`
 // binds by NAME and a spread wins silently: two files exporting a `rotateEpoch` would produce a
@@ -23,7 +23,7 @@
 //   2. **`withVersionGate` wraps everything except `meta`.** ADR 003 §4's N−1 rule is enforced
 //      by `version.js`; `meta` is exempt because gating the endpoint that explains the gate is a
 //      closed loop with the family inside it.
-//   3. **The ctx contract is enumerated, not assumed.** `REQUIRED_CTX` lists every member the 23
+//   3. **The ctx contract is enumerated, not assumed.** `REQUIRED_CTX` lists every member the 27
 //      handlers actually reach for, including the two extensions the builders declared
 //      (`ctx.sha256`, E2-C1) — so a host that forgets one fails at startup with the name of what
 //      it forgot, instead of at 03:00 with a 500 on a redemption.
@@ -48,6 +48,7 @@ import { registerDevice, adoptDevice, revokeDevice } from './devices.js';
 import { pairOffer, pairGet, pairAnswer, pairDeliver } from './pair.js';
 import { removeMember, leaveSpace, transferAdmin, renameSpace, deleteSpace } from './lifecycle.js';
 import { sendFeedback, CTX_EXTENSIONS as FEEDBACK_CTX } from './feedback.js';
+import { listReports, getReport, deleteReport, CTX_EXTENSIONS as REPORTS_CTX } from './reports.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. The registry — one line per route, in `router.js`'s own order
@@ -100,6 +101,18 @@ export const handlers = Object.freeze({
   // also exports it under the ROUTE's name, which is what lets `blindness.test.js` §8 check this
   // binding against that file's export the way it checks the other twenty-three.
   feedback: sendFeedback,
+
+  // LZP-1009 second pass — the operator's three, in a SECOND file.
+  //
+  // A second file rather than three more exports from `feedback.js`, and the reason is a test:
+  // `tests/server/feedback.test.js` §4 runs the POST handler against a store whose every other
+  // property THROWS, and that row is what proves storage did not break promise 1 ("a report never
+  // enters the op log"). It can only keep proving it while the write path and the read path are
+  // different functions in different files with different imports. Splitting them is what makes
+  // the reversal in `router.js` safe to make.
+  listReports,
+  getReport,
+  deleteReport,
 });
 
 /**
@@ -123,6 +136,8 @@ export const HANDLER_OWNERS = Object.freeze({
   transferAdmin: 'handlers/lifecycle.js', renameSpace: 'handlers/lifecycle.js',
   deleteSpace: 'handlers/lifecycle.js',
   feedback: 'handlers/feedback.js',
+  listReports: 'handlers/reports.js', getReport: 'handlers/reports.js',
+  deleteReport: 'handlers/reports.js',
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -130,7 +145,7 @@ export const HANDLER_OWNERS = Object.freeze({
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Every `ctx` member the 23 handlers reach for, with what breaks when it is absent.
+ * Every `ctx` member the 27 handlers reach for, with what breaks when it is absent.
  *
  * This is the deployment checklist for `server/api/**` and for `server/dev-server.mjs`, and it
  * is enumerated rather than trusted because the failure mode of a missing one is not a crash at
@@ -167,6 +182,15 @@ export const REQUIRED_CTX = Object.freeze([
   // what a host must supply — `tests/server/feedback.test.js` §6 asserts the spread really
   // happened, which a hand-copied entry would pass while drifting.
   ...FEEDBACK_CTX,
+  // LZP-1009 second pass, spread for the same reason and asserted the same way
+  // (`tests/server/reports.test.js` §6). `reportsAdminPub` is OPTIONAL and that is the design:
+  // a relay with no operator configured must not grow an operator surface, so absent it, all
+  // three admin routes answer 404 and the deployment is exactly what it was before this pass.
+  //
+  // It is CONFIGURATION and not a role. ADR 003 §5.1 removed `Member.role` because the admin of
+  // a CIRCLE must be resolved from the in-log chain; who operates this RELAY is a different
+  // question with a different answer, it has no column, and nothing a client sends can claim it.
+  ...REPORTS_CTX,
 ]);
 
 /** The non-optional subset, as plain names. */

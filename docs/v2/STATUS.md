@@ -1,25 +1,59 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-04 (the audit fix cycle + integration) · **Stopped at:** **every finding
-the independent audit called BLOCKS is closed, and what remains between here and a family release
-is a domain registration and one PO ruling.** Full record: `docs/v2/AUDIT.md` (the audit, with each
-finding marked and its evidence) and `docs/v2/V2-FINAL.md`; findings in `FINDINGS.md` §23.
+**Last session:** 2026-09-05 (LZP-1009's second pass, integrated) · **Stopped at:** **the feedback
+channel works from the Mac it was written for, the operator can read it, and the one thing left
+before it works in production is one environment variable.** Previous session: 2026-09-04, the
+audit fix cycle. Full record: `docs/v2/AUDIT.md` (the audit, with each finding marked and its
+evidence) and `docs/v2/V2-FINAL.md`; findings in `FINDINGS.md` §23.
 
 ---
 
-## THE HEADLINE: the Familienkreis can ship, once the PO claims a host
+## THE HEADLINE: a solo Mac can send a report, and „Berichte" can read it
 
 ```
-npm test 2249/2249 · test:property 101/101 · test:attack 977/977
-test:server 1009/1009 + 1 stated skip · test:fleet 476/476
-test:dom 904 pass / 3 fail / 36 skip (57 files, per-file `# pass`)
+npm test 2283/2283 · test:property 101/101 · test:attack 986/986
+test:server 1094/1094 + 1 stated skip · test:fleet 482/482
+test:dom 930 pass / 3 fail (59 files, per-file `# pass`)
 ```
 
-**5 716 green rows, 3 red** — the same three named residuals as before, and nothing else:
-`e8-density-legibility` §A4 (the 9 px ink floor, a PO ruling on `palette.js`), `e8-density-perf`
-§E1 (`findWorst` straddling the 60 fps frame) and §E3 (the saturated poster, a spec threshold error
-where 48 % is the mathematical ceiling and the row asks 75 %). None is new. **Zero npm
-dependencies, `node_modules/` absent.**
+**5 876 green rows, 3 red** — the same three named residuals and nothing else (§A4, §E1, §E3,
+below). **Zero npm dependencies, `node_modules/` absent.**
+
+### LZP-1009's second pass — what the PO ruled, and what it cost
+
+Two things made the channel useless in practice, and the PO ruled on both (2026-09-04/05):
+
+- **A solo Mac could not send.** The port was bound only behind the family door, and the report
+  that matters most — „ich komme nicht mehr rein" — can only be written by somebody who is solo.
+  **Ruled: a solo Mac may send.** D10's amendment stops being vacuous
+  (`DESIGN-DECISIONS.md` → *D10 EXTENDED*).
+- **The deployed relay bound no sink**, so even a family Mac got an honest 501. **Ruled: the report
+  is kept for 90 days, plus manual delete, and the admin view is a screen inside the app on his
+  Mac only, signalled by a quiet 5 px dot on ⚙** (D12).
+
+Measured end to end against `node server/dev-server.mjs` (the LIVE relay has no
+`LZP_REPORTS_ADMIN_PUB` set and still runs the previous deploy — see below): a solo, unsigned
+report → **202 `proves: unsigned`**; it appears in the admin view with the **prose verbatim** and
+the image **byte-identical**; `expiresAt − receivedAt = 7 776 000 000 ms = exactly 90 days`; a
+91-day-old report is swept and answers **404** to both list and get; „Löschen" removes one; an
+ordinary family device credential gets **401 `bad_signature`** on all three admin routes, a
+well-formed `LZP1` header gets **401 `bad_auth`**, and a replay of the operator's own credential
+gets **200 then 401 `replay`**. On a relay with **no operator configured** all three answer **404**
+— the same answer `/api/v1/nope` gets.
+
+**The ⚙ dot costs zero network requests**, measured as a difference rather than as a number:
+opening ⚙ makes exactly **one** request (`GET /api/v1/feedback`, on a human press) and makes the
+**same one** with the dot lit and with it dark.
+
+⚠ **THE LIVE RELAY IS BEHIND THIS TREE.** `https://langzeitplaner.vercel.app` answers `GET
+/api/v1/feedback` with **405** (the old route table) and `POST` with **501 `not_implemented`**. The
+three admin routes are not deployed and no operator key is enrolled. Nothing in this pass has met
+Postgres.
+
+The three reds, named: `e8-density-legibility` §A4 (the 9 px ink floor, a PO ruling on
+`palette.js`), `e8-density-perf` §E1 (`findWorst` straddling the 60 fps frame) and §E3 (the
+saturated poster, a spec threshold error where 48 % is the mathematical ceiling and the row asks
+75 %). None is new and none is this pass's.
 
 ### The acceptance run — FIVE consecutive runs, 35 launches of the shipped binary each
 

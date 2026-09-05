@@ -1236,8 +1236,17 @@ describe('S5 · module reachability', () => {
     // that can open a socket (its sender is a port), so a static edge costs gate 2 nothing, while
     // a dynamic `import()` here WOULD be a second door out of the eagerly-evaluated graph — the
     // defect `tests/tier1/network-scope.test.js` §2 names in so many words.
-    assert.equal(enumerated.length, 78,
-      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 78. If a module `
+    // 78 → 80: LZP-1009's SECOND PASS. `feedback/relay.js` — the solo sender and the operator's
+    // one dispatcher, reached from `feedback/ui.js#openFeedback`; and `feedback/admin.js` — the
+    // „Berichte" screen, reached STATICALLY from `settings.js#build`. Both are `live` and both
+    // were reachable the moment they landed, which is the ORDER that matters here: `admin.js`
+    // would have been a `defence` for as long as `setReportsCredential` had no caller, and this
+    // integration landed that caller in `family/mount.js#bindFeedback` rather than leaving the
+    // seam open. `relay.js` is also the SECOND dynamic door — the first thing outside
+    // `family/mount.js` ever to reach `platform/net.js` — and the price of that is argued in
+    // `tests/tier1/network-scope.test.js` §2, which enumerates the module graph behind it.
+    assert.equal(enumerated.length, 80,
+      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 80. If a module `
       + 'was added or deleted, add or delete its row rather than changing this number alone.');
   });
 

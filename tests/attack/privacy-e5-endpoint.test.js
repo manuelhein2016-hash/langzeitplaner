@@ -499,7 +499,7 @@ describe('§5 · everything two real Macs address over a real session', () => {
     }
   });
 
-  test('FAILED — the complete set of paths the SOURCE can build is nine, all under /api/v1/', () => {
+  test('FAILED — the complete set of paths the SOURCE can build is eleven, all under /api/v1/', () => {
     // The session above exercises the steady state. Pairing and opt-in add five more paths that
     // no fleet run reaches (the harness drives pairing over `mitm.js`, not over HTTP), so they
     // are read out of the source instead — which is the stronger statement anyway: this is every
@@ -509,9 +509,22 @@ describe('§5 · everything two real Macs address over a real session', () => {
     // `FEEDBACK_PATH`, and `family/mount.js#bindFeedback` addresses it by that IDENTIFIER — so
     // for one pass the product could build a ninth path and this enumeration could not see it.
     // A path constant that lives in a leaf module is exactly the shape this row exists to catch.
+    //
+    // ██ AND `src/js/feedback/relay.js` JOINS IT NOW (LZP-1009 SECOND PASS, 2026-09-05). ██
+    // It is the only other module that builds a path: the solo sender's `POST /api/v1/feedback`
+    // and the OPERATOR'S READER's two. Nine becomes eleven, and the two new ones are the first
+    // paths in this product that carry a value that came BACK over the network — a report id —
+    // which is why `relay.js#assertId` refuses anything but `rep_` + 22 base64url characters
+    // BEFORE the value is concatenated into a URL, rather than leaving `assertReachable` to catch
+    // it two modules later. `e10-network-scope.test.js` §2d drives the look-alikes.
+    //
+    // ⚠ THE THREE PATHS ARE WRITTEN AS LITERALS IN `relay.js` ON PURPOSE — `port.js`'s
+    // `FEEDBACK_PATH` is not imported there — precisely so this enumeration can see them. A
+    // constant reached by identifier is a path this row cannot read, which is the defect the
+    // paragraph above records.
     const files = ['src/js/sync/personal.js', 'src/js/family/mount.js', 'src/js/family/engine.js',
       'src/js/family/pairflow.js', 'src/js/crypto/pairing.js', 'src/js/crypto/backup.js',
-      'src/js/feedback/port.js'];
+      'src/js/feedback/port.js', 'src/js/feedback/relay.js'];
     const paths = new Set();
     for (const f of files) {
       for (const m of repoFile(f).matchAll(/['"`](\/api\/v1\/[^'"`]*)['"`]/g)) {
@@ -524,6 +537,13 @@ describe('§5 · everything two real Macs address over a real session', () => {
       // sentence and read the whole payload on the preview screen. `docs/v2/server-metadata.md`
       // carries its line; story 21.5's „zero requests in solo mode" was already amended for it.
       '/api/v1/feedback',
+      // LZP-1009 SECOND PASS. The OPERATOR'S two, and neither is reachable from a solo Mac: the
+      // shell's carve-out is a single (method, path) pair (`e10-network-scope` §2b), and the relay
+      // answers 404 on both unless `LZP_REPORTS_ADMIN_PUB` is configured and the P-256 signature
+      // over `lzp/reports/v1\n` verifies. `:id` is a report id, refused by shape before it reaches
+      // a URL. `docs/v2/server-metadata.md` §7.6 carries their line.
+      '/api/v1/feedback/:id',
+      '/api/v1/feedback/:id/delete',
       '/api/v1/ops',
       '/api/v1/pair/:id',
       '/api/v1/pair/answer',

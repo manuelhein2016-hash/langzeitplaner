@@ -5208,3 +5208,162 @@ survives is a missing row.**
   prevents the loss; it cannot repair one. AU-3, AU-4 and AU-2 *are* repaired retroactively,
   because those are reconstructions.
 - F12's remaining doc drift, F14, and all six F15 items.
+
+---
+
+## 24. LZP-1009's SECOND PASS — a solo Mac can send, and somebody can read it (2026-09-05)
+
+The channel was complete and unusable. Two facts, both measured before anything was written:
+
+- a **solo** Mac could not send — `setFeedbackPort` had one caller and it lived behind the family
+  door — and the report that matters most is *"I cannot join"*, which only a solo person can write;
+- the deployed relay bound **no sink**, so even a family Mac got an honest `501 not_implemented`.
+  Probed on the live host on 2026-09-05, and it still does.
+
+The PO ruled on both (2026-09-04/05): **a solo Mac may send**; **the admin view is a screen inside
+the app, on his Mac only**; **a quiet 5 px dot on ⚙**; **90-day auto-expiry plus manual delete**.
+`DESIGN-DECISIONS.md` carries them as *D10 EXTENDED* and *D12*.
+
+### 24.1 · The nine reversals, and why none of them is a diff
+
+Every pinned row below asserted something the ruling made false. Each is **inverted in place with
+its reasoning and the verbatim text it replaces**, never deleted.
+
+| row | said | says now |
+|---|---|---|
+| `network-scope.test.js` §2 | ONE dynamic door out of the boot graph | **TWO, each named** — plus a new row: the second reaches `net.js` and **not** `crypto/`, `sync/` or `family/`, with the five-module graph behind it enumerated |
+| `release-gate.test.js` §4b | *"solo mode makes zero requests BECAUSE the switch is first"* | `originAt < switchAt` — **the stated mechanism was wrong**: both checks are pure, and the order was load-bearing for the REASON STRING, not for the packet. Now: the switch is read after the rebuild and before any request object exists |
+| `e10-network-scope.test.js` §2c | ONE receiving route, write-only | **four routes, and exactly TWO mutating verbs** — the write and the delete. A count would pass over a fifth route with the wrong shape; **a reply route is P10's regression**, and that is what this row now guards |
+| `e10-network-scope.test.js` §2d | the ONE new path | **three**, plus a depth bound so a report id cannot become a path prefix |
+| `datenschutz-claims.test.js` §1 | `ROUTE_NAMES.length === 24` | **27** — and the row calls itself *a REVIEW TRIGGER*, so it is **answered**, not bumped: the three new verbs carry no `spaceParam`, are not `SPACE_SCOPED`, and are IP-keyed, so they widen the enum without widening what it says about a family |
+| `e13-datenschutz.dom.js` `PINNED.routeNames` | 24 · „vierundzwanzig" · "twenty-four" | **27 · „siebenundzwanzig" · "twenty-seven"**, re-measured with the command in the comment |
+| `e13-datenschutz.dom.js` §1a/§1b/§1c | nothing bound the port; „Senden" is dead; the copy says „braucht einen Familienkreis … „Senden" ist abgeschaltet" | the solo Mac **binds**, „Senden" **lives**, and the previous fix's own sentence is now a **mutant that must die**. §1a also counts the requests: **0** before the press |
+| `e13-datenschutz.dom.js` §6c | `canSend() === false` after two opens | the row's subject was always sheet **idempotence**; the sender's existence is §1a's measurement |
+| `privacy-e5-endpoint.test.js` | nine addressable paths | **eleven**, and `src/js/feedback/relay.js` joins the file list — its three paths are written as literals precisely so this enumeration can see them |
+| `server-metadata.md` §7.4 | *"a closed enum of 24 verbs"* | **27**, naming the three, with the ⚠ that they cannot name a member or a circle |
+
+### 24.2 · ⚠ THREE ROWS THAT WERE GREEN OVER A FEATURE THEY COULD NOT SEE
+
+This is **E10-1009-B** repeating, and the plan predicted all three rather than the tree finding
+them afterwards. Each is TIGHTENED in the same commit:
+
+1. **`e10-network-scope` §2a** skipped everything under `src/js/feedback/` — `if
+   (f.rel.startsWith(ALLOWED_DIR)) continue;` — so the subsystem could have grown a transport and
+   this row would never have looked. It now asserts, over that directory: **no module may import
+   `net.js` statically** (a static edge is on every solo launch's evaluation path, because
+   `settings.js` imports the subsystem statically), and **exactly one may import it dynamically**.
+2. **`e10-network-scope` §2b** — *"no bridge command can send a report"* — was already green and
+   false: `sync_request` can send one and **its name did not change**, so a name-regex sees
+   nothing. Replaced with the property a name cannot encode: **with sync off, exactly one
+   (method, path) pair is reachable**, read off *both* shells — the gate is a conjunction, the
+   carve-out is `==` on the percent-encoded path with no query, and `SYNC_SOLO_PATH` is one
+   constant with one value in Swift and Rust.
+3. **`network-scope` §5b** scanned `/\.send\(/`. The operator's reader calls
+   `transport.request(`, three times, for three routes — **a whole new transport, invisible**. It
+   now matches every dispatcher spelling over the **solo-reachable tree**, enumerates the three
+   call sites by file and line, and classifies a dispatcher handed on under a property name as
+   `handed-on` rather than as a trigger. Measured: **0 automatic · 1 human · 4 handed-on**.
+
+⚠ **A mutant corrected the classifier, not a review.** The first draft read
+`tick: () => setInterval(() => dispatch(…), 1000)` as `handed-on` — it saw the property binding and
+not the timer between it and the call. §5d now plants that exact shape and requires it to be
+`automatic`.
+
+### 24.3 · The Datenschutz copy — four sentences that had stopped being true, and a sixth inference
+
+- **`soloBody`** said „Senden" is off without a Familienkreis. Now: it works, you see word for word
+  what goes, nothing goes without the press, and it points at the retention paragraph.
+- **`retentionBody`** said *„Ehrlich: unbefristet. Es gibt keine automatische Löschung."* — a direct
+  contradiction of `Report.expiresAt`. **The unbounded claim is SCOPED, not softened**: the rate
+  rows and the change rows really are unbounded, and that is the harsher half. The one exception
+  carries its number: **90 Tage**.
+- **`feedbackBody`** described a report in transit and said nothing about it at rest. It is at rest
+  for 90 days and now says so.
+- **`infer4`**'s route numeral, 24 → 27.
+- **`infer6` — NEW, and it is a genuinely new fact.** A **signed** report's `Report.devicePub` is
+  byte-identical to `Device.sigPubRaw` — it has to be, or the signature could not be verified — so
+  a retained report is **joinable to a circle**: one equality join names the member, her circle and
+  her household, and `Report.prose` is plaintext. **Not defended against; the operator is the
+  intended reader.** The bound is stated with it: an unsigned report — every report a solo Mac
+  sends — carries no key at all. `server-metadata.md` §7.6, `datenschutz-claims.test.js` §8,
+  `e13-datenschutz.dom.js` §5a.
+
+### 24.4 · A defect nothing was watching for: two requests for one open of ⚙
+
+Opening Einstellungen made **two** identical `GET /api/v1/feedback` calls. The loop is short and
+every step is reasonable:
+
+```
+build → buildReportsSection → loadReports → GET → noteReportsKnown → store.setSettings
+     → the store notifies → main.js:262 onChange → rebuildSettings() → api.rebuild()
+     → buildReportsSection → loadReports → GET
+```
+
+It terminated **only because the second write of `reportsKnown` was value-identical and the store
+did not notify again** — a coincidence of that data, not a property. A relay returning the list in
+a different order, or one report arriving between the two calls, and the cycle runs again. *A
+render path that writes state which triggers a render is a loop with a lucky base case, and this
+one had a network request inside it.* `feedback/admin.js` §3b caches the rows for one open;
+`settings.js#openSettings` clears them. **The cache is filled BEFORE the prefs are written**,
+because writing them is what triggers the rebuild.
+
+### 24.5 · The redaction boundary, an ELEVENTH time — over the two carriers this pass adds
+
+`tests/attack/e11-reports-payload.test.js`, **9 rows**, and it re-argues nothing the tenth round
+proved. A boundary breaks at a **new carrier**, and this pass adds two:
+
+- **the solo sender** — a different transport configuration (`anonymous: true`, no `sign`, no
+  `devicePub`, `spaceKind: 'solo'`) built by a different module, from a Mac with a full board;
+- **the operator's reader** — three requests that leave a Mac which HAS a board on it.
+
+A real German fixture board (five needles, each a sentence somebody would mind), the shipped
+redaction renderer, the shipped bridge, three spellings of every needle over url + method + every
+header name and value + body, and the **PNG inflated with `node:zlib` and the raster grepped one
+latin-1 character per byte**. Zero bytes of a Privat entry, in any spelling, in the pixels or out.
+Positive controls in both directions, both non-vacuity halves.
+
+Two properties this round found worth naming:
+
+- **no query string on any reader request.** Not aesthetics: a query is the natural place for a
+  `since=` built from something on screen, and Vercel's own request log records path **and query**
+  under their terms, not ours.
+- **the reader is a TERMINUS.** For the first time bytes about a report travel *toward* a Mac. What
+  came back does not ride out again — not on a later request, not in a header, and not in the
+  **signed bytes**, which is the subtler version of the same defect.
+- and `relay.js#assertId` refuses a malformed report id **synchronously**, while the template
+  literal is built, so a value that came back over the network never becomes part of a URL at all.
+  `assert.throws`, not `assert.rejects`, and the distinction is the finding.
+
+Re-run and green alongside it: `e7-leak-downgrade`, `e7-leak-observer`, `e7-leak-routes`,
+`e10-outbound-payload`, `e6-attack-privat`, `e6-gate-privat` — **132 rows**.
+
+### 24.6 · Owed, and not closed here
+
+- **NOTHING IN THIS PASS HAS MET POSTGRES.** `U-REPORTTTL` (Prisma binds a `Date` correctly against
+  `TIMESTAMP(3)`; `@@index([expiresAt])` makes the sweep a range scan) and `U-REPORTONCE`
+  (`Report_pkey` surfaces P2002; `deleteMany` on an unknown id returns 0, not P2025) are ledger
+  rows with **no witness**. Closed by one run of `LZP_CONTRACT_DATABASE_URL=… npm run test:server`.
+- **The migration SQL is hand-written**, matched to Prisma's emission conventions and to
+  `check-server-config`'s parser. `prisma migrate dev` / `--deep` L2 has never confirmed
+  byte-for-byte drift-freedom. Run L2 with `SHADOW_DATABASE_URL` before the deploy.
+- **`LZP_REPORTS_ADMIN_PUB` is not set on the live relay**, and the live relay still runs the
+  previous deploy: `GET /api/v1/feedback` answers **405**, `POST` answers **501**. Everything in
+  §24 was driven against `node server/dev-server.mjs` over real HTTP. `U-ADMINENV` — that Vercel
+  actually hands the function the variable — is closed by one signed `GET` returning 200 against
+  the deployed function and by nothing available here.
+- **`tests/server/attack-relay-read.test.js:332-336` is a SECOND, unnamed pin of the same claim**
+  `blindness.test.js:215` carries. It filters `PLAINTEXT_STRINGS` on `/leak|palette/i` and asserts
+  `['Member.colorRef']` under the comment *"It is the ONLY user-chosen String"*. It is green only
+  because the words "leak" and "palette" were kept out of the `Report.prose` justification — **the
+  sentence it asserts is false while the test passes**, which is precisely the §4.5 shape. Its
+  owner should invert it to `['Member.colorRef', 'Report.prose']` and widen the regex to something
+  that actually catches content-bearing rows.
+- **`LZPADMIN` has never gone through the macOS shell.** The header NAME is unchanged and the
+  four-name allowlist passes it; no request has been driven through `syncPreflight` with it.
+- **The 90-day sweep across a real clock advance.** Read-side expiry is proved with a 91-day-old
+  row aged on disk and re-read through HTTP; a long-running sweep is not.
+- `tests/tier2/shell-ssrf.dom.js:127` still passes but its message — *"the switch is not the first
+  check"* — is now misleading; and `scripts/shell-ssrf.mjs`'s `carveout` probe's permanent home is
+  a §1b in that file. Both are its owner's.
+- `docs/v2/adr/003-sync-protocol.md` §7 and `SHELL-VERIFICATION.md`'s SSRF table still describe
+  gate 3's old check order.

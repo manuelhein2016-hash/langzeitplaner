@@ -136,12 +136,31 @@ copy anyway, because one sentence is cheaper than her trashing the app.
 | **F9 / R-1b** | MEDIUM | **CLOSED (retention) · residual NARROWED** | `_persistOps` retains the admin-chain lines across the horizon — measured on the shipped binary: every family Mac's `ops.jsonl` keeps exactly one `space.set` line, the solo Mac writes none. Retention prevents the loss; it cannot repair a log an *older* build already compacted, and that is the narrowed residual |
 | **F10** | MEDIUM | **PO-DECISION (D-G)** | untouched by design. The row and its file header still disagree; that is §6's D-G |
 | **F11** | MEDIUM | **CLOSED** | `layout.js` counts a dropped foreign **bar** into `overflowNew`, per day, like `laneOverflow` itself. `display-integrity.dom.js` §D6 green |
-| **F12** | MEDIUM | **PARTLY CLOSED · doc work outstanding** | the two that were code-adjacent are closed (the retracted R-1b sentence is gone from `store.js`; `ROUTE_NAMES.length === 24` is now asserted against the screen). The record-vs-tree disagreements are doc drift and are listed as outstanding below |
+| **F12** | MEDIUM | **PARTLY CLOSED · doc work outstanding** | the two that were code-adjacent are closed (the retracted R-1b sentence is gone from `store.js`; `ROUTE_NAMES.length === 24` is now asserted against the screen). The record-vs-tree disagreements are doc drift and are listed as outstanding below. **2026-09-05:** the enum is **27** and every place that number appears moved in one commit — `datenschutz-claims.test.js` §1 (which calls itself a *REVIEW TRIGGER* and was answered rather than bumped), `e13-datenschutz.dom.js` `PINNED.routeNames`, `DATENSCHUTZ.*.infer4` in both languages, and `server-metadata.md` §7.4 |
 | **F13** | ⛔ BLOCKS FAMILY | **CLOSED (gate) · PO-DECISION (claim the host)** | the placeholder is now `https://serveradresse-fehlt.invalid` — RFC 2606 §2, **undelegatable**, so no stranger can register it. The probe's `M2s` is red and stays red until a host is claimed, which is the correct state |
 | **F14** | MEDIUM | **PARTLY CLOSED (2026-09-04) · the tag is still OPEN** | the artifacts were **built and mounted**: `build-frontend` → `shell-macos/build.sh` → `build-release-assets.sh` → `build-unlock-page.sh` → `make-dmg.sh`, then `hdiutil attach` and a listing. 2 442 008 B = 2.33 MiB, four entries at the root. The Rust crate now **compiles** (and did not — see the new §0 below). What is still untouched: 0 tags, 0 remotes, `release.yml` has never run, `cargo tauri build` has never run anywhere |
 | **F15 · 1** | LOW | **CLOSED** | `withoutForeignEntries` was blind to the stripped format. One predicate at `store.js:403`; `tests/tier1/spine-foreign-guard.test.js`, 3 rows, both mutants die on the named row |
 | **F15 · 2–7** | LOW | **OPEN** | untouched — docs and declared blast radius, listed below |
 | **E10 § 8.2** | — | **CLOSED (2026-09-04)** | *the DMG carried no instructions at all.* The page was built (19 427 B) and discarded; the mounted image held three entries. It is now on the image on **both** paths, gated in `release.yml`, and the gate was **demonstrated by failure** — see §0 |
+
+### ⟦ LZP-1009 SECOND PASS · 2026-09-05 ⟧ — the dispositions this pass changed
+
+| # | was | now | the evidence |
+|---|---|---|---|
+| **D10 / 21.5** | ⚠ PO-DECISION, undecided | **RULED · CLOSED** | a solo Mac may send. See the amended block below and `DESIGN-DECISIONS.md` → *D10 EXTENDED* |
+| **F5(a) · D-E/D-F** | PO-DECISION | **CLOSED by the ruling** | `soloBody` no longer says „Senden" is off without a Familienkreis; §1b/§1c of `e13-datenschutz.dom.js` now hold the OPPOSITE sentence, with the old one listed as a mutant that must die |
+| **F12** | PARTLY CLOSED | **the numeral half CLOSED** | 24 → 27 in five places, in one commit |
+| **E10-1009-B** (the *green-over-a-blind-row* shape) | 2 instances found | **3 more found and TIGHTENED before they could hide anything** | `e10-network-scope` §2a (skipped the whole feedback directory), §2b (a name-regex that `sync_request` walks past), `network-scope` §5b (`.send(` only, blind to `transport.request(`) |
+| **the redaction boundary** | 10 rounds | **11th run, over the two NEW carriers** | `tests/attack/e11-reports-payload.test.js`, 9 rows: the solo sender and the operator's reader, a German fixture board, three spellings, and the **inflated pixel plane** |
+
+**A defect this pass found and fixed, which nothing was watching for:** opening ⚙ made **two**
+identical `GET /api/v1/feedback` calls. `loadReports` wrote `reportsKnown`; the write notified the
+store; `main.js:262`'s `onChange` called `rebuildSettings()`; the rebuild re-entered
+`buildReportsSection` and asked again. It terminated only because the second write happened to be
+value-identical — *a loop with a lucky base case, with a network request inside it*.
+`feedback/admin.js` §3b now caches the rows for one open of Einstellungen and `openSettings()`
+clears them; `tests/tier2/lzp1009-dot.dom.js` §1 counts the request and §2 proves the ⚙ dot adds
+none of them.
 
 ### What is genuinely still open
 
@@ -548,18 +567,40 @@ Every number below was re-measured against the live enums, not against the copy.
 They are rendered as paragraphs rather than a second `<ul>` deliberately: `datenschutz.dom.js` §1b
 counts `[data-ds] li` against `sees.length` and would have gone red for the wrong reason.
 
-### ⚠ D10 / story 21.5 — FOR THE PO, NOT DECIDED HERE
+### ⚠ D10 / story 21.5 — ~~FOR THE PO, NOT DECIDED HERE~~ · **RULED 2026-09-04/05 · CLOSED**
 
 D10 and ADR 003 §7.5 amended a **measured** property, justified as *"the second refuses the report
-from the only tester who has no Familienkreis."* **As shipped, the code refuses her anyway** — the
-feedback port is bound only inside the family door (`family/mount.js#bindFeedback`, reachable
+from the only tester who has no Familienkreis."* **As shipped, the code refused her anyway** — the
+feedback port was bound only inside the family door (`family/mount.js#bindFeedback`, reachable
 through the one dynamic `import()` behind `if (!hasPersonal && !hasCircle) return;`).
 
-So either the gate is wrong — the button should work solo, because the PO's mother *is* solo until
-she joins — **or the amendment bought nothing and D10 should be revisited.** The screen now says
-what the code does, so it is honest either way. Whichever way it goes, `soloBody` changes with it.
-This is written into `settings.js` at the F5(a) header, and it is **the PO's ruling, not an
-engineering choice.** It is D-E and D-F in §6 below, now with the coupling measured.
+So either the gate was wrong — the button should work solo, because the PO's mother *is* solo until
+she joins — **or the amendment bought nothing and D10 should be revisited.**
+
+> **THE PO RULED THE FIRST WAY, 2026-09-04/05: a solo Mac may send.** D10 is EXTENDED rather than
+> revisited (`DESIGN-DECISIONS.md` → *D10 EXTENDED*), and the amendment stops being vacuous.
+>
+> · `feedback/relay.js#bindSoloSender` is a second caller of `setFeedbackPort`, called from
+>   `feedback/ui.js#openFeedback` and only when `canSend()` is already false, so the family binder
+>   keeps precedence. It is the **second dynamic door** out of the boot graph and it reaches
+>   `platform/net.js` and nothing else — never `crypto/`, `sync/` or `family/`, enumerated in
+>   `tests/tier1/network-scope.test.js` §2.
+> · The shell gate is **reordered, not weakened**: pin → canonical rebuild → method → **switch**,
+>   as a conjunction with one exact-equality carve-out (`POST` + `/api/v1/feedback`, no query).
+>   Everything above the switch is pure and local, so the move costs no request; the carve-out has
+>   to see a canonical URL, which is why it could not stay where it was.
+> · **`soloBody` changed with it**, as this paragraph required — and so did `retentionBody`,
+>   `feedbackBody` and `infer4`'s route numeral, because the same ruling made a report **kept**
+>   (D12). §6's D-E and D-F are answered by the ruling; the four sentences are asserted by
+>   `tests/server/datenschutz-claims.test.js` §9 and `tests/tier2/e13-datenschutz.dom.js` §1b/§1c.
+>
+> **The reversal is recorded where each row lived**, never deleted: `network-scope.test.js` §2,
+> `release-gate.test.js` §4b, `e13-datenschutz.dom.js` §1a/§1b/§1c/§4b/§5a/§6c and its own
+> `INVERTED` ledger (4 → 6 entries), `e10-network-scope.test.js` §2b/§2c/§2d, and
+> `datenschutz-claims.test.js` §1.
+
+This was written into `settings.js` at the F5(a) header, and it was **the PO's ruling, not an
+engineering choice.** It was D-E and D-F in §6 below, with the coupling measured.
 
 ---
 

@@ -72,6 +72,22 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /** IPv4/IPv6 text — the same alphabet `limits.js` accepts, so nothing else reaches a bucket key. */
 const IP_TEXT_RE = /^[0-9A-Fa-f:.[\]]{1,45}$/;
 
+/** base64url, no padding — `auth.js#b64u`'s output. Only ever applied to 16 bytes of entropy. */
+function b64url(b) {
+  return Buffer.from(b).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/**
+ * The 65 raw bytes behind a base64url device key, or null. `null` rather than a throw: this runs
+ * after `handlers/feedback.js` verified a signature under that key, so anything failing here
+ * never got past the verifier, and a report is not lost over the shape of a credential.
+ */
+function rawPub(v) {
+  if (typeof v !== 'string' || !/^[A-Za-z0-9_-]+$/.test(v)) return null;
+  const b = new Uint8Array(Buffer.from(v.replace(/-/g, '+').replace(/_/g, '/'), 'base64'));
+  return b.length === 65 ? b : null;
+}
+
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
@@ -110,6 +126,9 @@ async function main() {
   const port = Number(arg('port', '8787'));
   const dir = path.resolve(arg('dir', path.join(HERE, '..', '.lzp-dev-store')));
   const demo = process.argv.includes('--demo');
+  // LZP-1009 second pass. `null` — not `undefined` — so the spread below is a deliberate absence
+  // rather than a key that happens to be missing.
+  const adminPub = arg('admin-pub', '').trim() === '' ? null : arg('admin-pub', '').trim();
 
   const limits = LIMITS;
   const store = fileStore(dir);
@@ -132,18 +151,59 @@ async function main() {
     //
     // `handlers/feedback.js` has no `to:` field and refuses a body that carries one, because a
     // payload-specified recipient is an open relay for spam. Where a report actually goes is
-    // therefore decided HERE, by the host, and the dev host's answer is the simplest honest one:
-    // two files on disk beside the store, named by arrival time.
+    // therefore decided HERE, by the host.
     //
-    // ⚠ IT IS A DIRECTORY, NOT A TABLE. Nothing about a report may enter `ctx.store` — if it did
-    // it would sync, and feedback about the family would appear on the family's board (Principle
-    // 10). The handler is proved not to reach the store at all (`tests/server/feedback.test.js`
-    // §4 runs it against a store whose every other property throws), and this is the other half:
-    // the sink the handler is handed cannot write one either, because it is `fs`.
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    // ⚠ THIS COMMENT USED TO SAY "IT IS A DIRECTORY, NOT A TABLE". HALF OF THAT IS NOW FALSE.
+    // ═══════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // It read: *"⚠ IT IS A DIRECTORY, NOT A TABLE. Nothing about a report may enter `ctx.store` —
+    // if it did it would sync, and feedback about the family would appear on the family's board
+    // (Principle 10)."* It is AMENDED here rather than quietly contradicted, because a host that
+    // started writing to the store under a comment forbidding it would be the worst possible way
+    // for the next reader to find out.
+    //
+    //   · THE FALSE HALF, and why it was too strong. "Nothing about a report may enter
+    //     `ctx.store`" was a proxy for the real property, and the proxy stopped fitting the
+    //     moment the PO chose a retained inbox with an operator (2026-09-05). A report now lands
+    //     in the `Report` table, through `store.putReport`, on this host and on Vercel alike.
+    //
+    //   · THE TRUE HALF, KEPT VERBATIM AND STILL STRUCTURAL. A report never enters the OP LOG and
+    //     never names a SPACE. `Report` has no `spaceId` and no relation to `Space`, so there is
+    //     no mechanism by which it could sync, and „eine Rückmeldung kann niemals auf dem Board
+    //     der Familie erscheinen" stays a fact about the schema rather than about anybody's care.
+    //
+    //   · AND THE HANDLER STILL DOES NOT TOUCH THE STORE. `handlers/feedback.js` is handed this
+    //     function and nothing else; `tests/server/feedback.test.js` §4 still runs it against a
+    //     store whose every other property THROWS, unchanged. That row is the check that storage
+    //     did not break promise 1, and it is why the write path and the operator's read path
+    //     (`handlers/reports.js`) are two different files.
+    //
+    // The dev host writes BOTH: the table, so `GET /api/v1/feedback` has something to answer
+    // with, and the two files on disk it always wrote, because a developer wants to `cat` a
+    // report without a signed request. The files are the convenience; the table is the product.
     //
     // Absent, the route answers 501 rather than accepting a report and dropping it — the preview
     // screen told her exactly what would be sent, and "sent" has to mean sent.
-    feedbackSink: async (r) => {
+    // Bound only when the store can actually keep a report — the same guard `adapters/vercel.js`
+    // uses, so BOTH hosts keep the sentence above true. A store adapter without `putReport` is a
+    // half-landed storage change, and the honest answer to a report it cannot keep is the 501
+    // the route already has, announced once at boot (below) rather than as a 500 per press.
+    ...(typeof store.putReport === 'function' ? { feedbackSink: async (r) => {
+      // THE SINK IS ALSO AN ADAPTER — the same translation `adapters/vercel.js` does, and the same
+      // reasons. The handler hands over a MESSAGE (`{at, report, image, signed, devicePub, …}`);
+      // `store.putReport` accepts a ROW (`{id, prose, image, signed, devicePub}`) and refuses any
+      // other key rather than ignoring it. `at` is not passed: `receivedAt` and `expiresAt` — and
+      // with them the 90 days — are the store's to stamp, so no caller can file a report that
+      // outlives the retention. The id is minted HERE and never returned to the reporter; an id
+      // in the 202 would be the read-back handle `handlers/feedback.js` promise 2 refuses.
+      await store.putReport({
+        id: `rep_${b64url(crypto.getRandomValues(new Uint8Array(16)))}`,
+        prose: r.report,
+        image: r.image === undefined ? null : r.image,
+        signed: r.signed === true,
+        devicePub: r.signed === true ? rawPub(r.devicePub) : null,
+      });
       const outDir = path.join(dir, 'feedback');
       await fsp.mkdir(outDir, { recursive: true });
       const stamp = new Date(r.at).toISOString().replace(/[:.]/g, '-');
@@ -151,7 +211,18 @@ async function main() {
       if (r.image) await fsp.writeFile(path.join(outDir, `${stamp}.png`), r.image);
       console.log(`[feedback] ${stamp} · ${r.signed ? 'signed' : 'unsigned'} · `
         + `${r.report.length} chars · ${r.image ? r.image.length : 0} image bytes · ${outDir}`);
-    },
+    } } : {}),
+    // LZP-1009 second pass · CTX_EXTENSIONS `reportsAdminPub` — the operator, on the dev host.
+    //
+    // `--admin-pub <base64url>` and nothing else: no env var here, because the dev host takes
+    // every other setting on the command line and because a developer running one relay on a
+    // laptop should be able to see, in the shell history, whether the operator surface is on.
+    // Absent, all three admin routes answer 404 and this host is exactly what it was before.
+    //
+    // NOT A ROLE. Same sentence as `adapters/vercel.js`: who operates this relay is server
+    // configuration; who is the admin OF A CIRCLE is still resolved from the in-log chain
+    // (ADR 003 §5.1), has no column, and cannot be claimed by any body this host will ever parse.
+    ...(adminPub === null ? {} : { reportsAdminPub: adminPub }),
     limits,
   };
 
@@ -161,6 +232,15 @@ async function main() {
   // surface as a 500 on one endpoint months later. `ctx.sha256` is the sharp case: only
   // `redeemInvite` reads it, so every smoke test passes and the first joining family member 500s.
   assertCtx(ctx);
+  // LZP-1009. `assertCtx` cannot say this: both members are OPTIONAL by design, so their absence
+  // is a legal boot and a silently featureless one. Said out loud, once, at the only moment a
+  // person is looking.
+  if (typeof ctx.feedbackSink !== 'function') {
+    console.log('[feedback] no store.putReport on this adapter — POST /api/v1/feedback answers 501');
+  }
+  if (typeof ctx.reportsAdminPub !== 'string') {
+    console.log('[feedback] no --admin-pub — GET /api/v1/feedback and the two routes under it answer 404');
+  }
 
   const server = http.createServer(async (req, res) => {
     const started = Date.now();

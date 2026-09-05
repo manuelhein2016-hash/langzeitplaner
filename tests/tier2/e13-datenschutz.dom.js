@@ -101,11 +101,38 @@ const INVERTED = Object.freeze([
     why: 'F5(b), same sentence, same reason.',
     keeps: 'nothing',
   }),
+  // ── LZP-1009 SECOND PASS · 2026-09-05 · PO decisions 1 and 4 ────────────────────────────────
+  // Rows this file's OWN §1 inverted, recorded here in the same shape, because the ledger is what
+  // makes a reversal a decision rather than a diff — and because §1b/§1c are now holding the
+  // OPPOSITE sentence from the one they held yesterday.
+  Object.freeze({
+    row: 'tests/tier2/e13-datenschutz.dom.js §1a/§1b/§1c (this file)',
+    asserts: 'that nothing bound the port on a solo Mac, that „Senden" is disabled, and that the '
+      + 'solo paragraph says „braucht einen Familienkreis … „Senden" ist abgeschaltet"',
+    why: 'PO decision 1, 2026-09-04/05. A solo Mac may send: the report that matters most is „ich '
+      + 'komme nicht mehr rein", and only somebody with no Familienkreis can write it. '
+      + '`feedback/relay.js#bindSoloSender` is the second caller of `setFeedbackPort`.',
+    keeps: 'the half F5(a) was really about — the paragraph may not promise an exception without '
+      + 'stating the condition on it. Only the condition changed, and §1a now measures BOTH that '
+      + 'the button lives and that opening the screen made zero requests.',
+  }),
+  Object.freeze({
+    row: 'tests/tier2/e13-datenschutz.dom.js §4b/§5a (this file), and §6c',
+    asserts: 'PINNED.routeNames === 24, „vierundzwanzig"/"twenty-four", five disclosures, and '
+      + '`canSend() === false` after two opens of Einstellungen',
+    why: 'PO decisions 1, 2 and 4. The enum is 27 (`listReports`, `getReport`, `deleteReport`); '
+      + 'the report is KEPT for 90 days, which makes `Report.devicePub` a sixth inference '
+      + '(`server-metadata.md` §7.6); and a solo Mac binds a sender.',
+    keeps: 'every mechanism matcher for the original five, unchanged, and §5c\'s per-disclosure '
+      + 'mutant — which is what proves the sixth did not blur the other five.',
+  }),
 ]);
 
 /** Measured outside the WebView; the command that produced each is in the string. */
 const PINNED = Object.freeze({
-  routeNames: 24,                       // node -e "import('./server/core/router.js').then(m=>console.log(m.ROUTE_NAMES.length))"
+  // 24 -> 27 on 2026-09-05 (LZP-1009 second pass): `listReports`, `getReport`, `deleteReport`.
+  // Re-measured, not incremented — the command below was run and its answer pasted.
+  routeNames: 27,                       // node -e "import('./server/core/router.js').then(m=>console.log(m.ROUTE_NAMES.length))"
   memberKeyedRateRules: Object.freeze(['pairSession', 'memberRemove', 'epochRotate']),
   //                                    // node -e "…Object.entries(RATE_RULES).filter(([,v])=>v.identity==='member')"
   logFieldsInOneLine: Object.freeze(['route', 'spaceId', 'deviceShort']),
@@ -116,7 +143,10 @@ const PINNED = Object.freeze({
 test('§0 · the inversion ledger is a ledger — every row it names is named completely', () => {
   // Not decoration. A hand-off list with a hole in it is how an inverted row gets lost, and a
   // lost inverted row is a green suite over a false sentence — which is the whole shape of F5.
-  assert.equal(INVERTED.length, 4, 'the ledger changed size without the report changing');
+  // 4 -> 6 on 2026-09-05: LZP-1009's second pass inverted two rows in THIS file, and a ledger
+  // that only records other people's reversals is a ledger with a hole in it exactly where
+  // its own author stood. Both new entries name the PO decision that caused them.
+  assert.equal(INVERTED.length, 6, 'the ledger changed size without the report changing');
   for (const e of INVERTED) {
     for (const k of ['row', 'asserts', 'why', 'keeps']) {
       assert.ok(typeof e[k] === 'string' && e[k].length > 0, `${e.row}: ${k} is empty`);
@@ -129,25 +159,87 @@ test('§0 · the inversion ledger is a ledger — every row it names is named co
 // §1 · F5(a) — THE EXCEPTION A SOLO MAC CANNOT TAKE
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 //
-// Measured outside this file: `setFeedbackPort` has exactly ONE caller in the product,
-// `family/mount.js#bindFeedback`, and it is reachable only through the single dynamic `import()`
-// in `main.js`, which sits behind `if (!hasPersonal && !hasCircle) return;`. This process is that
-// Mac: `family/mount.js` was never loaded, so nothing bound the port. The rows below do not
-// assume that — they measure it.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// ██ REVERSED 2026-09-05 · LZP-1009 SECOND PASS · PO decision 1 ██
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// WHAT THIS SECTION SAID, AND IT WAS TRUE WHEN IT WAS WRITTEN:
+//
+//   > Measured outside this file: `setFeedbackPort` has exactly ONE caller in the product,
+//   > `family/mount.js#bindFeedback`, and it is reachable only through the single dynamic
+//   > `import()` in `main.js`, which sits behind `if (!hasPersonal && !hasCircle) return;`. This
+//   > process is that Mac: `family/mount.js` was never loaded, so nothing bound the port.
+//
+// F5(a) called that a FINDING — the Datenschutz screen promised an exception a solo Mac could not
+// take — and the repair chosen at the time was to make the SENTENCE match the product. The PO
+// reversed that on 2026-09-04/05 and made the PRODUCT match what a person needs, which is the
+// better direction and the more expensive one:
+//
+//   **the report that matters most is „ich komme nicht mehr rein", and the person who writes it
+//   is by definition the person with no Familienkreis.** A screen that collects that sentence and
+//   then greys out the one button fails in exactly the case it exists for.
+//
+// So there is now a SECOND caller of `setFeedbackPort`: `feedback/relay.js#bindSoloSender`,
+// called from `feedback/ui.js#openFeedback` and only when `canSend()` is ALREADY false, so the
+// family binder keeps precedence. It opens a second dynamic door — onto `platform/net.js` and
+// nothing else, never onto `crypto/`, `sync/` or `family/` — and `tests/tier1/network-scope.test.js`
+// §2 enumerates the whole module graph behind it rather than counting doors.
+//
+// ██ WHAT DID NOT MOVE, AND IS THE HALF A PERSON ACTUALLY CARES ABOUT ██
+// This Mac still originates NOTHING by itself. No timer, no retry, no poll, no launch check. The
+// bind is a bridge read of a pref file; the request happens on one press of „Senden" and on no
+// other event in the product. §1a below measures both halves — that the button lives, AND that
+// nothing went out until it was pressed — because only the first of them changed.
+//
+// ⚠ THE BIND IS NOT AWAITED (`ui.js`: `bindSoloSender().then(…)`), so these rows WAIT for it
+// rather than reading the button on the same tick. A row that raced it would be measuring the
+// scheduler.
 
-test('§1a · ██ MEASURED ██ on this solo Mac nothing bound the port, and „Senden" is dead', async () => {
-  // Deliberately NOT binding a port, which is what makes this a solo Mac rather than a fixture.
-  // `datenschutz.dom.js` §7b binds one before it presses Senden; that row measures the family
-  // case. This one measures the case the Datenschutz paragraph was written about.
+test('§1a · ██ MEASURED ██ this solo Mac binds a sender, „Senden" lives, and nothing went out', async () => {
+  // Still deliberately NOT loading `family/mount.js`, which is what makes this a solo Mac rather
+  // than a fixture. What changed is what a solo Mac may then do.
   assert.equal(fbPort.canSend(), false,
-    'a port is bound in a process that never loaded family/mount.js — the family gate leaked');
-  assert.equal(fbPort.feedbackPort(), null, 'feedbackPort() is not null on a solo Mac');
+    'a port is bound before the screen was opened — the family gate leaked, or something binds at '
+    + 'boot. The solo binder runs on `openFeedback` and nowhere else, precisely so that a launch '
+    + 'that never opens the screen never evaluates `platform/net.js`.');
+  assert.equal(fbPort.feedbackPort(), null, 'feedbackPort() is not null before the screen opened');
 
   while (anySheetOpen()) closeTopSheet();
   i18n.setLang('de');
+  // ██ THE REQUEST COUNTER. ██ The real bridge, wrapped, so "nothing left this Mac" is a number
+  // this row read rather than a property it trusted. `sync_request` is the shell's ONE request
+  // primitive (`e10-network-scope.test.js` §2b), so counting it counts every packet the page can
+  // cause. `bindSoloSender()` resolves `window.__TAURI__.core.invoke` at CALL time, so the
+  // wrapper installed here is the one it uses.
+  const core = globalThis.window?.__TAURI__?.core;
+  assert.ok(core && typeof core.invoke === 'function',
+    'this row must run inside the shell — a browser has no bridge and would measure nothing');
+  const real = core.invoke;
+  const bridgeCalls = [];
+  core.invoke = (cmd, args) => { bridgeCalls.push(cmd); return real(cmd, args); };
+  const requestsMade = () => bridgeCalls.filter((c) => c === 'sync_request').length;
   try {
     fb.openFeedback();
     const sheet = await waitFor(() => $('.scrim:last-of-type .sheet'), { what: 'the Rückmeldung sheet' });
+    // ██ THE BIND, WAITED FOR RATHER THAN RACED. ██ `openFeedback` does not await it; a row that
+    // read the button on this tick would be green or red by the scheduler's choice, which is how
+    // `feedback.dom.js:375` came to be measuring nothing.
+    await waitFor(() => fbPort.canSend(), { what: 'the solo sender to be bound' });
+    const port = fbPort.feedbackPort();
+    assert.ok(port, 'the solo sender bound and the port is still null');
+    // ── AND IT IS THE SOLO SHAPE, NOT THE FAMILY ONE. ──────────────────────────────────────
+    // A solo Mac has no device key: ADR 002 §2.4 mints one at the family opt-in moment and
+    // nowhere else. So the port carries NO `sign` and NO `devicePub`, the report is written
+    // `signed: false`, and `server-metadata.md` §7.6's join has nothing to join on. If this row
+    // ever goes red because a key appeared, the disclosure on the screen is wrong, not this test.
+    assert.equal(port.spaceKind, 'solo', 'the solo binder claimed a space kind it does not have');
+    assert.equal(typeof port.sign, 'undefined',
+      'the solo port carries a signing function — a solo Mac would then be MINTING a device key, '
+      + 'which puts src/js/crypto/ behind the feedback door and is the one thing gate 2 is for');
+    assert.equal(typeof port.devicePub, 'undefined',
+      'the solo port carries a device public key — a solo report would then be joinable to a '
+      + 'circle, and `DATENSCHUTZ.*.infer6` says in so many words that it is not');
+
     const ta = $('textarea.fb-text', sheet);
     ta.value = 'Der Balken springt beim Ziehen eine Woche zurück.';
     ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -157,34 +249,61 @@ test('§1a · ██ MEASURED ██ on this solo Mac nothing bound the port, an
 
     const send = $$('button', preview).find((b) => b.textContent.trim() === 'Senden');
     assert.ok(send, 'there is no „Senden" button on the preview at all');
-    assert.equal(send.disabled, true,
-      '„Senden" is pressable on a Mac with no Familienkreis — the Datenschutz promise would then '
-      + 'be true and this whole finding is stale');
-    // And the product already says why, one module over. This is the sentence F5(a) says the
-    // Datenschutz screen should have been saying all along.
-    const status = $$('p.hint', preview).map((n) => n.textContent).join('\n');
-    assert.match(status, /Solange du keinen Familienkreis nutzt, gibt es keinen Server/,
-      'feedback/copy.js#noRelay is not on the screen — the true sentence moved and §1c is stale');
+    assert.equal(send.disabled, false,
+      '„Senden" is dead on a solo Mac. That is the state PO decision 1 reversed: the report that '
+      + 'matters most can only be written by somebody who has no Familienkreis.');
+    // ██ AND THE HALF THAT DID NOT MOVE. ██ Everything above happened — a screen opened, an image
+    // was rendered, a port was bound, a payload was built and previewed — and NOT ONE REQUEST has
+    // been made. The button is live; nothing is sent until it is pressed. That is 21.5 as amended,
+    // and it is the sentence `soloBody` now makes.
+    assert.equal(requestsMade(), 0,
+      `${requestsMade()} request(s) left this Mac before anybody pressed „Senden". The amendment `
+      + 'bounds an ORIGINATOR, not a count of endpoints: opening the screen must originate nothing.');
+    // …and the bind really did go through the bridge — one `sync_status`, which is a read of a
+    // constant and a small pref file in the shell process, and no socket.
+    assert.ok(bridgeCalls.includes('sync_status'),
+      'the binder never asked the shell anything — this row measured a browser, not a Mac');
   } finally {
+    core.invoke = real;
     while (anySheetOpen()) closeTopSheet();
   }
 });
 
 /**
- * THE MATCHER. Wherever the solo paragraph names the Rückmeldung, the same paragraph must carry
- * the condition that makes it reachable. Written as "from the mention onward" rather than as one
- * regex, because the pre-fix string ALSO contained „Rückmeldung" and „Familienkreis" — just not
- * in that order and not about each other.
+ * THE MATCHER, REVERSED 2026-09-05 (PO decision 1) — and it is NARROWER, not looser.
+ *
+ * WHAT IT REQUIRED, VERBATIM: from the mention of the Rückmeldung onward, the paragraph had to
+ * say `braucht einen Familienkreis`, `keinen Server, an den etwas gehen könnte` and
+ * `„Senden" ist abgeschaltet`. All three are now FALSE of the product, so a matcher that still
+ * demanded them would be a gate holding a false sentence in place — the shape F5(b) records one
+ * section down, where §5e of `network-scope.test.js` was doing exactly that.
+ *
+ * The property that survives is the one F5(a) was really about, and it survives UNCHANGED: the
+ * solo paragraph may not promise an exception without stating the CONDITION on it. Only the
+ * condition changed. It was "you need a Familienkreis"; it is now "you press the button, and
+ * nothing goes before you do", plus — because the report is now KEPT — a pointer to where the
+ * person can read what happens to it afterwards. That last clause is new work, not a rename:
+ * before this pass there was nothing at the far end to disclose.
+ *
+ * Still written as "from the mention onward" rather than as one regex, for the original reason:
+ * the whole paragraph contains these words somewhere, and what is asserted is that they are
+ * about each other.
  */
 function namesTheFamilienkreisCondition(text, lang) {
   const mention = lang === 'de' ? text.indexOf('Rückmeldung unter') : text.indexOf('feedback screen under');
   if (mention < 0) return false;
   const tail = text.slice(mention);
-  const needsCircle = lang === 'de' ? /braucht einen Familienkreis/ : /needs a Familienkreis/;
-  const noServer = lang === 'de'
-    ? /keinen Server, an den etwas gehen könnte/ : /no server anything could go to/;
-  const disabled = lang === 'de' ? /„Senden" ist\s+abgeschaltet/ : /"Send" is switched off/;
-  return needsCircle.test(tail) && noServer.test(tail) && disabled.test(tail);
+  // (1) the trigger is a human press, stated as a condition — the half that never moved.
+  const onlyOnPress = lang === 'de' ? /nur, wenn du sie auslöst/ : /only when you trigger it/;
+  // (2) the condition it USED to carry is gone, and the new one is explicit: no circle needed.
+  const withoutCircle = lang === 'de'
+    ? /auch ohne Familienkreis/ : /with or without a Familienkreis/;
+  // (3) and the honest cost of that: it goes to a relay that KEEPS it, and the paragraph says
+  //     where to read how long. A screen that grants the exception and hides the retention is
+  //     the marketing version of this change.
+  const pointsAtRetention = lang === 'de'
+    ? /Wie lange das dort steht/ : /How long that stays there/;
+  return onlyOnPress.test(tail) && withoutCircle.test(tail) && pointsAtRetention.test(tail);
 }
 
 test('§1b · the screen states the condition, in both languages, in the paragraph that promises it', () => {
@@ -198,6 +317,15 @@ test('§1b · the screen states the condition, in both languages, in the paragra
       : /There is\s+exactly one exception, and it happens only when you trigger it: the feedback/;
     assert.equal(unconditional.test(text), false,
       `${lang}: the screen has re-acquired the exception a solo Mac cannot take`);
+    // AND THE REVERSED HALF: the sentence the PO's decision made false must not survive either.
+    // This is the direction that matters now — a paragraph that still says „Senden" is off is a
+    // paragraph that will send somebody to the clipboard rather than to the button.
+    const stillDenied = lang === 'de'
+      ? /„Senden" ist\s+abgeschaltet|braucht einen Familienkreis/
+      : /"Send" is switched off|needs a Familienkreis/;
+    assert.equal(stillDenied.test(text), false,
+      `${lang}: the screen still says the report needs a Familienkreis. PO decision 1 (2026-09-04) `
+      + 'made that false: the report that matters most is the one somebody with no circle writes.');
   });
 });
 
@@ -209,22 +337,36 @@ test('§1c · MUTANT ██ §1b dies on the pre-fix sentence, and passes the sh
     'CONTROL: the shipped English fails its own matcher');
 
   const MUTANTS = [
+    // THE ORIGINAL PRE-F5 STRING, still dead: it promises an exception and states no condition.
     ['M-a-verbatim  ', 'de', 'Solange du keinen Familienkreis nutzt, verlässt kein Eintrag diesen Mac. '
       + 'Genau eine Ausnahme gibt es, und sie geschieht nur, wenn du sie auslöst: die Rückmeldung '
       + 'unter „Hilfe". Von allein sendet dieses Programm nichts.'],
     ['M-a-verbatim  ', 'en', 'As long as you use no Familienkreis, no entry leaves this Mac. There is '
       + 'exactly one exception, and it happens only when you trigger it: the feedback screen under '
       + '"Help". On its own this program sends nothing.'],
-    // The softening a hurried edit would reach for: the word Familienkreis is in the paragraph
-    // (it is in the FIRST sentence of every version) but the condition on the press is not.
+    // ██ THE STRING THIS FILE ITSELF SHIPPED UNTIL TODAY. ██ It is now FALSE — „Senden" works
+    // without a circle — and a matcher that still accepted it would be the gate holding the old
+    // product's sentence in place. It must die, and it is listed as a mutant for that reason.
+    ['M-a-prev-fix  ', 'de', 'Die Rückmeldung unter „Hilfe" geht nur, wenn du sie auslöst — und sie '
+      + 'braucht einen Familienkreis: ohne einen gibt es keinen Server, an den etwas gehen könnte, '
+      + '„Senden" ist abgeschaltet, und du kannst deinen Text nur kopieren oder als Datei sichern.'],
+    ['M-a-prev-fix  ', 'en', 'The feedback screen under "Help" goes only when you trigger it — and it '
+      + 'needs a Familienkreis: without one there is no server anything could go to, "Send" is '
+      + 'switched off, and all you can do is copy your text or save it to a file.'],
+    // The softening a hurried edit would reach for: the press is conditioned, and the two things
+    // the reversal ADDED — that no circle is needed, and where the retention is stated — are not.
     ['M-a-softened  ', 'de', 'Solange du keinen Familienkreis nutzt, verlässt kein Eintrag diesen Mac. '
       + 'Die Rückmeldung unter „Hilfe" geht nur, wenn du sie auslöst.'],
     ['M-a-softened  ', 'en', 'As long as you use no Familienkreis, no entry leaves this Mac. The '
       + 'feedback screen under "Help" goes only when you trigger it.'],
-    // The half-fix: says it needs a circle, does not say the button is dead without one — which
-    // is the fact a person standing in front of a greyed-out „Senden" needs.
-    ['M-a-halfway   ', 'de', 'Die Rückmeldung unter „Hilfe" geht nur, wenn du sie auslöst — und sie '
-      + 'braucht einen Familienkreis.'],
+    // ██ THE NEW HALF-FIX, and the one a reviewer would wave through. ██ It grants the exception
+    // honestly and says nothing about the report being KEPT for 90 days. Before this pass there
+    // was nothing at the far end; there is now, and a screen that grants and does not disclose is
+    // the marketing version of this change.
+    ['M-a-nokeep    ', 'de', 'Die Rückmeldung unter „Hilfe" geht nur, wenn du sie auslöst — auch ohne '
+      + 'Familienkreis: du siehst vorher Wort für Wort, was verschickt wird.'],
+    ['M-a-nokeep    ', 'en', 'The feedback screen under "Help" goes only when you trigger it — with or '
+      + 'without a Familienkreis: you see word for word beforehand what will be sent.'],
   ];
   for (const [name, lang, mutant] of MUTANTS) {
     assert.equal(namesTheFamilienkreisCondition(mutant, lang), false,
@@ -466,14 +608,22 @@ test('§4b · the enum this rests on, pinned — and the row another agent owes'
   // else), so this cannot be measured from inside the WebView. It IS measurable in one line from
   // the repo, and the number is pinned so a change to the enum shows up as a red row here rather
   // than as a silently stale sentence on a privacy page.
-  assert.equal(PINNED.routeNames, 24,
-    'ROUTE_NAMES changed length — re-measure, then re-read infer4, which says „vierundzwanzig"');
+  assert.equal(PINNED.routeNames, 27,
+    'ROUTE_NAMES changed length — re-measure, then re-read infer4, which says „siebenundzwanzig"');
   assert.deepEqual(PINNED.logFieldsInOneLine, ['route', 'spaceId', 'deviceShort'],
     'LOG_FIELDS changed — the sentence about one line naming the act may no longer hold');
   const de = DATENSCHUTZ.de.infer4;
-  assert.match(de, /vierundzwanzig festen Bezeichnungen/,
+  assert.match(de, /siebenundzwanzig festen Bezeichnungen/,
     'the German no longer states the count the pin above guards');
-  assert.match(DATENSCHUTZ.en.infer4, /twenty-four fixed names/, 'the English lost the count');
+  assert.match(DATENSCHUTZ.en.infer4, /twenty-seven fixed names/, 'the English lost the count');
+  // ⚠ AND THE REVIEW THE COUNT OWES, RECORDED WHERE THE NUMBER IS. The three new verbs are the
+  // operator's reports routes. They carry NO `spaceParam`, are not in `SPACE_SCOPED`, and their
+  // rate rules are keyed to an IP — so their log lines cannot name a member or a circle, and the
+  // only party who can produce one holds the private half of `LZP_REPORTS_ADMIN_PUB`. They widen
+  // the enum without widening what the enum says about a family. What DID genuinely change is
+  // §5a's sixth disclosure, and bumping this number without it would have been the drift F12
+  // found. `tests/server/datenschutz-claims.test.js` §1 carries the same review against the live
+  // enum, which is the row this pin was always owed by.
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -506,8 +656,8 @@ const FIVE = Object.freeze([
   }),
   Object.freeze({
     key: 'infer4', what: '§7.4 — the application log names the act',
-    de: [/vierundzwanzig festen Bezeichnungen/, /Umbenennen/, /speichert den neuen Namen\s+nirgends/],
-    en: [/twenty-four fixed names/, /Renaming/, /stores the\s+new name nowhere/],
+    de: [/siebenundzwanzig festen Bezeichnungen/, /Umbenennen/, /speichert den neuen Namen\s+nirgends/],
+    en: [/twenty-seven fixed names/, /Renaming/, /stores the\s+new name nowhere/],
   }),
   Object.freeze({
     key: 'infer5', what: '§7.5 — cross-space correlation attaches two circles to one person',
@@ -516,9 +666,23 @@ const FIVE = Object.freeze([
     en: [/two members with different ids/, /the same public key in both/,
       /recovery key/, /attach\s+them to one person/],
   }),
+  // ── ADDED 2026-09-05 · LZP-1009 SECOND PASS · `server-metadata.md` §7.6 ────────────────────
+  // The sixth, and the only one on this screen that did not exist as a FACT before this pass:
+  // until now a report took no custody at all (the relay answered 501). It is kept for 90 days
+  // now, and a SIGNED report's `Report.devicePub` is byte-identical to `Device.sigPubRaw` — so
+  // one equality join names the member, her circle and her household, with nothing decrypted.
+  // Both halves are required below, because half of it is a scare: the JOIN, and the BOUND (an
+  // unsigned report — every report a solo Mac sends — carries no key at all).
+  Object.freeze({
+    key: 'infer6', what: '§7.6 — a retained report joins to a circle by the device key',
+    de: [/unterschrieben/, /für dein Gerät ohnehin gespeichert hat/,
+      /Ohne Familienkreis gibt es/, /90 Tagen/],
+    en: [/signed/, /the very one the relay already stores/,
+      /Without a Familienkreis there is no/, /90/],
+  }),
 ]);
 
-test('§5a · all five are on the glass, in both languages, each with its mechanism', () => {
+test('§5a · all six are on the glass, in both languages, each with its mechanism', () => {
   bothLanguages((lang, body) => {
     const text = rendered(body);
     for (const d of FIVE) {
@@ -576,7 +740,7 @@ test('§5c · MUTANT ██ dropping one disclosure names which one died ██'
       }
     }
   }
-  assert.ok(FIVE.every((d) => d.de.every((re) => re.test(whole))), 'CONTROL: the shipped five');
+  assert.ok(FIVE.every((d) => d.de.every((re) => re.test(whole))), 'CONTROL: the shipped six');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -587,7 +751,7 @@ test('§6a · the reader reads the DOM, both languages carry every new key, and 
   const de = Object.keys(DATENSCHUTZ.de).sort();
   const en = Object.keys(DATENSCHUTZ.en).sort();
   assert.deepEqual(de, en, 'the two languages carry different key sets');
-  for (const k of ['inferTitle', 'inferLead', 'infer1', 'infer2', 'infer3', 'infer4', 'infer5', 'inferIp']) {
+  for (const k of ['inferTitle', 'inferLead', 'infer1', 'infer2', 'infer3', 'infer4', 'infer5', 'infer6', 'inferIp']) {
     assert.ok(de.includes(k), `${k} is missing from the copy table`);
   }
   bothLanguages((lang, body) => {
@@ -648,8 +812,13 @@ test('§6c · a second open of the sheet renders the identical screen, and „Se
   const second = await read();
   assert.ok(first.length > 4000, `the first open drew only ${first.length} characters`);
   assert.equal(first, second, 'the screen is not the same on the second open');
-  assert.equal(fbPort.canSend(), false,
-    'the port became bound during this session — a solo Mac gained a sender it cannot have');
+  // ⚠ REVERSED 2026-09-05. This asserted `canSend() === false` — "a solo Mac gained a sender it
+  // cannot have". It can have one now (PO decision 1), and this row's actual subject is that the
+  // SCREEN is idempotent, not that the sender is absent. What matters here is that opening
+  // Einstellungen twice draws the same characters; whether a sender exists is §1a's measurement
+  // and is made there, with the request count beside it.
+  assert.equal(typeof fbPort.canSend(), 'boolean',
+    'canSend() stopped answering — §1a and this row both read it');
   // And the section really is in the shipped sheet, not only in the detached body §1–§5 used.
   assert.includes(first, 'Vercel');
   assert.includes(first, 'Frankfurt');

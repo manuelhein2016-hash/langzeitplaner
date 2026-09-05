@@ -131,6 +131,9 @@ const TIME_COLUMNS = Object.freeze({
   Space: ['createdAt'], Member: ['joinedAt', 'removedAt'], Device: ['addedAt', 'revokedAt'],
   Op: ['receivedAt'], Epoch: ['createdAt'], KeyWrap: [], Invite: ['expiresAt', 'usedAt', 'revokedAt'],
   PairSession: ['expiresAt', 'burnedAt'], Nonce: ['expiresAt'], RateBucket: ['windowStart'],
+  // LZP-1009 second pass. `receivedAt` is ARRIVAL — the same word `Op` uses, and deliberately not
+  // an authoring time (`authoredat` is a forbidden token). `expiresAt` is receivedAt + 90 days.
+  Report: ['receivedAt', 'expiresAt'],
 });
 
 /** Columns whose values are numbers, bigints, booleans or a closed enum. */
@@ -138,6 +141,9 @@ const SCALAR_COLUMNS = Object.freeze({
   Space: ['currentEpoch', 'nextSeq', 'kind'], Member: [], Device: ['lastSeenSeq', 'lastPushedSeq'],
   Op: ['seq', 'epoch'], Epoch: ['epoch'], KeyWrap: ['epoch'], Invite: ['epoch'],
   PairSession: ['attempts'], Nonce: [], RateBucket: ['count'],
+  // `signed` is a boolean and never null: false is an answer (`handlers/feedback.js` — an
+  // unsigned report is accepted on purpose), and null would be a third state nobody has a rule for.
+  Report: ['signed'],
 });
 
 test('§2 EVERY column of EVERY model is opaque, a timestamp, a scalar, or a justified String', () => {
@@ -212,11 +218,39 @@ test('§2 exactly ONE justified String is content rather than an id, and it is t
   // in 21.3. What it DOES add to a dump is the founder named unambiguously rather than inferred
   // from four correlations, which `attack-relay-correlate.test.js` already records as SUCCEEDED
   // and DOCUMENTED (21.3 §7.1) — the census got no new fact, only a cheaper one.
+  //
+  // ═══ THIS IS THAT DECISION, AND IT WAS TAKEN — LZP-1009 second pass, 2026-09-05 ═════════════
+  //
+  // A second content-bearing String has appeared: `Report.prose`, her sentence, verbatim and in
+  // the clear. The test above was written so that this line could not be a diff, and it was not:
+  // the PO ruled on 2026-09-04/05 that reports are KEPT and read in a screen inside his own app,
+  // and the sentence he reads has to be somewhere. So the assertion is amended rather than
+  // relaxed, and it now carries the two facts 21.3 has to state:
+  //
+  //   · it is DELIBERATE — the product is that he reads it, not that the relay tolerates it; and
+  //   · it is not for ever — 90 days, and the NUMBER is required to be in the inventory entry,
+  //     so the retention is auditable from `PLAINTEXT_STRINGS` alone. That matters because
+  //     `PLAINTEXT_STRINGS` is what the Datenschutz copy is written FROM: a reader who has only
+  //     this table must be able to answer "how long do you keep what I wrote" without opening an
+  //     adapter, and a number that lives only in code is a number the copy drifts away from.
+  //
+  // The two rows differ in kind and both differ from every id on the list. `Member.colorRef` is a
+  // user's CHOICE forced into the clear by a constraint that cannot be evaluated inside
+  // ciphertext (15.3). `Report.prose` is a user's WORDS, in the clear because reading them is the
+  // whole point. A THIRD row still fails this test, and should.
   const content = Object.keys(PLAINTEXT_STRINGS).filter(
     (k) => !/(^|\.)(id|spaceId|memberId|founderMemberId|deviceShort|opId|recipientId|senderDeviceId|createdBy|rid|nonce|key|kind)$/.test(k));
-  assert.deepEqual(content, ['Member.colorRef']);
+  assert.deepEqual(content, ['Member.colorRef', 'Report.prose']);
   assert.match(PLAINTEXT_STRINGS['Member.colorRef'], /DELIBERATE LEAK/);
   assert.match(PLAINTEXT_STRINGS['Member.colorRef'], /21\.3/);
+  assert.match(PLAINTEXT_STRINGS['Report.prose'], /DELIBERATE/,
+    'a content-bearing String that does not say it is deliberate reads like an oversight, and an '
+    + 'oversight is what the next reader will try to remove');
+  assert.match(PLAINTEXT_STRINGS['Report.prose'], /21\.3/,
+    'the Datenschutz copy has to gain the sentence this test exists to force');
+  assert.match(PLAINTEXT_STRINGS['Report.prose'], /90/,
+    'and the retention has to be readable from the inventory alone: 90 days, in the entry, so '
+    + 'the copy and the code cannot drift');
 });
 
 test('§2 no column name, in the table or in schema.prisma, carries a forbidden token', () => {
@@ -1307,4 +1341,152 @@ function stripComments(src) {
     i++;
   }
   return out;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §9  THE REPORT TABLE — the one place the relay is NOT blind, and the shape that keeps it there
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// LZP-1009 second pass. Every section above asks whether a sentence a family typed can reach the
+// relay. This one asks the opposite question about the one table where the answer is YES on
+// purpose — she typed it INTO a report, addressed to the operator, and he reads it — and then
+// asks the question that actually matters:
+//
+//     can what she wrote to HIM ever appear on THEIR board?
+//
+// The answer is structural rather than careful, and §9a is where that word is cashed. `Report`
+// has no `spaceId`, no relation to `Space`, and therefore no column any board could be joined
+// through. `handlers/feedback.js` promise 1 made this claim about a SINK ("this handler touches
+// ctx.store exactly once"); it is now a claim about a TABLE, and a table outlives a handler.
+//
+// §9b is the honest half, and it is a test rather than a comment because the alternative is a
+// privacy claim nobody has measured: the same walk that proves §3's headline finds `Report.prose`
+// immediately, in both adapters, and on disk in the file adapter. That is the disclosure, and if
+// this test ever goes green by finding nothing, §3's headline has stopped searching rather than
+// the relay having become blind.
+
+test('§9a a Report has no space, no member, no relation — the absence IS the guarantee', () => {
+  // (i) the column set. This is the whole mechanism, so it is asserted over the DOMAIN and not by
+  // spot-checking one name: a Report column that names a space, a member, a device or an op is a
+  // column a future handler can join a board through.
+  assert.deepEqual(MODEL_COLUMNS.Report.filter((c) => /space|member|device(?!Pub)|board|op\b|seq/i.test(c)), [],
+    'a Report column that names anything on a board is the end of Principle 10');
+  assert.equal(MODEL_COLUMNS.Report.includes('spaceId'), false);
+
+  // (ii) and the schema, because MODEL_COLUMNS is a JavaScript object and Postgres does not read
+  // it. A `@relation` inside `model Report` would create the join whatever this table says.
+  const schema = fs.readFileSync(path.join(REPO, 'server/prisma/schema.prisma'), 'utf8');
+  const block = /\nmodel Report \{([\s\S]*?)\n\}/.exec(schema);
+  assert.ok(block, 'schema.prisma has no model Report');
+  assert.equal(/@relation/.test(block[1]), false,
+    'model Report declares a relation. A report joined to a Space is a report that can be listed '
+    + 'beside a board, and the sentence "a report can never appear on the family\'s board" stops '
+    + 'being structural the moment this line exists.');
+  assert.equal(/\bSpace\b|\bMember\b|\bDevice\b|\bOp\b/.test(block[1]), false,
+    'model Report names another model');
+
+  // (iii) and no other model points BACK at it. Space carries `members Member[]`, `ops Op[]` and
+  // three more; a `reports Report[]` there would be the same join written from the other end.
+  const spaceBlock = /\nmodel Space \{([\s\S]*?)\n\}/.exec(schema);
+  assert.equal(/Report/.test(spaceBlock[1]), false, 'model Space lists reports among its children');
+  assert.equal(/Report/.test(schema.split('model Report')[0].replace(/\/\/[^\n]*/g, '')), false,
+    'a model above Report mentions it — the relation would be declared there');
+
+  // (iv) the migration creates no foreign key on the table. The schema is the source, and this is
+  // what actually reaches Postgres.
+  const migDir = path.join(REPO, 'server/prisma/migrations');
+  const sql = fs.readdirSync(migDir)
+    .filter((d) => fs.existsSync(path.join(migDir, d, 'migration.sql')))
+    .map((d) => fs.readFileSync(path.join(migDir, d, 'migration.sql'), 'utf8')).join('\n');
+  assert.match(sql, /CREATE TABLE "Report"/, 'no migration creates the Report table');
+  assert.equal(/ALTER TABLE "Report" ADD CONSTRAINT[^;]*FOREIGN KEY/i.test(sql), false,
+    'a migration gives Report a foreign key — and then DELETE FROM "Space" cascades into it, '
+    + 'which is the second half of the same mistake: a family that leaves would silently withdraw '
+    + 'reports that were never theirs to withdraw');
+});
+
+test('§9a the four report methods are the only ones that name no space, and nothing joins them', async () => {
+  // A store-level restatement of the same thing, because a handler reaches the table through the
+  // interface and not through the schema. `listOps` is the method a report would have to travel
+  // out through; it takes a spaceId and the report methods have none to give it.
+  const { REPORT_INPUT_COLUMNS } = await import('../../server/core/store-interface.js');
+  assert.deepEqual([...REPORT_INPUT_COLUMNS], ['id', 'prose', 'image', 'signed', 'devicePub'],
+    'a fifth input column that named a space would be the join, arriving through the interface '
+    + 'rather than through the schema');
+  const src = fs.readFileSync(path.join(REPO, 'server/adapters/memory.js'), 'utf8');
+  const reportBlock = src.slice(src.indexOf('putReport('), src.indexOf('function sweepReports'));
+  assert.ok(reportBlock.length > 400, 'the report block was not found — this assertion is anchored on it');
+  for (const f of ['state.spaces', 'state.ops', 'state.members', 'state.devices', 'state.keyWraps']) {
+    assert.equal(reportBlock.includes(f), false,
+      `the report methods read ${f}. They must touch nothing a board is made of; that mutual `
+      + 'ignorance is what C64 measures and what this reads.');
+  }
+  assert.match(reportBlock, /state\.reports/, 'the block this is anchored on is the wrong block');
+});
+
+for (const adapter of ADAPTERS) {
+  const T = (name, fn) => test(`${adapter.name} :: ${name}`, fn);
+
+  T('§9b THE DISCLOSURE — a report IS readable in the store, and the §3 walk finds it', async () => {
+    // The inverse of §3's headline, and it must be RUN rather than stated: the same enumeration
+    // that proves nothing a family typed onto a board survives, finds a report's prose at once.
+    // This is what the Datenschutz copy (21.3) has to say out loud, and what makes §3's silence
+    // about the other ten tables mean something.
+    const c = clock(1787900000000);
+    const store = adapter.make(c);
+    await store.putReport({
+      id: 'rep_AAAAAAAAAAAAAAAAAAAAAA',
+      prose: 'Arzttermine lassen sich nicht mehr anlegen.',
+      image: null, signed: false, devicePub: null,
+    });
+    const found = scalarsOf(adapter.raw(store), []).filter(([, v]) => String(v).includes('Arzttermine lassen sich'));
+    assert.ok(found.length > 0,
+      'the store walk cannot see the Report table. Either §3\'s headline is no longer exhaustive '
+      + '— which would make every "NOTHING in the store is anything they typed" row above vacuous '
+      + '— or the report was not stored. Both are failures, and this row cannot tell them apart '
+      + 'on purpose: either one has to be looked at.');
+    if (adapter.name === 'file') {
+      assert.match(adapter.bytes(store), /Arzttermine lassen sich nicht mehr anlegen/,
+        'and on disk, in the clear, which is exactly what 21.3 has to state');
+    }
+  });
+
+  T('§9b a report and a full family session coexist, and neither enumeration can see the other',
+    async () => {
+      // The §3 headline is re-run with a report sitting in the same store. Two things are proved
+      // at once: the report does not reach any board surface (no op, no response, no member row),
+      // and the corpus search over everything else is unaffected by the one table that is
+      // deliberately readable — because a report's prose is not a corpus word, and a corpus word
+      // in a report would be a family's own sentence arriving by a route §3 does not model.
+      const { store, spaceId, responses } = await session(adapter.make);
+      await store.putReport({
+        id: 'rep_BBBBBBBBBBBBBBBBBBBBBB',
+        prose: 'Der Balken springt beim Ziehen zurück.',
+        image: null, signed: true, devicePub: new Uint8Array(65).fill(4),
+      });
+
+      const page = await store.listOps(spaceId, 0n, 500);
+      assert.equal(page.ops.length, 6, 'the six sealed ops, and not a seventh');
+      for (const op of page.ops) {
+        assert.equal(new TextDecoder('utf8', { fatal: false }).decode(op.envelope).includes('Der Balken springt'), false,
+          'a report reached the op log — the one place LZP-1009 says it must never be (P10)');
+      }
+      for (const { route, res } of responses) {
+        assert.equal(JSON.stringify(res.body || null).includes('Der Balken springt'), false,
+          `${route} carried a report onto the wire`);
+      }
+      assert.equal((await store.listMembers(spaceId)).length, 2, 'the roster is the roster');
+
+      // And the corpus walk still finds nothing, with the report in the store.
+      const hitsFound = [];
+      for (const [where, value] of scalarsOf(adapter.raw(store), [])) {
+        for (const w of hits(value)) hitsFound.push({ where, word: w });
+      }
+      assert.deepEqual(hitsFound, [], 'the headline search changed answer once a report was stored');
+
+      // The reverse direction, on the same store: deleting the space leaves the report standing.
+      await store.deleteSpace(spaceId);
+      assert.equal((await store.listReports(10)).length, 1,
+        'deleteSpace reached a table it has no relation to — see §9a');
+    });
 }

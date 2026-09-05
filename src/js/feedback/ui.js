@@ -48,6 +48,12 @@ import { buildReport, wireBody, signedBytes, b64, SCREENS } from './report.js';
 import { renderRedactedBoard, pngDataUrl } from './redact.js';
 import { installErrorTap, noteEvent, clearEvents } from './events.js';
 import { feedbackPort, canSend } from './port.js';
+// LZP-1009 SECOND PASS — the solo binder. A STATIC import, and that is the cheap half: `relay.js`
+// imports `port.js` and `core/b64.js` and nothing else at module scope. The dynamic
+// `await import('../platform/net.js')` is inside `relay.js`, behind a configured origin, and it
+// is the SECOND door ADR 003 §7 gate 2 now names — see `relay.js`'s header for why one module
+// and not `family/mount.js`, and `tests/tier1/network-scope.test.js` §2 for the amended count.
+import { bindSoloSender } from './relay.js';
 
 /** Injected once at module init by `settings.js`. Everything here is optional. */
 let env = {};
@@ -118,6 +124,28 @@ export function openFeedback() {
   let stage = 'write';
   let built = null;
   let sending = false;
+
+  // ── LZP-1009 SECOND PASS · THE SOLO BINDER, AND WHY IT IS HERE AND ONLY HERE ───────────────
+  //
+  // ██ PRECEDENCE. ██ `canSend()` is asked FIRST, so a Mac in a personal space or a Familienkreis
+  // — bound at boot by `family/mount.js#bindFeedback`, with a `sign`, a `devicePub` and the right
+  // `spaceKind` — is left exactly as it was. This binds the case that had no binder at all, and
+  // `report.js:59`'s long-unused `SPACE_KINDS` entry `'solo'` stops being unused.
+  //
+  // ██ IT IS NOT AWAITED, AND THAT IS DELIBERATE. ██ The screen must open at the speed of a
+  // screen. The bridge answers in a millisecond or it does not answer; the button is redrawn by
+  // `rebuild()` when it does, and on the preview screen `send.disabled` is read at build time —
+  // which is after she has written a sentence and pressed „Weiter". A person cannot outrun this,
+  // and if she does, „Senden" is disabled with the honest sentence under it and the two
+  // fallbacks beside it, which is the state the screen was designed to survive anyway.
+  //
+  // ██ IT IS NOT AN ORIGINATOR. ██ `bindSoloSender` binds a port. It makes no request and cannot:
+  // the one function that reaches a network is the `send` closure it binds, and the only thing
+  // that calls that is `doSend`, and the only thing that calls THAT is the click listener below.
+  // `tests/tier1/network-scope.test.js` §5b counts exactly that, and the count is still one.
+  if (!canSend()) {
+    bindSoloSender().then((r) => { if (r === 'bound') rebuild(); });
+  }
 
   const api = openSheet({
     title: T('sheetTitle'),

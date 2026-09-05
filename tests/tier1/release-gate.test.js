@@ -422,16 +422,60 @@ describe('§4 · the refusal is launch-invariant; the switch that precedes it is
     const originAt = preBody.indexOf('pinnedSyncOrigin()');
     assert.ok(switchAt >= 0, 'syncPreflight no longer loads the switch from disk on each request');
     assert.ok(originAt >= 0, 'syncPreflight no longer consults the pinned origin');
-    assert.ok(switchAt < originAt,
-      'the origin is now consulted before the switch. Solo mode makes zero requests BECAUSE the '
-      + 'switch is first and both checks are pure — reordering them is how a solo Mac starts '
-      + 'resolving a name.');
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // ██ REVERSED 2026-09-05 · LZP-1009 SECOND PASS · PO decision 1 ██
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // WHAT THIS ASSERTION SAID, VERBATIM:
+    //
+    //   > assert.ok(switchAt < originAt,
+    //   >   'the origin is now consulted before the switch. Solo mode makes zero requests
+    //   >    BECAUSE the switch is first and both checks are pure — reordering them is how a
+    //   >    solo Mac starts resolving a name.')
+    //
+    // THE STATED MECHANISM WAS WRONG, AND THAT IS THE INTERESTING PART. Solo mode made zero
+    // requests because BOTH checks are pure, not because of their order. `pinnedSyncOrigin()` is
+    // a compiled-in constant plus a trimmed string; `syncCanonicalURL` is `URLComponents` and
+    // string comparison. Neither resolves a name, allocates a `URLSession` or opens a socket.
+    // The order was load-bearing for the REASON STRING an operator sees — F1's human shape,
+    // which the rest of this row still asserts — and this row had quietly promoted it into the
+    // reason no packet leaves. Nothing in this project ever measured that claim; the row said it,
+    // and being green is what a claim like that looks like when nobody has checked it.
+    //
+    // The carve-out (`syncSoloSendIsAllowed`) forced the question, because it must decide on a
+    // CANONICAL url — `/api/v1/%66eedback` and `/api/v1/feedback/../feedback` are the same path
+    // to a server and different strings to a comparison. Deciding it before the rebuild would
+    // mean deciding it on the string the page sent, which is the whole class of bug the pin and
+    // the rebuild exist to close. So the switch moved to step 4, after the pin, the rebuild and
+    // the method, and before the body and the headers.
+    //
+    // WHAT IS ASSERTED NOW is the property that actually holds and that actually matters: the
+    // switch is read AFTER the pin and the canonical rebuild, and BEFORE anything that could
+    // originate traffic. `tests/tier1/headless-shell.test.js:208-247` carries the full argument
+    // and the six mutants that prove the carve-out is exact-equality rather than a prefix;
+    // `scripts/shell-ssrf.mjs`'s `carveout` mode observes the order from outside the process.
+    assert.ok(originAt < switchAt,
+      'the switch is now read BEFORE the canonical rebuild. The carve-out would then be decided '
+      + 'on the string the page sent rather than on a canonical URL, which is exactly the class '
+      + 'of bug the pin and the rebuild exist to close.');
+    // …and still before a socket can exist. This is the half the old row was reaching for.
+    const sessionAt = preBody.indexOf('URLRequest(url: url)');
+    assert.ok(sessionAt >= 0, 'syncPreflight no longer builds a request — this row reads its body');
+    assert.ok(switchAt < sessionAt,
+      'the switch is now read after the request object is built — solo mode would be constructing '
+      + 'a request it then throws away, and the next edit is the one that sends it');
 
     const rust = rustSource();
-    const rpre = rust.slice(rust.indexOf('    // 1 — the switch. ADR 003 §7 gate 3.'));
-    const rbody = rpre.slice(0, 900);
-    assert.ok(rbody.indexOf('SyncPrefs::load(') < rbody.indexOf('pinned_sync_origin()'),
-      'the Rust shell consults the origin before the switch');
+    const rpre = rust.slice(rust.indexOf('    // 1 — the pin. Configuration, never a parameter'));
+    const rbody = rpre.slice(0, 1400);
+    assert.ok(rbody.indexOf('pinned_sync_origin()') < rbody.indexOf('SyncPrefs::load('),
+      'the Rust shell reads the switch before the pin — the two shells now disagree about the '
+      + 'order, which is the one thing this pair of assertions exists to prevent');
+    const rCanon = rbody.indexOf('sync_canonical_url(');
+    assert.ok(rCanon >= 0, 'the Rust preflight no longer canonicalises at all');
+    assert.ok(rCanon < rbody.indexOf('SyncPrefs::load('),
+      'the Rust shell reads the switch before the canonical rebuild');
   });
 
   test('§4c · an unset origin refuses locally — no socket, no DNS, however many launches', () => {

@@ -123,6 +123,40 @@ Nothing below repeats.
       alone, or both moved to different hosts — and `scripts/mom-test-probe.mjs` row `M2s` fails
       while the address is still the reserved slot. A checklist item is a reminder; those rows
       are what a release cannot pass with an unset origin.
+- [ ] **THE OPERATOR KEY — `LZP_REPORTS_ADMIN_PUB`, and the relay is honest without it.**
+      *(LZP-1009 second pass, PO decision 2, 2026-09-05. It sits here beside the origin row
+      because both are ONE ACT that has to happen in two places, and because both are silently
+      survivable — this one more so, which is why it is a box rather than a ⛔.)*
+
+      A report is now **kept** (D12c: 90 days, plus manual delete), and „Berichte" in Einstellungen
+      is where it is read. The relay learns who the operator is from **one environment variable**
+      holding the raw uncompressed P-256 public key of his device signing key, base64url — the
+      same 86 characters the app shows him, with a copy button, in that very section.
+
+      ```
+      Vercel → project → Settings → Environment Variables → Production
+          LZP_REPORTS_ADMIN_PUB = <86 base64url chars, from ⚙ → Berichte → „Mein Schlüssel">
+      ```
+
+      → enrolled ☐ · → verified with one signed `GET /api/v1/feedback` returning **200** ☐
+
+      **WHAT HAPPENS IF YOU SKIP IT, and why it is not a ⛔.** The relay answers **404** on all
+      three reports routes — the same answer `/api/v1/nope` gets, decided *before* the credential
+      is parsed, so nothing tells a prober the surface was ever specified. Reports are still
+      **received and stored**: the sink is bound in `vercel.js#buildCtx` regardless, so nothing a
+      family sends is lost while this is unset. The only broken thing is his own reading of them,
+      and „Berichte" says so in German on his screen rather than failing silently.
+
+      ⚠ **AN OBSERVABLE CHANGE TO A LIVE ENDPOINT.** After this deploy and **without** the
+      variable, `GET https://langzeitplaner.vercel.app/api/v1/feedback` goes from **405** (the old
+      route table's method-not-allowed) to **404**. That is deliberate — a relay with no operator
+      does not advertise the surface — and it is written down here because it is the kind of
+      change that gets noticed by a monitor and diagnosed as a broken deploy.
+
+      ⚠ **AND IT IS NOT A CONTROL AGAINST THE PLATFORM.** Whoever can set this variable can read
+      the database directly, and can set it to a key of their own. The wire says so itself
+      (`ADMIN_PROVES_NOT[0]`); do not let a dashboard screenshot of it read as more than it is.
+
 - [ ] ⛔ **The relay host is CLAIMED, and the placeholder is not.** Today the four mails carry
       `https://serveradresse-fehlt.invalid`. RFC 2606 §2 reserves `.invalid` so no registry can
       delegate it and no resolver answers it — a mail sent before the substitution therefore

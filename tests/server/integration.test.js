@@ -145,7 +145,13 @@ test('§1 `assertCtx` names what is missing, one member at a time', () => {
   // CTX_EXTENSIONS: a relay that has not configured a destination answers 501, HONESTLY, rather
   // than accepting a report and dropping it. A required member would instead stop the whole
   // server from booting over a route no family needs to sync.
-  assert.deepEqual([...optional].sort(), ['feedbackSink', 'log', 'subtle']);
+  // `reportsAdminPub` (LZP-1009 second pass) joins them for the SAME reason, one step further on:
+  // a relay with no operator enrolled must not advertise an operator surface at all. Its three
+  // routes answer 404 — the same answer `/api/v1/nope` gets — rather than 401, so the reply
+  // cannot depend on what credential was presented. `handlers/reports.js#CTX_EXTENSIONS` carries
+  // the argument, and `adapters/vercel.js` is the only place the env var is read, which is what
+  // keeps `server/core/` free of `process.env`.
+  assert.deepEqual([...optional].sort(), ['feedbackSink', 'log', 'reportsAdminPub', 'subtle']);
   assert.doesNotThrow(() => assertCtx(full));
 });
 

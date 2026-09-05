@@ -1068,6 +1068,14 @@ body.finding .d-hol { opacity: .3; }
 
 .quiet-dot,
 .update-hint #btn-settings::after,
+/* LZP-1009 second pass — the SAME dot for an unopened report, joined to this rule
+   group rather than given one of its own. 17.5 / 19.3 / 22.4 all land on one
+   quiet hint, and two hint styles would be two hints. Semantics, so it cannot
+   drift into meaning something louder: "the last time you looked, there were
+   reports you had not opened" — a pure function of two local prefs
+   (`feedback/admin.js#reportsHintActive`), refreshed by a press and by nothing
+   else. No count, no banner, no sound, and never on the board. */
+.reports-hint #btn-settings::after,
 .ub-dot {
   width: 5px; height: 5px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent-a), var(--accent-b));
@@ -1080,7 +1088,8 @@ body.finding .d-hol { opacity: .3; }
 /* first home outside the native menu: the ⚙ that opens settings. Positioned on
    the button itself, so it travels with the toolbar and costs no layout. */
 #btn-settings { position: relative; }
-.update-hint #btn-settings::after {
+.update-hint #btn-settings::after,
+.reports-hint #btn-settings::after {
   content: ''; position: absolute; top: 2px; right: 2px; display: block;
 }
 
@@ -1094,6 +1103,53 @@ body.finding .d-hol { opacity: .3; }
 .update-row .ur-text strong { font: 600 12px var(--font); color: var(--ink-1); }
 .update-row .ur-text span { font: 400 11px var(--font); color: var(--ink-3); }
 .field .val-wide { font: 500 12px var(--mono); color: var(--ink-2); }
+
+/* ── LZP-1009 second pass · „Berichte" — the operator's list ──────────────────
+   Drawn on ONE Mac (`feedback/admin.js` is gated on a pref nothing writes), so
+   this block is dead CSS on every installation but his. It is here rather than
+   in a stylesheet of its own because the product ships one stylesheet, and a
+   second one loaded conditionally would be a second thing that can fail to
+   load on the screen that has to work when everything else is broken.
+
+   The card borrows `.update-row`'s shape above deliberately: a person who has
+   read one settings list has read this one. What it does NOT borrow is colour —
+   there is no red, no amber, no unread badge. `.rp-new` is a 2 px accent rule
+   down the left edge and nothing else, the same "quiet or not at all" the ⚙ dot
+   obeys, because an inbox that shouts is an inbox somebody turns off. */
+.rp-list { margin: 2px 0 10px; }
+.rp-card {
+  border: 1px solid var(--field-border); border-radius: 7px; background: var(--chrome);
+  margin: 0 0 7px; overflow: hidden;
+}
+.rp-card.rp-new { border-left: 2px solid var(--accent-a); }
+.rp-head {
+  display: flex; align-items: baseline; gap: 10px; width: 100%;
+  padding: 8px 11px; border: 0; background: none; cursor: pointer; text-align: left;
+  font: 400 11.5px var(--font); color: var(--ink-2);
+}
+.rp-head:hover { background: var(--hover, rgba(0, 0, 0, 0.03)); }
+.rp-head .rp-when { font: 500 12px var(--mono); color: var(--ink-1); }
+.rp-head .rp-expiry { color: var(--ink-3); }
+.rp-head .rp-thread { margin-left: auto; font: 400 11px var(--mono); color: var(--ink-3); }
+.rp-body { padding: 0 11px 10px; }
+
+/* HER PROSE, VERBATIM AND MONOSPACED — the same presentation the preview screen
+   gave it before it left her Mac (`feedback/ui.js#previewScreen`). Both ends of
+   the pipe look alike on purpose: a question about a character is answerable
+   rather than a guess. Selectable, wrapping, and never `innerHTML`. */
+.rp-prose {
+  margin: 0 0 9px; padding: 9px 11px; max-height: 320px; overflow: auto;
+  font: 400 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap; word-break: break-word;
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; color: var(--ink);
+}
+.rp-shot { margin: 0 0 9px; }
+.rp-shot .rp-png {
+  display: block; max-width: 100%; border: 1px solid var(--rule); border-radius: 6px;
+  background: #fff;
+}
+.rp-acts { display: flex; gap: 8px; justify-content: flex-end; }
+.rp-acts .rp-delete, .rp-shot .rp-img { height: 22px; padding: 0 9px; }
 .field .ctl .when { font: 400 11px var(--font); color: var(--ink-3); }
 
 /* ── 22.7 — the minimum-version bar ──────────────────────────────────────────
@@ -1120,7 +1176,8 @@ body.finding .d-hol { opacity: .3; }
    feature animates or transitions in the first place, and that is on purpose:
    a hint that fades in draws the eye, which is the exact opposite of quiet. */
 @media (prefers-reduced-motion: reduce) {
-  .quiet-dot, .update-hint #btn-settings::after, .update-bar { animation: none; transition: none; }
+  .quiet-dot, .update-hint #btn-settings::after, .reports-hint #btn-settings::after,
+  .update-bar { animation: none; transition: none; }
 }
 
 /* ── LZP-106 · the unlock screen (22.2 / A12) ─────────────────────────────────
