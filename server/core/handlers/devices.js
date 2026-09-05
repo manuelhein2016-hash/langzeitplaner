@@ -126,7 +126,7 @@ export function bytesToB64u(b) {
  * ⚠ `clientIp` is only as trustworthy as the edge in front of it. On Vercel `x-forwarded-for` is
  * set by the platform and a client-supplied one is overwritten; on a host that does not overwrite
  * it, a client can spoof the header and evade every per-IP limit. The structural fix is for the
- * platform adapter (`api/v1/[[...path]].js`, LZP-207) to put the connection's real peer address
+ * platform adapter (`api/v1/[...path].js`, LZP-207) to put the connection's real peer address
  * on `req.clientIp`. Recorded as owed rather than assumed.
  */
 export { clientIp };

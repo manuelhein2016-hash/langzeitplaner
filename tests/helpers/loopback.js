@@ -6,7 +6,7 @@
 //
 // `docs/v2/contracts/server.contract.js §3` names this file:
 //
-//   > `route(ctx, req)` … SHARED by api/v1/[[...path]].js and by tests/helpers/loopback.js, so
+//   > `route(ctx, req)` … SHARED by api/v1/[...path].js and by tests/helpers/loopback.js, so
 //   > the fleet suite exercises the real handlers with no sockets.
 //
 // and ADR 003 §8 says the same from the client side: "`transport` is a PORT, not fetch. In tests
@@ -218,7 +218,7 @@ export function createWire(relay) {
 
 /**
  * The `fetchImpl` `net.js` is handed. It is the whole of the socket replacement: a URL and the
- * exact bytes `net.js` signed, turned into a `ServerReq` the way `api/v1/[[...path]].js` does.
+ * exact bytes `net.js` signed, turned into a `ServerReq` the way `api/v1/[...path].js` does.
  */
 export function fetchImplFor(wire, deviceShort, opts = {}) {
   return async function loopbackImpl(url, init) {

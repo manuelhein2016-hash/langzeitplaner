@@ -4,7 +4,7 @@
 // dev-server over the file adapter, and tests/helpers/loopback.js which binds the client's
 // Transport port straight to these handlers with no sockets at all. All three go through this
 // table. That is what makes ADR 003 §9's claim true: the same handler code that runs in
-// production runs in CI, and `api/v1/[[...path]].js` cannot contain a bug that a handler test
+// production runs in CI, and `api/v1/[...path].js` cannot contain a bug that a handler test
 // would not also see.
 //
 // PURITY. No clock, no randomness, no I/O, no framework types. Matching is a pure function of

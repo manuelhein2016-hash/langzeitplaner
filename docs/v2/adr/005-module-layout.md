@@ -137,7 +137,7 @@ server/
   dev-server.mjs         [new]  zero-dependency node:http host over the file adapter
   prisma/schema.prisma   [new]  ADR 003 §5.1
 
-api/v1/[[...path]].js    [new]  ~15 lines: Request → router → Response
+api/v1/[...path].js    [new]  ~15 lines: Request → router → Response
 ```
 
 ### 1.7 Tests — extending the harness that already exists

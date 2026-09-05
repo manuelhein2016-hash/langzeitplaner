@@ -29,7 +29,7 @@
 //      it forgot, instead of at 03:00 with a 500 on a redemption.
 //
 // PURITY (ADR 003 §9, ADR 005 §2). This file imports only from `server/core`. It has no clock, no
-// randomness, no I/O and no framework types; every host — `server/api/[[...path]].js`,
+// randomness, no I/O and no framework types; every host — `server/api/[...path].js`,
 // `server/dev-server.mjs`, and a test binding the port directly — builds its own `ctx` and calls
 // the function this file returns.
 

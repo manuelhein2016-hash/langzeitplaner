@@ -1,4 +1,4 @@
-// server/api/v1/[[...path]].js — the Vercel function entry point.  ADR 003 §9 · ADR 005 §1.6.
+// server/api/v1/[...path].js — the Vercel function entry point.  ADR 003 §9 · ADR 005 §1.6.
 //
 // "~15 lines: normalise Request → ServerReq, build ctx with prismaStore(), run router, write
 //  ServerRes back. **A bug in it cannot be a bug in a handler.**" — ADR 003 §9.
