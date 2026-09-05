@@ -286,15 +286,27 @@ if (require_('V1', 'server/vercel.json', 'LZP-109 has nothing to deploy with')) 
         `outputDirectory is ${JSON.stringify(outDir)}, which publishes the Vercel root directory `
         + 'as static files — schema.prisma, adapters/ and core/ would all be downloadable. Point it '
         + 'at an empty directory the build creates (see server/vercel-build.sh).');
-    } else if (!new RegExp(`mkdir\\s+-p\\s+${outDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(build)
-               && !has(`server/${outDir}`)) {
-      fail('V11', 'server/vercel.json',
-        `outputDirectory is ${JSON.stringify(outDir)}, but the build neither creates it nor is it `
-        + 'committed. Vercel fails the deployment after a successful migrate, which is the worst '
-        + 'place to stop: the database has already moved and the code has not.');
     } else {
-      pass('V11', 'server/vercel.json',
-        `outputDirectory ${JSON.stringify(outDir)} — created empty by the build, so the relay serves no static file`);
+      const esc = outDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const creates = new RegExp(`mkdir\\s+-p\\s+${esc}\\b`).test(build) || has(`server/${outDir}`);
+      // Vercel refuses an EMPTY output directory too — "The Output Directory "public" is empty" —
+      // so creating it is not enough; the build must also put something in it. Measured on the
+      // deploy of 5709fc7, which got all the way past `migrate deploy` before stopping here.
+      const fills = new RegExp(`>\\s*${esc}/`).test(build) || new RegExp(`${esc}/\\S+`).test(build);
+      if (!creates) {
+        fail('V11', 'server/vercel.json',
+          `outputDirectory is ${JSON.stringify(outDir)}, but the build neither creates it nor is it `
+          + 'committed. Vercel fails the deployment after a successful migrate, which is the worst '
+          + 'place to stop: the database has already moved and the code has not.');
+      } else if (!fills) {
+        fail('V11', 'server/vercel.json',
+          `outputDirectory ${JSON.stringify(outDir)} is created but nothing is written into it. `
+          + 'Vercel rejects an empty output directory as well as a missing one, and it does so '
+          + 'AFTER `prisma migrate deploy` has already run.');
+      } else {
+        pass('V11', 'server/vercel.json',
+          `outputDirectory ${JSON.stringify(outDir)} — created and filled by the build, and it holds no source`);
+      }
     }
 
     // V10 — `npm ci` is not `npm install`: it refuses to run without a lockfile, and it fails the

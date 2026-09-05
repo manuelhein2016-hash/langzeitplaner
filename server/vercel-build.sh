@@ -37,12 +37,22 @@ set -euo pipefail
 # is serverless functions and nothing else: every route lives under `api/`, and `/` should answer
 # 404 because a blind relay is not a page anyone should land on.
 #
-# So the directory is created here, EMPTY, and never committed. That matters — whatever is in the
-# output directory is published as static files. The tempting one-line fix is
+# So the directory is created here and never committed. It cannot be EMPTY either — Vercel rejects
+# that too, with "The Output Directory "public" is empty" — so it holds exactly one file, and that
+# file earns its place rather than being a `.keep`.
+#
+# `robots.txt` is the honest occupant. This host answers device-signed API calls and nothing else;
+# it has no pages, and it should never appear in a search index. The API responses already carry
+# `X-Robots-Tag: noindex`, but a crawler reads `/robots.txt` BEFORE it asks for anything, so this
+# is the one place the instruction actually arrives in time. It discloses nothing: it names no
+# route, no member, no space — only that there is nothing here to crawl.
+#
+# Whatever is in the output directory is PUBLISHED. The tempting one-line fix is
 # `"outputDirectory": "."`, which would serve this entire directory: schema.prisma, every adapter,
 # core/, and anything a future contributor drops beside them. `check-server-config.mjs` row V11
 # refuses that value by name so it cannot be reintroduced as a quick fix during an outage.
 mkdir -p public
+printf 'User-agent: *\nDisallow: /\n' > public/robots.txt
 
 npx prisma generate
 
