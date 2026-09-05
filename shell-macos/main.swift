@@ -219,12 +219,21 @@ let UPDATE_CHANNEL = "stable"
 /// manifest file serves both shells.
 let UPDATE_TARGET = "darwin-universal"
 
-/// PLACEHOLDER — there is no GitHub repository yet (PLAN.md §4: "the project is
-/// not yet a git repo; D3's GitHub repo is a separate, PO-owned step"). LZP-101
-/// owns the real slug. The placeholder marker below is checked at runtime and
-/// the fetch REFUSES rather than resolving some unrelated host.
+/// The real slug, substituted 2026-09-05 when the repository was created public.
+///
+/// NOTHING REWRITES THIS ONE. `release.yml:122-132` rewrites `tauri.conf.json`'s
+/// `OWNER/REPO` from `GITHUB_REPOSITORY` at build time; the Swift shell is not built by
+/// that workflow, so its endpoint has to be correct in the file. It carried
+/// `OWNER-PLACEHOLDER` until now, and the runtime marker check meant the fetch refused
+/// rather than resolving an unrelated host — the right failure mode, and still the one
+/// that fires if this line is ever emptied.
+///
+/// The repository MUST stay public for this to resolve: it is an unauthenticated GET and
+/// there is no token anywhere in this shell. A private repo answers 404 to everyone and
+/// the whole update channel (22.3 / 22.5) dies silently. `docs/v2/RELEASE.md:61`'s claim
+/// that visibility does not matter was measured false during the ship audit.
 let UPDATE_MANIFEST_URL =
-    "https://github.com/OWNER-PLACEHOLDER/langzeitplaner/releases/latest/download/latest.json"
+    "https://github.com/manuelhein2016-hash/langzeitplaner/releases/latest/download/latest.json"
 
 /// PLACEHOLDER — the updater key does not exist yet either. Empty means the
 /// updater refuses to download anything at all, which is the correct failure

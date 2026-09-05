@@ -135,6 +135,23 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
+      # THE ICONS MUST EXIST BEFORE cargo TOUCHES THE CRATE, and they are not committed.
+      #
+      # `tauri-build` runs in build.rs and reads `bundle.icon` -> src-tauri/icons/icon.png.
+      # Nothing image-shaped is in git on purpose (RELEASE.md: "so nothing image-shaped can be
+      # stale or unreproducible"), so on a clean checkout that file does not exist and the crate
+      # fails in a PROC MACRO, before rustc reads a line of lib.rs:
+      #
+      #     error: proc macro panicked
+      #       = help: message: failed to open icon .../src-tauri/icons/icon.png: No such file
+      #
+      # release.yml:231-233 already knows this — "This MUST run before `tauri build`" — but this
+      # job did not, so the one job whose entire purpose is proving the production shell compiles
+      # could never have passed on a clean runner. It passed locally only because a developer
+      # machine has already built the assets. Found on the first push, 2026-09-05.
+      - name: Build the artwork the crate's build script reads
+        run: ./scripts/build-release-assets.sh
+
       # `--locked` requires src-tauri/Cargo.lock to be COMMITTED. It is, as of
       # this change. Without it every build resolves dependency versions afresh,
       # which is how "compiles today" quietly becomes "broke on the tag nobody

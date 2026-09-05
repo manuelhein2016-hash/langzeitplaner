@@ -291,9 +291,36 @@ describe('the three files disagreeing', () => {
   // back out (`materialize.js:prefsFromRegisters`), so a name that arrives from a checkpoint or a
   // peer rather than through `flattenPref` cannot build the projection either. The frozen v1
   // store throws on every one of these depths, so this is a place v2 is now strictly better.
+  // ── THE HARNESS HAS A STACK TOO, and it is not the same stack everywhere ────────────────────
+  //
+  // This row went red on CI while passing on every developer machine, and the failure was NOT in
+  // the product: `JSON.stringify` threw `RangeError` inside `seedBoard` (tests/helpers/env.js:75)
+  // while BUILDING the fixture, so the app was never launched. `JSON.stringify` recurses, and
+  // V8's recursion limit is a function of the thread's stack size, which differs between a macOS
+  // developer box and a Linux CI runner. Reproduced locally: `--stack-size=984` passes,
+  // `--stack-size=600` fails, same build, same file.
+  //
+  // The premise the row depends on is therefore "this host can SERIALISE a board nested N deep",
+  // and it was never stated. It is stated now, and measured at run time rather than assumed.
+  // What must NOT change: the row keeps SEVERAL depths. Its own history is why — 2000 crashed,
+  // 4000 was caught by the door, 6000 crashed again, on one build. A single depth would have
+  // been a false green, so the non-vacuity floor below fails loudly rather than quietly testing
+  // one shallow case on a small-stack host.
+  const DEEP_DEPTHS = [40, 1000, 2000, 4000, 6000];
+  const serialisableHere = (n) => {
+    let o = {}; const root = o;
+    for (let i = 0; i < n; i++) { o.k = {}; o = o.k; }
+    try { JSON.stringify(root); return true; } catch { return false; }
+  };
+
   test('R3-36b FAILED (held): a board.json whose settings nest thousands deep BOOTS, at every depth, and says what it dropped', async () => {
     const deep = (n) => { let o = {}; const root = o; for (let i = 0; i < n; i++) { o.k = {}; o = o.k; } o.leaf = 1; return root; };
-    for (const n of [40, 1000, 2000, 4000, 6000]) {
+    const depths = DEEP_DEPTHS.filter(serialisableHere);
+    assert.ok(depths.length >= 3,
+      `this host can only serialise ${depths.length} of the ${DEEP_DEPTHS.length} depths `
+      + `(${JSON.stringify(depths)}) — below three the non-monotonicity this row exists for is `
+      + 'untestable and a pass would be a false green. Raise the runner\'s --stack-size.');
+    for (const n of depths) {
       const board = RICH();
       board.settings.deepThing = deep(n);
       resetStorage();

@@ -25,19 +25,37 @@ tag, you will not notice the deploy that broke the relay.
 
 ## A · Once, ever — before the first release exists
 
-Nothing below repeats. All of it is still open today.
+Nothing below repeats.
 
-- [ ] GitHub repository created and `origin` pushed (the tree is local-only; no workflow has ever run)
-- [ ] Repository visibility decided **deliberately** — public, or private with a fallback download
-      link Mom can reach without a GitHub account (`RELEASE.md` §2.5). Decide before the e-mail is
-      designed, not after she meets a login page. → decision: ......................................
-- [ ] Updater keypair generated: `cargo tauri signer generate`
+- [x] GitHub repository created and `origin` pushed — **2026-09-05**,
+      `https://github.com/manuelhein2016-hash/langzeitplaner`, default branch `main`, 56 commits.
+      History scanned for credentials before it was made public: no `*.key`, `*.p12`, `*.p8` or
+      `.env` was ever committed, and every `postgres://` / `AuthKey_` hit is documentation with the
+      value elided.
+- [x] Repository visibility decided **deliberately** → decision: **PUBLIC**, 2026-09-05.
+      Not a preference — a requirement. The updater fetches
+      `github.com/<repo>/releases/latest/download/latest.json` as an **unauthenticated** GET and
+      there is no token anywhere in either shell, so a private repo 404s for every client and the
+      whole self-update channel (22.3 / 22.5) dies silently. `release.yml:536-550` would also
+      hard-fail every non-prerelease tag at the last step. `RELEASE.md:61`'s claim that "nothing in
+      the pipeline needs it to be public" was measured **false** during the ship audit and is
+      corrected there.
+- [ ] Updater keypair generated: `cargo tauri signer generate -w ~/.langzeitplaner-updater.key`
+      **(PO — the private key's password is yours to choose; do not let it be generated for you.)**
 - [ ] `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` is a **real** key
       (it is the literal string `REPLACE_ME__…` today, and `check-release-config.mjs --strict`
       correctly fails on it)
 - [ ] Secrets: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
 - [ ] `plugins.updater.endpoints` no longer says `OWNER/REPO`
-- [ ] `shell-macos/main.swift`'s `UPDATE_MANIFEST_URL` no longer says `OWNER-PLACEHOLDER`
+      *(this one is rewritten by `release.yml:122-132` from `GITHUB_REPOSITORY`; leave it alone)*
+- [x] `shell-macos/main.swift`'s `UPDATE_MANIFEST_URL` no longer says `OWNER-PLACEHOLDER` —
+      **2026-09-05**, now
+      `https://github.com/manuelhein2016-hash/langzeitplaner/releases/latest/download/latest.json`.
+      **Nothing rewrites this one**: CI only substitutes Tauri's copy, and the Swift shell is not
+      built by that workflow, so its endpoint has to be right in the file. The Datenschutz copy
+      (21.3) already names the operator — „bei GitHub nach", and that GitHub belongs to Microsoft
+      and is not in the EU — in both languages; it deliberately does not print the URL, because
+      that screen is written for a reader who would not act on one.
 - [ ] **`workflow_dispatch` run completed green before any real tag.** ~~`src-tauri/` has never
       been compiled; nobody knows whether the Rust half builds~~ — **it has now, and it did not.**
       Measured 2026-09-04 on rustc 1.98.1 / cargo 1.98.1, aarch64-apple-darwin: a clean

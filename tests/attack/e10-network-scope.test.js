@@ -217,10 +217,24 @@ describe('§1 · 21.5 — every socket in the product, and who is allowed to ope
       'the shells name more than one remote host:\n' + urls.map((u) => `  ${u.file}:${u.line} ${u.url}`).join('\n'));
     assert.match(urls[0].url, /^https:\/\//, 'the one remote URL is not https');
     assert.match(urls[0].url, /latest\.json$/, 'the one remote URL is not the update manifest');
-    // And it is still a placeholder — LZP-1008's RUNBOOK and RELEASE-CHECKLIST both say so, and
-    // the shell refuses rather than resolving some unrelated host that happens to answer.
-    assert.match(urls[0].url, /OWNER-PLACEHOLDER/,
-      'the release host is now real — check that RELEASE-CHECKLIST §A and the Datenschutz text (21.3) name it');
+    // INVERTED 2026-09-05. This assertion used to require `OWNER-PLACEHOLDER`, and its failure
+    // message was a REVIEW TRIGGER rather than a bug report: "the release host is now real —
+    // check that RELEASE-CHECKLIST §A and the Datenschutz text (21.3) name it". It fired on the
+    // first push, exactly as designed. Both were checked before this line changed:
+    //   · RELEASE-CHECKLIST §A now records the repository, the visibility decision and this URL;
+    //   · the Datenschutz copy (21.3) already named the operator in both languages — „bei GitHub
+    //     nach", and that GitHub belongs to Microsoft and is not in the EU. It deliberately does
+    //     not print the URL, and `e13-datenschutz.dom.js:301` is the row that keeps the operator
+    //     named there.
+    //
+    // What the row protects has NOT moved: the product still names exactly ONE remote host, it is
+    // still https, and it is still the update manifest. The placeholder check is replaced by the
+    // stronger statement it was standing in for — the host is the one the release actually
+    // publishes to, so a typo here cannot ship a fleet that updates from somewhere else.
+    assert.match(urls[0].url,
+      /^https:\/\/github\.com\/manuelhein2016-hash\/langzeitplaner\/releases\/latest\/download\/latest\.json$/,
+      'the update manifest URL is not the repository the release workflow publishes to — a fleet '
+      + 'that updates from a host nobody controls is the worst outcome in this file');
   });
 
   test('§1h · the second class is reported, not ignored: contentsOf: sites are enumerated', () => {
