@@ -183,7 +183,42 @@ if (require_('V1', 'server/vercel.json', 'LZP-109 has nothing to deploy with')) 
       pass('V2', 'server/vercel.json', 'regions ["fra1"] — Frankfurt, decision D2');
     }
 
-    const build = String(v.buildCommand || '');
+    // V3–V6 SCAN THE BUILD, WHEREVER IT LIVES.
+    //
+    // `buildCommand` used to hold the whole pipeline inline. Vercel caps that field at 256
+    // characters and it reached 271, which made the project undeployable — so the logic moved to
+    // `server/vercel-build.sh` and the field became `bash vercel-build.sh`.
+    //
+    // Reading only the field after that move would have left four rows green over a build they no
+    // longer describe: V3 would stop seeing `migrate deploy`, V6 would stop seeing the VERCEL_ENV
+    // gate, and V4 — the row that keeps `db push` away from a live database — would pass because
+    // it found nothing rather than because there was nothing to find. So the delegation is
+    // followed: if the command invokes a script that exists under the Vercel root, the script's
+    // text IS the build for scanning purposes. A build that names no script keeps the old
+    // behaviour exactly.
+    const buildField = String(v.buildCommand || '');
+    let build = buildField;
+    let buildWhere = 'server/vercel.json';
+    // Comments are STRIPPED before scanning, and that is not tidiness. The script explains why
+    // `migrate dev` and `db push` are forbidden — so scanning its raw text made V4 fail on its own
+    // rationale, reporting the danger as though it were present. A check that cannot tell a rule
+    // from a description of the rule is the same rot that has bitten three other rows in this
+    // repository; each time the fix was to strip comments first, and it is the fix here.
+    const stripSh = (s) => s.split('\n').map((l) => l.replace(/(^|\s)#.*$/, '$1')).join('\n');
+    const delegated = buildField.match(/([A-Za-z0-9._/-]+\.sh)\b/);
+    if (delegated && existsSync(at(`server/${delegated[1]}`))) {
+      build = `${buildField}\n${stripSh(read(`server/${delegated[1]}`))}`;
+      buildWhere = `server/${delegated[1]}`;
+    } else if (delegated) {
+      // Its own id, not a second V3. A row id names ONE verdict per subject
+      // (`deploy-readiness.test.js` §1 enforces it), and "the script is missing" is a different
+      // fact from "the build does not migrate" — the operator needs to be told the first, or they
+      // will go looking for a `migrate deploy` line in a file that does not exist.
+      fail('V3b', 'server/vercel.json',
+        `buildCommand delegates to \`${delegated[1]}\`, which does not exist under the Vercel root `
+        + 'directory. The deployment would fail at build time with a missing-file error.');
+    }
+    void buildWhere;
     if (!/prisma\s+migrate\s+deploy/.test(build)) {
       fail('V3', 'server/vercel.json', 'buildCommand does not run `prisma migrate deploy` — the schema would drift from the code');
     } else {

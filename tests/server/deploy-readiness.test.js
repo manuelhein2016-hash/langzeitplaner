@@ -60,6 +60,12 @@ const SUBSET = [
   CHECK,
   'package.json',
   'server/vercel.json',
+  // The build itself, which `vercel.json` only POINTS at. Vercel caps `buildCommand` at 256
+  // characters; it reached 271 and made the project undeployable, so the pipeline moved into this
+  // script and rows V3–V6 follow the delegation to scan it. Leave it out of the scratch tree and
+  // those four rows judge a build that is not there — which is how a readiness check starts
+  // passing a configuration that cannot deploy, the exact failure this whole file exists to stop.
+  'server/vercel-build.sh',
   'server/package.json',
   'server/package-lock.json',
   'server/prisma/schema.prisma',
@@ -305,8 +311,16 @@ const CONFIG_CASES = [
   mutantCase({ what: 'buildCommand uses `prisma db push`', row: 'V4',
     mutate: (d) => editJson(d, 'server/vercel.json', (v) => { v.buildCommand = 'npx prisma generate && npx prisma db push && [ "$VERCEL_ENV" = production ] && npx prisma migrate deploy'; }),
     because: '`db push` is not safe against a live database — it reshapes it with no migration history and no rollback' }),
-  mutantCase({ what: 'buildCommand stops running `prisma generate`', row: 'V5',
-    mutate: (d) => editJson(d, 'server/vercel.json', (v) => { v.buildCommand = v.buildCommand.replace('npx prisma generate && ', ''); }),
+  // This mutant edits the SCRIPT, not the field, and that is the point of it. The three mutants
+  // above replace `buildCommand` with an inline string, so they exercise the direct-scan path.
+  // This one leaves the delegation in place and removes `prisma generate` from
+  // `server/vercel-build.sh` — so if V5 ever stopped following the delegation it would go green
+  // over a build with no client generation. Until 2026-09-05 this case did
+  // `buildCommand.replace('npx prisma generate && ', '')`, which became a silent no-op the moment
+  // the pipeline moved out of the field: the mutant "passed" because it changed nothing.
+  mutantCase({ what: 'the build script stops running `prisma generate`', row: 'V5',
+    mutate: (d) => wr(d, 'server/vercel-build.sh',
+      rd(d, 'server/vercel-build.sh').replace(/^npx prisma generate$/m, '')),
     because: 'no client is generated for the deployed schema' }),
   mutantCase({ what: 'buildCommand migrates without gating on VERCEL_ENV', row: 'V6',
     mutate: (d) => editJson(d, 'server/vercel.json', (v) => { v.buildCommand = 'npx prisma generate && npx prisma migrate deploy'; }),
