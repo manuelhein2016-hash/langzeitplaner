@@ -20,11 +20,33 @@ const SNAPSHOT_FILE: &str = "snapshots.json";
 const OPS_FILE: &str = "ops.jsonl";
 const CHECKPOINT_FILE: &str = "checkpoint.json";
 
+/// The user's board directory — and it is `<Application Support>/LangzeitPlaner`, NOT
+/// `app_data_dir()`.
+///
+/// ⚠ THIS CONSTANT IS LOAD-BEARING AND IT IS NOT COSMETIC. `app_data_dir()` derives the
+/// path from the bundle identifier, so it answers `.../org.langzeitplaner.app` — while
+/// `shell-macos/main.swift:64-67` hard-codes the component `"LangzeitPlaner"`. Those are
+/// two different directories, and the Swift shell is the one that has every board in it:
+/// it is what is installed, what was signed and notarized, and what every measurement in
+/// this project used.
+///
+/// The failure mode is not "install the wrong DMG". `main.swift:422-478` extracts a
+/// `.app.tar.gz` and `replaceItemAt`s the installed bundle in place, and
+/// `.github/workflows/release.yml:429` publishes exactly such an archive built by Tauri —
+/// so the FIRST SUCCESSFUL AUTO-UPDATE would silently convert a Swift install into a Tauri
+/// one, and the board would move to a directory that does not exist. Nobody downloads
+/// anything; nobody makes a mistake. Nothing is destroyed — the real board sits untouched
+/// next door — but it presents to the user as total data loss.
+///
+/// `data_dir()` is the platform base (`~/Library/Application Support` on macOS); the
+/// component below is the same literal Swift appends. The two shells resolve to one
+/// directory, which is what "the same product" has to mean.
 fn data_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
-    let dir = app
+    let base = app
         .path()
-        .app_data_dir()
-        .map_err(|e| format!("no app data dir: {e}"))?;
+        .data_dir()
+        .map_err(|e| format!("no data dir: {e}"))?;
+    let dir = base.join("LangzeitPlaner");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir)
 }

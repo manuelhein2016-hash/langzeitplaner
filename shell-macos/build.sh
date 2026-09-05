@@ -11,6 +11,15 @@ DEST="/Applications"
 APP="$DEST/LangzeitPlaner.app"
 C="$APP/Contents"
 
+# The version is READ from package.json, never written here. It used to be two hard-coded
+# `1.0.0` literals in the Info.plist below, and `main.swift` reads CFBundleShortVersionString
+# back as the updater's `currentVersion` (:304-308, :543) — so a shell built from a 2.0.0 tree
+# reported 1.0.0 and would have been offered 2.0.0 for ever, by its own updater, on every
+# launch. `check-release-config.mjs` did not catch it because it reads only package.json and
+# Cargo.toml; this line is what makes those two the single source.
+VERSION="$(node -p "require('$REPO/package.json').version")"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "bad version from package.json: $VERSION" >&2; exit 1; }
+
 echo "▸ building icon"
 # Rendered from assets/icon.svg, NOT from assets/icon-1024.png: that PNG was flattened
 # onto an opaque white background, so every size derived from it gives the app a white
@@ -55,7 +64,7 @@ iconutil -c icns "$ICONSET" -o "$C/Resources/AppIcon.icns"
 cp "$REPO/index.html" "$C/Resources/web/"
 cp -R "$REPO/src" "$C/Resources/web/"
 
-cat > "$C/Info.plist" <<'PLIST'
+cat > "$C/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -63,8 +72,8 @@ cat > "$C/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>LangzeitPlaner</string>
   <key>CFBundleDisplayName</key><string>LangzeitPlaner</string>
   <key>CFBundleIdentifier</key><string>org.langzeitplaner.app</string>
-  <key>CFBundleVersion</key><string>1.0.0</string>
-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleExecutable</key><string>LangzeitPlaner</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
