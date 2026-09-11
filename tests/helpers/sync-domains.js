@@ -855,6 +855,14 @@ export const S5 = deep([
     + '17.6 roster port the attribution line uses.'),
   MOD('src/js/family/createjoin.js', 'live'),
   MOD('src/js/family/engine.js', 'live'),
+  MOD('src/js/family/gate3.js', 'live',
+    'ADR 003 §7 gate 3\'s switch, split out of `familysettings.js` by LZP-1010. It exists as its '
+    + 'own leaf because BOTH opt-ins have to move the switch before their first request — the '
+    + 'settings sheet\'s „Familienkreis erstellen" and the circle screen\'s create and join — and '
+    + '`familysettings.js` imports `createjoin.js`, so the second could not import the first. It '
+    + 'imports nothing, deliberately: `createjoin.js` does not depend on `engine.js` and a shared '
+    + 'helper must not drag the sync engine in behind it.',
+    null),
   MOD('src/js/family/familysettings.js', 'live'),
   MOD('src/js/family/leavedelete.js', 'live'),
   MOD('src/js/family/membersui.js', 'live'),
@@ -1039,5 +1047,5 @@ export const DOMAINS = deep({
 
 /** Counts, so a truncated file is a loud failure rather than a quiet one. */
 export const DOMAIN_SIZES = deep({
-  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 80,   // S5 70 -> 78: LZP-1009's src/js/feedback/; 78 -> 80: its second pass (relay.js, admin.js)
+  S1: 8, S1_CELLS: 160, S2: 16, S2_SCENARIOS: 5, S3: 5, S4: 8, S5: 81,   // S5 70 -> 78: LZP-1009's src/js/feedback/; 78 -> 80: its second pass (relay.js, admin.js); 80 -> 81: LZP-1010's family/gate3.js
 });

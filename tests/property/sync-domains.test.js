@@ -1245,8 +1245,15 @@ describe('S5 · module reachability', () => {
     // seam open. `relay.js` is also the SECOND dynamic door — the first thing outside
     // `family/mount.js` ever to reach `platform/net.js` — and the price of that is argued in
     // `tests/tier1/network-scope.test.js` §2, which enumerates the module graph behind it.
-    assert.equal(enumerated.length, 80,
-      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 80. If a module `
+    // 80 → 81: LZP-1010's `family/gate3.js`, reached statically from BOTH `family/familysettings.js`
+    // and `family/createjoin.js` — which is the whole reason it is a file. Gate 3's switch has to
+    // move before the first request of either opt-in, and the two screens could not share a helper
+    // any other way: `familysettings.js` imports `createjoin.js`, so the import can only run one
+    // direction, and `createjoin.js` deliberately does not depend on `engine.js`. Static on both
+    // edges and costing gate 2 nothing, for the same reason the `feedback/` rows above are static:
+    // the module imports NOTHING, so it cannot widen the eagerly-evaluated graph by a single byte.
+    assert.equal(enumerated.length, 81,
+      `S5 enumerates ${enumerated.length} modules; the walk in the fix pass found 81. If a module `
       + 'was added or deleted, add or delete its row rather than changing this number alone.');
   });
 
