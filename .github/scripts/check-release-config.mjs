@@ -38,7 +38,7 @@
 // Both exit 0 on purpose: they are reporting modes, and the rows are the
 // evidence. Only the default text mode decides whether a release may proceed.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -175,6 +175,47 @@ if (build.frontendDist !== '../dist') {
 }
 if (!/build-frontend\.mjs/.test(String(build.beforeBuildCommand || ''))) {
   fail('build.beforeBuildCommand does not run scripts/build-frontend.mjs, so ../dist would be stale or missing');
+}
+
+// ── THE PAGE MUST BE ABLE TO REACH THE SHELL — measured the hard way, 2026-09-11 ─────────────
+//
+// `app.withGlobalTauri` defaults to FALSE in Tauri v2, and it was absent. So `window.__TAURI__`
+// did not exist in the page, and every `window.__TAURI__?.core?.invoke` in the product silently
+// evaluated to `undefined`. Nothing failed loudly. The crate compiled, all six suites passed, the
+// universal bundle built, the DMG notarized, and the app LAUNCHED — and it was a browser tab with
+// no shell underneath it:
+//
+//   · `chooseTransport` found no `invoke`, fell back to `fetch`, and `connect-src 'self'` blocked
+//     it — surfacing to the user as "net: the request did not complete (TypeError)" when he tried
+//     to create a Familienkreis;
+//   · worse and quieter, `storage.js` could not reach `save_board` either, so the app ran on
+//     localStorage and never opened ~/Library/Application Support/LangzeitPlaner at all. Installed
+//     over a real board, it would have shown an EMPTY one — looking exactly like data loss while
+//     the file sat untouched beside it.
+//
+// The Swift shell hid this for the whole project: `main.swift` installs its own `__TAURI__` shim,
+// so every measurement ever taken on that shell had a working bridge. Tier 2 runs on the Swift
+// shell too. There was no test anywhere that could have caught it, because the defect is in the
+// one file no suite executes and the one runtime nobody had run.
+//
+// This row is cheap and it is the only thing standing between here and that happening again.
+const appCfg = conf.app || {};
+const readsGlobal = (() => {
+  try {
+    return readdirSync(resolve(ROOT, "src/js"), { recursive: true })
+      .filter((f) => String(f).endsWith('.js'))
+      .some((f) => /window\.__TAURI__/.test(readFileSync(resolve(ROOT, "src/js", String(f)), "utf8")));
+  } catch { return true; }
+})();
+if (readsGlobal && appCfg.withGlobalTauri !== true) {
+  fail(
+    'src/js reads `window.__TAURI__`, but app.withGlobalTauri is not true in tauri.conf.json. '
+      + 'Tauri v2 defaults it to false, so the global would not exist: every invoke() resolves to '
+      + 'undefined, the network transport falls back to fetch and is refused by CSP, and — silently '
+      + '— storage falls back to localStorage so the app never reads the user\'s real board. It '
+      + 'launches and looks fine. Nothing else in this repository can catch this: the Swift shell '
+      + 'installs its own __TAURI__ shim, so every suite passes either way.',
+  );
 }
 
 // D1: signing is off, and the way it is off must stay "no identity in the file".
