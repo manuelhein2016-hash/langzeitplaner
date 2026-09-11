@@ -106,6 +106,7 @@ import { exportRawPublic, signBytes, importKexPublic } from '../crypto/identity.
 import { createSpaceKey, wrapSpaceKey, encodeWrap } from '../crypto/spacekeys.js';
 import { hkdf, INFO, NO_SALT, KDF, HASH } from '../crypto/suite.js';
 import { probeCrypto, isSuiteAvailable, unavailableMessage } from '../crypto/probe.js';
+import { armGate3, disarmGate3 } from './gate3.js';
 
 const TE = new TextEncoder();
 
@@ -1747,6 +1748,17 @@ async function submitCreate() {
 
   view.busy = true;
   render();
+  // ── GATE 3'S SWITCH, BEFORE THE FIRST REQUEST (LZP-1010) ──────────────────────────────────
+  //
+  // This file had no reference to gate 3 at all, and `createCircleOnRelay` below is the first
+  // request the product ever makes. In a shell the switch is false until something sets it, and
+  // the only thing that ever did — `familysettings.js#armShellSync` — required a space to exist
+  // already. So the shell refused `POST /api/v1/spaces`, `sentenceFor(e)` said
+  // „net: the shell reported blocked", and the circle could not be created at all.
+  //
+  // Pressing „Familienkreis erstellen" after typing a name, a display name and a colour is as
+  // explicit as an opt-in gets, so this is the moment the switch is supposed to move.
+  const armedByThisSubmit = (await armGate3()) === 'armed';
   try {
     const out = await createCircleOnRelay(view.origin, view.colorRef);
     await rememberCircle({
@@ -1776,6 +1788,10 @@ async function submitCreate() {
     view.step = 'done';
     render();
   } catch (e) {
+    // No circle came of it, so this Mac is still solo and the shell must say so too. Conditional
+    // on `familyCircle()` because a retry after a PARTIAL failure — prefs written, adoption not —
+    // must not disarm a Mac that is now in a circle.
+    if (armedByThisSubmit && !familyCircle()) await disarmGate3();
     view.busy = false;
     fail(sentenceFor(e));
     console.warn('[circle] create failed', e);
@@ -1979,6 +1995,9 @@ async function submitJoin() {
   view.busy = true;
   view.notice = null;
   render();
+  // Gate 3, before `redeemOnRelay` — the joiner's first request, and the joiner has no space
+  // either. Same finding as `submitCreate`; see LZP-1010 there and in `gate3.js`.
+  const armedByThisSubmit = (await armGate3()) === 'armed';
   try {
     const out = await redeemOnRelay(view.origin, view.code, view.colorRef);
     await rememberCircle({
@@ -2010,6 +2029,9 @@ async function submitJoin() {
     view.step = 'done';
     render();
   } catch (e) {
+    // Still solo, including on the `color_taken` path below — that leaves the invite usable and
+    // the person on this screen, and the next press arms the switch again.
+    if (armedByThisSubmit && !familyCircle()) await disarmGate3();
     view.busy = false;
     if (e && e.code === 'color_taken') {
       // NOT A FAILURE, and it must not read as one. The invite was rolled back, so the same

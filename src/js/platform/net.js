@@ -692,7 +692,18 @@ export function createBridgeTransport(deps) {
         const kind = ['offline', 'timeout', 'blocked', 'transport'].includes(reply.error)
           ? /** @type {NetErrorKind} */ (reply.error)
           : 'transport';
-        throw new NetError(kind, `net: the shell reported ${reply.error}`);
+        // THE REASON IS CARRIED, and it used to be dropped. The shell distinguishes eight local
+        // refusals by name (`sync_refusal` in `src-tauri/src/lib.rs`, and the same vocabulary in
+        // `main.swift`) and puts the one that fired in `reply.reason`. Collapsing all eight to the
+        // single word „blocked" cost a real diagnosis: „Das hat nicht geklappt: net: the shell
+        // reported blocked" is the same sentence for a stale origin, a disabled switch, a bad
+        // method and a header that is not on the allowlist — four different things to do about it.
+        //
+        // It is not a disclosure. Every one of these is a decision this Mac made about its own
+        // configuration, before any socket existed; none of them names anything the page did not
+        // already hand the shell.
+        const why = typeof reply.reason === 'string' && reply.reason ? ` (${reply.reason})` : '';
+        throw new NetError(kind, `net: the shell reported ${reply.error}${why}`);
       }
       if (!Number.isInteger(reply.status)) {
         throw new NetError('bad_response', 'net: the shell answered without a status');

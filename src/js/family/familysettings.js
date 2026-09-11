@@ -134,6 +134,7 @@ import { buildAdminSection } from './adminpanel.js';
 import { createUnshare, publishedState, UNSHARE, UNSHARE_COPY } from './unshare.js';
 import { TXT as SHARING_TXT } from './sharing.js';
 import { FAMILY_PREFS, CIRCLE_SPACE_PREF, CLIENT_VERSION } from './engine.js';
+import { armGate3, disarmGate3 } from './gate3.js';
 import { probeCrypto, isSuiteAvailable, unavailableMessage } from '../crypto/probe.js';
 import { normalizeOrigin, insecureOriginMessage, NetError } from '../platform/net.js';
 import { exportBackup, passphraseStrength, EXPORT_SHEET_COPY, README } from '../crypto/backup.js';
@@ -313,24 +314,64 @@ export async function shellSyncStatus() {
  * shell pref is not where that is decided; a settings sheet that could silently disarm sync would
  * be a display preference with a network consequence.
  *
+ * ── THE FIRST CIRCLE COULD NOT BE CREATED, AND THIS GUARD IS WHY (LZP-1010) ─────────────────
+ *
+ * „A space exists" is the right condition for the call on every settings open. It is the WRONG
+ * condition for the opt-in click, and as the only condition it deadlocked the product:
+ *
+ *   `optIn()` (mount.js:640) must POST /api/v1/spaces to create the space …
+ *   … the shell refuses that POST, because `sync_enabled` is false (lib.rs:1077) …
+ *   … and this function will not set `sync_enabled`, because no space exists yet.
+ *
+ * So „Familienkreis erstellen" answered „Das hat nicht geklappt: net: the shell reported blocked"
+ * on every shipped shell, in both implementations, for every person who ever pressed it. The
+ * tier-2 e2e did not catch it because it asserted this exact refusal and then set the pref
+ * itself (`shell-family-e2e.dom.js` §2) — everything downstream of creation was proven against a
+ * switch no product code path could have moved.
+ *
+ * `optIn: true` names the other moment. The click IS the opt-in — it is the person deciding to
+ * stop being solo — and that is what this docblock already called "the moment the switch is
+ * supposed to move". Gate 3 is not weakened: the switch still moves only on a deliberate,
+ * explicit act, never on drawing a sheet, and `disarmShellSyncIfNoSpace` puts it back if the
+ * creation the click authorised does not produce a space.
+ *
+ * @param {{optIn?: boolean}} [opts] `optIn` skips the space check for the opt-in click itself.
  * @returns {Promise<'armed'|'not-in-a-shell'|'no-space'|'failed'>} for tests; nothing reads it in
  *          the product, because there is nothing a person could do about any of the four.
  */
-export async function armShellSync() {
+export async function armShellSync({ optIn = false } = {}) {
+  const invoke = shellInvoke();
+  if (!invoke) return 'not-in-a-shell';
+  if (!optIn) {
+    const st = store.state.settings || {};
+    const hasSpace = Boolean(st[FAMILY_PREFS.space]) || Boolean(st[CIRCLE_SPACE_PREF]);
+    if (!hasSpace) return 'no-space';
+  }
+  // Not a toast on failure. A person cannot act on it, and the visible symptom — sync that does
+  // not run — already has its own honest sentence in „Server & eigene Geräte" (19.3).
+  return armGate3();
+}
+
+/**
+ * Put gate 3's switch back after an opt-in that armed it and then failed.
+ *
+ * This is the ONLY thing in the product that turns the switch off, and it is narrow on purpose.
+ * `armShellSync`'s docblock says a settings sheet that could silently disarm sync would be a
+ * display preference with a network consequence — that is still true, and this is not that. It
+ * runs only on the failure path of the click that armed it, and only when no space came to exist,
+ * so it cannot reach a Mac that is in a circle. Its effect is to restore the state the person was
+ * in one second earlier: solo, and originating nothing.
+ *
+ * Silent for the same reason `armShellSync` is: the visible symptom already has its own sentence.
+ *
+ * @returns {Promise<'disarmed'|'not-in-a-shell'|'has-space'|'failed'>} for tests.
+ */
+export async function disarmShellSyncIfNoSpace() {
   const invoke = shellInvoke();
   if (!invoke) return 'not-in-a-shell';
   const st = store.state.settings || {};
-  const hasSpace = Boolean(st[FAMILY_PREFS.space]) || Boolean(st[CIRCLE_SPACE_PREF]);
-  if (!hasSpace) return 'no-space';
-  try {
-    await invoke('set_shell_pref', { key: 'sync_enabled', value: true });
-    return 'armed';
-  } catch (e) {
-    // Not a toast. A person cannot act on it, and the visible symptom — sync that does not run —
-    // already has its own honest sentence in „Server & eigene Geräte" (19.3).
-    console.warn('[family] the shell would not arm sync_enabled:', (e && e.message) || e);
-    return 'failed';
-  }
+  if (Boolean(st[FAMILY_PREFS.space]) || Boolean(st[CIRCLE_SPACE_PREF])) return 'has-space';
+  return disarmGate3();
 }
 
 function buildOptInSection(body, api, hooks) {
@@ -426,10 +467,22 @@ function buildOptInSection(body, api, hooks) {
     // must meet one sentence, not a TypeError four steps in.
     if (!(await assertSuiteAvailable())) return;
     go.disabled = true;
+    // ── GATE 3'S SWITCH, BEFORE THE REQUEST THAT NEEDS IT (LZP-1010) ────────────────────────
+    //
+    // This used to run AFTER `onOptIn`, on the reasoning that "the space now exists, so the
+    // switch may move". The space does not exist until `onOptIn` RETURNS, and `onOptIn` cannot
+    // return without POSTing /api/v1/spaces, which the shell refuses while the switch is off.
+    // The order was the bug, and it made „Familienkreis erstellen" impossible in every shell
+    // ever shipped.
+    //
+    // The click is the opt-in, so this is the moment — see `armShellSync`. Arming a shell that
+    // then fails to create anything is why `disarmShellSyncIfNoSpace` exists below.
+    const armedByThisClick = (await armShellSync({ optIn: true })) === 'armed';
     try {
       await hooks.onOptIn(origin);
-      // The space now exists, so the shell's gate-3 switch may move. BEFORE the reload, because
-      // the reload is what arms the engine and the engine's first push must not be refused.
+      // Idempotent, and now the ordinary path: the space exists, so this is the plain form of the
+      // call. Kept BEFORE the reload, because the reload is what arms the engine and the engine's
+      // first push must not be refused.
       await armShellSync();
       // The space is created and the identity is durable, but this store was `init()`ed without
       // one — `usePersonalSpace()` refuses after `init()` for a reason ADR 006 §9.4 makes cheap:
@@ -439,6 +492,9 @@ function buildOptInSection(body, api, hooks) {
       api.close();
       location.reload();
     } catch (e) {
+      // Creation failed, so this Mac is still solo — and must be solo in the shell too. Only
+      // undoes what this click did, and only while no space exists.
+      if (armedByThisClick) await disarmShellSyncIfNoSpace();
       go.disabled = false;
       toast(t('familyFailed', String((e && e.message) || e)));
     }

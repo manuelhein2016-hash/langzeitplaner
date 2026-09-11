@@ -170,19 +170,38 @@ test('§1 the page cannot name a host — the origin is shell configuration, and
   // subject is an instance whose switch has never been moved. §11 makes the same refusal
   // assertion from the other side, on a shell that is genuinely solo.
   if (PHASE === 'solo') skip('§11 owns the unarmed shell — arming it here would destroy its subject');
-  // ORDER FIRST, on an instance that has not yet been armed. With the switch at its default the
-  // command refuses at check 1 — before it looks at the URL at all — which is exactly what "solo
-  // makes zero requests is a property of the order" means. The switch is PERSISTED (`sync.json`),
-  // so on a relaunch of a Mac that already has a circle it is legitimately on; the row branches on
-  // the fact rather than assuming a state, and asserts something either way.
+  // ── ORDER FIRST — AND THE SWITCH IS NO LONGER CHECK 1, DELIBERATELY ───────────────────────
+  //
+  // This row used to assert that an unarmed shell refuses with `sync_disabled` before it looks at
+  // the URL at all. That stopped being true when solo send landed: `sync_preflight` now runs
+  // 1 pin → 2 canonical rebuild → 3 method → 4 switch, precisely so the one permitted solo pair
+  // can be decided on a CANONICAL url rather than on the string the page sent
+  // (`src-tauri/src/lib.rs:1064-1078`, mirrored in `main.swift`). The row was not updated, so it
+  // has been red in this driver ever since — and this driver is not in CI, so nothing said so.
+  //
+  // THE GUARANTEE IT WAS PROTECTING IS INTACT, and is what the two probes below now assert
+  // separately. Steps 1 to 3 are pure and local — no socket, no DNS — so "solo makes zero
+  // requests is a property of the order" still holds; what changed is only WHICH local refusal
+  // fires first. Asserting that an off-origin URL dies on the pin, and that an on-origin one the
+  // carve-out does not cover dies on the switch, is strictly stronger than the single branch it
+  // replaces: it pins both checks instead of whichever happened to run first.
   const armed0 = (await invoke('sync_status')).enabled === true;
-  const beforeArming = await invoke('sync_request', {
+  const offOriginFirst = await invoke('sync_request', {
     url: 'https://evil.example/api/v1/meta', method: 'GET', headers: {}, body: '',
   });
-  assert.equal(beforeArming.reason, armed0 ? 'url_is_not_the_pinned_origin' : 'sync_disabled',
-    armed0
-      ? 'an armed shell accepted an off-origin URL'
-      : 'the switch is not the FIRST check — an unarmed shell looked at the URL before refusing');
+  assert.equal(offOriginFirst.reason, 'url_is_not_the_pinned_origin',
+    'the pin is no longer the first thing an off-origin URL meets');
+  assert.ok(!offOriginFirst.status, 'a refused request must carry no HTTP answer');
+  if (!armed0) {
+    // The switch still gates, on the address that passes the pin. `GET /api/v1/meta` is not the
+    // solo-send pair (`POST` + exactly `/api/v1/feedback`), so an unarmed shell must refuse it.
+    const onOriginWhileOff = await invoke('sync_request', {
+      url: ORIGIN + '/api/v1/meta', method: 'GET', headers: {}, body: '',
+    });
+    assert.equal(onOriginWhileOff.reason, 'sync_disabled',
+      'gate 3 no longer refuses an on-origin request on an unarmed shell');
+    assert.ok(!onOriginWhileOff.status, 'a refused request must carry no HTTP answer');
+  }
   await invoke('set_shell_pref', { key: 'sync_enabled', value: true });
 
   // The single most important property of the new attack surface, asserted from the page that
@@ -194,6 +213,16 @@ test('§1 the page cannot name a host — the origin is shell configuration, and
   assert.equal(off.error, 'blocked');
   assert.equal(off.reason, 'url_is_not_the_pinned_origin');
   assert.ok(!off.status, 'a refused request must carry no HTTP answer');
+
+  // ── PUT THE SWITCH BACK WHERE THIS ROW FOUND IT ───────────────────────────────────────────
+  //
+  // The arming above is a probe's, not the product's, and `sync.json` persists it for every row
+  // that follows in this launch. Leaving it on made §2 — „a Familienkreis is created from the
+  // real screen" — run against a shell armed by the TEST, which is exactly the blind spot that
+  // let the create deadlock ship (LZP-1010). §2 now asserts it starts unarmed, and this is what
+  // makes that assertion honest rather than a coincidence of this row failing first.
+  if (!armed0) await invoke('set_shell_pref', { key: 'sync_enabled', value: false });
+
   // The probes above are this file's own; they must not be counted as the product's traffic.
   WIRE.sync_request.length = 0;
   WIRE.sync_urls.length = 0;
@@ -206,10 +235,29 @@ test('§1 the page cannot name a host — the origin is shell configuration, and
 test('§2 a Familienkreis is created from the real screen, and every byte went through the bridge', async () => {
   if (PHASE !== 'create') skip(PHASE ? `phase is ${PHASE}` : SKIP_REASON);
 
-  // The shell's gate-3 switch, pushed by the product's own code path. Without it `sync_request`
-  // refuses everything — which is precisely the state a shipped shell was in before this pass.
-  assert.equal(await armShell(), 'no-space', 'a Mac with no space must not arm the switch');
-  await invoke('set_shell_pref', { key: 'sync_enabled', value: true });
+  // ── GATE 3 IS LEFT OFF HERE ON PURPOSE, AND THAT IS THE POINT OF THE ROW (LZP-1010) ───────
+  //
+  // This used to read:
+  //
+  //     assert.equal(await armShell(), 'no-space', 'a Mac with no space must not arm the switch');
+  //     await invoke('set_shell_pref', { key: 'sync_enabled', value: true });
+  //
+  // — it asserted that the product's arming refuses, and then reached past the product and set
+  // the pref itself. So everything below proved the create screen works from a state NO product
+  // code path could reach, while the state it could reach — switch off, no space — was one the
+  // product deadlocked in: `armShellSync` would not arm without a space, and creating the space
+  // is the request the shell was refusing. „Familienkreis erstellen" answered „Das hat nicht
+  // geklappt: net: the shell reported blocked" on every shell ever shipped, and this suite was
+  // green throughout.
+  //
+  // Now the hand-flip is gone and `submitCreate` arms gate 3 itself. Nothing else here changed:
+  // if the deadlock ever returns, `POST /api/v1/spaces` is refused locally and this row fails on
+  // its own existing assertions.
+  assert.equal(await armShell(), 'no-space',
+    'a Mac with no space must not arm the switch from a settings sheet');
+  const gate3Before = await invoke('sync_status');
+  assert.equal(gate3Before.enabled, false,
+    'gate 3 was already armed before the click — this row would prove nothing');
   WIRE.sync_request.length = 0;
   WIRE.sync_urls.length = 0;
 
@@ -234,6 +282,12 @@ test('§2 a Familienkreis is created from the real screen, and every byte went t
   const circle = cj.familyCircle();
   assert.ok(circle, 'no circle in settings after create');
   assert.match(circle.spaceId, /^fsp_/);
+
+  // The product moved the switch, from inside the button's own handler. Asserted separately from
+  // "the POST succeeded" because the two fail differently: this one names WHY the POST could.
+  const gate3After = await invoke('sync_status');
+  assert.equal(gate3After.enabled, true,
+    'the create button did not arm gate 3 — see gate3.js, and the deadlock is back');
 
   // ── THE PROOF THAT MATTERS ────────────────────────────────────────────────────────────────
   // `POST /spaces` and `POST /invites` both happened, and BOTH went through `sync_request`.
