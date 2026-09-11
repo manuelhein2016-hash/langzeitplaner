@@ -826,12 +826,24 @@ describe('§6 · the Swift shell\'s hand-substituted constants are gated', () =>
     // The F13 trap, one file over: pinning "SH-KEY is FAIL" would make `npm test` go red on the
     // day the PO generates the keypair and does the right thing. So both branches are driven
     // through the shipped predicate and this row is green in either state of the tree.
+    // ── AND THIS ROW ITSELF ASSUMED A TREE STATE, which is the joke its own title makes ────────
+    //
+    // It built the "real key" variant by replacing the LITERAL `let UPDATER_PUBLIC_KEY_B64 = ""`.
+    // On 2026-09-11 the PO generated the keypair and pasted the key in, the literal stopped
+    // existing, the replace became a no-op, and the row died on its own guard — *"the empty-key
+    // declaration moved; this row edits it by exact text"*. Exactly the F13 trap it was written to
+    // avoid, rebuilt inside the row that avoids it: doing the right thing turned the suite red.
+    //
+    // Both variants are now derived from whatever the declaration currently says, so the row is
+    // genuinely a function of the predicate and green before the key exists, after it exists, and
+    // after it is rotated.
     const swift = sources().swift;
+    const DECL = /let UPDATER_PUBLIC_KEY_B64 = "[^"]*"/;
+    assert.match(swift, DECL, 'the UPDATER_PUBLIC_KEY_B64 declaration moved; SH-KEY reads it by this shape');
     const real = Buffer.alloc(32, 7).toString('base64');
-    const withKey = swift.replace('let UPDATER_PUBLIC_KEY_B64 = ""', `let UPDATER_PUBLIC_KEY_B64 = "${real}"`);
-    assert.notEqual(withKey, swift, 'the empty-key declaration moved; this row edits it by exact text');
+    const withKey = swift.replace(DECL, `let UPDATER_PUBLIC_KEY_B64 = "${real}"`);
 
-    const empty = nRow(preflightRows({ swift: swift.replace(/let UPDATER_PUBLIC_KEY_B64 = "[^"]*"/, 'let UPDATER_PUBLIC_KEY_B64 = ""') }), 'SH-KEY');
+    const empty = nRow(preflightRows({ swift: swift.replace(DECL, 'let UPDATER_PUBLIC_KEY_B64 = ""') }), 'SH-KEY');
     assert.equal(empty.status, 'FAIL',
       'an empty UPDATER_PUBLIC_KEY_B64 passes the release pre-flight. The Swift shell then ships '
       + 'with an updater that refuses every download, and 22.3/22.5 are dead in it.');
@@ -848,7 +860,10 @@ describe('§6 · the Swift shell\'s hand-substituted constants are gated', () =>
 
   test('§6b · a set-but-unusable key is refused, and the tree\'s own row agrees with the function', () => {
     const swift = sources().swift;
-    const junk = nRow(preflightRows({ swift: swift.replace('let UPDATER_PUBLIC_KEY_B64 = ""', 'let UPDATER_PUBLIC_KEY_B64 = "not-a-key"') }), 'SH-KEY');
+    // Same literal-vs-shape defect as §6a, and it was worse here: with the key filled in, the
+    // replace was a no-op, `junk` became the REAL tree, and the row asserting "a junk key is
+    // refused" would have been asserting the opposite of what it read.
+    const junk = nRow(preflightRows({ swift: swift.replace(/let UPDATER_PUBLIC_KEY_B64 = "[^"]*"/, 'let UPDATER_PUBLIC_KEY_B64 = "not-a-key"') }), 'SH-KEY');
     assert.equal(junk.status, 'FAIL',
       'a non-empty string that is not a key passes. That is worse than the empty case: the updater '
       + 'would fetch, download, verify against nonsense and discard every release in silence.');

@@ -239,7 +239,7 @@ let UPDATE_MANIFEST_URL =
 /// updater refuses to download anything at all, which is the correct failure
 /// mode: no key, no installs. Replace with the base64 of the 32-byte Ed25519
 /// public key (a minisign `.pub` line is also accepted).
-let UPDATER_PUBLIC_KEY_B64 = ""
+let UPDATER_PUBLIC_KEY_B64 = "RWSrtkmk2DEiWQAg0Hh1acyGC4VnsGrDiWGLkIAyspqsYw3t/vQhcBz0"
 
 let UPDATER_PREFS_FILE = "updater.json"
 let UPDATER_STAGED_FILE = "staged-update.tar.gz"

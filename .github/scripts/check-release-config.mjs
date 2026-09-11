@@ -341,19 +341,44 @@ function shellRows(swift, endpoints) {
     } else {
       let bytes = null;
       let text = '';
+      let buf = null;
       try {
-        const buf = Buffer.from(key, 'base64');
+        buf = Buffer.from(key, 'base64');
         bytes = buf.length;
         text = buf.toString('utf8');
       } catch { /* handled below */ }
+      // ── THIS ROW MUST MIRROR `parseUpdaterPublicKey`, NOT ITS OWN IDEA OF A KEY ───────────────
+      //
+      // It used to accept exactly two shapes: a whole `.pub` FILE (base64 whose plaintext carries
+      // `untrusted comment:`), or a bare 32-byte raw key. It rejected the THIRD shape the shell
+      // actually accepts — a single minisign `.pub` LINE, which decodes to 42 bytes: 2-byte
+      // algorithm (`Ed`) + 8-byte key id + the 32-byte key.
+      //
+      // That is the shape `cargo tauri signer generate` puts on your screen, so the first real key
+      // anyone pasted failed this gate, with a message stating the opposite of the truth: "neither
+      // a 32-byte Ed25519 key nor a minisign public key file". Measured 2026-09-11 on the PO's own
+      // keypair. The row's own remediation text three lines above already said "a minisign .pub
+      // line is also accepted" — the prose was right and the code was wrong.
+      //
+      // Note the whole-FILE form is accepted here but would NOT work in the shell: the parser
+      // splits the raw string on newlines and base64-decodes each line, so a file-blob arrives as
+      // one 152-byte candidate and matches neither 32 nor 42. Kept as a pass because it is the
+      // Tauri-side spelling and a paste-swap between the two fields is a real mistake worth
+      // catching downstream rather than here — SH-PAIR below is what compares the two.
+      const isMinisignLine = bytes === 42 && buf && buf.subarray(0, 2).toString('latin1') === 'Ed';
       if (text.includes('untrusted comment:')) {
         rows.push(PASS('SH-KEY', 'UPDATER_PUBLIC_KEY_B64 decodes to a minisign public key file.'));
+      } else if (isMinisignLine) {
+        rows.push(PASS('SH-KEY',
+          'UPDATER_PUBLIC_KEY_B64 decodes to 42 bytes beginning `Ed` — a minisign public key line, '
+          + 'the shape `parseUpdaterPublicKey` (main.swift:353-356) reads as algorithm + key id + key.'));
       } else if (bytes === 32) {
         rows.push(PASS('SH-KEY', 'UPDATER_PUBLIC_KEY_B64 decodes to 32 bytes — a raw Ed25519 public key.'));
       } else {
         rows.push(FAIL('SH-KEY',
           `UPDATER_PUBLIC_KEY_B64 is set but decodes to ${bytes === null ? 'nothing readable' : `${bytes} bytes`}, `
-          + 'which is neither a 32-byte Ed25519 key nor a minisign public key file. Every signature check '
+          + 'which is none of the three shapes main.swift:342 accepts: a 32-byte raw Ed25519 key, a '
+          + '42-byte minisign line beginning `Ed`, or a whole minisign .pub file. Every signature check '
           + 'against it fails, so the updater downloads and then discards each release — silently, for ever.'));
       }
     }
