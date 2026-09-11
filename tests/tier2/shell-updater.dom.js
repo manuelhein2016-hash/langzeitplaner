@@ -27,7 +27,22 @@ test('the shell implements the four updater commands the JS port sends', async (
   assert.equal(typeof s, 'object');
   assert.equal(s.channel, CHANNEL, '22.5 — one channel, and both sides name it the same');
   assert.equal(s.target, TARGET);
-  assert.match(s.currentVersion, /^\d+\.\d+\.\d+$/, 'the shell reports its CFBundleShortVersionString');
+  // A PRERELEASE SUFFIX IS LEGAL HERE, and this row used to forbid it.
+  //
+  // `/^\d+\.\d+\.\d+$/` rejected `2.0.0-rc.1` — a shape `release.yml:129` deliberately produces,
+  // since a tag containing `-` is what marks a GitHub prerelease, and a prerelease is the only way
+  // to publish a build that no installed app is offered. So the row failed the moment the version
+  // was bumped for the release candidate: the test forbade what the release process requires.
+  //
+  // The ordering it depends on is real, not assumed — measured against the shipped comparator:
+  //     isNewer("2.0.0",      "2.0.0-rc.1") === true     ← the rc is later offered the real release
+  //     isNewer("2.0.0-rc.2", "2.0.0-rc.1") === true
+  //     isNewer("2.0.0-rc.1", "2.0.0")      === false
+  // `updater.js:215 compareVersions` ends in `comparePre`, so it is semver and not a numeric
+  // triple. Had it NOT been, an rc install would have sat on 2.0.0-rc.1 for ever, because the
+  // real 2.0.0 would never have looked newer.
+  assert.match(s.currentVersion, /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/,
+    'the shell reports its CFBundleShortVersionString, optionally with a semver prerelease suffix');
   assert.equal(s.stagedVersion, null, 'a first launch has nothing staged');
   // …and the port wrapper reads the same object the raw command returns
   const viaPort = await port.status();
