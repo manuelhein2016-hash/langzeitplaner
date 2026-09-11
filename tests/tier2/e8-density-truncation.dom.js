@@ -301,8 +301,31 @@ test('§C2 · at the 92 px minimum column the badges are a tax, and the line is 
   //    118 px default they will be taking width off chrome that has room, and
   //    v1's own characterization rows are the oracle for that geometry.
   const at118 = table({ colWidth: 118, crowd: 0 }, '118 px column — the default, which the 92 px reclaim may not touch');
-  rows.push({ id: 'v1/the-default-column-is-not-re-metricked', ok: at118['v1 · my plain note'].visible === 13,
-    why: `a plain v1 note shows ${at118['v1 · my plain note'].visible} characters at the 118 px default; v1's own board showed 13` });
+  // ── STATED AS GEOMETRY, NOT AS A GLYPH COUNT — fixed 2026-09-11 ───────────────────────────
+  //
+  // This asserted `visible === 13`, and 13 is a fact about one Mac's font rasterisation. It
+  // passed here and failed on the CI runner, where the same board draws a different number of
+  // characters into the same number of pixels. Third row in this suite to read the environment
+  // without saying so; the previous two were a wall-clock weekday and a thread stack size.
+  //
+  // The claim was never about 13. It is the sentence three lines up: the 92 px reclaim is a no-op
+  // from 114 px up, so at the 118 px default the note's text column must still be the WHOLE body
+  // width — nothing clawed back for chrome that has room. That is a comparison between two
+  // measurements taken in the same engine, so whatever the font does, it does to both sides.
+  // Measured at BOTH widths above the 114 px threshold, because a note carries a couple of pixels
+  // of inherent padding that a one-sided comparison would read as a clamp (it does: 60 px of a
+  // 62 px body at 118). Padding is constant; a clamp is not. So the property is that the gap at
+  // the 118 px default equals the gap at the 160 px maximum — if the reclaim ever started firing
+  // at the default, 118 would give up pixels that 160 keeps, and these two would diverge.
+  const bodyAt = (w) => withBoard({ notes: [own('t', DAY, TEXT)], settings: { colWidth: w, layers: NO_LAYERS, hiddenMembers: {} } },
+    () => px($('.note', dayNode()).getBoundingClientRect().width));
+  const gap118 = bodyAt(118) - at118['v1 · my plain note'].textPx;
+  const gap160 = bodyAt(160) - at160['v1 · my plain note'].textPx;
+  rows.push({ id: 'v1/the-default-column-is-not-re-metricked', ok: Math.abs(gap118 - gap160) <= 1,
+    why: `the note's text column gives up ${gap118.toFixed(1)} px at the 118 px default and `
+      + `${gap160.toFixed(1)} px at the 160 px maximum — both above the 114 px threshold, so they must `
+      + `agree. It draws ${at118['v1 · my plain note'].visible} characters there, which is a fact about `
+      + `this engine's font rasterisation and is deliberately NOT asserted.` });
   // 2. THE WIDE END STILL PAYS FOR ITSELF. Buying the narrow column by taxing
   //    the wide one would be a trade, not a fix.
   rows.push({ id: '2.5/wider-is-still-wider', ok: at160['v1 · my plain note'].visible > at118['v1 · my plain note'].visible

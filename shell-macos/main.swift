@@ -583,7 +583,19 @@ func updaterFetchManifest(_ done: @escaping (String) -> Void) {
     // buys nothing and costs the user a network call she did not ask for. Refusing here is the
     // same fail-closed direction the empty key was always meant to express, stated as a fact
     // about the key rather than as a string match on the URL.
-    guard !UPDATER_PUBLIC_KEY_B64.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    // `updaterPublicKeyB64()`, NOT the raw constant — measured 2026-09-11.
+    //
+    // This guard shipped reading `UPDATER_PUBLIC_KEY_B64` directly while every other consumer
+    // (:517 verification, :645 the download path) goes through the accessor that honours the
+    // headless `--updater-pubkey` override. The inconsistency cut both ways and both were wrong:
+    // while the constant was empty, `updater-selftest.sh` — which exists precisely to "drive a
+    // real key" through the override — could not get past this line whatever key it passed; and
+    // once the constant was filled in, no override could put the no-key state back, which is what
+    // `tests/run-dom-tests.sh` needs to keep the tier-2 suite off the network.
+    //
+    // Reading the accessor makes the override mean the same thing at every site, which is the only
+    // way a flag documented as "the selftest can drive a real key" is actually true.
+    guard !updaterPublicKeyB64().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         done(updaterJSON(["ok": false, "error": UpdaterError.noKey.rawValue]))
         return
     }
