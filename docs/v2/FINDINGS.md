@@ -5367,3 +5367,79 @@ Re-run and green alongside it: `e7-leak-downgrade`, `e7-leak-observer`, `e7-leak
   a §1b in that file. Both are its owner's.
 - `docs/v2/adr/003-sync-protocol.md` §7 and `SHELL-VERIFICATION.md`'s SSRF table still describe
   gate 3's old check order.
+
+---
+
+## §25 · THE UX-AUDIT FIX CYCLE — and the one item whose obvious fix is impossible
+
+Closing the audit's 45 open items (`docs/v2/UX-AUDIT.md`). Everything else in this pass landed;
+this section is the one that did not, because attempting it found a constraint that rules out the
+fix the plan described.
+
+### 25.1 · 20.3 — a leave CANNOT author its own tombstone
+
+**The gap.** `POST /members/leave` and `POST /members/remove` share one server body —
+`handlers/lifecycle.js:224 purgeMember`, whose own docblock says *"One implementation, because the
+two stories say 'the same effect'"*. On the client they are not the same at all:
+
+| | remove (20.2) | leave (20.3) |
+|---|---|---|
+| in-log op | `member.set{_alive:false}` (`removal.js:281 REMOVAL_PATCH`) | **none** |
+| epoch rotation | `keys.rotate('member.remove')` | none (the relay returns `rotateRequired`) |
+
+Because a leave authors no op, `store.js:4113`'s `currentMembers` — derived from the log, which
+ADR 006 makes the truth — still lists the leaver as current on every remaining Mac, and their
+already-folded Geteilt entries stay on every board that had pulled them. The relay purged their
+FUTURE ops, so nothing new arrives and nothing is refused: the departure is silent and invisible.
+
+**WHY THE OBVIOUS FIX IS IMPOSSIBLE, and it is worth writing down.** The plan for this pass said:
+have `adminpanel.js#leaveSpace` author `member.set{_alive:false}` on self before the relay call.
+It cannot work. `purgeMember` deletes the departing member's ops **keyed on deviceShort**
+(`lifecycle.js:229-230 deleteOpsByDevices`), in the same transaction as the leave — so a tombstone
+the leaver publishes is destroyed by the very request that publishes it. `mount.js:252-253` already
+records the consequence in passing (*"a leave authors no op — the relay purges the leaver's ops in
+the same transaction"*); what was missing is that this also forecloses the fix.
+
+`core/ops.js:1343-1350` refuses a self `removeMember` for a different and also correct reason.
+
+**THE SHAPE THAT WORKS.** The tombstone has to be authored by someone whose ops survive, and the
+only list on a remaining Mac that knows a member has gone is the RELAY ROSTER, which keeps
+`removedAt` and which `mount.js` already caches (`rosterCache`). So:
+
+> On pull, a Mac **that holds the admin seat** diffs the roster's `removedAt` members against the
+> log's `_alive` registers and authors the existing `removeMember` op for each one it finds
+> missing. `removeMember` already refuses self, already demands `mustBeSittingAdmin`, and already
+> orders the epoch rotation — which is also the right owner, because `lifecycle.js:574-575` says
+> the rotation after a leave belongs to the departing member's successor, not to the leaver.
+
+It is eventual rather than immediate: until the admin's Mac next syncs, the leaver stays listed.
+That is honest and it is the only ordering the protocol allows.
+
+**NOT DONE HERE, deliberately.** It moves who authors a governing op, and it needs a three-Mac
+fleet row — admin, leaver, observer — to be worth anything. Rushed, the failure mode is an op
+some Macs drop silently, which is exactly what `REMOVAL_PATCH`'s own comment warns about. 20.3
+carries an interim erratum in the catalogue in the meantime, the way 19.4 does for E5-6.
+
+### 25.2 · 18.4 — ⌘Z obeys its rule and still eats a co-editor's write
+
+`tests/attack/ownership-authz-undo.test.js:151-161` characterises this in full and its rows are
+GREEN, because in the attack suite "C2 SUCCEEDED" means the attack worked. It has never carried a
+finding number, so the audit graded 18.4 PARTIAL on it and there was nothing to point at.
+
+The letter of the rule holds: `undo.js:257 captureImages` refuses `op.act !== me`, so my stacks
+never contain a peer's op, and `tests/fleet/e10-fleet-board.test.js` §18.4 passes. What escapes is
+the *promotion*: an undo restores the pre-image of MY truth register at a FRESH stamp (rule U4),
+and a field's displayed value is max-by-stamp between my truth register and the co-editor's
+`pub.*`. A fresh stamp beats everything. So a co-editor's newer write is not undone — it is
+**outvoted, silently**, by a keystroke whose whole meaning is "undo my own typo".
+
+The test file makes the sharper point: the person pressing ⌘Z need not be the attacker. Co-edit
+immediately after your victim types, and their next routine undo destroys your text with no
+notice and no trace.
+
+**Not fixed here.** It is not a bug in undo's ownership check, which is correct; it is the
+interaction between U4's fresh stamp and max-by-stamp promotion, and every candidate fix (stamp
+the restore at the pre-image's original time; refuse to restore a field whose register has moved
+under a different author; make undo author a `pub.*` too) changes op semantics that ADR 001 and
+the whole fold rest on. That wants its own pass and its own adversarial round, not a commit inside
+a UX fix cycle. 18.4 carries an interim erratum.

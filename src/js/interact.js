@@ -51,6 +51,7 @@ let pending = null;
 let drag = null;
 let editor = null;
 let autoScrollTimer = null;
+let autoScrollDir = 0;      // 5.6 — which way the armed interval is scrolling, so a reversal re-arms
 let onChange = () => {};
 
 export function initInteractions(board, wrap, opts = {}) {
@@ -681,13 +682,23 @@ function handleEdgeScroll(e) {
   if (e.clientX < r.left + EDGE) dir = -1;
   else if (e.clientX > r.right - EDGE) dir = 1;
   if (!dir) return stopEdgeScroll();
-  if (autoScrollTimer) return;
+  // THE DIRECTION IS RE-EVALUATED, and it used to not be. This was `if (autoScrollTimer) return;`,
+  // which armed the interval once and then ignored every later pointermove — so a drag that
+  // started inside one edge zone and was carried to the OTHER kept scrolling the way it began.
+  // Found by writing the 5.6 tier-2 row: a note in the first column is itself within 48px of the
+  // left edge, so every such drag armed leftwards and then refused to scroll right at all.
+  if (autoScrollTimer) {
+    if (autoScrollDir === dir) return;
+    stopEdgeScroll();
+  }
+  autoScrollDir = dir;
   autoScrollTimer = setInterval(() => {
     wrapEl.scrollLeft += dir * EDGE_SPEED;
   }, 16);
 }
 function stopEdgeScroll() {
   if (autoScrollTimer) { clearInterval(autoScrollTimer); autoScrollTimer = null; }
+  autoScrollDir = 0;
 }
 
 // ── hit testing ──────────────────────────────────────────────────────────────

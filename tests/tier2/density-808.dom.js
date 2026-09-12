@@ -763,16 +763,28 @@ test('§8 · the vertical cost is measured against this window and said out loud
     const wrap = $('.board-wrap') || boardEl().parentElement;
     const mine = $$('.sheet-body .warn').map((n) => n.textContent)
       .filter((w) => /px zu niedrig|px too short/.test(w));
+    const compacted = $$('.sheet-body .hint').map((n) => n.textContent)
+      .filter((h) => /zu niedrig, daher|so the board is drawing/.test(h));
     const perDevice = $$('.sheet-body .hint').map((n) => n.textContent)
       .filter((h) => /nur für diesen Mac|to this Mac only/.test(h));
-    // The row height the MODEL settled on — `buildBoard` clamps to the preset's
-    // floor, so a Komfort sheet asked for 18 is really drawing 26.
-    const effective = Math.max(L.DENSITY[d].minRowHeight, rowHeight);
+    // THE ROW HEIGHT THE BOARD ACTUALLY DREW, read off the rendered variable.
+    //
+    // This was `Math.max(minRowHeight, rowHeight)` — the preset's floor applied to the request —
+    // and the chrome was a re-typed `26 + 62`. Both stopped being right at 1.B: the row height is
+    // now capped to what FITS, and `--pad-h` moved for 10.5, so `need` was overstated by 14px AND
+    // computed from a height the board no longer draws. That is why this row went red on CI and
+    // green here — it only disagreed on windows of certain heights.
+    const have = wrap.clientHeight;
+    const effective = parseInt(getComputedStyle(document.documentElement)
+      .getPropertyValue('--row-h'), 10);
     cleanup();
     return {
-      have: wrap.clientHeight,
-      need: 31 * effective + 26 + 62,
+      have,
+      asked: Math.max(L.DENSITY[d].minRowHeight, rowHeight),
+      effective,
+      need: 31 * effective + L.BOARD_CHROME_H,
       warned: mine.length === 1,
+      compacted: compacted.length === 1,
       text: mine[0] || null,
       perDevice: perDevice[0] || null,
     };
@@ -789,29 +801,68 @@ test('§8 · the vertical cost is measured against this window and said out loud
     for (const [k, r] of Object.entries(grid)) {
       diag(`  ${k.padEnd(18)}${String(r.have).padStart(9)}${String(r.need).padStart(14)}   ${r.warned ? 'WARNS' : 'silent'}${r.need > r.have ? '' : '   (fits)'}`);
     }
-    const anyWarn = Object.entries(grid).find(([, r]) => r.warned);
-    const anySilent = Object.entries(grid).find(([, r]) => !r.warned);
-    diag(`  DE: „${grid['de/komfort/26'].text}"`);
-    diag(`  EN: „${grid['en/komfort/26'].text}"`);
+    const anyCompact = Object.entries(grid).find(([, r]) => r.compacted);
+    const anyFull = Object.entries(grid).find(([, r]) => !r.compacted);
     diag(`  DE per-device line: „${grid['de/kompakt/22'].perDevice}"`);
     diag(`  EN per-device line: „${grid['en/kompakt/22'].perDevice}"`);
 
-    const wrong = Object.entries(grid).filter(([, r]) => r.warned !== (r.need > r.have));
+    const overflowing = Object.entries(grid).filter(([, r]) => r.need > r.have + 1);
+    const inflated = Object.entries(grid).filter(([, r]) => r.effective > r.asked);
+    const mismatched = Object.entries(grid).filter(([, r]) => r.compacted !== (r.effective < r.asked));
+    const wrong = Object.entries(grid).filter(([, r]) => r.warned !== (r.need > r.have + 1));
     verdict('§8 · the vertical cost', [
       // The biconditional. „Warns when it should" and „is quiet when it should"
       // in one cell, over twenty-four configurations.
       { id: 'v1§2/the-warning-is-exactly-need-exceeds-have', ok: wrong.length === 0,
         why: `${wrong.length} configurations disagree with their own measurement: ${JSON.stringify(wrong.map(([k, r]) => `${k} have ${r.have} need ${r.need} warned ${r.warned}`))}` },
-      { id: 'v1§2/the-sweep-actually-crosses-the-boundary', ok: !!anyWarn && !!anySilent,
-        why: `NON-VACUITY: warned at ${anyWarn ? anyWarn[0] : 'nowhere'}, silent at ${anySilent ? anySilent[0] : 'nowhere'} — the sweep never crossed the line it claims to characterise` },
+      // ── THE PROMISE ITSELF (1.B / N16) ────────────────────────────────────
+      // This section characterised the vertical cost as a TRADE the settings pane confesses to.
+      // It is not a trade any more: the row height is a ceiling and the board takes whatever still
+      // shows all 31 days. So the promise is asserted over all twenty-four configurations, and it
+      // is the cell that would have caught the old behaviour.
+      // ── THE PROMISE, AND EXACTLY HOW FAR IT REACHES ───────────────────────
+      //
+      // At KOMPAKT — v1's default, and what every install starts on — the fit now guarantees it
+      // at every row height the slider offers. That is the cell that would have caught the old
+      // behaviour, where nine rows and the scratchpad sat below the fold out of the box.
+      //
+      // At KOMFORT it cannot be guaranteed and never could, which this section discovered rather
+      // than introduced: `DENSITY.komfort.minRowHeight` is 26 — "the smallest Komfort row that
+      // still shows what a Kompakt row shows" — so 31 of them plus the chrome need a 922px
+      // scroller, i.e. a window near 990. No 1440×900 display has one. Komfort is therefore a
+      // deliberate trade on a laptop, and the honest thing is that the sheet SAYS so, which is
+      // the biconditional cell below. Dropping below 26 to force a fit would give a Komfort user
+      // fewer lines per row than Kompakt shows, which is not a fit anyone asked for.
+      { id: 'v1§1/all-31-rows-fit-at-the-DEFAULT-density-at-every-row-height',
+        ok: overflowing.filter(([k]) => k.includes('kompakt')).length === 0,
+        why: `${overflowing.filter(([k]) => k.includes('kompakt')).length} Kompakt configurations `
+          + `fall below the fold: ${JSON.stringify(overflowing.filter(([k]) => k.includes('kompakt')).map(([k, r]) => `${k} need ${r.need} have ${r.have}`))}` },
+      { id: '1.B/the-fit-never-inflates-a-row-past-what-was-asked-for', ok: inflated.length === 0,
+        why: `${inflated.length} configurations drew TALLER rows than asked: ${JSON.stringify(inflated.map(([k, r]) => `${k} asked ${r.asked} drew ${r.effective}`))}` },
+      // A SILENT OVERRIDE IS HOW A SETTING COMES TO LOOK BROKEN. When the board compacts itself the
+      // person set a height and is not getting it, and the sheet says so — exactly then, never
+      // otherwise.
+      { id: '1.B/the-compaction-is-disclosed-exactly-when-it-happens', ok: mismatched.length === 0,
+        why: `${mismatched.length} configurations misreport it: ${JSON.stringify(mismatched.map(([k, r]) => `${k} asked ${r.asked} drew ${r.effective} said ${r.compacted}`))}` },
+      { id: 'v1§2/the-sweep-actually-crosses-the-boundary', ok: !!anyCompact && !!anyFull,
+        why: `NON-VACUITY: compacted at ${anyCompact ? anyCompact[0] : 'nowhere'}, full height at ${anyFull ? anyFull[0] : 'nowhere'} — the sweep never crossed the line it characterises` },
       { id: 'v1§2/kompakt-at-its-default-is-not-warned-about-on-this-window', ok: !grid['de/kompakt/22'].warned,
         why: `Kompakt at v1's own default warned, needing ${grid['de/kompakt/22'].need} px of ${grid['de/kompakt/22'].have}` },
       // 13.7 — both languages, always. And the per-device sentence is the only
       // place the user is told the setting does not travel, so it must exist in
       // both too.
-      { id: '13.7/both-languages-carry-the-warning', ok: grid['de/komfort/26'].text !== grid['en/komfort/26'].text
-          && /px zu niedrig/.test(grid['de/komfort/26'].text || '') && /px too short/.test(grid['en/komfort/26'].text || ''),
-        why: `DE „${grid['de/komfort/26'].text}" · EN „${grid['en/komfort/26'].text}"` },
+      // 13.7 — both languages, always. This used to read the rendered WARNING, which now fires
+      // only on a window below the supported minimum; on any normal window there is no text to
+      // read. The compaction sentence is the one this harness can actually produce, so that is
+      // the pair asserted — and it is asserted only where the sweep produced one.
+      { id: '13.7/both-languages-carry-the-compaction-sentence',
+        ok: !anyCompact || (() => {
+          const de = Object.entries(grid).find(([k, r]) => k.startsWith('de/') && r.compacted);
+          const en = Object.entries(grid).find(([k, r]) => k.startsWith('en/') && r.compacted);
+          return !!de && !!en;
+        })(),
+        why: 'the board compacted itself in one language and not the other — Mom\'s English Mac '
+          + 'would be told nothing about a row height it is not getting' },
       { id: '17.7/the-per-device-promise-is-stated-in-both-languages',
         ok: !!grid['de/kompakt/22'].perDevice && !!grid['en/kompakt/22'].perDevice
           && grid['de/kompakt/22'].perDevice !== grid['en/kompakt/22'].perDevice,

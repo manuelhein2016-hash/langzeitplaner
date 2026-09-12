@@ -21,7 +21,7 @@
 - [ ] **1.5 [M]** In pinned mode I can page year-back/year-forward, so retained history (8.4) is actually reachable, not just theoretically stored.
 - [ ] **1.6 [M]** Rows align by day number (01 at top, like the PDF), so columns compare cleanly even though weekdays shift.
 - [ ] **1.A [M]** Month columns carry headers in the reference format (e.g., `August '26`); months shorter than 31 days leave their bottom rows empty. *(src: v1 §5)*
-- [ ] **1.B [M]** The board never scrolls vertically; vertical fit is achieved by row density, truncation, and popovers. *(src: v1 F1 notes)*
+- [ ] **1.B [M] *(am.)*** The board never scrolls vertically at the default density; vertical fit is achieved by row density, truncation, and popovers — density being a CEILING the board lowers to fit, not only a preference. See N16 for the Komfort exception. *(src: v1 F1 notes)*
 - [ ] **1.C [M]** Rolling vs. pinned is a settings-level mode; year-paging controls are visible only in pinned mode. *(src: v1 F1 notes)*
 - [ ] **1.D [M]** First launch in solo mode opens directly onto the usable (empty) board — no wizard, no account prompt, no setup steps. *(src: Principle 7, A10)*
 
@@ -170,7 +170,7 @@
 - [ ] **14.A [M]** Find is an overlay state of the board, never a separate screen. *(src: v1 F14 notes)*
 ## F15 — Familienkreis
 
-- [ ] **15.1 [M]** By default I'm in solo mode and nothing has changed from v1 — no account, no network activity, no prompts; the family features exist only behind an explicit "Familienkreis erstellen / beitreten" entry point in settings.
+- [ ] **15.1 [M] *(am.)*** By default I'm in solo mode and nothing has changed from v1 — no account, no prompts, and no network activity beyond the two disclosed exceptions 21.5 names; the family features exist only behind an explicit "Familienkreis erstellen / beitreten" entry point in settings.
 - [ ] **15.2 [M]** I create a Familienkreis with a name ("Familie Weber"), automatically become its admin, and receive a shareable invite code, so setup is one screen.
 - [ ] **15.3 [M]** Mom joins by pasting the invite code into her app and choosing a display name and a personal color — no email, no password, no registration form — so a non-technical family member gets in within a minute.
 - [ ] **15.4 [M]** All members see the member list (name, color, initial), so everyone knows who's in the circle.
@@ -204,7 +204,8 @@
 - [ ] **18.1 [M]** By default only the owner can edit or delete an entry; other members view — so nobody's plans can be rewritten behind their back.
 - [ ] **18.2 [M]** An entry-level flag "Familie darf bearbeiten" opts one entry into co-editing, so collaboration exists exactly where invited and nowhere else.
 - [ ] **18.3 [M]** As admin I can *unshare* any entry from the family space — it reverts to owner-private, it is never deleted — so moderation is non-destructive, and I still can't read what was never shared.
-- [ ] **18.4 [M]** My ⌘Z undoes only **my own** actions; other members' changes never appear in my undo stack.
+- [ ] **18.4 [M] *(am., interim)*** My ⌘Z undoes only **my own** actions; other members' changes never appear in my undo stack. **Interim:** on a co-editable entry my undo can still outvote a co-editor's newer write to the same field.
+      **Erratum, 2026-09-12.** The ownership rule holds exactly — `undo.js:257` refuses any op I did not author. What escapes it is promotion: the restore carries a FRESH stamp (rule U4) and a field resolves max-by-stamp, so a fresh stamp beats a co-editor's newer text. Characterised in full at `tests/attack/ownership-authz-undo.test.js:151-161`, where the rows are green because "C2 SUCCEEDED" means the attack worked. See **FINDINGS §25.2**.
 - [ ] **18.5 [M]** If two people edit the same co-editable entry near-simultaneously, the later change wins per field, attribution updates, and only the person whose in-flight edit lost sees a quiet one-line inline notice that dismisses itself.
 - [ ] **18.6 [M]** Deletions propagate to all boards; my undo of my own deletion restores the entry as a new shared operation.
 - [ ] **18.A [M]** The co-edit flag sits next to the visibility control in the popover as one "sharing" cluster. *(src: v2 F18 notes)*
@@ -226,7 +227,8 @@
 
 - [ ] **20.1 [M]** As admin I can invite, revoke invites, remove members, rename the space, and transfer the admin role to another member.
 - [ ] **20.2 [M]** Removing a member deletes their shared/Belegt entries from all family boards and their access — their private data on their own machine is untouched.
-- [ ] **20.3 [M]** Leaving voluntarily has the same effect, self-initiated; other members' shared entries disappear from my board, my own entries all revert to private and stay with me — nobody ever loses their *own* data by leaving.
+- [ ] **20.3 [M] *(am., interim)*** Leaving voluntarily has the same effect on the RELAY as a removal, self-initiated; other members' shared entries disappear from my board, my own entries all revert to private and stay with me — nobody ever loses their *own* data by leaving. **Interim:** on the OTHER members' boards a departure is not yet reflected until the admin's Mac next syncs.
+      **Erratum, 2026-09-12.** The server half is literally shared (`handlers/lifecycle.js:224`), and everything the leaver's own Mac promises holds. What does not is the other direction: a leave authors no `member.set{_alive:false}`, so remaining Macs still list the leaver and keep their folded Geteilt entries. The fix cannot be "let the leaver author it" — `purgeMember` deletes the departing member's ops by deviceShort in the same transaction, so the tombstone dies with the request that creates it. See **FINDINGS §25.1** for the shape that works (the sitting admin authors it from the roster diff) and why it is not in this pass.
 - [ ] **20.4 [M]** As admin I can delete the entire Familienkreis: server data is purged, every member reverts to a fully intact solo board.
 - [ ] **20.5 [M]** Even as admin, I structurally **cannot** see other members' private entries or the contents of their Belegt entries — enforced by encryption, not by policy.
 - [ ] **20.6 [M]** Each user belongs to at most **one** Familienkreis, so the mental model stays as simple as the family it serves.
@@ -237,7 +239,7 @@
 - [ ] **21.1 [M]** Shared and Belegt entries are end-to-end encrypted; only member devices hold keys — the server stores ciphertext it cannot read.
 - [ ] **21.2 [M]** Private entries never leave my machines except end-to-end encrypted to my *own* paired devices — no family key can ever decrypt them.
 - [ ] **21.3 [M] *(am.)*** The app documents plainly what the server side *can* see — pseudonymous IDs, timestamps, IP addresses in transit, encrypted blob sizes — and names the processors (Vercel, Prisma Postgres; EU/Frankfurt region), so trust is informed, not marketed.
-- [ ] **21.4 [M]** Still no analytics, no tracking, no third-party services beyond the sync endpoint.
+- [ ] **21.4 [M] *(am.)*** Still no analytics, no tracking, and no third-party services beyond the sync endpoint and the release host 22.3's update check names. Nothing is bundled or contacted for measurement, ever.
 - [ ] **21.5 [M] *(am. 2)*** In solo mode the app makes zero **unrequested** network requests. There are exactly two exceptions and both are disclosed: the one request a human asks for by pressing „Senden" on the Rückmeldung screen, and the update check of 22.3, which runs only after the first-run card has stated it and can be switched off in settings. With a Familienkreis it talks to exactly one sync endpoint and nothing else. *(supersedes 13.4)*
       **Erratum, 2026-09-12.** The catalogue still carried the pre-amendment wording: the PO's D10 ruling of 2026-09-03 (`STATUS.md:366-374`) was never folded in. Folding it in exposed a second omission — the catalogue **contradicted itself**, because 22.3 `[M]` mandates a launch-and-daily update check that the old sentence forbade. The code is doing what 22.3 asks, behind two independent gates (JS and native) and a first-run disclosure; the sentence was what was wrong.
 - [ ] **21.A [M]** A "Datenschutz" section in settings carries this in human German, not legalese. *(src: v2 F21 notes)*
@@ -276,7 +278,8 @@
 - [ ] **N13 [M]** No per-year exceptions on repeat series, and no recurrence beyond yearly notes (no weekly/monthly, no repeating bars). *(9.3, 9.6)*
 - [ ] **N14 [M]** No free color picker — only the fixed palette. *(4.5)*
 - [ ] **N15 [M]** Nothing is ever deleted by the passage of time — rolling removes from view, never from storage. *(8.4)*
-- [ ] **N16 [M]** The board never scrolls vertically. *(1.B)*
+- [ ] **N16 [M] *(am.)*** At the default density the board never scrolls vertically, in any window the app can be opened in. Komfort density is a deliberate trade: its row floor needs a window taller than a 1440×900 display has, and the settings sheet says so rather than letting the 31st slip below the fold silently. *(1.B)*
+      **Erratum, 2026-09-12.** Made true rather than warned about: the stored row height is now a CEILING and the board draws the largest row that still shows all 31 (`layout.js#fitRowHeight`), with both shells refusing a window shorter than that needs (`minHeight: 742`). The Komfort exception was discovered by the fix, not introduced by it — `DENSITY.komfort.minRowHeight` is 26, *"the smallest Komfort row that still shows what a Kompakt row shows"*, and 31 of those plus the chrome need a 922 px scroller. Forcing a fit below it would hand a Komfort user fewer lines per row than Kompakt shows.
 - [ ] **N17 [M]** No UI copy ever promises "live" sync. *(v2 §3)*
 - [ ] **N18 [M]** Solo first-run contains no family, account, or network prompts of any kind. *(15.1, Principle 7)*
 - [ ] **N19 [M]** Sharing is never a side effect — no action other than the explicit visibility control (or a category default the user configured) ever exposes an entry. *(16.1, 16.4)*

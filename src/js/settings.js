@@ -6,7 +6,7 @@ import { store } from './store.js';
 import { t, getLang, setLang } from './i18n.js';
 import { BUNDESLAENDER, stateName } from './holidays.js';
 import { FERIEN_META, ferienHorizonFor } from './ferien.js';
-import { BOARD_CHROME_H } from './layout.js';
+import { BOARD_CHROME_H, fitRowHeight } from './layout.js';
 import { el, openSheet, field, switchBox, confirmSheet, toast } from './ui.js';
 import { openUnlockHelp } from './firstrun.js';
 import { storagePath, isTauri } from './storage.js';
@@ -306,18 +306,37 @@ function build(body, api) {
   // the user can act on — pixels of window, and days of month. It is measured
   // rather than derived from a constant because the chrome above the board
   // changes with the toolbar's own wrapping.
+  // ── WHAT THIS SAYS NOW, AND WHY IT CHANGED (1.B) ─────────────────────────
+  //
+  // It used to measure `rowNow` — the row height ASKED FOR — against the window and warn about
+  // the shortfall. That was the honest report of a real defect: the board did fall below the
+  // fold. Now `fitRowHeight` absorbs the shortfall by drawing shorter rows, so warning about a
+  // gap that no longer exists would be a lie in the other direction.
+  //
+  // So there are two sentences and they are different facts:
+  //
+  //   · the board COMPACTED ITSELF — informational, because the person set a row height and is
+  //     not getting it, and a silent override is how a setting comes to look broken;
+  //   · the window is BELOW THE MINIMUM the board can fit even at the density floor — a real
+  //     warning, and the only case where the 31st is still below the fold. Both shells refuse to
+  //     open a window this short (`minHeight: 742`), so it takes a deliberate act to see it.
   const wrapEl = document.querySelector('.board-wrap');
   if (wrapEl) {
     const have = wrapEl.clientHeight;
-    // 31 rows + --head-h + --pad-h, from the layout module rather than re-typed here — this
-    // constant was stale by 14px the moment --pad-h moved for 10.5.
-    const need = 31 * rowNow + BOARD_CHROME_H - 0;
+    const fitted = fitRowHeight(rowNow, DENSITY[densityOf(s)], have);
+    const need = 31 * fitted + BOARD_CHROME_H;
+    if (have > 0 && fitted < rowNow) {
+      body.appendChild(el('p', 'hint',
+        lang === 'en'
+          ? `This window is too short for ${rowNow} px rows, so the board is drawing them at ${fitted} px to keep all 31 days visible. Make the window taller to get the height you chose.`
+          : `Dieses Fenster ist für ${rowNow} px hohe Zeilen zu niedrig, daher zeichnet das Brett sie mit ${fitted} px, damit alle 31 Tage sichtbar bleiben. Fenster höher ziehen, um die gewählte Höhe zu bekommen.`));
+    }
     if (have > 0 && need > have + 1) {
-      const lostRows = Math.ceil((need - have) / rowNow);
+      const lostRows = Math.ceil((need - have) / fitted);
       body.appendChild(el('p', 'warn',
         lang === 'en'
-          ? `This window is ${need - have} px too short for that row height: the scratchpad and roughly the last ${lostRows} day rows of every month fall below the fold and have to be scrolled to. Make the window taller, or choose Compact.`
-          : `Dieses Fenster ist ${need - have} px zu niedrig für diese Zeilenhöhe: der Notizzettel und etwa die letzten ${lostRows} Tageszeilen jedes Monats liegen unter der Kante und müssen gescrollt werden. Fenster höher ziehen — oder Kompakt wählen.`));
+          ? `This window is ${need - have} px too short even at the smallest row height: the scratchpad and roughly the last ${lostRows} day rows of every month fall below the fold and have to be scrolled to. Make the window taller.`
+          : `Dieses Fenster ist ${need - have} px zu niedrig selbst bei der kleinsten Zeilenhöhe: der Notizzettel und etwa die letzten ${lostRows} Tageszeilen jedes Monats liegen unter der Kante und müssen gescrollt werden. Fenster höher ziehen.`));
     }
   }
 

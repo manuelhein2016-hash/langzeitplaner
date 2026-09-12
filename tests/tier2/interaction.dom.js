@@ -748,3 +748,81 @@ test('14.1 · Escape restores the board — no dimming, no hit marks', () => {
   assert.equal($$('.board .note.hit').length, 0, 'no hit marks survive');
   assert.equal($$('.board .note.current').length, 0);
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 5.6 · DRAGGING NEAR THE EDGE AUTO-SCROLLS THE BOARD
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// The audit could not verify this one and left it UNVERIFIED — `tests/COVERAGE.md` calls it "not
+// automatable" because it seems to need a window narrower than twelve columns. It does not. What
+// `interact.js:680-687` reads is the bounding rect of `#board-wrap`, so a NARROW SCROLLER is
+// enough, and a scroller can be made narrow with one style assignment.
+//
+// The gesture is deliberately built from raw pointer events rather than the `drag()` helper
+// above: the helper releases at the destination, and the whole subject here is what happens
+// WHILE the pointer is held near the edge.
+
+test('5.6 · a drag held near the right edge scrolls the board towards the months off-screen', async () => {
+  // AND IT STARTS INSIDE THE LEFT EDGE ZONE ON PURPOSE. The note lives in the first column, which
+  // is itself within EDGE (48px) of the left edge, so the gesture arms LEFTWARDS first and has to
+  // reverse. That is the case the old `if (autoScrollTimer) return;` could not do — writing this
+  // row is what found it — and it is the realistic one: dragging August into November begins at
+  // the left edge and ends at the right.
+  reset();
+  const wrap = $('#board-wrap');
+  const restore = wrap.style.width;
+  try {
+    // Narrow the scroller until there is somewhere to scroll to. 12 columns at 118px will not fit
+    // in 320px, which is the whole point — 1.4's horizontal degradation is what 5.6 rides on.
+    wrap.style.width = '320px';
+    wrap.scrollLeft = 0;
+    assert.ok(wrap.scrollWidth > wrap.clientWidth + 100,
+      'the scroller is not actually scrollable — this row would prove nothing');
+
+    const date = someDate(0, 8);
+    store.apply('createNoteInline', {
+      id: 'edge-scroll', date, text: 'Randnotiz', categoryId: store.state.categories[0].id,
+      visibility: 'privat', unhideCategoryId: null, lastCategoryId: store.state.categories[0].id,
+    });
+    await waitFor(() => $('.board .note[data-note-id="edge-scroll"]'), { what: 'the note to render' });
+    const note = $('.board .note[data-note-id="edge-scroll"]');
+    assert.ok(note, 'the note did not render');
+
+    const r = wrap.getBoundingClientRect();
+    const a = at(note, 6, 4);
+    ptr('pointerdown', note, a);
+    // Past the 4px threshold first, so this is a drag and not a click…
+    window.dispatchEvent(new PointerEvent('pointermove', {
+      bubbles: true, pointerId: 1, isPrimary: true, buttons: 1,
+      clientX: a.clientX, clientY: a.clientY + 10,
+    }));
+    // …then hold inside EDGE (48px) of the right edge, which is what arms the interval.
+    window.dispatchEvent(new PointerEvent('pointermove', {
+      bubbles: true, pointerId: 1, isPrimary: true, buttons: 1,
+      clientX: r.right - 10, clientY: a.clientY + 10,
+    }));
+
+    // The scroll is an interval, not a synchronous jump: 14px every 16ms.
+    let moved = true;
+    try { await waitFor(() => wrap.scrollLeft > 0, { timeout: 800, what: 'the board to auto-scroll' }); }
+    catch { moved = false; }
+    const reached = wrap.scrollLeft;
+    // Release before asserting, so a failure cannot leave the board wedged mid-drag for the
+    // rows after this one.
+    window.dispatchEvent(new PointerEvent('pointerup', {
+      bubbles: true, pointerId: 1, isPrimary: true, buttons: 0,
+      clientX: r.right - 10, clientY: a.clientY + 10,
+    }));
+
+    assert.ok(moved, 'holding a drag at the right edge never scrolled the board');
+    assert.ok(reached > 0, `scrollLeft stayed at ${reached}`);
+    // …and releasing stops it: the interval must not outlive the gesture.
+    const afterRelease = wrap.scrollLeft;
+    await new Promise((r2) => setTimeout(r2, 120));
+    assert.equal(wrap.scrollLeft, afterRelease,
+      'the board kept scrolling after the pointer came up — the interval outlived the drag');
+  } finally {
+    wrap.style.width = restore;
+    wrap.scrollLeft = 0;
+  }
+});
