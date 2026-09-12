@@ -157,6 +157,7 @@ const rememberCategory = (tx, catId) => tx.pref({ lastCategoryId: catId });
 
 export function openDayPopover(anchor, date, opts = {}) {
   closePopover();
+  closeSelectionSharing();        // 16.3 — two floating cards over one entry is the worst of both
   // `share` is the ONE open disclosure, remembered across `render()` so a level change does not
   // slam the strip shut under the finger that just used it — and so the §7.4 downgrade sentence
   // is still on screen at the moment it is true. `{id, kind, lastChange}` or null.
@@ -176,18 +177,100 @@ export function openDayPopover(anchor, date, opts = {}) {
   window.addEventListener('resize', closePopover);
 }
 
-function place(anchor) {
+// ═════════════════════════════════════════════════════════════════════════════
+// 16.3 · THE SECOND HOME — the entry's SELECTED STATE
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// `family/sharing.js:565-571` designed the control for two sites and said so:
+//
+//     "16.3's second home — the entry's SELECTED STATE, which lives in `interact.js` and is not
+//      this ticket's file — mounts the identical control by calling this and appending the
+//      result. There is deliberately no second implementation for the second site."
+//
+// It was never built. The selected state got an outline ring and resize handles and nothing else,
+// so 16.3's "two clicks maximum" was only ever true from an already-open popover: from the board
+// it was select, abandon the selection, click the day, click the trigger, click the level.
+//
+// This is the second home, and it is the SAME `sharingStrip` — no second implementation, exactly
+// as that comment asks. It lives here rather than in `interact.js` for the reason every family
+// seam in this product does: `interact.js` is in the boot graph, and `useSharing` already holds
+// the module here, so `interact.js` asks this file and never learns that `family/` exists.
+//
+// A SEPARATE NODE from the day popover, and the two are mutually exclusive: opening a day
+// popover closes this, and this does not open while one is up. Two floating cards over one entry
+// would be the worst of both.
+
+let selNode = null;
+
+/** Is there a sharing module installed at all? Solo Macs have none, and must not grow a control. */
+export const selectionSharingAvailable = () => !!sharing;
+
+export function closeSelectionSharing() {
+  if (!selNode) return;
+  document.removeEventListener('pointerdown', onSelOutside, true);
+  window.removeEventListener('resize', closeSelectionSharing);
+  selNode.remove();
+  selNode = null;
+}
+
+function onSelOutside(e) {
+  if (selNode && !selNode.contains(e.target)) closeSelectionSharing();
+}
+
+/**
+ * Mount the sharing cluster beside a selected entry.
+ *
+ * @param {HTMLElement} anchor the selected node, for placement
+ * @param {'note'|'bar'} kind
+ * @param {string} id the entry id — NEVER the entry object; see the note on `openSharing`'s
+ *        callbacks, which is the same hazard one file over
+ */
+export function openSelectionSharing(anchor, kind, id) {
+  closeSelectionSharing();
+  if (!sharing || !anchor || node) return;          // no module, or a day popover already owns it
+  const entry = currentEntry(kind, id);
+  if (!entry || entry.isForeign) return;            // 18.1 — not mine, not mine to level
+  selNode = el('div', 'popover sel-share');
+  selNode.appendChild(sharing.sharingStrip({
+    entry,
+    nameOf: memberNameOf,
+    // `commitLevel`, not `applyLevel`: the latter also writes the day popover's `ctx` and calls
+    // its `refresh()`, and there is no popover here.
+    //
+    // AND NOTHING RE-OPENS THE STRIP FROM HERE, deliberately. The write notifies the store,
+    // `main.js#redraw` runs `renderBoard` and then `applySelection`, and `applySelection` is
+    // already the one place that mounts this card for whatever is selected — so it re-opens with
+    // the fresh level on its own. An extra reopen in this callback raced that path and lost:
+    // `applySelection` had already closed the card by the time the callback continued, so the
+    // strip vanished under the finger that had just used it. One owner.
+    onLevel: (level) => commitLevel(id, kind, level),
+    onCoEdit: (on) => commitCoEdit(id, kind, on),
+  }));
+  document.body.appendChild(selNode);
+  place(anchor, selNode);
+  document.addEventListener('pointerdown', onSelOutside, true);
+  window.addEventListener('resize', closeSelectionSharing);
+}
+
+/**
+ * Position a floating card beside an anchor, clamped to the viewport.
+ *
+ * Takes the card as an argument rather than reading `node`, so 16.3's selection strip uses the
+ * same placement as the day popover instead of a second copy of this arithmetic.
+ */
+function place(anchor, card = node) {
+  if (!card) return;
   const r = anchor.getBoundingClientRect();
-  const w = node.offsetWidth;
-  const h = node.offsetHeight;
+  const w = card.offsetWidth;
+  const h = card.offsetHeight;
   let left = r.right + 8;
   if (left + w > window.innerWidth - 8) left = r.left - w - 8;
   if (left < 8) left = 8;
   let top = r.top - 6;
   if (top + h > window.innerHeight - 8) top = window.innerHeight - h - 8;
   if (top < 8) top = 8;
-  node.style.left = `${left}px`;
-  node.style.top = `${top}px`;
+  card.style.left = `${left}px`;
+  card.style.top = `${top}px`;
 }
 
 function refresh() {
@@ -601,8 +684,18 @@ const currentEntry = (kind, id) =>
  * click — therefore meets v1's decline protocol rather than an overwrite with a level the user
  * never saw. See the note at `openSharing` for why the entry is not passed in.
  */
-function applyLevel(id, kind, level) {
-  if (!sharing) return;
+/**
+ * The WRITE, with no popover bookkeeping.
+ *
+ * Split out of `applyLevel` for 16.3's second home: the selected-state strip has no `ctx` and no
+ * rows to `refresh()`, and calling the combined version from there wrote to the day popover's
+ * context — which threw when there was no popover open. The transaction is the part both homes
+ * share; what each does afterwards is its own.
+ *
+ * @returns {{patch:Object, level:string, to:string}|null} the plan, or null if it declined
+ */
+function commitLevel(id, kind, level) {
+  if (!sharing) return null;
   let done = null;
   store.txn('set-visibility', (tx) => {
     const x = tx.get(kind, id);
@@ -611,6 +704,11 @@ function applyLevel(id, kind, level) {
     if (!done) return false;                       // the v1 decline protocol, verbatim
     tx[kind](id).set(done.patch);
   });
+  return done;
+}
+
+function applyLevel(id, kind, level) {
+  const done = commitLevel(id, kind, level);
   if (!done) return;
   ctx.share = { id, kind, lastChange: done };
   refresh();
@@ -618,8 +716,9 @@ function applyLevel(id, kind, level) {
 
 /** 18.2 — „Familie darf bearbeiten". Refused below Geteilt by `planCoEditChange` as well as by
  *  the disabled input, so a caller that gets past the DOM still cannot set it (ADR 004 §8). */
-function applyCoEdit(id, kind, on) {
-  if (!sharing) return;
+/** The write half of `applyCoEdit`. Split for the same reason as `commitLevel`. */
+function commitCoEdit(id, kind, on) {
+  if (!sharing) return null;
   let done = null;
   store.txn('toggle-coedit', (tx) => {
     const x = tx.get(kind, id);
@@ -628,6 +727,11 @@ function applyCoEdit(id, kind, on) {
     if (!done) return false;
     tx[kind](id).set(done.patch);
   });
+  return done;
+}
+
+function applyCoEdit(id, kind, on) {
+  const done = commitCoEdit(id, kind, on);
   if (!done) return;
   ctx.share = { id, kind, lastChange: null };             // a grant is not a downgrade
   refresh();

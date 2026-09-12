@@ -922,6 +922,11 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 /* 16.4 — the per-category default-visibility control in „Kategorien". Drawn only on a Mac that is
    in a space (see `legend.js#catRow`), so a solo legend never grows it. Sized to sit between the
    swatches and the entry count without widening the row. */
+/* 16.3 — the sharing cluster in the entry's selected state. The same .popover shell (and the same
+   `place()`) as the day card, narrowed to the strip it carries: no rows, no day heading. */
+.popover.sel-share { width: auto; min-width: 196px; padding: 6px 7px; }
+.popover.sel-share .pop-share { border: 0; margin: 0; padding: 0; }
+
 .cat-default { display: inline-flex; align-items: center; margin-left: 8px; }
 .cat-default-sel {
   height: 20px; font: 400 10px var(--font); color: var(--ink-2);

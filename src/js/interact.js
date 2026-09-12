@@ -34,7 +34,14 @@ import { visibilityForNewEntry } from './core/visibility.js';
 // pointer state machine can never disagree about who may edit what. See the guard below.
 import { canEditEntry } from './layout.js';
 import { renderBoard, currentModel } from './board.js';
-import { openDayPopover, closePopover, popoverOpen } from './popover.js';
+import {
+  openDayPopover, closePopover, popoverOpen,
+  // 16.3 — the sharing cluster's SECOND home. Asked of `popover.js` rather than imported from
+  // `family/sharing.js`: this module is in the boot graph, and `popover.js` already holds the
+  // installed module behind `useSharing`. So solo mode never learns that `family/` exists, which
+  // is what `tests/tier1/network-scope.test.js` §2 measures.
+  selectionSharingAvailable, openSelectionSharing, closeSelectionSharing,
+} from './popover.js';
 import { flashCategory } from './legend.js';
 import { t } from './i18n.js';
 import { colorOf } from './palette.js';
@@ -101,12 +108,30 @@ export function clearSelection() {
 }
 export function applySelection() {
   boardEl?.querySelectorAll('.selected').forEach((n) => n.classList.remove('selected'));
-  if (!selection.id) return;
+  if (!selection.id) { closeSelectionSharing(); return; }
   const sel =
     selection.type === 'note'
       ? `.note[data-note-id="${cssEsc(selection.id)}"]`
       : `.bar[data-bar-id="${cssEsc(selection.id)}"], .bar-label[data-bar-id="${cssEsc(selection.id)}"]`;
-  boardEl?.querySelectorAll(sel).forEach((n) => n.classList.add('selected'));
+  const hit = boardEl?.querySelectorAll(sel);
+  hit?.forEach((n) => n.classList.add('selected'));
+
+  // ── 16.3 · THE VISIBILITY CONTROL, IN THE SELECTED STATE ──────────────────────────────────
+  //
+  // "I change an entry's visibility with a three-state control in its selected state and
+  // popover, TWO CLICKS MAXIMUM." The popover half shipped; this one did not, so from the board
+  // it was five clicks — select, abandon the selection, click the day, click the trigger, click
+  // the level. Now it is two: the click that selects, and the click that sets the level.
+  //
+  // Only where there is something to change: `selectionSharingAvailable()` is false on a solo
+  // Mac, and `openSelectionSharing` refuses a foreign entry (18.1 — not mine, not mine to
+  // level). A selection while a day popover is open is left alone; that card already carries the
+  // same control.
+  if (selectionSharingAvailable() && !popoverOpen() && hit && hit.length) {
+    openSelectionSharing(hit[0], selection.type, selection.id);
+  } else {
+    closeSelectionSharing();
+  }
 }
 const cssEsc = (s) => (window.CSS?.escape ? CSS.escape(s) : String(s).replace(/"/g, '\\"'));
 

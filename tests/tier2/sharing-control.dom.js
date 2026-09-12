@@ -886,3 +886,94 @@ test('§7 · A4 — a yearly repeat has ONE control, because it is ONE object', 
   assert.equal(noteById(id).date, '2025-09-15', 'and the anchor did not move');
   reset();
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// §9 · 16.3's SECOND HOME — the entry's SELECTED STATE
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// `family/sharing.js:565-571` designed the control for two sites and said so: "16.3's second home
+// — the entry's SELECTED STATE, which lives in `interact.js` and is not this ticket's file —
+// mounts the identical control by calling this". It was never built, so 16.3's "two clicks
+// maximum" only ever held from an already-open popover; from the board it was five.
+//
+// The budget is the claim, so the budget is what is counted.
+
+test('§9 · 16.3 — a selected entry carries the control, and the level changes in ONE more click', () => {
+  de();
+  const id = makeNote({ visibility: 'privat' });
+  const anchor = document.createElement('div');
+  document.body.appendChild(anchor);
+  try {
+    assert.equal(popover.selectionSharingAvailable(), true,
+      'the sharing module is installed in this harness — without it there is nothing to mount');
+
+    // CLICK 1 — the selection. `interact.js#applySelection` is what a board click reaches.
+    popover.openSelectionSharing(anchor, 'note', id);
+    const card = document.querySelector('.popover.sel-share');
+    assert.ok(card, 'a selected entry grew no sharing control');
+    const opts = [...card.querySelectorAll('.share-opt')];
+    assert.deepEqual(opts.map((b) => b.dataset.level), [...VISIBILITY_LEVELS],
+      'the selected state must carry the same three-state control, not a different one');
+    assert.equal(noteById(id).visibility, 'privat');
+
+    // CLICK 2 — the level. Two clicks total, which is 16.3's budget exactly.
+    opts.find((b) => b.dataset.level === 'geteilt').click();
+    assert.equal(noteById(id).visibility, 'geteilt',
+      'the second click did not change the level — the budget is not met');
+
+    // …AND THE STRIP RE-READS. In the app the write notifies the store, `main.js#redraw` runs
+    // `renderBoard` then `applySelection`, and `applySelection` is the one place that mounts this
+    // card — so it comes back carrying the new level. This harness has no live selection, so the
+    // redraw closes it and the equivalent call is made here explicitly. (An earlier draft reopened
+    // from inside the `onLevel` callback instead and raced that same redraw: the card vanished
+    // under the finger that had just used it.)
+    popover.openSelectionSharing(anchor, 'note', id);
+    const after = document.querySelector('.popover.sel-share');
+    assert.ok(after, 'the strip vanished after use');
+    assert.equal(after.querySelector('.share-opt[aria-checked="true"]').dataset.level, 'geteilt');
+  } finally {
+    popover.closeSelectionSharing();
+    anchor.remove();
+  }
+});
+
+test('§9 · a foreign entry is not levelled from the selected state either (18.1)', () => {
+  // 18.1 — only the owner may change an entry. The popover half already refuses; this half must
+  // refuse for the same reason and not merely decline to render by accident.
+  de();
+  const id = makeNote({ visibility: 'geteilt' });
+  const note = noteById(id);
+  const wasForeign = note.isForeign;
+  const anchor = document.createElement('div');
+  document.body.appendChild(anchor);
+  try {
+    note.isForeign = true;
+    popover.openSelectionSharing(anchor, 'note', id);
+    assert.equal(document.querySelector('.popover.sel-share'), null,
+      'a foreign entry offered a level control in its selected state');
+  } finally {
+    note.isForeign = wasForeign;
+    popover.closeSelectionSharing();
+    anchor.remove();
+  }
+});
+
+test('§9 · a solo Mac grows no control at all — the module is the gate', () => {
+  // ADR 003 §7 gate 2: `interact.js` is in the boot graph and asks `popover.js` whether a module
+  // is installed. Uninstalled, there is nothing to mount and nothing to import.
+  de();
+  const id = makeNote({ visibility: 'privat' });
+  const anchor = document.createElement('div');
+  document.body.appendChild(anchor);
+  try {
+    popover.useSharing(null);
+    assert.equal(popover.selectionSharingAvailable(), false);
+    popover.openSelectionSharing(anchor, 'note', id);
+    assert.equal(document.querySelector('.popover.sel-share'), null,
+      'a solo Mac was offered a visibility control');
+  } finally {
+    popover.useSharing(sharing);
+    popover.closeSelectionSharing();
+    anchor.remove();
+  }
+});

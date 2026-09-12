@@ -49,7 +49,7 @@ import { initAdminPanel } from './adminpanel.js';
 // behind the one dynamic door, solo mode cannot render the cluster for two independent structural
 // reasons: `stripV2Fields` leaves no `visibility` field on any entry for it to change, AND not one
 // byte of the module is evaluated.
-import { useSharing, memberNameOf } from '../popover.js';
+import { useSharing, useMemberNames, memberNameOf } from '../popover.js';
 import { installConflictNotice } from './conflict.js';
 import * as sharing from './sharing.js';
 import { chooseTransport } from '../platform/net.js';
@@ -335,6 +335,23 @@ function syncCircleMounts(hooks) {
   // surfaces and for the same reason (20.3): a Mac that has left may not keep a control that
   // writes a `visibility` register nothing will ever publish.
   useSharing(circle ? sharing : null);
+  // ── 17.6 · THE RESOLVER THAT WAS EXPORTED AND NEVER INSTALLED ─────────────────────────────
+  //
+  // `popover.js` exports `useMemberNames` and `memberNameOf` reads what it installs. Nothing in
+  // the product ever called it, so `memberNames` stayed null, `memberNameOf` always answered
+  // null, and `sharing.js#attributionLine` fell through to its last resorts: the one-letter
+  // initial, or „von einem Mitglied". The FORMAT was always right — `ATTRIBUTION_EXAMPLE` is
+  // literally „von Mama · geteilt · geändert So." — it just never had a name to put in it.
+  //
+  // The names are in the log, not on the relay: ADR 003 §5.1 gives the relay no name column, so
+  // the roster cannot carry them and `store.state.members` is the only place they exist. Read
+  // through a lambda so it answers at the moment the popover asks, not at the moment the sheet
+  // was mounted — a name arriving with D9's keys must show up without a remount.
+  useMemberNames(circle
+    ? (id) => (store.state.members instanceof Map
+      ? (store.state.members.get(id) || {}).displayName || null
+      : null)
+    : null);
   if (!circle) { initMembersUI(); rosterCache = []; rosterFor = null; return; }
   initMembersUI({
     legend: true,

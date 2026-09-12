@@ -30,7 +30,8 @@
 - [ ] **2.1 [M]** I click any day, type, and hit Enter to save — Escape cancels — so capturing a note takes seconds and never opens a dialog.
 - [ ] **2.2 [M] *(am.)*** I click an existing note to select it, double-click it (or press Enter while selected) to edit it in place, and clear its text or hit ✕ to delete it, so maintenance is as fast as creation. *(click model fixed in v1 §15)*
 - [ ] **2.3 [M]** A day can hold more than one note (with graceful truncation on narrow columns), so busy days don't force compromises.
-- [ ] **2.4 [M]** A crowded day shows the first two notes plus "+n"; clicking expands a popover with the full stack, so narrow columns never silently hide entries.
+- [ ] **2.4 [M] *(am.)*** A crowded day shows as many notes as the row height allows — two at every density's default and above — plus "+n"; clicking expands a popover with the full stack, so narrow columns never silently hide entries.
+      **Erratum, 2026-09-12.** "Two" is what the defaults give and what every shipped density shows: `rowCapacity` is `floor((rowH − 1) / lineH)`, so Kompakt at 22 px and Komfort at 26 px both show two, and only the slider's own floor of 18 px shows one. Fixing the count at two regardless would mean either clipping a 9 px line or ignoring the slider — and the promise the story is really making is the second half, that nothing is hidden SILENTLY, which the chip and the popover keep at every height.
 - [ ] **2.5 [M]** Notes cap at ~80 characters, truncate with ellipsis, and show full text on hover — keeping rows thin is what keeps 12 months on one screen.
 - [ ] **2.A [M]** Notes render in their category's color on the board. *(src: v1 F2 notes)*
 - [ ] **2.B [M]** The day popover offers full note texts with in-place edit and delete, and shows each note's category. *(src: v1 F2 notes)*
@@ -56,7 +57,8 @@
 - [ ] **4.4 [M]** Deleting a category with entries prompts me to reassign them ("Move 23 entries to …?"), so nothing vanishes as a side effect.
 - [ ] **4.5 [M]** Colors come from a fixed palette of ~10 distinguishable, print-safe tones instead of a free picker, so the legend stays readable on screen and paper.
 - [ ] **4.6 [M]** Creating an entry whose category is currently hidden auto-unhides that category with a brief flash, so a new entry can never disappear the moment I make it.
-- [ ] **4.A [M] *(am.)*** In v2 the legend has two sections — *Meine Kategorien* (personal, never synced) and *Familie* (members) — and categories remain a private organizational system. *(src: A3)*
+- [ ] **4.A [M] *(am. 2)*** In v2 the legend has two sections — personal categories (never synced) and the family members — separated by a rule rather than by headings, and categories remain a private organizational system. *(src: A3)*
+      **Erratum, 2026-09-12.** The section LABELS are deliberately absent and `family/membersui.js:1083-1115` argues it at length. v1 ships a default category called „Familie", so a „Familie" heading produced *„Arbeit · Familie · Reisen · bearbeiten │ Familie ⬤⬤⬤"* — the same word twice in one 40 px row meaning two different things. The alternative was renaming a category that exists in every v1 board, with stamps and a year of entries in it, which is an upgrade that edits the user's data. The divider carries A3's two sections for ~85 px less, and the rule is applied to both halves rather than one.
 
 ## F5 — Move, resize, undo
 
@@ -78,6 +80,7 @@
 - [ ] **6.4 [M]** I can toggle the layer off, so it never competes with my own entries when I don't need it.
 - [ ] **6.5 [M]** Holidays are computed from rules (fixed dates + Easter arithmetic + Buß- und Bettag rule), not from a lookup table — so this layer literally never runs out of data, forever, offline: any pinned year, past or future, shows correct holidays.
 - [ ] **6.6 [C]** A "show other Bundesländer dimmed" toggle reproduces the PDF's union view — my state's holidays strong, everyone else's muted (two distinct visual weights).
+      **Audit note, 2026-09-12.** Verified, not amended. The toggle is `settings.js:168-171` (`layers.otherStates`, default off), the layer decision is `layout.js:719`, and the two weights are `app.css:321-325`: own holidays are `500 8.5px` in the product's violet `#7A6BB5`, foreign ones are `--ink-4` **and** italic — two channels apart, so the distinction survives a colour-blind reader and a greyscale print.
 - [ ] **6.A [M]** When user content covers a holiday's text, the user entry wins the space but the holiday stays discoverable (marked day + tooltip). *(src: v1 F6 notes)*
 - [ ] **6.B [M]** The Bundesland selector offers all 16 states plus "nur bundesweite Feiertage". *(src: v1 §13)*
 
@@ -116,6 +119,7 @@
 - [ ] **10.1 [M]** Each month column has a small free-text area beneath it, so undated thoughts ("book cabin?") live next to the month they belong to.
 - [ ] **10.2 [M]** Scratchpad text persists and autosaves like everything else, so it's a real part of the board, not a sticky note that vanishes.
 - [ ] **10.3 [C]** I can drag a scratchpad line onto a day to turn it into a dated note, so vague plans can graduate into real ones.
+      **Audit note, 2026-09-12.** Not implemented, and recorded as an accepted gap rather than a defect — the catalogue's own rule is that "absence of a `[C]` item is a noted gap". It is the only unbuilt `[C]` in the product; the other four (6.6, 13.2, 14.2, 17.7) all ship.
 - [ ] **10.4 [M]** Pads belong to a *specific* month — Aug '26 and Aug '27 are different pads; new months arrive empty, old pads persist into history.
 - [ ] **10.5 [M]** A pad grows to ~5 lines then scrolls; print includes only non-empty pads.
 - [ ] **10.A [M]** Pads read visually as margin, not day content, and support native text editing incl. its own text undo. *(src: v1 F10 notes)*
