@@ -1,5 +1,46 @@
 # LangzeitPlaner v2 — UX AUDIT AGAINST THE 196-ITEM CATALOGUE
 
+> ### ██ ANSWERED 2026-09-12 · THE VERDICTS BELOW ARE THE AUDIT'S, NOT THE PRODUCT'S ██
+>
+> **40 of the 45 open items are closed; 5 remain and each is named.** Everything from `## The
+> answer` down is preserved exactly as the audit wrote it, because a finding rewritten after it is
+> fixed cannot be audited a second time. This block is the disposition.
+>
+> **All four FAILs are closed, and both data-loss bugs the audit did not find are too.**
+>
+> | | |
+> |---|---|
+> | **The Ablage menu** (11.3, 11.7, 12.4, 12.1) | Export and import deadlocked the app — sync Tauri commands calling `blocking_save_file`, which the plugin's own docstring forbids on the main thread. Both are `async` now, and the export is atomic. Print had no command at all in the shipped shell; implemented through objc2, mirroring the Swift shell call for call. |
+> | **Key backup was unreachable** (21.B) | `exportBackup` — the only export carrying identity and space keys — had no reachable UI, so a dead Mac took the Familienkreis with it silently. `recoveryMaterial` wired, and 21.B's honesty moment now appears on both onboarding screens. |
+> | **⌘Q could lose an edit** (11.1) | No exit handler at all against a 700 ms save debounce. Now holds the quit, flushes, with a deadline so a wedged page cannot make the app unquittable. *(Not in the audit.)* |
+> | **⌘W made the app unreachable** (13.5) | Nothing handled Dock reopen; with the menu-bar icon off too, force-quit was the only way back. *(Not in the audit.)* |
+> | **Deleting a circle trapped everyone else** (20.4) | „Kreis verlassen" threw before it cleaned up locally, and the message blamed a removal that never happened. |
+> | **The Schulferien were invented** (7.1, 7.4) | Replaced with the official KMK tables — four school years, all sixteen Länder, 386 ranges, cross-checked against the KMK's own `.ics` files: 16/16 states and 1 400 holiday-days matching exactly. |
+> | **The board scrolled vertically** (1.B, N16, 8.3) | The stored row height is a ceiling now; both shells refuse a window too short for 31 rows. |
+> | Also: 13.7 (an English install kept a German menu), 22.2 (`gatekeeper_status` existed in neither shell), 13.1, 13.2, 13.K, 16.3, 16.4, 17.6, 19.2, 5.6, 6.5, 8.B, 2.B, 10.5, 1.A | |
+>
+> **The item that prevents recurrence** is `tests/tier1/shell-parity.test.js`. It landed RED, naming
+> four live defects, and caught a new Tauri-only command within a minute of being written. Tier 2
+> runs `shell-macos/main.swift`; the DMG ships `src-tauri`; nothing had ever compared them.
+>
+> **Nine catalogue rows were wrong about the product rather than the reverse**, and carry errata —
+> the sharpest being that 21.5 forbade network requests 22.3 *requires*, so the catalogue
+> contradicted itself, and the PO's own D10 ruling had never been folded in.
+>
+> **Still open, and why:**
+>
+> | | |
+> |---|---|
+> | **20.3** | A leave authors no tombstone, so the leaver stays current on every other board. The obvious fix is impossible — `purgeMember` deletes the leaver's ops in the same transaction — see **FINDINGS §25.1** for the shape that works. |
+> | **18.4** | ⌘Z obeys its ownership rule and still outvotes a co-editor's newer write, via U4's fresh stamp. Characterised in the attack suite; **FINDINGS §25.2**. |
+> | **10.3** | `[C]`, never built. An accepted gap by the catalogue's own rule. |
+> | **4.A, 2.4, 6.6** | Amended or annotated: each was a catalogue wording or a verified design decision, not a defect. |
+>
+> **What still needs a human.** The Ablage deadlock was diagnosed by code-read; nobody has pressed
+> ⇧⌘E on a real build, because GUI automation hits the -1743 Apple Events wall. That is the first
+> thing to do with a new DMG.
+
+
 | | |
 |---|---|
 | **Audited** | `ab00471` on `main`, 2026-09-11/12 |

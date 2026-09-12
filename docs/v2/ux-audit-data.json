@@ -1252,13 +1252,15 @@
     },
     {
      "id": "11.3",
-     "verdict": "PARTIAL",
-     "method": "mixed",
-     "evidence": "Import door: src/js/backup.js:42-84 (⇧⌘I main.js:522; Settings settings.js:390-391) → confirmSheet title i18n `importConfirm` 'Aktuelles Board ersetzen?' / 'Replace current board?' (src/js/i18n.js:57, :543), confirm label 'Ersetzen', danger:true → store.replaceAll(parsed) (src/js/store.js:5527). Restore of a v1-shape export pinned by tests/tier1/store-persistence.test.js describe 'replaceAll() (11.3)' (:812-866, incl. 'clears both undo and redo — import is not undoable', 'writes through immediately') and tests/attack/v1-fidelity-core.test.js describe 'export and re-import (11.2, 11.3)' (:1061) — both ran green (287/287, 72/72). Re-join clause: `importBackup` (src/js/crypto/backup.js:1583) has NO caller in src/js (grep -rn importBackup src/js → only crypto/backup.js and a comment at settings.js:604); no `format`/`langzeitplaner-backup` guard exists on the import path (grep of store.js, core/replace.js, backup.js, main.js → none). Probe run: `node --import ./tests/helpers/dev-flag.mjs <scratch>/migrate-probe.mjs` feeding migrate() a file shaped like exportBackup's output ({format:'langzeitplaner-backup', v:2, board:{notes:[1 note]…}, identity:{…}}) → 'notes after migrate: 0 | bars: 0 | categories: Arbeit,Familie,Reisen,Deadlines | schemaVersion: 1'. The fleet rows that prove re-join (tests/fleet/e10-backup-restore.test.js §2a-§2e, :491-548, ran 21/21) call importBackup directly (:430) — library, not product.",
+     "verdict": "FAIL",
+     "method": "code-read",
+     "evidence": "RECONCILIATION FINDING — src/js/backup.js:44-50 `importBoard` calls `await invoke('import_board', {})` FIRST and only then `confirmAndReplace` (:63-84, which is where the „Aktuelles Board ersetzen?\" sheet lives), so the picker runs before any confirmation. `src-tauri/src/lib.rs:1326-1331 import_board` is a SYNCHRONOUS `#[tauri::command]` calling `.blocking_pick_file()` — the identical misuse proven for `export_board` under 11.7, on the same main-thread chain (wry url_scheme_handler.rs:57 → tauri ipc/protocol.rs:75 → webview/mod.rs:1909 → tauri-macros wrapper.rs:251 body_blocking → blocking_fn! `rx.recv()` → tauri-runtime-wry lib.rs:239 inline-on-main → rfd modal_future.rs:78-102 beginSheetModalForWindow). The plugin forbids it in as many words (tauri-plugin-dialog-2.7.3/src/lib.rs:756-760). The `<input type=file>` fallback at backup.js:53-62 never runs, because a deadlocked call never throws. Swift shell is unaffected (main.swift uses NSOpenPanel directly). ‖ AGENT-PASS EVIDENCE (for the milder clause): Import door: src/js/backup.js:42-84 (⇧⌘I main.js:522; Settings settings.js:390-391) → confirmSheet title i18n `importConfirm` 'Aktuelles Board ersetzen?' / 'Replace current board?' (src/js/i18n.js:57, :543), confirm label 'Ersetzen', danger:true → store.replaceAll(parsed) (src/js/store.js:5527). Restore of a v1-shape export pinned by tests/tier1/store-persistence.test.js describe 'replaceAll() (11.3)' (:812-866, incl. 'clears both undo and redo — import is not undoable', 'writes through immediately') and tests/attack/v1-fidelity-core.test.js describe 'export and re-import (11.2, 11.3)' (:1061) — both ran green (287/287, 72/72). Re-join clause: `importBackup` (src/js/crypto/backup.js:1583) has NO caller in src/js (grep -rn importBackup src/js → only crypto/backup.js and a comment at settings.js:604); no `format`/`langzeitplaner-backup` guard exists on the import path (grep of store.js, core/replace.js, backup.js, main.js → none). Probe run: `node --import ./tests/helpers/dev-flag.mjs <scratch>/migrate-probe.mjs` feeding migrate() a file shaped like exportBackup's output ({format:'langzeitplaner-backup', v:2, board:{notes:[1 note]…}, identity:{…}}) → 'notes after migrate: 0 | bars: 0 | categories: Arbeit,Familie,Reisen,Deadlines | schemaVersion: 1'. The fleet rows that prove re-join (tests/fleet/e10-backup-restore.test.js §2a-§2e, :491-548, ran 21/21) call importBackup directly (:430) — library, not product.",
      "confidence": "high",
-     "clause": "and re-joins my Familienkreis when the keys are present",
+     "clause": "Importing a JSON restores my data … after an explicit \"replace current board?\" confirmation",
      "note": "Worse than a missing feature: the app's own recovery file (langzeitplaner-schluessel-*.json / -eintraege-*.json) fed through the only import door passes JSON.parse, gets the 'Ersetzen' confirmation, and replaces the board with an EMPTY default board (top-level has no notes/bars; the board is nested under `board`). The day's snapshot (11.5) is the only way back. Neither shell offers another import route (lib.rs:1326-1341 import_board only reads bytes). Confirmation clause and v1-export restore hold.",
-     "trail": [],
+     "trail": [
+      "RECONCILIATION (not the agent pass): escalated PARTIAL → FAIL. The agents' clause was \"and re-joins my Familienkreis when the keys are present\"; this is the more severe one they did not reach."
+     ],
      "defence": [
       {
        "refuted": false,
@@ -1273,7 +1275,7 @@
        "suggested": "PARTIAL"
       }
      ],
-     "status": "confirmed",
+     "status": "confirmed (reconciliation)",
      "prio": "M",
      "text": "Importing a JSON restores my data — and re-joins my Familienkreis when the keys are present — after an explicit \"replace current board?\" confirmation, so recovery is one action and never an accident. *(A2)*"
     },
