@@ -1415,6 +1415,10 @@ fn print_board(window: tauri::WebviewWindow) -> Result<(), String> {
             // A COPY of the shared info, never the shared object itself — the user's system-wide
             // print settings are not ours to mutate. `main.swift:2471` does the same.
             let shared: *mut AnyObject = msg_send![objc2::class!(NSPrintInfo), sharedPrintInfo];
+            // `copy` returns +1 and this never releases it: one small NSPrintInfo is leaked per
+            // print. Said out loud rather than left for someone to find — it is bounded by how
+            // often a person presses CmdOrCtrl+P, and the alternative is holding a `Retained<>`
+            // through a typed binding this function deliberately does not use.
             let info: *mut AnyObject = msg_send![shared, copy];
             if info.is_null() {
                 return;
@@ -1452,12 +1456,36 @@ fn print_board(window: tauri::WebviewWindow) -> Result<(), String> {
             let _: () = msg_send![op, setShowsPrintPanel: true];
             let _: () = msg_send![op, setShowsProgressPanel: true];
 
-            if ns_window.is_null() {
+            // ── A SELECTOR MISTAKE MUST DEGRADE, NOT TRAP ─────────────────────────────────────
+            //
+            // `msg_send!` sends whatever name it is handed and an unknown one is
+            // "unrecognized selector sent to instance" — a crash, at runtime, in the shipped app,
+            // on a path no test in this repository can reach. This code shipped once with
+            // `runModalForWindow:` (NSApplication's selector, not NSPrintOperation's) and would
+            // have crashed the first time anybody pressed CmdOrCtrl+P.
+            //
+            // So the sheet-modal call is guarded by the runtime's own answer. If the selector is
+            // ever wrong again, printing falls back to `runOperation` — a print without a sheet,
+            // which is worse than intended and enormously better than a crash.
+            let modal_sel = objc2::sel!(runOperationModalForWindow:delegate:didRunSelector:contextInfo:);
+            let can_sheet: bool = msg_send![op, respondsToSelector: modal_sel];
+            if ns_window.is_null() || !can_sheet {
                 let _: bool = msg_send![op, runOperation];
             } else {
+                // `runOperationModalForWindow:…`, NOT `runModalForWindow:…`.
+                //
+                // THE SECOND NAME DOES NOT EXIST ON NSPrintOperation. It exists on NSApplication,
+                // which is what makes it look right — and `msg_send!` sends whatever selector it
+                // is handed, so the wrong one is not a compile error. It is "unrecognized selector
+                // sent to instance" the first time somebody presses CmdOrCtrl+P, which is a crash
+                // in the shipped app and a crash no test in this repository could reach.
+                //
+                // Caught by checking AppKit's own header rather than the Rust binding
+                // (`NSPrintOperation.h:105`); Swift spells it `runModal(for:delegate:didRun:
+                // contextInfo:)`, which is why `main.swift:2485` reads differently and is correct.
                 let _: () = msg_send![
                     op,
-                    runModalForWindow: ns_window,
+                    runOperationModalForWindow: ns_window,
                     delegate: std::ptr::null_mut::<AnyObject>(),
                     didRunSelector: None::<objc2::runtime::Sel>,
                     contextInfo: std::ptr::null_mut::<std::ffi::c_void>()
