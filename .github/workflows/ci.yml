@@ -267,7 +267,11 @@ jobs:
                 + `these and FAILS THE BUILD before rustc reads lib.rs. Set both, or neither.`);
             }
           }
-          const known = new Set(['tray-icon', 'macos-private-api', 'devtools', 'isolation']);
+          // `image-png` (13.2): `Image::from_bytes` is behind it, and the tray needs it to carry a
+          // real monochrome template glyph instead of the colour app icon. It has NO
+          // tauri.conf.json counterpart, so it belongs in the known set and not in the pair list
+          // above — nothing in the config can disagree with it.
+          const known = new Set(['tray-icon', 'macos-private-api', 'devtools', 'isolation', 'image-png']);
           for (const f of features) {
             if (!known.has(f)) {
               bad++;

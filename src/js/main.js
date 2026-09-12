@@ -590,6 +590,14 @@ function wireNativeMenu() {
   };
   const actions = {
     settings: () => openSettingsWithFamily(),
+    // 13.K — the Hilfe menu item. Help lives in the Einstellungen sheet's own Hilfe section, so
+    // this is the same door under its own name.
+    //
+    // Deliberately does NOT name the module that section is built from: `e10-network-scope.test.js`
+    // §2a asserts which FILES may mention that subsystem at all — comments and strings included,
+    // because an import specifier is a string — and main.js is not one of them. Principle 10 is a
+    // claim about who can open that screen, and this file opening Einstellungen is not that.
+    help: () => openSettingsWithFamily(),
     export: () => exportBoard(),
     import: () => importBoard(() => onChange('restore')),
     print: () => printBoard(),

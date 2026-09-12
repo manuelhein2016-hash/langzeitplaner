@@ -22,7 +22,7 @@ tauri-build = { version = "2", features = [] }
 # The config is the half that is right: no window here is transparent and nothing calls
 # `set_effects`, so the app does not need the private API. Removing the feature keeps the
 # shipped behaviour and makes the two halves agree.
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 # LZP-102 (22.3, 22.6). The plugin owns the HTTPS GET, the minisign verification

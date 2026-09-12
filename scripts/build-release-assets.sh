@@ -33,6 +33,21 @@ say "compiling scripts/render-svg.swift"
 RENDER="$WORK/render-svg"
 swiftc -O -o "$RENDER" scripts/render-svg.swift -framework AppKit
 
+# ── 1a. the MENU-BAR glyph, from assets/tray-glyph.svg ────────────────────────
+# 13.2 — a template image is rendered from its ALPHA alone, so the colour app icon
+# used as one arrives in the menu bar as a solid blob. This is the real glyph, at
+# the 22pt menu-bar size and its @2x. `lib.rs` embeds them with include_bytes!,
+# which is why a missing file has to be a loud build failure and not a blank icon.
+say "menu-bar glyph from assets/tray-glyph.svg"
+mkdir -p src-tauri/icons
+"$RENDER" src-tauri/icons/tray-glyph.png 22 22 --svg assets/tray-glyph.svg 0 0 22 22 0 0 \
+  | { [ "$VERBOSE" = 1 ] && cat || cat >/dev/null; }
+"$RENDER" src-tauri/icons/tray-glyph@2x.png 44 44 --svg assets/tray-glyph.svg 0 0 44 44 0 0 \
+  | { [ "$VERBOSE" = 1 ] && cat || cat >/dev/null; }
+for f in src-tauri/icons/tray-glyph.png src-tauri/icons/tray-glyph@2x.png; do
+  [ -s "$f" ] || { echo "✗ $f was not produced" >&2; exit 1; }
+done
+
 # ── 1. app icon, from assets/icon.svg ──────────────────────────────────────────
 # NOT from assets/icon-1024.png: that file was flattened onto white, so every size
 # derived from it gives the app a white square instead of a rounded icon. Rendering

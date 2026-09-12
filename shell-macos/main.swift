@@ -2610,6 +2610,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         root.addItem(windowItem)
         NSApp.windowsMenu = windowMenu
 
+        // 13.K — "Fenster/Hilfe: standard". Fenster was here; Hilfe was in NEITHER shell. It
+        // points at `settings.js#buildHelpSection`, which is where help actually lives (the
+        // Gatekeeper walkthrough and „Rückmeldung senden"). Registering it as NSApp.helpMenu is
+        // what puts it in the system's Help position and gives its search field.
+        let helpItem = NSMenuItem()
+        let helpMenu = NSMenu(title: L("Hilfe", "Help"))
+        helpMenu.addItem(item(L("LangzeitPlaner-Hilfe", "LangzeitPlaner Help"), "help", ""))
+        helpItem.submenu = helpMenu
+        root.addItem(helpItem)
+        NSApp.helpMenu = helpMenu
+
         return root
     }
 }

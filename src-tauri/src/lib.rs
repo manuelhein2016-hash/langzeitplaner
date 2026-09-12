@@ -1515,6 +1515,90 @@ fn gatekeeper_status(app: AppHandle) -> String {
     .to_string()
 }
 
+// ── 13.1 · THE WINDOW REMEMBERS ITS SIZE AND POSITION ────────────────────────────────────────
+//
+// "A normal Dock app with a single window that remembers size, position, and scroll offset across
+// launches." The scroll offset was remembered (`main.js`, localStorage). The FRAME was not: there
+// is no `tauri-plugin-window-state` here, nothing saved a frame, and `tauri.conf.json` carried
+// `"center": true`, so every launch re-centred at 1440×900 no matter where the window had been
+// left. `main.swift:2058-2060` has always done this with `setFrameAutosaveName`.
+//
+// Written by hand rather than by adding the plugin, for the reason the rest of this file is:
+// `UpdaterPrefs` and `SyncPrefs` already establish the shape — a small JSON beside the board,
+// written atomically — and this product's whole dependency posture is to add one only when it
+// buys something. Sixty bytes and thirty lines do not.
+//
+// The throttle matters: a window drag emits Moved continuously, and writing a file per frame
+// would be a disk write every few milliseconds. One write a second, plus a final one when the
+// window closes or the app quits, loses at most a second of "where I left it".
+const WINDOW_FILE: &str = "window.json";
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+struct WindowFrame {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+}
+
+static LAST_FRAME_SAVE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+fn save_window_frame(window: &tauri::Window, throttle: bool) {
+    if throttle {
+        if let Ok(mut g) = LAST_FRAME_SAVE.lock() {
+            if let Some(t) = *g {
+                if t.elapsed() < std::time::Duration::from_secs(1) {
+                    return;
+                }
+            }
+            *g = Some(std::time::Instant::now());
+        }
+    }
+    // A minimised or fullscreen window reports a frame that is not the one to come back to.
+    if window.is_minimized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+        return;
+    }
+    let (Ok(pos), Ok(size)) = (window.outer_position(), window.inner_size()) else {
+        return;
+    };
+    if size.width == 0 || size.height == 0 {
+        return;
+    }
+    let frame = WindowFrame { x: pos.x, y: pos.y, w: size.width, h: size.height };
+    if let Ok(dir) = data_dir(window.app_handle()) {
+        if let Ok(txt) = serde_json::to_string(&frame) {
+            let _ = write_atomic(&dir.join(WINDOW_FILE), &txt);
+        }
+    }
+}
+
+/// Put the window back where it was, or leave it centred. Returns false when there was nothing
+/// saved — which is a genuine first launch, and the one time `center` is the right answer.
+fn restore_window_frame(app: &AppHandle) -> bool {
+    let Ok(dir) = data_dir(app) else { return false };
+    let Some(txt) = read_opt(&dir.join(WINDOW_FILE)) else { return false };
+    let Ok(f) = serde_json::from_str::<WindowFrame>(&txt) else { return false };
+    let Some(w) = app.get_webview_window("main") else { return false };
+
+    // A frame saved on a monitor that is no longer attached would put the window somewhere the
+    // user cannot reach. Accept it only if it overlaps some monitor by a sensible margin.
+    let visible = w.available_monitors().map(|ms| {
+        ms.iter().any(|m| {
+            let p = m.position();
+            let s = m.size();
+            let (l, t) = (p.x, p.y);
+            let (r, b) = (p.x + s.width as i32, p.y + s.height as i32);
+            f.x + (f.w as i32) > l + 80 && f.x < r - 80 && f.y + 40 > t && f.y < b - 80
+        })
+    });
+    if !matches!(visible, Ok(true)) {
+        return false;
+    }
+    let _ = w.set_size(tauri::PhysicalSize::new(f.w, f.h));
+    let _ = w.set_position(tauri::PhysicalPosition::new(f.x, f.y));
+    true
+}
+
 /// 11.1 — set when the page has finished its pre-quit flush, or when the deadline gave up on it.
 /// Read by `RunEvent::ExitRequested`, which must let the second exit through or the app could
 /// never be quit at all.
@@ -1695,17 +1779,41 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         ],
     )?;
 
+    // 13.K — "Fenster/Hilfe standard". Fenster was missing Zoom, and there was no Hilfe submenu
+    // at ALL — in either shell. `main.swift:2600-2611` has Zoom and „Alle nach vorne bringen"; the
+    // last of those has no Tauri predefined item, and a menu entry that silently does nothing is
+    // worse than an absent one, so Fenster carries the three that work.
     let window_menu = Submenu::with_items(
         app,
         l("Fenster", "Window").as_str(),
         true,
         &[
             &PredefinedMenuItem::minimize(app, Some(l("Im Dock ablegen", "Minimize").as_str()))?,
+            &PredefinedMenuItem::maximize(app, Some(l("Zoomen", "Zoom").as_str()))?,
             &PredefinedMenuItem::fullscreen(app, Some(l("Vollbild", "Enter Full Screen").as_str()))?,
         ],
     )?;
 
-    Menu::with_items(app, &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
+    // Hilfe points at the one place help actually lives: `settings.js#buildHelpSection`, which
+    // holds the Gatekeeper walkthrough and „Rückmeldung senden". A Hilfe menu that opened a URL
+    // would be this app's first outbound link and 21.5's problem; this opens a sheet.
+    let help_menu = Submenu::with_items(
+        app,
+        l("Hilfe", "Help").as_str(),
+        true,
+        &[&MenuItem::with_id(
+            app,
+            "help",
+            l("LangzeitPlaner-Hilfe", "LangzeitPlaner Help").as_str(),
+            true,
+            None::<&str>,
+        )?],
+    )?;
+
+    Menu::with_items(
+        app,
+        &[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu, &help_menu],
+    )
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1773,13 +1881,27 @@ pub fn run() {
             // running binary IS the staged version now; drop the stale marker so
             // the quiet "Update verfügbar" hint does not outlive the update.
             clear_staged_marker_if_applied(&handle);
+            // 13.1 — before the window is shown, so it does not visibly jump.
+            restore_window_frame(&handle);
             app.set_menu(build_menu(&handle)?)?;
 
             // 13.2 — monochrome template glyph, light/dark aware, one click
             // focuses the window.
             let tray_handle = handle.clone();
+            // 13.2 — A REAL TEMPLATE GLYPH, NOT THE APP ICON.
+            //
+            // This passed `default_window_icon()` — the full-bleed colour app icon — to
+            // `icon_as_template(true)`. macOS builds a template from the ALPHA CHANNEL ALONE, so
+            // an illustration that is opaque nearly everywhere arrives in the menu bar as a solid
+            // blob. The comment above this call already claimed a "monochrome template glyph";
+            // there was no such asset anywhere in the repository. `assets/tray-glyph.svg` is it,
+            // rendered by `scripts/build-release-assets.sh` and checked into `src-tauri/icons/`.
+            //
+            // @2x is what a Retina menu bar draws; `Image::from_bytes` reads the PNG and macOS
+            // picks the scale. A missing file is a compile error by construction, which is the
+            // only way a build cannot silently go back to the blob.
             TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray-glyph@2x.png"))?)
                 .icon_as_template(true)
                 .tooltip("LangzeitPlaner")
                 .on_tray_icon_event(move |_tray, _event| {
@@ -1803,12 +1925,16 @@ pub fn run() {
             // Everything else is a board action; the web layer owns it.
             let _ = app.emit("menu", id);
         })
-        .on_window_event(|window, event| {
+        .on_window_event(|window, event| match event {
             // ⌘W / red button hide rather than close (13.5).
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            WindowEvent::CloseRequested { api, .. } => {
+                save_window_frame(window, false);   // 13.1 — the unthrottled one that matters
                 api.prevent_close();
                 let _ = window.hide();
             }
+            // 13.1 — throttled, because a drag emits these continuously.
+            WindowEvent::Moved(_) | WindowEvent::Resized(_) => save_window_frame(window, true),
+            _ => {}
         })
         .build(tauri::generate_context!())
         .expect("error while running LangzeitPlaner")
@@ -1853,6 +1979,10 @@ pub fn run() {
                 // "quit". It cannot: `restart()` carries `RESTART_EXIT_CODE` (tauri's app.rs:582),
                 // and on the main thread it bypasses `ExitRequested` altogether. Measured, not
                 // assumed. `update-ui.js` has already flushed the board before calling it anyway.
+                if let Some(w) = app.get_webview_window("main") {
+                    // `WebviewWindow` derefs to the `Window` the saver takes.
+                    save_window_frame(&w.as_ref().window_ref(), false);
+                }
                 if code.is_none() && !FLUSH_DONE.load(Ordering::SeqCst) {
                     api.prevent_exit();
                     let handle = app.clone();

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44" width="44" height="44">
+  <!-- 13.2 — THE MENU-BAR GLYPH, AND WHY IT IS NOT assets/icon.svg.
+       macOS renders a template image from its ALPHA CHANNEL ONLY: colour is discarded and every
+       opaque pixel becomes ink. The app icon is a full-bleed colour illustration, so used as a
+       template it is opaque nearly everywhere and arrives in the menu bar as a solid blob.
+       `lib.rs` called `icon_as_template(true)` on exactly that, and its own comment claimed a
+       "monochrome template glyph" that did not exist anywhere in the repository.
+
+       So this is a real glyph: a calendar outline drawn as transparent-background shapes, at the
+       22pt menu-bar size (44px @2x). Black is conventional for a template and irrelevant to the
+       result — only the alpha matters, which is why it stays correct in light and dark menu bars
+       and while the bar is highlighted. The Swift shell needs none of this: it asks for the SF
+       Symbol "calendar", which is already a template. -->
+  <g fill="none" stroke="#000" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="7" y="10" width="30" height="27" rx="4"/>
+    <path d="M7 18h30"/>
+    <path d="M15 7v6M29 7v6"/>
+  </g>
+  <g fill="#000">
+    <rect x="13" y="23" width="5" height="4.5" rx="1.2"/>
+    <rect x="21.5" y="23" width="5" height="4.5" rx="1.2"/>
+    <rect x="30" y="23" width="5" height="4.5" rx="1.2"/>
+    <rect x="13" y="30" width="5" height="4.5" rx="1.2"/>
+    <rect x="21.5" y="30" width="5" height="4.5" rx="1.2"/>
+  </g>
+</svg>
