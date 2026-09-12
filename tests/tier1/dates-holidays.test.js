@@ -970,69 +970,87 @@ describe('7.1 / 7.4 — the bundled dataset', () => {
     }
   });
 
-  test('7.4 — FERIEN_META declares the data unverified, with a stated horizon', () => {
-    assert.deepEqual(F.FERIEN_META, {
-      verified: false,
-      horizon: '2028-08-31',
-      updated: '2026-08-01',
-      source: 'KMK (Platzhalterdaten / placeholder data)',
-    });
-    // settings.js renders t('ferienUnverified') off `verified === false`. This
-    // assertion is the reminder to flip it when real KMK tables land.
+  test('7.4 — FERIEN_META declares VERIFIED KMK data, with a stated horizon', () => {
+    // WAS: `verified: false`, horizon 2028-08-31, source „KMK (Platzhalterdaten / placeholder
+    // data)". The file shipped fabricated sample dates and said so, and settings showed the end
+    // user a developer's note — „Vor Release durch die offiziellen KMK-Termine ersetzen." The
+    // Schulferien layer is a headline feature of a German family planner, and it was shading the
+    // wrong weeks.
+    //
+    // The real tables are in now: four school years, all sixteen Länder, extracted from the KMK's
+    // own PDFs by word geometry and CROSS-CHECKED against the KMK's per-state .ics downloads for
+    // 2026/27 — an independent publication of the same data, parsed by a different code path.
+    // 16/16 states and 1 400 holiday-days matched exactly. That agreement is what earns the other
+    // three school years their trust, and it is why `verified` may now be true.
+    assert.equal(F.FERIEN_META.verified, true);
+    assert.equal(F.FERIEN_META.horizon, '2029-07-28');
+    assert.match(F.FERIEN_META.source, /KMK/);
+    assert.doesNotMatch(F.FERIEN_META.source, /Platzhalter|placeholder/i,
+      'the source still describes itself as placeholder data');
   });
 
   test('7.4 — the data does not extend indefinitely: it starts and stops', () => {
     let earliest = '9999-99-99';
     let latest = '0000-00-00';
     for (const rows of Object.values(F.FERIEN)) {
-      for (const [, s, e] of rows) {
-        if (s < earliest) earliest = s;
+      for (const [, s2, e] of rows) {
+        if (s2 < earliest) earliest = s2;
         if (e > latest) latest = e;
       }
     }
-    assert.equal(earliest, '2026-06-22'); // NW Sommerferien 2026
-    assert.equal(latest, '2028-09-09');   // BW Sommerferien 2028
+    // The four bundled school years, 2025/26 … 2028/29. 2025/26 is carried because its
+    // Sommerferien tail runs into September 2026 and is on the board today.
+    assert.equal(earliest, '2025-10-02');
+    assert.equal(latest, '2029-09-10');
     // Beyond the data there is simply nothing — no throw, no extrapolation.
     for (const code of H.ALL_STATE_CODES) {
       const idx = F.ferienIndex(code, 'de');
-      assert.equal(idx.has('2029-01-01'), false, code);
-      assert.equal(idx.has('2025-12-24'), false, code);
-      assert.equal(idx.get('2030-07-01'), undefined, code);
+      assert.equal(idx.has('2030-01-01'), false, code);
+      assert.equal(idx.has('2024-12-24'), false, code);
+      assert.equal(idx.get('2031-07-01'), undefined, code);
     }
   });
 
-  test('7.4 — FINDING 2: seventeen shaded days lie BEYOND the declared horizon', () => {
-    // Story 7.4: "the bundled dataset has a visible horizon … beyond which
-    // shading is simply absent." FERIEN_META.horizon says 2028-08-31, but two
-    // states' 2028 Sommerferien run past it, so the board shades days the
-    // settings sheet has told the user are uncovered. The label undersells the
-    // data rather than overselling it, so no user is misled into trusting
-    // missing shading — but the two numbers disagree, and this test pins the
-    // disagreement so the retrofit cannot quietly change which one is right.
-    const beyond = {};
-    for (const code of H.ALL_STATE_CODES) {
-      const days = [...F.ferienIndex(code, 'de').keys()]
-        .filter((d) => d > F.FERIEN_META.horizon).sort();
-      if (days.length) beyond[code] = days;
+  test('7.4 — the horizon UNDERSELLS the data, and never the other way round', () => {
+    // WAS „FINDING 2: seventeen shaded days lie BEYOND the declared horizon", which recorded the
+    // old disagreement between the label and the table as a defect. It is now the DESIGNED
+    // relationship, and the direction is the whole point.
+    //
+    // `FERIEN_META.horizon` is the EARLIEST last-covered day across the sixteen Länder, so no
+    // state is ever promised coverage it does not have. Fifteen states therefore hold data past
+    // it — which is safe. The opposite would not be: a horizon later than some state's data would
+    // invite a person to read absent shading as "no holidays", which is exactly what 7.4's
+    // "beyond which shading is simply absent" exists to prevent.
+    //
+    // Settings does not show this pessimistic figure to anybody: `ferienHorizonFor(code)` gives
+    // the selected Bundesland its own last covered day, which is both true and useful.
+    const ends = H.ALL_STATE_CODES.map((c) => ({
+      code: c,
+      end: [...F.ferienIndex(c, 'de').keys()].sort().at(-1),
+    }));
+    for (const { code, end } of ends) {
+      assert.ok(end >= F.FERIEN_META.horizon,
+        `${code} runs out at ${end}, BEFORE the declared horizon ${F.FERIEN_META.horizon} — `
+        + 'the label now oversells and absent shading cannot be trusted');
+      assert.equal(F.ferienHorizonFor(code), end,
+        `${code}: the per-state horizon must be that state's own last covered day`);
     }
-    assert.deepEqual(Object.keys(beyond), ['BW', 'BY']);
-    assert.equal(beyond.BW.length, 9);
-    assert.equal(beyond.BY.length, 8);
-    assert.equal(beyond.BW.at(0), '2028-09-01');
-    assert.equal(beyond.BW.at(-1), '2028-09-09');
-    assert.equal(beyond.BY.at(-1), '2028-09-08');
-    assert.equal(
-      Object.values(beyond).reduce((n, ds) => n + ds.length, 0), 17
-    );
+    assert.equal(Math.min(...ends.map((e) => e.end.localeCompare(F.FERIEN_META.horizon))), 0,
+      'no state ends exactly at the global horizon — it is no longer the minimum');
+    // …and an unknown or absent code falls back to the conservative dataset-wide figure.
+    assert.equal(F.ferienHorizonFor(''), F.FERIEN_META.horizon);
+    assert.equal(F.ferienHorizonFor('ZZ'), F.FERIEN_META.horizon);
   });
 });
 
 describe('7.2 — naming the shaded period', () => {
   test('ferienIndex maps every day of a period to its name, inclusive at both ends', () => {
     const idx = F.ferienIndex('BY', 'de');
-    const [name, start, end] = F.FERIEN.BY.find(([n]) => n === 'Weihnachtsferien');
+    // Pinned to the 2026/27 one by DATE, not by being first: the bundle now carries four school
+    // years, so `find(name)` returns 2025's.
+    const [name, start, end] = F.FERIEN.BY.find(([n, a]) => n === 'Weihnachtsferien' && a.startsWith('2026'));
     assert.equal(start, '2026-12-24');
-    assert.equal(end, '2027-01-05');
+    assert.equal(end, '2027-01-08');   // the real KMK range; the placeholder said 01-05
     let d = start;
     while (d <= end) {
       assert.equal(idx.get(d), name, d);
@@ -1051,30 +1069,38 @@ describe('7.2 — naming the shaded period', () => {
     }
   });
 
-  test('all six bundled period names appear, and each has an English label', () => {
+  test('the period names are the KMK\'s own, and they are never translated', () => {
+    // WAS six invented names, each with an English label. Both halves changed, deliberately.
+    //
+    // THE NAMES. The KMK's table has six columns and two of them are COMBINED — „Ostern/Frühjahr"
+    // and „Himmelfahrt/Pfingsten". Splitting those into `Osterferien` / `Frühjahrsferien` means
+    // guessing which one a given range is, and the guess is wrong in practice: Bavaria's February
+    // break sits in the „Ostern/Frühjahr" column and is not Osterferien. A hover tooltip that
+    // confidently names the wrong holiday is worse than one that quotes the source, so the
+    // source's own labels are what the board carries.
+    //
+    // THE TRANSLATION. Story 13.7: "switching translates the full UI while German content terms
+    // (Feiertage names, Ferien names) REMAIN GERMAN." They are proper nouns of the German school
+    // calendar; an English reader here is reading a German calendar and needs to match what the
+    // school letter said.
     const used = new Set();
     for (const rows of Object.values(F.FERIEN)) for (const [n] of rows) used.add(n);
     assert.deepEqual([...used].sort(), [
-      'Herbstferien', 'Osterferien', 'Pfingstferien',
+      'Herbstferien', 'Himmelfahrt-/Pfingstferien', 'Oster-/Frühjahrsferien',
       'Sommerferien', 'Weihnachtsferien', 'Winterferien',
     ]);
-    for (const n of used) {
-      assert.equal(typeof F.FERIEN_NAMES_EN[n], 'string', `${n} has no English name`);
-    }
-    // The table is a superset: 'Frühjahrsferien' is translated but unused by
-    // the placeholder data. Real KMK tables use it, so the entry is not dead.
-    assert.equal(F.FERIEN_NAMES_EN['Frühjahrsferien'], 'Spring break');
-    assert.equal(used.has('Frühjahrsferien'), false);
+    assert.deepEqual(F.FERIEN_NAMES_EN, {},
+      'the English name table is back — 13.7 says these terms stay German');
   });
 
-  test('German is the default; only lang === "en" translates', () => {
-    assert.equal(F.ferienFor('BY', 'de')[0].name, 'Sommerferien');
-    assert.equal(F.ferienFor('BY')[0].name, 'Sommerferien');
-    assert.equal(F.ferienFor('BY', 'fr')[0].name, 'Sommerferien');
-    assert.equal(F.ferienFor('BY', 'en')[0].name, 'Summer break');
-    assert.equal(F.ferienIndex('BY', 'en').get('2026-08-05'), 'Summer break');
-    assert.equal(F.ferienIndex('BY', 'de').get('2026-08-05'), 'Sommerferien');
-    // Same days, different labels — translation never moves a date.
+  test('13.7 — the name is the same in every language, and the days never move', () => {
+    // `lang` is still accepted, because callers pass it and the layer LABEL („Schulferien" /
+    // „School holidays") is chrome that i18n.js does translate. It simply no longer changes the
+    // content term. Asserted across three languages so a re-introduced table cannot hide in one.
+    for (const lang of ['de', 'en', 'fr', undefined]) {
+      assert.equal(F.ferienFor('BY', lang)[0].name, 'Herbstferien', String(lang));
+      assert.equal(F.ferienIndex('BY', lang).get('2026-08-05'), 'Sommerferien', String(lang));
+    }
     assert.deepEqual(
       [...F.ferienIndex('BY', 'en').keys()],
       [...F.ferienIndex('BY', 'de').keys()]
@@ -1101,8 +1127,8 @@ describe('7.2 — naming the shaded period', () => {
     assert.notEqual(a, b);
     assert.notEqual(a[0], b[0]);
     a[0].name = 'mutated';
-    assert.equal(F.ferienFor('BY', 'de')[0].name, 'Sommerferien');
-    assert.equal(F.FERIEN.BY[0][0], 'Sommerferien');
+    assert.equal(F.ferienFor('BY', 'de')[0].name, 'Herbstferien');
+    assert.equal(F.FERIEN.BY[0][0], 'Herbstferien');
   });
 });
 
@@ -1114,14 +1140,15 @@ describe('7.1 / 7.3 / 7.5 — the Ferien layer on the board', () => {
       settings: { startMonth: '2026-08', bundesland: 'BY' },
       layers: { schulferien: true },
     });
-    const inside = dayOf(m, '2026-08-05'); // BY Sommerferien 2026-08-01…09-14
+    const inside = dayOf(m, '2026-08-05'); // BY Sommerferien 2026-08-03…09-14 (KMK)
     assert.equal(inside.ferien, true);
     assert.equal(inside.ferienName, 'Sommerferien');
     const outside = dayOf(m, '2026-09-15');
     assert.equal(outside.ferien, false);
     assert.equal(outside.ferienName, '');
     // Boundaries are inclusive on the board too.
-    assert.equal(dayOf(m, '2026-08-01').ferien, true);
+    assert.equal(dayOf(m, '2026-08-03').ferien, true);
+    assert.equal(dayOf(m, '2026-08-02').ferien, false, 'the day before the range must be clear');
     assert.equal(dayOf(m, '2026-09-14').ferien, true);
     assert.equal(dayOf(m, '2026-07-31'), null); // outside the window entirely
   });
@@ -1163,23 +1190,26 @@ describe('7.1 / 7.3 / 7.5 — the Ferien layer on the board', () => {
   });
 
   test('7.4 — a board past the data horizon simply has no shading', () => {
+    // The window moved out by two years: the bundled data now runs to September 2029, so the old
+    // 2029-01 board is inside it. This is the point of the row — past the DATA there is nothing —
+    // and it has to be asked past the actual data, not past where the data used to stop.
     const m = model({
-      settings: { startMonth: '2029-01', bundesland: 'BY' },
+      settings: { startMonth: '2030-01', bundesland: 'BY' },
       layers: { schulferien: true },
     });
     assert.equal(m.cols.flatMap((c) => c.days).filter((d) => d.ferien).length, 0);
     // …while Feiertage, being computed, are fully present in the same window.
-    assert.equal(dayOf(m, '2029-10-03').holiday.name, 'Tag der Deutschen Einheit');
-    assert.equal(dayOf(m, '2029-04-02').holiday.name, 'Ostermontag'); // Easter 2029-04-01
+    assert.equal(dayOf(m, '2030-10-03').holiday.name, 'Tag der Deutschen Einheit');
+    assert.equal(dayOf(m, '2030-04-22').holiday.name, 'Ostermontag'); // Easter 2030-04-21
   });
 
-  test('English board labels the shading in English', () => {
+  test('13.7 — an English board still labels the shading in German', () => {
     const m = model({
       settings: { startMonth: '2026-08', bundesland: 'BY', language: 'en' },
       layers: { schulferien: true },
     });
-    assert.equal(dayOf(m, '2026-08-05').ferienName, 'Summer break');
-    assert.equal(dayOf(m, '2026-12-28').ferienName, 'Christmas break');
+    assert.equal(dayOf(m, '2026-08-05').ferienName, 'Sommerferien');
+    assert.equal(dayOf(m, '2026-12-28').ferienName, 'Weihnachtsferien');
   });
 });
 

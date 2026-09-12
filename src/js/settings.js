@@ -5,7 +5,7 @@
 import { store } from './store.js';
 import { t, getLang, setLang } from './i18n.js';
 import { BUNDESLAENDER, stateName } from './holidays.js';
-import { FERIEN_META } from './ferien.js';
+import { FERIEN_META, ferienHorizonFor } from './ferien.js';
 import { el, openSheet, field, switchBox, confirmSheet, toast } from './ui.js';
 import { openUnlockHelp } from './firstrun.js';
 import { storagePath, isTauri } from './storage.js';
@@ -183,7 +183,10 @@ function build(body, api) {
   const horizon = el('div', 'field');
   horizon.appendChild(el('label', null, t('ferienHorizon')));
   const hv = el('div', 'ctl');
-  hv.appendChild(el('span', null, formatDate(FERIEN_META.horizon, lang)));
+  // The horizon for THIS Bundesland, not the dataset's conservative minimum — the person reading
+  // it has one state selected, and the global figure is up to six weeks pessimistic for fifteen
+  // of the sixteen. Falls back to the global value when no state is chosen. See `ferienHorizonFor`.
+  hv.appendChild(el('span', null, formatDate(ferienHorizonFor(s.bundesland), lang)));
   horizon.appendChild(hv);
   body.appendChild(horizon);
   if (!FERIEN_META.verified) body.appendChild(el('p', 'warn', t('ferienUnverified')));

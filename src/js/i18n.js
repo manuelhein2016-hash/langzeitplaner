@@ -37,8 +37,13 @@ const DE = {
   bundeslandNone: 'Kein Bundesland gewählt',
   pickBundesland: 'Bundesland wählen',
   ferienHorizon: 'Ferien-Daten bis',
+  // Shown only when `FERIEN_META.verified` is false. It used to be a note to the DEVELOPER —
+  // „Vor Release durch die offiziellen KMK-Termine ersetzen" — rendered to the end user in
+  // settings. Nobody reading their own calendar can act on that. It now says what it means for
+  // the person looking at it.
   ferienUnverified:
-    'Achtung: Platzhalterdaten. Vor Release durch die offiziellen KMK-Termine ersetzen.',
+    'Diese Ferientermine sind noch nicht mit den offiziellen KMK-Angaben abgeglichen. '
+    + 'Bitte vor dem Planen bei der Schule nachsehen.',
   launchAtLogin: 'Beim Anmelden starten',
   menuBarIcon: 'Symbol in der Menüleiste',
   rowHeight: 'Zeilenhöhe',
@@ -541,7 +546,8 @@ const EN = {
   pickBundesland: 'Choose a federal state',
   ferienHorizon: 'School-holiday data until',
   ferienUnverified:
-    'Warning: placeholder data. Replace with the official KMK dates before release.',
+    'These holiday dates have not been checked against the official KMK tables yet. '
+    + 'Please confirm with the school before planning around them.',
   launchAtLogin: 'Launch at login',
   menuBarIcon: 'Menu-bar icon',
   rowHeight: 'Row height',
