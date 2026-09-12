@@ -29,7 +29,7 @@
 //     file calls it. A solo settings sheet has a null callback and draws nothing.
 
 import { store } from '../store.js';
-import { setFamilySections } from '../settings.js';
+import { setFamilySections, openSettings } from '../settings.js';
 import {
   readFamilyConfig, armStore, startEngine, createSpaceOnRelay, adoptOnRelay,
   attestPeer, savePeer, saveRingEpoch, mintSpaceId, createSpaceKey, FAMILY_PREFS,
@@ -190,8 +190,70 @@ function installSections(handle, hooks) {
     refreshRoster();                       // fire-and-forget
     return buildFamilySections(body, api, {
       onOptIn: (origin) => optIn(origin, hooks),
+      recoveryMaterial: recoveryMaterial(handle),
     });
   });
+}
+
+/**
+ * 21.B / ADR 002 §7.2 — WHAT „Schlüssel sichern" NEEDS, AND WHY IT NEVER GOT IT.
+ *
+ * `familysettings.js#buildRecoverySection` has always returned at its own guard —
+ * `if (!material) return;` — because this function did not exist and `installSections` passed
+ * only `{ onOptIn }`. Its docblock said the hook "is supplied by `family/mount.js`". It was not.
+ *
+ * The consequence was not a missing button. `exportBackup` is the ONLY export in the product that
+ * carries the identity and the space keys, and its single call site is inside that section. So on
+ * every shipped build there was **no reachable way to back up your keys at all** — and with no
+ * account, no password and no reset, a dead Mac took the Familienkreis with it, permanently and
+ * silently. That is what 21.B's honesty moment exists to warn about, and the warning was missing
+ * because the thing it warns about was unreachable.
+ *
+ * WHY IT IS A FUNCTION AND NOT A VALUE. The material must be read at the moment the user presses
+ * the button, not when the sheet was drawn: a circle can be joined, or its epoch rotated, between
+ * the two. `buildRecoverySection` calls `material()` inside `run()` for exactly that reason.
+ *
+ * WHAT IT RETURNS. `null` on a Mac with no personal space — there is nothing to recover, and the
+ * section draws nothing, which is also what a solo ⚙ sees. Otherwise the identity plus a key ring
+ * shaped the way `crypto/backup.js#bundleFor` validates it: `{id, epochs, epoch?}` per slot, with
+ * `id` (not `spaceId` — the pairing flow's contract differs, and `bundleFor` throws on the wrong
+ * prefix rather than writing a keyless file).
+ *
+ * The family slot is filled only when this Mac is actually in a circle AND its engine has started;
+ * `circleEngine()` is null otherwise, and a backup with `family: null` is the correct artifact for
+ * a Mac that is in no circle.
+ */
+export function recoveryMaterial(handle) {
+  return () => {
+    const armed = handle && handle.armed;
+    const parts = handle && handle.parts;
+    const personalId = handle && handle.cfg && handle.cfg.spaceId;
+    if (!armed || !parts || !personalId) return null;
+
+    const spaces = {
+      personal: { id: personalId, epochs: parts.keyring.keysByEpoch(personalId) },
+      family: null,
+    };
+
+    const circle = readCircleConfig(store.state && store.state.settings);
+    const cp = circleEngine();
+    if (circle && cp && cp.keyring) {
+      const epochs = cp.keyring.keysByEpoch(circle.spaceId);
+      // An empty ring is D9's waiting state, not a circle worth writing into a backup:
+      // `bundleFor` refuses an empty `epochs` outright, and it is right to — a file that claimed
+      // a family space it holds no key for would restore a member who cannot read anything.
+      if (epochs && (epochs.size ?? Object.keys(epochs).length) > 0) {
+        spaces.family = {
+          id: circle.spaceId,
+          epochs,
+          epoch: typeof cp.keyring.currentEpoch === 'function'
+            ? cp.keyring.currentEpoch(circle.spaceId)
+            : undefined,
+        };
+      }
+    }
+    return { identity: armed.identity, spaces };
+  };
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -248,7 +310,11 @@ let mountedFor = null;
  * empties the cache, is therefore seen by it too.
  */
 function syncCircleMounts(hooks) {
-  initCreateJoin();
+  // 21.B — the one port `createjoin.js` cannot build for itself. The export sheet lives in
+  // `familysettings.js`, which IMPORTS `createjoin.js`, so the edge only runs one way; and
+  // routing through settings keeps `crypto/backup.js` out of the circle screen's static graph.
+  // Answering `true` is what tells `renderCreated`/`renderJoined` the button has somewhere to go.
+  initCreateJoin({ openRecovery: () => { openSettings(); return true; } });
   // The ONE port `adminpanel.js` cannot build for itself: the relay's roster, which is the only
   // list on this Mac that knows who has LEFT (a leave authors no op — the relay purges the
   // leaver's ops in the same transaction, `handlers/lifecycle.js:229`). It is the SAME array

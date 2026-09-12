@@ -1099,6 +1099,13 @@ function buildRecoverySection(body, api, hooks) {
   if (!spaceId) return;                        // no membership, nothing to recover
   const material = typeof hooks.recoveryMaterial === 'function' ? hooks.recoveryMaterial : null;
   if (!material) return;                       // not armed this launch — see the note above
+  // …and a hook that ANSWERS NULL is the same thing as no hook. `mount.js` installs the same
+  // sections for an armed Mac and a solo one (`installSections(null, hooks)`), so the function
+  // always exists and it is its ANSWER that says whether there is anything to back up. Probing it
+  // here rather than trusting the `spaceId` check above keeps the two from drifting apart — and
+  // without it a null answer would reach the destructure inside `run()` as a TypeError, under the
+  // button, after the user had typed a passphrase.
+  if (!material()) return;
 
   body.appendChild(el('div', 'section-title', say(EXPORT_SHEET_COPY.title)));
 
@@ -1171,7 +1178,9 @@ function buildRecoverySection(body, api, hooks) {
     if (passphrase !== null && !(await assertSuiteAvailable())) return;
     button.disabled = true;
     try {
-      const { identity, spaces } = material();
+      const held = material();
+      if (!held) throw new Error('no recovery material on this Mac');
+      const { identity, spaces } = held;
       const file = await exportBackup(store.state, identity, spaces, passphrase, {
         exportedAt: new Date().toISOString().slice(0, 10),
         app: CLIENT_VERSION,

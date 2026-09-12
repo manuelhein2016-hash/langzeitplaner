@@ -218,6 +218,19 @@ const DEFAULT_PORTS = Object.freeze({
   /** `board.json` is the truth and this store was `init()`ed without a space — ADR 006 §9.4. */
   reload: () => globalThis.location?.reload?.(),
   clipboard: (text) => globalThis.navigator?.clipboard?.writeText?.(text),
+  /**
+   * 21.B — open „Schlüssel sichern", from the one screen where a person will act on it.
+   *
+   * A PORT, not an import. `familysettings.js` imports THIS file (for `buildFamilyCircleSection`),
+   * so the edge can only run one way and `createjoin.js` cannot reach back. It is also the seam
+   * that keeps `crypto/backup.js` out of this module's static graph — the same reason
+   * `familysettings.js:1069-1076` gives for where the export sheet lives.
+   *
+   * `family/mount.js` injects the real one. The default answers `false`, which is the honest
+   * answer in a browser preview or a tier-1 harness where there is no sheet to open: the button
+   * is then not drawn at all, rather than drawn and dead.
+   */
+  openRecovery: () => false,
 });
 
 let ports = { ...DEFAULT_PORTS };
@@ -1798,6 +1811,42 @@ async function submitCreate() {
   }
 }
 
+/**
+ * 21.B — „Kein Passwort. Dein Backup ist dein Schlüssel — exportiere jetzt eins."
+ *
+ * Rendered on BOTH endings of onboarding (created and joined), because both produce a Mac whose
+ * membership exists only as keys on this disk. `circleJoinLead` already tells the person the
+ * comforting half — „Kein Konto, kein Passwort, keine Anmeldung" — and this is the half that
+ * follows from it: with no account there is nothing to recover FROM, so the backup file is the
+ * account. The one minute anybody will ever act on that is the minute the circle comes into
+ * existence, which is why the sentence lives here and not only in settings.
+ *
+ * The button is drawn only when `ports.openRecovery` can actually open the sheet. A button that
+ * says „Sicherung exportieren" and does nothing would be worse than no button at all — this is
+ * the screen where the product is asking to be believed about key loss.
+ */
+function backupMoment(b) {
+  const box = el('div', 'circle-backup');
+  box.appendChild(el('p', 'circle-backup-title', t('circleBackupTitle')));
+  box.appendChild(el('p', 'circle-hint', t('circleBackupBody')));
+  b.appendChild(box);
+}
+
+/** The „Sicherung exportieren" button, for the `.circle-acts` row. `null` when there is no sheet. */
+function backupButton() {
+  const go = el('button', 'circle-ghost', t('circleBackupGo'));
+  go.type = 'button';
+  go.id = 'circle-backup-go';
+  go.addEventListener('click', () => {
+    // Close first, then open Settings where „Schlüssel sichern" lives. Leaving the circle screen
+    // up would put a second sheet behind it; and nothing is lost by closing, because a fresh
+    // invite code can be minted from the admin panel at any time („Neue Einladung").
+    closeCircleScreen();
+    ports.openRecovery();
+  });
+  return go;
+}
+
 function renderCreated() {
   const b = el('div', 'circle-body');
   b.appendChild(el('h1', 'circle-title', t('circleCreatedTitle', view.circleName)));
@@ -1819,8 +1868,10 @@ function renderCreated() {
   }
 
   notices(b);
+  backupMoment(b);
 
   const acts = el('div', 'circle-acts');
+  if (ports.openRecovery !== DEFAULT_PORTS.openRecovery) acts.appendChild(backupButton());
   if (view.code) {
     const copy = el('button', 'circle-ghost', t('circleCopyInvite'));
     copy.type = 'button';
@@ -2089,7 +2140,10 @@ function renderJoined() {
     b.appendChild(el('p', 'circle-wait-line', t('circleKeysHere')));
   }
 
+  backupMoment(b);
+
   const acts = el('div', 'circle-acts');
+  if (ports.openRecovery !== DEFAULT_PORTS.openRecovery) acts.appendChild(backupButton());
   const done = el('button', 'circle-go', t('circleDone'));
   done.type = 'button';
   done.id = 'circle-done';
@@ -2327,6 +2381,13 @@ body.circle-on { overflow: hidden; }
 .circle-notice { margin: 14px 0 0; font: 400 12.5px/1.6 var(--font); color: var(--ink-2); max-width: 58ch; }
 /* An actual refusal. One sentence, in the product's own restrained red. */
 .circle-problem { margin: 14px 0 0; font: 400 12.5px/1.6 var(--font); color: #A03A12; max-width: 58ch; }
+
+/* 21.B — the honesty moment. A quiet rule above the buttons, in the same register as the 20.5
+   admin framing: this is a fact about how the product works, and a warning box would make it read
+   as an error the person had caused. The sentence has to be believed, not dismissed. */
+.circle-backup { margin: 22px 0 0; padding: 0 0 0 13px; border-left: 2px solid var(--field-border); max-width: 58ch; }
+.circle-backup-title { margin: 0; font: 600 12.5px/1.6 var(--font); color: var(--ink-1); }
+.circle-backup .circle-hint { margin-top: 5px; }
 
 .circle-acts { margin-top: 22px; display: flex; gap: 10px; align-items: center; }
 .circle-go { height: 40px; padding: 0 22px; border-radius: 8px; border: 0; background: var(--ink-1); color: #fff; font: 600 13px var(--font); }

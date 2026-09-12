@@ -394,6 +394,16 @@ const DE = {
   circleCreatedD9:
     'Wer beitritt, ist sofort im Kreis. Die gemeinsamen Einträge bekommt er, sobald dein Mac '
     + 'das nächste Mal abgleicht — dafür musst du nichts tun.',
+  // 21.B — THE HONESTY MOMENT. `circleJoinLead` already says the comforting half („Kein Konto,
+  // kein Passwort, keine Anmeldung"); this is the half that follows from it. There is no account
+  // to recover from, so the backup file IS the account, and the only moment a person will ever
+  // act on that is the minute the circle comes into existence.
+  circleBackupTitle: 'Kein Passwort. Dein Backup ist dein Schlüssel.',
+  circleBackupBody:
+    'Es gibt kein Konto und kein „Passwort vergessen". Wenn dieser Mac verloren geht und du keine '
+    + 'Sicherung hast, ist der Zugang zum Familienkreis weg — die Einträge auf den anderen Macs '
+    + 'bleiben, aber dieser Mac kommt nicht zurück hinein. Exportiere jetzt eine Sicherung.',
+  circleBackupGo: 'Sicherung exportieren',
   circleDone: 'Fertig',
   circleWorking: 'Einen Moment',
   circleInviteLine1: (name) => `Du bist zu „${name}“ eingeladen.`,
@@ -817,6 +827,12 @@ const EN = {
   circleCreatedD9:
     'Whoever joins is in the circle straight away. The shared entries reach them the next time '
     + 'your Mac syncs — you do not have to do anything.',
+  circleBackupTitle: 'No password. Your backup is your key.',
+  circleBackupBody:
+    'There is no account and no „forgot password". If this Mac is lost and you have no backup, '
+    + 'access to the family circle is gone — the entries on the other Macs stay, but this Mac '
+    + 'cannot get back in. Export a backup now.',
+  circleBackupGo: 'Export a backup',
   circleDone: 'Done',
   circleWorking: 'One moment',
   circleInviteLine1: (name) => `You are invited to “${name}”.`,
