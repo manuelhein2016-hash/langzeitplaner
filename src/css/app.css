@@ -43,7 +43,11 @@
   --lane-gap: 8px;
   --gutter: 27px;              /* 3 lanes × 8px + 3px breathing room */
   --head-h: 26px;
-  --pad-h: 62px;
+  /* 10.5 — "a pad grows to ~5 lines then scrolls". At 9px/1.35 a line is ~12.2px, and the label
+     plus padding costs ~15px, so five lines need ~76px. This was 62px — about 3.9 lines — and
+     `ta.rows = 5` in board.js could not help, because a flex child inside a fixed-height parent
+     never gets to ask for its own height. */
+  --pad-h: 76px;
 
   /* ── THE TWO THINGS THAT MAY STAND TO THE RIGHT OF A SENTENCE ─────────────
      Both used to be OVERLAYS painted on top of the day row; both are now
@@ -910,13 +914,21 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 .pop-x { font: 400 11px var(--font); color: var(--ink-3); padding: 0 2px; }
 .pop-x:hover { color: var(--ink-1); }
 .pop-row {
-  display: flex; align-items: center; gap: 6px; padding: 3px 0;
+  display: flex; align-items: flex-start; gap: 6px; padding: 3px 0;
   border-top: 1px solid var(--hover);
 }
-.pop-row .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+/* flex-start, not center: a note that wraps to two lines must keep its dot and its ✕ level with
+   the FIRST line rather than floating to the middle of the block. */
+.pop-row .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; margin-top: 3px; }
+/* 2.B — THE POPOVER OFFERS FULL NOTE TEXTS.
+   This used to be `white-space: nowrap; text-overflow: ellipsis`, so the popover ellipsised at
+   214 px and the full text was reachable only by hovering — inside a panel whose entire purpose
+   is that the board's own truncation is not the last word (2.4: "clicking expands a popover with
+   the full stack"). A tooltip on top of a tooltip is not an answer. The board stays truncated,
+   which is what keeps twelve months on one screen; the popover wraps. */
 .pop-row .txt {
-  flex: 1; min-width: 0; font: 400 10px var(--font); color: var(--ink-1);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: text;
+  flex: 1; min-width: 0; font: 400 10px/1.35 var(--font); color: var(--ink-1);
+  overflow-wrap: anywhere; cursor: text;
 }
 .pop-row input.txt { border: 1px solid var(--field-border); border-radius: 3px; padding: 1px 3px; }
 .pop-row .act { font: 400 10px var(--font); color: var(--ink-4); padding: 0 2px; }

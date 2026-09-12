@@ -1272,10 +1272,5 @@ function renderPad(col) {
   return { el: pad, ta };
 }
 
-export function monthLabel(key, lang) {
-  const { y, m } = parseISO(`${key}-01`);
-  const MN = lang === 'en' ? MONTH_EN : MONTH_DE;
-  return `${MN[m - 1]} ${y}`;
-}
 
 export { colorOf };

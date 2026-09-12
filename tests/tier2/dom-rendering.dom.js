@@ -304,9 +304,10 @@ test('1.1/1.2 · twelve columns, each headed by its own month, in order', () => 
     assert.equal(col.dataset.month, m.cols[i].key);
     assert.equal(col.dataset.index, String(i));
   });
-  // Labels are "Mon ’YY" — the year is carried by every column, so a window
-  // that straddles New Year never leaves the reader guessing.
-  for (const c of cols) assert.match($('.col-head', c).textContent, /^[A-Za-zÄÖÜäöü]{3} ’\d\d$/);
+  // 1.A — labels are "Monat ’YY": the FULL month name (the reference format the story names,
+  // e.g. „August ’26") plus a two-digit year carried by every column, so a window that straddles
+  // New Year never leaves the reader guessing. Was `{3}` — the three-letter abbreviation v1 used.
+  for (const c of cols) assert.match($('.col-head', c).textContent, /^[A-Za-zÄÖÜäöü]{3,10} ’\d\d$/);
   // Chronological, with no gaps: each key is exactly one month after the last.
   const keys = cols.map((c) => c.dataset.month);
   for (let i = 1; i < keys.length; i++) {

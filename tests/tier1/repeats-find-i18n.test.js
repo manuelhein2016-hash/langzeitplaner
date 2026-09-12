@@ -1026,7 +1026,7 @@ describe('F13.7 · weekday abbreviations stay language-specific', () => {
     setLang('en');
     const m = model({ settings: { language: 'de' } });
     assert.equal(dayOf(m, '2026-01-07').wd, 'Mi');
-    assert.equal(colOf(m, '2026-03').label, 'Mär ’26');
+    assert.equal(colOf(m, '2026-03').label, 'März ’26');
     setLang('de');
   });
 });
@@ -1045,8 +1045,8 @@ describe('F13.7 · month labels', () => {
     const m = model({ settings: { language: 'de' } });
     assert.deepEqual(
       m.cols.map((c) => c.label),
-      ['Jan ’26', 'Feb ’26', 'Mär ’26', 'Apr ’26', 'Mai ’26', 'Jun ’26',
-       'Jul ’26', 'Aug ’26', 'Sep ’26', 'Okt ’26', 'Nov ’26', 'Dez ’26']
+      ['Januar ’26', 'Februar ’26', 'März ’26', 'April ’26', 'Mai ’26', 'Juni ’26',
+       'Juli ’26', 'August ’26', 'September ’26', 'Oktober ’26', 'November ’26', 'Dezember ’26']
     );
   });
 
@@ -1054,8 +1054,8 @@ describe('F13.7 · month labels', () => {
     const m = model({ settings: { language: 'en' } });
     assert.deepEqual(
       m.cols.map((c) => c.label),
-      ['Jan ’26', 'Feb ’26', 'Mar ’26', 'Apr ’26', 'May ’26', 'Jun ’26',
-       'Jul ’26', 'Aug ’26', 'Sep ’26', 'Oct ’26', 'Nov ’26', 'Dec ’26']
+      ['January ’26', 'February ’26', 'March ’26', 'April ’26', 'May ’26', 'June ’26',
+       'July ’26', 'August ’26', 'September ’26', 'October ’26', 'November ’26', 'December ’26']
     );
   });
 
@@ -1066,9 +1066,9 @@ describe('F13.7 · month labels', () => {
 
   test('the year suffix is the last two digits and survives a year boundary', () => {
     const m = model({ settings: { language: 'de' } }, '2026-07');
-    assert.equal(m.cols[0].label, 'Jul ’26');
-    assert.equal(m.cols[6].label, 'Jan ’27');
-    assert.equal(m.cols[11].label, 'Jun ’27');
+    assert.equal(m.cols[0].label, 'Juli ’26');
+    assert.equal(m.cols[6].label, 'Januar ’27');
+    assert.equal(m.cols[11].label, 'Juni ’27');
   });
 });
 

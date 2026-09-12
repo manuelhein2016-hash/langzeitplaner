@@ -126,15 +126,21 @@ describe('F1 · board skeleton', () => {
     assert.equal(dayOf(junk, '2026-01-07').wd, 'Mi');
   });
 
-  test('column labels: short in the head, full for the tooltip', () => {
+  test('1.A — the head carries the reference format, the tooltip the four-digit year', () => {
+    // WAS "short in the head": „Jan ’26", a three-letter abbreviation, which is what v1 rendered.
+    // Story 1.A names the reference format as `August '26` — the full month name — and the
+    // catalogue is the resolved product truth. A deliberate divergence from v1, not a bug fix;
+    // `tests/audit/v1orig-layout.test.js` keeps the record of what v1 did.
     const m = build({});
-    assert.equal(m.cols[0].label, 'Jan ’26');
+    assert.equal(m.cols[0].label, 'Januar ’26');
     assert.equal(m.cols[0].fullLabel, 'Januar 2026');
-    assert.equal(m.cols[2].label, 'Mär ’26');
+    assert.equal(m.cols[2].label, 'März ’26', 'the umlaut survives');
     const en = build({ settings: { language: 'en' } });
-    assert.equal(en.cols[0].label, 'Jan ’26');
+    assert.equal(en.cols[0].label, 'January ’26');
     assert.equal(en.cols[0].fullLabel, 'January 2026');
     assert.equal(en.cols[2].fullLabel, 'March 2026');
+    // The head is the short YEAR, not a short month: two digits and a typographic apostrophe.
+    for (const c of m.cols) assert.match(c.label, /^[A-Za-zÄÖÜäöü]+ ’\d\d$/, c.label);
   });
 
   test('a leap year contributes 366 populated day rows and a 29-row February', () => {

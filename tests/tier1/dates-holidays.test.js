@@ -388,7 +388,7 @@ describe('1.6 — day-number row alignment', () => {
     assert.equal(colOf(en, '2026-09').days[0].wd, 'Tu');
     assert.equal(colOf(de, '2026-08').fullLabel, 'August 2026');
     assert.equal(colOf(en, '2026-12').fullLabel, 'December 2026');
-    assert.equal(colOf(de, '2026-12').label, 'Dez ’26');
+    assert.equal(colOf(de, '2026-12').label, 'Dezember ’26');
   });
 });
 

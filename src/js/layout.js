@@ -844,7 +844,16 @@ export function buildBoard(state, opts = {}) {
       y: mo.y,
       m: mo.m,
       index: mi,
-      label: `${MN[mo.m - 1].slice(0, 3)} ’${String(mo.y).slice(2)}`,
+      // 1.A — the reference format is the FULL month name plus a two-digit year: „August ’26".
+      // This was `.slice(0, 3)` — „Aug ’26" — which is what v1 rendered, so changing it is a
+      // deliberate divergence from v1 and not a bug fix. The catalogue is the resolved product
+      // truth and says the specs govern it; `tests/audit/v1orig-layout.test.js` keeps the record
+      // of what v1 did and is deliberately left alone.
+      //
+      // It costs nothing to fit: the column is sized from the day rows, not the head, and the
+      // longest German month („September") is 9 characters against a header that already carries
+      // the year. `headSig` includes the label, so the patch cache invalidates correctly.
+      label: `${MN[mo.m - 1]} ’${String(mo.y).slice(2)}`,
       fullLabel: `${MN[mo.m - 1]} ${mo.y}`,
       len,
       days,
