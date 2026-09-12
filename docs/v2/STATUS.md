@@ -48,18 +48,39 @@ suites    npm test 2323/2323 · attack 986/986 · server 1094/1094 +1 stated ski
 
 **NOT PROVEN, and each one stays named:**
 
-1. **`cargo tauri build` has never run anywhere.** No universal binary — the x86_64 half has never
-   been compiled by anybody — no bundler, no DMG from the real path. ~~`git tag` is empty and
-   `release.yml` has never executed.~~ **Stale as of 2026-09-11:** `v2.0.0-rc.1`, `rc.2` and
-   `rc.3` are annotated tags on this repository and `release.yml` has run on each. What remains
-   unproven is narrower and worth stating narrowly: **no DMG from that pipeline has been installed
-   and opened by a person**, and the pre-flight/notarization gates below have only ever been
-   exercised by the workflow itself. **The signing above was done by a person.** The pipeline now
-   holds the same sequence (step 9b: `notarytool submit --wait` → `stapler staple` → `stapler
-   validate` on **both** the DMG and the `.app`; a hard `spctl` gate demanding `accepted` **and**
-   `source=Notarized Developer ID` on the app *and* the downloaded image; pre-flight rows
-   the eight `N-*` rows: `N-SUBMIT`, `N-ORDER`, `N-STAPLE`, `N-VALIDATE`, `N-RUNTIME`, `N-SPCTL-APP`, `N-SPCTL-DMG`, `N-NOTARIZED`) — **and has never been asked to
-   perform it.** The DMG re-sign branch it depends on has never run either; it was dead under D1.
+1. ~~**`cargo tauri build` has never run anywhere.** No universal binary — the x86_64 half has
+   never been compiled by anybody — no bundler, no DMG from the real path. `git tag` is empty and
+   `release.yml` has never executed.~~
+
+   **Closed 2026-09-12 by `v2.0.0-rc.4`, and measured off the runner.** The published DMG was
+   downloaded to a real Mac and checked there, not trusted from the workflow log:
+
+   ```
+   shasum -a 256          matches the published SHA256SUMS.txt, both artifacts
+   lipo -archs            x86_64 arm64                  ← the Intel half now exists
+   codesign               Developer ID Application: Manuel Hein (ZZ77R3LWS4)
+                          flags=0x10000(runtime) · Mach-O universal (x86_64 arm64)
+   stapler validate       worked — on the .app AND on the .dmg
+   spctl --assess         accepted · source=Notarized Developer ID — on both
+   latest.json            all three platform keys point at the universal tarball,
+                          and every signature equals the published .sig byte for byte
+   DMG contents           LangzeitPlaner.app · Applications symlink · „Bitte zuerst
+                          lesen.html" · .background · .VolumeIcon.icns
+   ```
+
+   So the pipeline has now done, unaided, what a person did by hand on the ship day: step 9b's
+   `notarytool submit --wait` → `stapler staple` → `stapler validate` on both images, behind a hard
+   `spctl` gate demanding `accepted` **and** `source=Notarized Developer ID`. The DMG re-sign
+   branch that was dead under D1 ran too.
+
+   **What is still genuinely unproven, stated narrowly:** no DMG from this pipeline has been
+   **installed and driven by a person**. Ten checks need a keypress inside a signed bundle and no
+   automation on a runner or on this machine can reach them — Apple Events are refused `-1743` in
+   both places. Four fixes in rc.4 compiled, read correctly and never executed (FINDINGS §25.3,
+   §25.4), which is exactly why that list is not a formality. Known cosmetic gap: the runner has
+   no Finder session, so the image carries no `.DS_Store` and the DMG window opens as a plain
+   folder listing rather than the styled one. Functionally complete and notarized; to ship the
+   styled window, build the image on a Mac with a desktop session (`scripts/make-dmg.sh`).
 2. **The Prisma adapter's `U-REPORTONCE` and `U-REPORTTTL` have no database witness**
    (`server/adapters/prisma.js:938-939`). If `U-REPORTTTL` is wrong the 90-day retention is off by
    Frankfurt's summer hour and **nothing visibly fails** — reports live an hour longer or vanish an
