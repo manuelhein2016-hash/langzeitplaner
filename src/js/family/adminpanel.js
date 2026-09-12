@@ -700,11 +700,41 @@ export function createAdminPort(circle) {
       }
     },
 
-    /** 20.3 — leave, then forget the circle on this Mac. */
+    /**
+     * 20.3 — leave, then forget the circle on this Mac.
+     *
+     * ── THE LOCAL HALF RUNS EVEN WHEN THE RELAY REFUSES (20.4) ──────────────────────────────
+     *
+     * This used to be `await call(...)` then `await forgetCircle()`, in that order, with nothing
+     * between them — so a throwing call meant `forgetCircle()` never ran. That is exactly the
+     * state every remaining member is in after an admin deletes the circle: the space is gone,
+     * every request earns `not_a_member`, and pressing „Kreis verlassen" to clean up threw before
+     * it cleaned anything up. There was no way out of a circle that no longer existed short of a
+     * reinstall or hand-editing board.json.
+     *
+     * `not_a_member` is also the answer when you were removed rather than dissolved — the relay
+     * conflates the two on purpose (`handlers/lifecycle.js:198`), because telling them apart
+     * would turn a space id into an existence oracle. We do not need to tell them apart: in both
+     * cases this Mac is not in that circle, and forgetting it locally is the correct, and the
+     * only available, thing to do.
+     *
+     * Any OTHER failure — offline, a 500, a protocol refusal — must NOT forget the circle: the
+     * membership may still be perfectly good and the request simply did not arrive. So the
+     * carve-out is exactly `not_a_member`, and everything else still throws.
+     *
+     * The board is untouched either way. That is 20.3's and 20.4's shared promise.
+     */
     async leaveSpace() {
-      const res = await call(origin, 'POST', '/api/v1/members/leave', undefined, { spaceId });
-      await forgetCircle();
-      return res;
+      try {
+        const res = await call(origin, 'POST', '/api/v1/members/leave', undefined, { spaceId });
+        await forgetCircle();
+        return res;
+      } catch (e) {
+        const code = e && e.body && e.body.error;
+        if (code !== 'not_a_member') throw e;
+        await forgetCircle();
+        return { ok: true, alreadyGone: true };
+      }
     },
 
     /**
@@ -721,9 +751,20 @@ export function createAdminPort(circle) {
       const body = proof
         ? { confirm: spaceId, adminProof: { by: proof.by, sig: proof.sig } }
         : { confirm: spaceId };
-      const res = await call(origin, 'POST', `/api/v1/spaces/${spaceId}/delete`, undefined, body);
-      await forgetCircle();
-      return res;
+      try {
+        const res = await call(origin, 'POST', `/api/v1/spaces/${spaceId}/delete`, undefined, body);
+        await forgetCircle();
+        return res;
+      } catch (e) {
+        // Same carve-out as `leaveSpace`, and it does not swallow the proof demand: the un-proofed
+        // call above earns `second_member_signature_required`, which is a different code and still
+        // throws so `leavedelete.js` can name the terms. Only "this space is not yours / not
+        // there" forgets locally — a space already deleted must not leave this Mac stuck in it.
+        const code = e && e.body && e.body.error;
+        if (code !== 'not_a_member') throw e;
+        await forgetCircle();
+        return { ok: true, alreadyGone: true };
+      }
     },
   });
 }

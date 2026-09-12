@@ -299,9 +299,16 @@ const DE = {
   syncErrOffline:
     'Keine Verbindung zum Netz. Deine Änderungen sind gesichert und gehen los, sobald wieder '
     + 'Netz da ist.',
+  // 20.2 / 20.4 — the relay answers `not_a_member` for BOTH "you were removed" and "the circle no
+  // longer exists" (`handlers/lifecycle.js:198`: „an unknown space and a space you are not in: one
+  // answer"), and it is right to: distinguishing them would turn a space id into an existence
+  // oracle. So this sentence used to guess — „wahrscheinlich entfernt" — and guessed wrong for
+  // every member of a circle the admin had dissolved, blaming a removal that never happened.
+  // Name both, and say what to do, because „Kreis verlassen" is now the way out of either.
   syncErrAuth:
-    'Dieser Mac darf nicht mehr abgleichen. Wahrscheinlich wurde er aus dem Familienkreis '
-    + 'entfernt. Das Board auf diesem Mac bleibt, wie es ist.',
+    'Dieser Mac gehört nicht mehr zu diesem Familienkreis — er wurde entweder entfernt, oder der '
+    + 'Kreis wurde aufgelöst. Das Board auf diesem Mac bleibt vollständig, wie es ist. Über '
+    + '„Kreis verlassen" in den Einstellungen räumst du den Rest auf.',
   syncErrProtocol:
     'Diese Version ist zu alt für den Abgleich. Ein Update behebt das; bis dahin funktioniert '
     + 'das Board hier ganz normal weiter.',
@@ -733,8 +740,9 @@ const EN = {
   syncErrOffline:
     'No network connection. Your changes are safe and will go out as soon as there is one again.',
   syncErrAuth:
-    'This Mac is no longer allowed to sync. It was most likely removed from the family circle. '
-    + 'The board on this Mac stays exactly as it is.',
+    'This Mac is no longer part of this family circle — it was either removed, or the circle was '
+    + 'dissolved. The board on this Mac stays complete, exactly as it is. Use „Leave circle" in '
+    + 'settings to clear up the rest.',
   syncErrProtocol:
     'This version is too old to sync. An update fixes it; until then the board here keeps '
     + 'working normally.',
