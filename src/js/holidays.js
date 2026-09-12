@@ -120,9 +120,27 @@ export function holidaysForYear(year, state, lang = 'de') {
     const own = states === null || (state !== '' && states.includes(state));
     const prev = out.get(date);
     if (prev) {
-      // Two holidays on one date (rare, e.g. a regional one meeting a fixed
-      // one): keep the one the user's state observes.
-      if (prev.own || !own) return;
+      // ── 6.5 · TWO HOLIDAYS ON ONE DATE, AND NEITHER OF THEM VANISHES ──────
+      //
+      // This used to `return` and drop one outright, so in every year where
+      // Christi Himmelfahrt lands on 1 May it simply disappeared from the board
+      // — a nationwide public holiday, gone, with nothing to say it had been
+      // there. `tests/COVERAGE.md` recorded it as fact.
+      //
+      // The day row has space for ONE chip, so the shown label still belongs to
+      // the holiday the user's own state observes — that is the one they get a
+      // day off for, and `short` is what fits. But the tooltip is a sentence,
+      // not a chip, so both names go in it. Nothing is lost and nothing is
+      // invented; the board says „Tag der Arbeit" and hovering says both.
+      const keep = prev.own || !own ? prev : null;
+      const winner = keep || {
+        name, short: shorten(name), own,
+        states: states === null ? ALL_STATE_CODES : states,
+      };
+      const other = keep ? name : prev.name;
+      const both = winner.name.includes(other) ? winner.name : `${winner.name} · ${other}`;
+      out.set(date, { ...winner, name: both });
+      return;
     }
     out.set(date, {
       name,

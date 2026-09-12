@@ -622,30 +622,38 @@ describe('6.5 — the computed set never runs out (distant years)', () => {
     }
   });
 
-  test('…except in the years where Christi Himmelfahrt lands on 1 May', () => {
-    // CHARACTERIZED BEHAVIOUR (see FINDING 1 in the report). When Easter falls
-    // on 23 March, Easter+39 = 1 May, and Tag der Arbeit occupies that date
-    // first. holidaysForYear's put() keeps the entry already present when it is
-    // `own`, so Christi Himmelfahrt is DROPPED from the map for that year: the
-    // day is still shown as a holiday, but under one name only, and the year's
-    // map has 18 entries instead of 19. The spec does not legislate the
-    // collision case, so this is not a story violation — but it is a real,
-    // silent data loss that the op-log retrofit must not accidentally "fix"
-    // without a decision.
+  test('…and in the years where Christi Himmelfahrt lands on 1 May, NEITHER is lost', () => {
+    // THE DECISION THIS ROW ASKED FOR, TAKEN. It used to characterise the collision as accepted
+    // data loss and said so in as many words: "a real, silent data loss that the op-log retrofit
+    // must not accidentally 'fix' without a decision."
+    //
+    // When Easter falls on 23 March, Easter+39 is 1 May and Tag der Arbeit already holds the date.
+    // `put()` kept whichever the user's state observes and DROPPED the other, so a nationwide
+    // public holiday simply disappeared from the board in those years, with nothing to say it had
+    // been there.
+    //
+    // The day row has space for one chip, so the visible label still belongs to the holiday the
+    // state actually observes — that is the one you get the day off for, and `short` is what fits.
+    // The tooltip is a sentence rather than a chip, so it now carries both names. Nothing is lost
+    // and nothing is invented.
     for (const y of EASTER_MAR_23_YEARS) {
       assert.equal(H.easterSunday(y), `${y}-03-23`);
       assert.equal(D.addDays(H.easterSunday(y), 39), `${y}-05-01`);
       const m = H.holidaysForYear(y, 'BY', 'de');
-      assert.equal(m.size, 18, `${y} should have one entry fewer`);
-      assert.equal(m.get(`${y}-05-01`).name, 'Tag der Arbeit');
-      assert.equal(m.get(`${y}-05-01`).own, true);
+      assert.equal(m.size, 18, `${y}: still one DATE fewer — two holidays share it`);
+      const may1 = m.get(`${y}-05-01`);
+      assert.equal(may1.short, 'Tag der Arbeit', 'the chip shows the observed holiday');
+      assert.equal(may1.own, true);
+      assert.match(may1.name, /Tag der Arbeit/, `${y}: the observed holiday must lead`);
+      assert.match(may1.name, /Christi Himmelfahrt/,
+        `${y}: Christi Himmelfahrt is being swallowed again`);
       assert.equal(
-        [...m.values()].some((h) => h.name === 'Christi Himmelfahrt'), false,
-        `${y}: Christi Himmelfahrt should have been swallowed`
+        [...m.values()].some((h) => /Christi Himmelfahrt/.test(h.name)), true,
+        `${y}: the day exists but no longer names both holidays`
       );
     }
     // 2008 is the one inside living memory — a real past calendar year.
-    assert.equal(H.holidaysForYear(2008, 'NI', 'de').get('2008-05-01').name, 'Tag der Arbeit');
+    assert.match(H.holidaysForYear(2008, 'NI', 'de').get('2008-05-01').name, /Tag der Arbeit/);
   });
 });
 

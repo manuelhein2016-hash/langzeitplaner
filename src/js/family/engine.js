@@ -276,6 +276,14 @@ function driveCadence(sync, p) {
   if (doc) doc.addEventListener('visibilitychange', onVisible);
   if (globalThis.addEventListener) {
     globalThis.addEventListener('online', wake);
+    // 19.2 — "others' changes arrive automatically — ON APP FOCUS and every ~30–60 s". The focus
+    // half was missing, and `visibilitychange` does not cover it: `document.hidden` flips when the
+    // window is minimised, occluded or the app is hidden, NOT when it merely loses key status to
+    // another app while staying visible. That is the common case — click Safari, read something,
+    // click back — and it produced no pull at all, so a peer's entry could sit unseen for up to a
+    // minute with the board in front of you. `wake()` cancels and re-arms the timer, so an extra
+    // focus event cannot double-fire or stack requests.
+    globalThis.addEventListener('focus', wake);
     globalThis.addEventListener('pagehide', () => { sync.flush().catch(() => {}); });
   }
 

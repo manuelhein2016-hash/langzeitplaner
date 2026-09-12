@@ -444,12 +444,25 @@ function jumpToToday() {
   scrollToToday(true);
 }
 
+/**
+ * 8.B — macOS "Reduce Motion", for the animations CSS cannot reach.
+ *
+ * `app.css:1308-1312` already neutralises every CSS animation and transition under
+ * `prefers-reduced-motion`. A `scrollTo({behavior:'smooth'})` is a SCRIPTED animation and no media
+ * query can touch it, so ⌘T swept the board across twelve columns for a person who had asked the
+ * system for exactly the opposite. This is the only scripted animation in the product.
+ */
+const reduceMotion = () => {
+  try { return globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true; }
+  catch { return false; }        // a host without matchMedia is not a host that asked for less
+};
+
 function scrollToToday(smooth) {
   const key = monthKeyOf(todayISO());
   const col = boardEl.querySelector(`.col[data-month="${key}"]`);
   if (!col) { wrapEl.scrollLeft = 0; return; }
   const target = col.offsetLeft - 8;
-  wrapEl.scrollTo({ left: target, behavior: smooth ? 'smooth' : 'auto' });
+  wrapEl.scrollTo({ left: target, behavior: smooth && !reduceMotion() ? 'smooth' : 'auto' });
 }
 
 // 13.1 — the window remembers its scroll offset across launches.
