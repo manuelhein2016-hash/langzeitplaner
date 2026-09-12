@@ -129,6 +129,11 @@ const F2 = [
   ['addCategory', { id: 'nc', name: 'x', nameEn: 'x', paletteRef: 'blau', defaultVisibility: 'nope' }, 'a defaultVisibility outside the enum', 'throw'],
   ['renameCategory', { id: 'c1', lang: 'fr', name: 'x' }, 'a language that is not de|en', 'throw'],
   ['recolorCategory', { id: 'c1', paletteRef: 3 }, 'a numeric paletteRef', 'throw'],
+  // 16.4 — the setter `defaultVisibility` never had. It validates against the enum for the same
+  // reason `addCategory` does one row above: `visibilityForNewEntry` fails CLOSED on anything
+  // outside it, so an accepted bad value would look like the control doing nothing.
+  ['setCategoryDefault', { id: 'c1', defaultVisibility: 'nope' }, 'a level outside the enum', 'throw'],
+  ['setCategoryDefault', { id: 'c1', defaultVisibility: 3 }, 'a numeric level', 'throw'],
   ['deleteCategory', { id: 'c1', lastCategoryId: 9 }, 'a numeric lastCategoryId — ACCEPTED into a pref register', 'accept'],
   ['deleteCategoryReassign', { id: 'c1', targetId: 'c1', noteIds: [], barIds: [] }, 'reassigning a category to itself', 'throw'],
   ['deleteCategoryReassign', { id: 'c1', targetId: 'c2', noteIds: [null], barIds: [] }, 'a null id in the fan-out', 'throw'],
@@ -164,16 +169,19 @@ describe('F-2 — the full scope of "apply() throws instead of declining"', () =
     return out;
   }
 
-  test('R3-20 SUCCEEDED (defect, F-2 widened): 33 of 42 hostile inputs THROW out of apply(); F-2 as filed names four of them', async () => {
+  test('R3-20 SUCCEEDED (defect, F-2 widened): 35 of 44 hostile inputs THROW out of apply(); F-2 as filed names four of them', async () => {
     const rows = await runCorpus();
     const wrong = rows.filter((r) => r.actual !== r.expect)
       .map((r) => `${r.name} (${r.why}): expected ${r.expect}, got ${r.actual}${r.err ? ` ${r.err}` : ''}`);
     assert.deepEqual(wrong, [], 'the corpus itself must be accurate');
 
     const thrown = rows.filter((r) => r.actual === 'throw');
-    assert.equal(rows.length, 42);
-    assert.equal(thrown.length, 33,
-      'DEFECT: thirty-three inputs a file or a peer can supply reach a THROW rather than a decline');
+    // 42 → 44, and 33 → 35: 16.4's `setCategoryDefault` contributes two hostile rows, both of
+    // which throw, exactly as `addCategory`'s own out-of-enum row does. The defect this row
+    // characterises is unchanged in kind; it is two inputs wider.
+    assert.equal(rows.length, 44);
+    assert.equal(thrown.length, 35,
+      'DEFECT: thirty-five inputs a file or a peer can supply reach a THROW rather than a decline');
     assert.equal(thrown.filter((r) => /over 80|over 40/.test(r.why)).length, 4,
       'F-2 as filed — the over-length case — is four of those twenty-seven');
 
@@ -195,13 +203,22 @@ describe('F-2 — the full scope of "apply() throws instead of declining"', () =
     const covered = new Set(F2.map(([n]) => n));
     const missing = Object.keys(MUTATIONS).filter((n) => !covered.has(n));
     assert.deepEqual(missing, [], 'a mutation added later without a row here would slip past this attack');
-    // 22 v1 retrofits + 6 family rows (E6-1, plus 20.2's removeMember). Counted by their DISCRIMINATOR rather than in one
-    // total, so that a family row growing a v1 `sites` entry — which would corrupt
-    // `V1_MUTATE_SITES` and the 22-site proof built on it — reddens this too.
+    // 22 v1 retrofits + 6 family rows (E6-1, plus 20.2's removeMember) + the v2 BOARD rows.
+    // Counted by their DISCRIMINATOR rather than in one total, so that a family row growing a v1
+    // `sites` entry — which would corrupt `V1_MUTATE_SITES` and the 22-site proof built on it —
+    // reddens this too.
+    //
+    // The family count is derived from the KIND now, not from an empty `sites`. That proxy held
+    // only while every post-v1 row happened to be a family one; `setCategoryDefault` (16.4) is a
+    // v2 row that writes `cat.set`, so it has no v1 site AND is not family.
     const retrofit = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length > 0);
-    const family = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length === 0);
+    const family = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].kinds
+      .every((k) => k.startsWith('member.') || k.startsWith('space.')));
+    const v2board = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length === 0
+      && !MUTATIONS[n].kinds.every((k) => k.startsWith('member.') || k.startsWith('space.')));
     assert.equal(retrofit.length, 22);
     assert.equal(family.length, 6);
+    assert.deepEqual(v2board, ['setCategoryDefault']);
   });
 
   // ── R3-23 · INVERTED 2026-08-27 · A3-H3 is CLOSED ────────────────────────────

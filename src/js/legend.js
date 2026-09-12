@@ -545,6 +545,46 @@ function catRow(c, lang, api) {
   }
   row.appendChild(sws);
 
+  // ── 16.4 · WHAT A NEW ENTRY IN THIS CATEGORY STARTS AS ────────────────────────────────────
+  //
+  // `defaultVisibility` has been a register since the beginning and `addCategory` has always
+  // accepted one, but nothing could CHANGE it: rows 18-21 of `core/ops.js` are add, rename,
+  // recolor, delete, and the legend never passed the field. So 16.4 — "a personal category can
+  // set a default visibility for new entries in it, so routine sharing costs zero extra clicks"
+  // — was reachable only by hand-editing board.json.
+  //
+  // ONLY WHEN THIS MAC IS IN A SPACE. `familyLegend` is null on a solo Mac (see the seam at the
+  // top of this file), and a default visibility means nothing where nothing can be shared — so a
+  // solo legend does not grow a control, and the family VOCABULARY never reaches a solo board.
+  // That also keeps this file's promise under ADR 003 §7 gate 2: a `<select>` and three i18n keys,
+  // no import of `family/`, static or dynamic.
+  //
+  // A `<select>` rather than `sharing.js`'s three-state segment, and deliberately: that component
+  // lives behind the family door and takes an ENTRY, and reaching it from the boot graph is the
+  // one thing this seam exists to prevent. Three options in a native control is also the right
+  // weight for a setting nobody visits twice.
+  if (familyLegend) {
+    const visWrap = el('label', 'cat-default');
+    visWrap.title = t('catDefaultVis');
+    const sel = document.createElement('select');
+    sel.className = 'cat-default-sel';
+    sel.setAttribute('aria-label', `${t('catDefaultVis')} — ${c.name}`);
+    for (const level of ['privat', 'belegt', 'geteilt']) {
+      const o = document.createElement('option');
+      o.value = level;
+      o.textContent = t(level);
+      o.selected = (c.defaultVisibility || 'privat') === level;
+      sel.appendChild(o);
+    }
+    sel.addEventListener('change', () => {
+      store.apply('setCategoryDefault', { id: c.id, defaultVisibility: sel.value });
+      notify('legend');
+      api.rebuild();
+    });
+    visWrap.appendChild(sel);
+    row.appendChild(visWrap);
+  }
+
   const n = store.countEntriesIn(c.id);
   row.appendChild(el('span', 'count', String(n)));
 

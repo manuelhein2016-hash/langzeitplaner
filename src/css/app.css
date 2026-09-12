@@ -919,6 +919,16 @@ body.ferien-hatch .day.fer.we { background-color: var(--bg-weekend); }
 }
 /* flex-start, not center: a note that wraps to two lines must keep its dot and its ✕ level with
    the FIRST line rather than floating to the middle of the block. */
+/* 16.4 — the per-category default-visibility control in „Kategorien". Drawn only on a Mac that is
+   in a space (see `legend.js#catRow`), so a solo legend never grows it. Sized to sit between the
+   swatches and the entry count without widening the row. */
+.cat-default { display: inline-flex; align-items: center; margin-left: 8px; }
+.cat-default-sel {
+  height: 20px; font: 400 10px var(--font); color: var(--ink-2);
+  border: 1px solid var(--field-border); border-radius: 4px; background: var(--surface);
+  padding: 0 2px;
+}
+
 .pop-row .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; margin-top: 3px; }
 /* 2.B — THE POPOVER OFFERS FULL NOTE TEXTS.
    This used to be `white-space: nowrap; text-overflow: ellipsis`, so the popover ellipsised at

@@ -688,6 +688,9 @@ test('every mutation entry is complete and every op it can build is valid', () =
     addCategory: { id: CAT[3], name: 'Neue Kategorie', nameEn: 'New category', paletteRef: 'blau' },
     renameCategory: { id: CAT[0], lang: 'de', name: 'Arbeit' },
     recolorCategory: { id: CAT[0], paletteRef: 'gruen' },
+    // 16.4 — the one setter `defaultVisibility` never had. The register existed and
+    // `addCategory` accepted it; nothing could change it afterwards.
+    setCategoryDefault: { id: CAT[0], defaultVisibility: 'geteilt' },
     deleteCategory: { id: CAT[0], lastCategoryId: CAT[1] },
     deleteCategoryReassign: { id: CAT[0], targetId: CAT[1], noteIds: ['n1', 'n2'], barIds: ['b1'], lastCategoryId: CAT[1] },
     // rows 23-28 — the family vocabulary (E6-1, plus 20.2's removal). `makeCtx()` carries

@@ -1026,8 +1026,12 @@ describe('makeTx', () => {
     // no v1. Counting the table would therefore have counted them, and INVERTING them is not
     // something to fix: rule U6 says `member.set` / `space.set` are never undone, and the row
     // below asserts exactly that rather than leaving it to a number.
+    // The 22 v1 sites, PLUS the v2 rows that write board registers and are therefore undoable
+    // like any other edit. `setCategoryDefault` (16.4) is the first of those: changing what new
+    // entries in a category start as is as undoable as recolouring it.
     const names = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length > 0);
     assert.equal(names.length, 22, `expected 22 v1 mutate sites, found ${names.length}`);
+    names.push('setCategoryDefault');
     const mint = (() => { let i = 0; return () => fmt(T0, i++, DS_A); })();
     const ctx = { act: MEM_ME, dev: DEV_A, gid: b22(), mint, newOpId: () => b22(), space: PERSONAL_PLACEHOLDER };
     const nid = uuid(); const bid = uuid(); const cid = uuid();
@@ -1054,6 +1058,7 @@ describe('makeTx', () => {
       recolorCategory: { id: cid, paletteRef: 'gelb' },
       deleteCategory: { id: cid, lastCategoryId: CAT1 },
       deleteCategoryReassign: { id: cid, targetId: CAT1, noteIds: [nid], barIds: [bid], lastCategoryId: CAT1 },
+      setCategoryDefault: { id: cid, defaultVisibility: 'geteilt' },
     };
     for (const name of names) {
       const ops = MUTATIONS[name].build(ctx, args[name]);
@@ -1090,8 +1095,15 @@ describe('makeTx', () => {
       transferAdmin: { admin: MEM_MAMA, adminPrev: b22() },
       removeMember: { memberId: MEM_MAMA },
     };
-    const family = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].sites.length === 0);
-    assert.deepEqual(family.sort(), Object.keys(famArgs).sort(), 'every v2 row is driven here');
+    // DERIVED FROM WHAT THEY WRITE, NOT FROM `sites`. This used to be `sites.length === 0`, which
+    // was a proxy for "added after v1" and held only while every v2 row happened to be a family
+    // one. `setCategoryDefault` (16.4) broke it: a v2 addition that writes `cat.set`, which IS in
+    // UNDOABLE_KINDS and SHOULD be undoable, exactly as `recolorCategory` and `renameCategory`
+    // are. The rule this row is about is the KIND — `member.set` and `space.set` produce no undo
+    // image — so that is what selects the rows now, and a new family row joins automatically.
+    const family = Object.keys(MUTATIONS).filter((n) => MUTATIONS[n].kinds
+      .every((k) => k.startsWith('member.') || k.startsWith('space.')));
+    assert.deepEqual(family.sort(), Object.keys(famArgs).sort(), 'every family row is driven here');
     for (const name of family) {
       const ops = MUTATIONS[name].build(fctx, famArgs[name]);
       assert.ok(ops.length > 0, `${name} built nothing`);

@@ -500,6 +500,8 @@ const DE = {
   //    is `core/entities.js:VISIBILITY_LEVELS` and there is one spelling of each.
   //    `board.js:FAMILY_COPY` is the interim table that steps aside the moment these exist:
   //    `board.js:ft()` resolves through `t()` FIRST and falls back only while a key is missing.
+  // 16.4 — the label on the per-category default-visibility control in „Kategorien".
+  catDefaultVis: 'Neue Einträge',
   belegt: 'Belegt',
   geteilt: 'Geteilt',
   privat: 'Privat',
@@ -916,6 +918,7 @@ const EN = {
 
   // ADR 004 §4.3, the English half. `EN` spreads `DE`, so a key added above and NOT overridden
   // here ships German text to an English board — which is why all six are restated.
+  catDefaultVis: 'New entries',
   belegt: 'Busy',
   geteilt: 'Shared',
   privat: 'Private',

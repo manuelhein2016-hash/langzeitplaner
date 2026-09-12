@@ -1048,6 +1048,33 @@ export const MUTATIONS = deepFreeze({
     sites: ['legend.js:129'], label: 'recolor-category', kinds: ['cat.set'],
     build: (ctx, { id, paletteRef }) => [catSet(ctx, id, { paletteRef })],
   },
+  /**
+   * 16.4 — set a category's default visibility.
+   *
+   * `defaultVisibility` has been a register since the beginning and `addCategory` has always
+   * accepted it, but NOTHING could change it afterwards: rows 18-21 are add / rename / recolor /
+   * delete, and the legend never passed the field. So the story's "a personal category can set a
+   * default visibility for new entries in it" was reachable only by hand-editing board.json.
+   *
+   * A3: `defaultVisibility` is a personal-space field with no `pub.*` counterpart
+   * (`visibility.js:396-408`), so this publishes nothing to the family — which is why it needs no
+   * admin check and no visibility gate of its own. The value is validated here rather than at the
+   * call site, because `visibilityForNewEntry` fails CLOSED on anything outside the enum and a
+   * silent fall back to Privat would look like the control doing nothing.
+   */
+  setCategoryDefault: {
+    // `sites: []` like every other v2 addition (`removeMember`, row 28): the sites list is the
+    // V1 call-site inventory that `core-ops.test.js` pins at 22, and a v2 op is not one of them.
+    sites: [], label: 'category-default-visibility', kinds: ['cat.set'],
+    build: (ctx, { id, defaultVisibility }) => {
+      if (!VISIBILITY_LEVELS.includes(defaultVisibility)) {
+        throw new OpError(
+          'setCategoryDefault: `defaultVisibility` must be one of '
+          + `${JSON.stringify(VISIBILITY_LEVELS)}, got ${JSON.stringify(defaultVisibility)}`);
+      }
+      return [catSet(ctx, id, { defaultVisibility })];
+    },
+  },
 
   // 21 ───────────────────────────────────────────────────────────────────────
   /** The empty-category path (`legend.js:152`). `[L]` only when the deleted category WAS the
