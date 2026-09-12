@@ -6,6 +6,7 @@ import { store } from './store.js';
 import { t, getLang, setLang } from './i18n.js';
 import { BUNDESLAENDER, stateName } from './holidays.js';
 import { FERIEN_META, ferienHorizonFor } from './ferien.js';
+import { BOARD_CHROME_H } from './layout.js';
 import { el, openSheet, field, switchBox, confirmSheet, toast } from './ui.js';
 import { openUnlockHelp } from './firstrun.js';
 import { storagePath, isTauri } from './storage.js';
@@ -308,7 +309,9 @@ function build(body, api) {
   const wrapEl = document.querySelector('.board-wrap');
   if (wrapEl) {
     const have = wrapEl.clientHeight;
-    const need = 31 * rowNow + 26 + 62;         // 31 rows + --head-h + --pad-h
+    // 31 rows + --head-h + --pad-h, from the layout module rather than re-typed here — this
+    // constant was stale by 14px the moment --pad-h moved for 10.5.
+    const need = 31 * rowNow + BOARD_CHROME_H - 0;
     if (have > 0 && need > have + 1) {
       const lostRows = Math.ceil((need - have) / rowNow);
       body.appendChild(el('p', 'warn',

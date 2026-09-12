@@ -534,6 +534,50 @@ export function assignLanes(bars) {
  * @param {object} state store.state
  * @param {object} opts  { today }
  */
+/**
+ * The board chrome that shares the scroller with the 31 day rows.
+ *
+ * `--head-h` (26) + `.pad`'s `margin-top` (14) + `--pad-h` (76). The margin is easy to forget and
+ * a real tier-2 row caught it: the board overflowed its scroller by exactly those 4 px that
+ * `floor()` had not absorbed. Anything that shares the scroller belongs in this number.
+ */
+export const BOARD_CHROME_H = 26 + 14 + 76;
+
+/**
+ * 1.B / N16 — "THE BOARD NEVER SCROLLS VERTICALLY", made true rather than warned about.
+ *
+ * 1.B names the mechanism in its own sentence: *"vertical fit is achieved by ROW DENSITY,
+ * truncation, and popovers."* Truncation and popovers were built; density was not part of the
+ * fit at all. It was a user PREFERENCE, `.board-wrap` had `overflow-y: auto`, and when the two
+ * disagreed the board simply scrolled — about nine day rows and the scratchpad below the fold at
+ * the shipped minimum window, out of the box. `settings.js` computed exactly that and rendered a
+ * warning: the code knew it was breaking the promise and told the user instead of keeping it.
+ *
+ * A calendar you have to scroll to see the 31st is not the thing on the wall it is imitating.
+ *
+ * So the stored row height becomes a CEILING, not a fixed value: whatever the person asked for,
+ * the board takes the largest row that still fits 31 of them plus the head and the pad. It never
+ * goes below `minRowHeight`, because that floor is the 9 px ink legibility ruling and a board you
+ * cannot read is not a fix. Below that the board scrolls again — but only in a window shorter
+ * than `31 × minRowHeight + BOARD_CHROME_H`, which is why `tauri.conf.json` and `main.swift` now
+ * refuse to open one.
+ *
+ * `viewportH` absent or 0 means "nobody measured", which is every tier-1 caller and the print
+ * path: the answer is then the stored preference, unchanged. That keeps this pure and keeps the
+ * printed sheet metric-ed by the print stylesheet rather than by whatever window happened to be
+ * open.
+ *
+ * @param {number} want the row height the settings ask for, already floored
+ * @param {{minRowHeight:number}} dp the density preset
+ * @param {number} [viewportH] measured `.board-wrap` client height, or 0/undefined
+ */
+export function fitRowHeight(want, dp, viewportH) {
+  const have = Number(viewportH) || 0;
+  if (have <= 0) return want;
+  const fits = Math.floor((have - BOARD_CHROME_H) / 31);
+  return Math.max(dp.minRowHeight, Math.min(want, fits));
+}
+
 export function buildBoard(state, opts = {}) {
   const today = opts.today || todayISO();
   const s = state.settings;
@@ -548,7 +592,7 @@ export function buildBoard(state, opts = {}) {
   // other geometry in the app (`--row-h`, `rowAt`, the drag preview, print)
   // derives from `model.rowH`, so clamping once here clamps all of them.
   const dp = DENSITY[density];
-  const rowH = Math.max(dp.minRowHeight, s.rowHeight || dp.rowHeight);
+  const rowH = fitRowHeight(Math.max(dp.minRowHeight, s.rowHeight || dp.rowHeight), dp, opts.viewportH);
   const capacity = rowCapacity(rowH, density);
 
   const start = visibleStart(s, today);

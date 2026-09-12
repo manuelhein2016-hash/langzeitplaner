@@ -485,13 +485,37 @@ test('1.2 · row height is a variable, honoured live at both extremes', async ()
   assert.equal(cssVar('--row-h'), `${model().rowH}px`);
   assert.match($('.board .rows').style.height, /^calc\(var\(--row-h\) \* 31\)$/,
     'row geometry is calc() against the variable — never resolved pixels');
+  // 1.B — the stored height is now a CEILING: `fitRowHeight` caps it to whatever still shows all
+  // 31 rows plus the head and the pad in this window. So the assertion is no longer
+  // `--row-h === the setting`; it is `--row-h === the model's rowH`, which is the fitted number
+  // every other geometry derives from. The property this row exists for — the setting is honoured
+  // LIVE, through a CSS variable, never resolved pixels — is unchanged and still measured.
   for (const h of [18, 22, 32]) {
     await withSettings({ rowHeight: h }, () => {
-      assert.equal(cssVar('--row-h'), `${h}px`);
-      assert.equal(Math.round(dayNode(plainDate()).getBoundingClientRect().height), h,
+      // Read the FITTED height off the rendered variable: `model()` here rebuilds from the store
+      // without a viewport, so it answers the stored preference rather than what was drawn.
+      const fitted = parseInt(cssVar('--row-h'), 10);
+      assert.ok(fitted <= h, `rowHeight ${h}: the fit INFLATED the row to ${fitted}`);
+      assert.equal(cssVar('--row-h'), `${fitted}px`);
+      assert.equal(Math.round(dayNode(plainDate()).getBoundingClientRect().height), fitted,
         'day row height at rowHeight ' + h);
-      assert.equal(Math.round($('.board .rows').getBoundingClientRect().height), h * 31,
+      assert.equal(Math.round($('.board .rows').getBoundingClientRect().height), fitted * 31,
         'the 31-row block at rowHeight ' + h);
+    });
+  }
+});
+
+test('1.B · N16 — all 31 rows are inside the scroller, so the board does not scroll vertically', async () => {
+  // THE PROMISE, MEASURED IN A REAL WINDOW. Before the fit this was false out of the box: at the
+  // shipped minimum window about nine day rows and the scratchpad sat below the fold, and
+  // `settings.js` rendered a warning saying so rather than preventing it.
+  reset();
+  const wrap = wrapEl();
+  for (const h of [18, 22, 32]) {
+    await withSettings({ rowHeight: h }, () => {
+      const over = wrap.scrollHeight - wrap.clientHeight;
+      assert.ok(over <= 1,
+        `rowHeight ${h}: the board overflows its scroller by ${over}px — 1.B says it never does`);
     });
   }
 });

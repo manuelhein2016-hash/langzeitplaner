@@ -375,6 +375,29 @@ function wireToolbar() {
   $('pg-next').addEventListener('click', () => page(1));
 
   wrapEl.addEventListener('scroll', saveScroll, { passive: true });
+
+  // ── 1.B · THE BOARD RE-FITS WHEN THE WINDOW CHANGES ────────────────────────
+  //
+  // `renderBoard` measures the scroller and `fitRowHeight` caps the row height to what fits, so
+  // the board only stays fitted if something re-renders when the window is resized. Nothing did:
+  // `redraw()` ran on store changes and on nothing else, so dragging the window shorter left the
+  // 31st below the fold until the next edit.
+  //
+  // Debounced through rAF because a resize fires continuously while the mouse is down, and each
+  // one is a full re-render. Guarded on the measured height actually CHANGING, so a width-only
+  // drag — which cannot affect the vertical fit — costs nothing.
+  if (globalThis.ResizeObserver) {
+    let lastH = 0;
+    let queued = false;
+    const ro = new ResizeObserver(() => {
+      const h = wrapEl.clientHeight;
+      if (h === lastH || queued) return;
+      lastH = h;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; redraw(); });
+    });
+    ro.observe(wrapEl);
+  }
 }
 
 function toggleLayer(key) {

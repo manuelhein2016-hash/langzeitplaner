@@ -266,7 +266,16 @@ function scrubMarks(root) {
 
 export function renderBoard(root) {
   const state = store.state;
-  model = buildBoard(state);
+  // 1.B — the board fits the window rather than scrolling past it. The stored row height is a
+  // ceiling; `fitRowHeight` takes the largest row that still shows all 31 plus the head and the
+  // pad. Measured here, at the one place the model is built, so every geometry downstream
+  // (`--row-h`, `rowAt`, the drag preview, print) derives from the same number as before.
+  //
+  // `clientHeight` of a hidden or unattached scroller is 0, which `fitRowHeight` reads as
+  // "nobody measured" and answers with the stored preference — the same thing tier 1 gets.
+  const wrap = (root && root.closest && root.closest('.board-wrap'))
+    || document.querySelector('.board-wrap');
+  model = buildBoard(state, { viewportH: wrap ? wrap.clientHeight : 0 });
   const epoch = copyEpoch();
 
   // Density lives on :root only. Every position below is expressed in calc()

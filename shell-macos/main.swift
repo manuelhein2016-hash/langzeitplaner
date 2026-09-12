@@ -2074,7 +2074,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         window.title = "LangzeitPlaner"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.minSize = NSSize(width: 900, height: 640)
+        window.minSize = NSSize(width: 900, height: 742)
         window.contentView = webView
         window.delegate = self
         // 13.1 — remember size and position across launches. Center only on

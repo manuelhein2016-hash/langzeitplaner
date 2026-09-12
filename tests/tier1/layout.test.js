@@ -1239,3 +1239,76 @@ describe('model invariants', () => {
     assert.equal(m.cols[0].key, '2026-01', 'pinned mode is unaffected by it');
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// 1.B / N16 · THE BOARD FITS THE WINDOW
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// "The board never scrolls vertically; vertical fit is achieved by row density, truncation, and
+// popovers." Truncation and popovers were built. Density was not part of the fit at all — it was
+// a preference, `.board-wrap` had `overflow-y: auto`, and when the two disagreed the board simply
+// scrolled. `settings.js` computed exactly how many rows fell below the fold and rendered a
+// warning about it: the code knew it was breaking the promise and told the user instead of
+// keeping it.
+
+describe('1.B — the stored row height is a ceiling, not a fixed value', () => {
+  const kompakt = L.DENSITY.kompakt;
+  const komfort = L.DENSITY.komfort;
+
+  test('an unmeasured caller gets the stored preference, unchanged', () => {
+    // Tier 1 and the print path never measure a scroller. `fitRowHeight` must stay pure for them
+    // — a printed sheet is metric-ed by the print stylesheet, not by whatever window was open.
+    for (const h of [undefined, null, 0, NaN, -1]) {
+      assert.equal(L.fitRowHeight(22, kompakt, h), 22, String(h));
+      assert.equal(L.fitRowHeight(32, kompakt, h), 32, String(h));
+    }
+  });
+
+  test('a tall window changes nothing — the ceiling only ever lowers', () => {
+    assert.equal(L.fitRowHeight(22, kompakt, 2000), 22);
+    assert.equal(L.fitRowHeight(26, komfort, 2000), 26,
+      'a roomy window must not INFLATE the rows past what was asked for');
+  });
+
+  test('a short window shrinks the row until all 31 fit, and the arithmetic closes', () => {
+    // From the smallest scroller in which the promise CAN hold — 31 × minRowHeight + chrome —
+    // upwards. Below that the ink floor wins and the board scrolls; that case is the next row.
+    for (const have of [31 * kompakt.minRowHeight + L.BOARD_CHROME_H, 700, 760, 800, 900]) {
+      const rowH = L.fitRowHeight(22, kompakt, have);
+      assert.ok(31 * rowH + L.BOARD_CHROME_H <= have,
+        `${have}px: 31 rows of ${rowH} plus chrome is ${31 * rowH + L.BOARD_CHROME_H} — still past the fold`);
+      assert.ok(rowH <= 22, `${have}px: the row grew past the preference`);
+    }
+  });
+
+  test('…but never below the ink floor, which is a legibility ruling and not a preference', () => {
+    // `minRowHeight` is what keeps 9px type readable (§A4's subject). A board that fits because
+    // it became unreadable has not solved anything, so below this the board scrolls again — and
+    // both shells refuse to open a window that small (`minHeight: 728`).
+    assert.equal(L.fitRowHeight(22, kompakt, 400), kompakt.minRowHeight);
+    assert.equal(L.fitRowHeight(22, kompakt, 1), kompakt.minRowHeight);
+    assert.equal(L.fitRowHeight(26, komfort, 400), komfort.minRowHeight);
+  });
+
+  test('the shipped minimum window is tall enough for the promise to hold', () => {
+    // 31 × 18 + 116 = 674 of scroller. The window adds a 28px titlebar and a 40px toolbar, so a
+    // 742px window is the smallest one in which the board genuinely never scrolls — which is why
+    // that is the number in tauri.conf.json and main.swift.
+    const scroller = 742 - 28 - 40;
+    const rowH = L.fitRowHeight(22, kompakt, scroller);
+    assert.equal(rowH, kompakt.minRowHeight);
+    assert.ok(31 * rowH + L.BOARD_CHROME_H <= scroller,
+      'the shipped minHeight no longer fits 31 rows — raise it or lower the floor, deliberately');
+  });
+
+  test('the model really uses it: the same state renders shorter rows in a shorter window', () => {
+    // The unit above is the rule; this is the wiring. A regression that stopped passing
+    // `viewportH` through `buildBoard` would leave every row at the preference and every row
+    // above would still pass.
+    const tall = L.buildBoard(boardState({ settings: { rowHeight: 32 } }), { today: '2026-01-15', viewportH: 2000 });
+    const short = L.buildBoard(boardState({ settings: { rowHeight: 32 } }), { today: '2026-01-15', viewportH: 700 });
+    assert.equal(tall.rowH, 32);
+    assert.ok(short.rowH < 32, 'the short window did not re-fit — is viewportH still threaded through?');
+    assert.ok(31 * short.rowH + L.BOARD_CHROME_H <= 700);
+  });
+});
