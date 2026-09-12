@@ -1575,6 +1575,14 @@ fn gatekeeper_status(app: AppHandle) -> String {
 // window closes or the app quits, loses at most a second of "where I left it".
 const WINDOW_FILE: &str = "window.json";
 
+/// The window's smallest honourable size, in LOGICAL units — the same two numbers as
+/// `tauri.conf.json`'s `app.windows[0].minWidth` / `minHeight`, which is why
+/// `tests/tier1/shell-parity.test.js` §4 asserts the two files agree. 742 is not arbitrary: it is
+/// what 31 rows plus the board chrome need (`src/js/layout.js` `BOARD_CHROME_H`), so a window
+/// shorter than this is the vertical scroll that story 1.B and N16 promise cannot happen.
+const MIN_W_LOGICAL: u32 = 900;
+const MIN_H_LOGICAL: u32 = 742;
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
 struct WindowFrame {
     x: i32,
@@ -1666,12 +1674,32 @@ fn restore_window_frame(app: &AppHandle) -> bool {
     let mut fw = ((f.w as f64 * k).round() as i64).clamp(1, i64::from(u32::MAX)) as u32;
     let mut fh = ((f.h as f64 * k).round() as i64).clamp(1, i64::from(u32::MAX)) as u32;
 
+    // ── THE GUARD THAT REJECTED EVERY FRAME ──────────────────────────────────────────────────
+    //
     // A frame saved on a monitor that is no longer attached would put the window somewhere the
-    // user cannot reach. Accept it only if it overlaps some monitor by a sensible margin — and
-    // then take THAT monitor's size as a ceiling, because the overlap test on its own happily
-    // passes a window far larger than the screen it lands on. i64 throughout: `f.x + f.w as i32`
-    // overflows on a hostile file, and the panic would be at launch, before any window exists.
-    let Ok(monitors) = w.available_monitors() else { return false };
+    // user cannot reach, so it is accepted only if it overlaps some monitor by a sensible margin
+    // — and then that monitor's size is a ceiling, because the overlap test on its own happily
+    // passes a window far larger than the screen it lands on.
+    //
+    // BUT THE LIST HAS TO BE ASKED FOR TWICE. `available_monitors()` comes back EMPTY in this
+    // app: tao answers it with `CGDisplay::active_displays()` and returns an empty `VecDeque` on
+    // any error (tao-0.35.3 `platform_impl/macos/monitor.rs:146-156`), while `primary_monitor()`
+    // and `current_monitor()` go through `CGDisplay::main()` and answer correctly. Measured in a
+    // real launch against a scratch HOME: `monitors=0`, `primary=Some(3024×1964 @ 2.0)`.
+    //
+    // So a guard built on that list alone rejects every frame there is, and the restore half of
+    // 13.1 never ran once — the frame was written faithfully and then ignored on every launch.
+    // The empty list is not distinguishable from "no displays attached", which is why this falls
+    // back rather than trusting it: `available_monitors` is still preferred when it answers,
+    // because it is the only one of the three that can see a SECOND display.
+    //
+    // i64 throughout: `f.x + f.w as i32` overflows on a hostile file, and that panic would be at
+    // launch, before there is any window to show it in.
+    let mut monitors = w.available_monitors().unwrap_or_default();
+    if monitors.is_empty() {
+        monitors.extend(w.current_monitor().ok().flatten());
+        monitors.extend(w.primary_monitor().ok().flatten());
+    }
     let (x, y, cw, ch) = (i64::from(fx), i64::from(fy), i64::from(fw), i64::from(fh));
     let Some(m) = monitors.iter().find(|m| {
         let p = m.position();
@@ -1682,8 +1710,22 @@ fn restore_window_frame(app: &AppHandle) -> bool {
     }) else {
         return false;
     };
-    fw = fw.min(m.size().width);
-    fh = fh.min(m.size().height);
+    // ── AND A FLOOR, NOT ONLY A CEILING ──────────────────────────────────────────────────────
+    //
+    // `{"w":0,"h":0}` restored a TWO-PIXEL window. Measured: the app launched, drew nothing a
+    // person could see, and offered no way back except deleting the file by hand — tao applies
+    // `minWidth`/`minHeight` to a user's own resizing, not to a programmatic `set_size`.
+    //
+    // The floor is the window's own configured minimum, in logical units, so it is multiplied by
+    // the scale we are about to apply. `MIN_*_LOGICAL` mirrors `tauri.conf.json`, and
+    // `tests/tier1/shell-parity.test.js` §4 fails if the two ever disagree — the numbers being in
+    // two files is the thing that rots, so the gate is the point.
+    let floor_w = (f64::from(MIN_W_LOGICAL) * now).round() as u32;
+    let floor_h = (f64::from(MIN_H_LOGICAL) * now).round() as u32;
+    // The ceiling is the monitor, unless the monitor is smaller than the minimum — in which case
+    // the app cannot honour both and the minimum wins, exactly as it does at first launch.
+    fw = fw.clamp(floor_w, m.size().width.max(floor_w));
+    fh = fh.clamp(floor_h, m.size().height.max(floor_h));
 
     let _ = w.set_size(tauri::PhysicalSize::new(fw, fh));
     let _ = w.set_position(tauri::PhysicalPosition::new(fx, fy));

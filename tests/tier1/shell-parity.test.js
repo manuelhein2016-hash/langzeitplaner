@@ -328,3 +328,89 @@ describe('§3 · the shell-pref key tables agree', () => {
     }
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §4 · THE WINDOW'S SMALLEST HONOURABLE SIZE, IN THREE FILES
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// The same two numbers are written down three times: `tauri.conf.json` declares them to the
+// shipped shell, `shell-macos/main.swift` sets `window.minSize` for the reference shell, and
+// `src-tauri/src/lib.rs` needs them as a FLOOR when it replays a saved frame — because tao
+// applies `minWidth`/`minHeight` to a user's own resizing and not to a programmatic `set_size`.
+//
+// Measured, in a real launch against a scratch HOME: a `window.json` of `{"w":0,"h":0}` restored
+// a TWO-PIXEL window. The app was running, drew nothing a person could see, and there was no way
+// back except deleting the file by hand.
+//
+// So the floor has to exist, and three copies of a number is the thing that rots. 742 in
+// particular is load-bearing: it is what 31 rows plus the board chrome need (`src/js/layout.js`
+// `BOARD_CHROME_H`), which is the whole of what stories 1.B and N16 promise. A shell that let the
+// window be shorter would reintroduce the vertical scroll those two say cannot happen.
+describe('§4 · the window minimum agrees across both shells and the config', () => {
+  const conf = JSON.parse(shellSource('src-tauri/tauri.conf.json'));
+  const win = conf.app.windows[0];
+
+  test('§4a — the Rust restore floor is the config minimum', () => {
+    const rust = shellSource(RUST);
+    const w = /const\s+MIN_W_LOGICAL:\s*u32\s*=\s*(\d+)\s*;/.exec(rust);
+    const h = /const\s+MIN_H_LOGICAL:\s*u32\s*=\s*(\d+)\s*;/.exec(rust);
+    assert.ok(w && h,
+      'src-tauri/src/lib.rs no longer declares MIN_W_LOGICAL / MIN_H_LOGICAL. If the floor in '
+      + '`restore_window_frame` went away, a hand-edited or truncated window.json can restore a '
+      + 'window too small to see — measured at 2×2 physical for {"w":0,"h":0}.');
+    assert.equal(Number(w[1]), win.minWidth,
+      `lib.rs MIN_W_LOGICAL=${w[1]} but tauri.conf.json minWidth=${win.minWidth}`);
+    assert.equal(Number(h[1]), win.minHeight,
+      `lib.rs MIN_H_LOGICAL=${h[1]} but tauri.conf.json minHeight=${win.minHeight}`);
+  });
+
+  test('§4b — and the Swift shell sets the same minSize', () => {
+    const swift = shellSource(SWIFT);
+    const m = /window\.minSize\s*=\s*NSSize\(width:\s*(\d+),\s*height:\s*(\d+)\)/.exec(swift);
+    assert.ok(m, 'shell-macos/main.swift no longer sets window.minSize');
+    assert.equal(Number(m[1]), win.minWidth,
+      `main.swift minSize width=${m[1]} but tauri.conf.json minWidth=${win.minWidth} — the two `
+      + 'shells would disagree about the one size story 1.B depends on');
+    assert.equal(Number(m[2]), win.minHeight,
+      `main.swift minSize height=${m[2]} but tauri.conf.json minHeight=${win.minHeight}`);
+  });
+
+  test('§4c — the floor is actually applied, not merely declared', () => {
+    // §4a proves the numbers agree; a constant nothing reads would satisfy it. This asserts the
+    // clamp exists and clamps UP — `fw.min(..)` alone was the shipped bug, a ceiling with no
+    // floor, and it is the single edit that would make this row pass while the app regressed.
+    const rust = shellSource(RUST);
+    assert.match(rust, /let\s+floor_w\s*=[\s\S]{0,120}MIN_W_LOGICAL/,
+      'restore_window_frame no longer derives a physical floor from MIN_W_LOGICAL');
+    assert.match(rust, /fw\s*=\s*fw\.clamp\(\s*floor_w/,
+      'the restored width is no longer clamped UP to the floor — a ceiling alone is what let '
+      + '{"w":0,"h":0} restore a 2×2 window');
+    assert.match(rust, /fh\s*=\s*fh\.clamp\(\s*floor_h/,
+      'the restored height is no longer clamped UP to the floor');
+  });
+
+  test('§4d — the restore does not trust available_monitors() alone', () => {
+    // THE REASON THE RESTORE NEVER RAN. `available_monitors()` comes back EMPTY in this app —
+    // tao answers it with `CGDisplay::active_displays()` and swallows any error into an empty
+    // VecDeque (tao-0.35.3 platform_impl/macos/monitor.rs:146-156) — while `primary_monitor()`
+    // answers correctly. Measured in a real launch: `monitors=0`, `primary=Some(3024×1964@2.0)`.
+    // A guard built on that list alone rejects every frame there is, so the window was saved
+    // faithfully and ignored on every launch. Reverting to the single call is silent: no test
+    // fails, no error is logged, and 13.1 just quietly stops working again.
+    const rust = shellSource(RUST);
+    // Bounded by the next top-level item rather than by brace matching, and deliberately
+    // written without a closing brace anywhere in it: `suite-integrity.test.js` slices test
+    // bodies by counting braces, so one inside a string or even a comment here would end this
+    // body before its assertions, and the row would be reported as asserting nothing. It was.
+    const start = rust.indexOf('fn restore_window_frame');
+    const body = rust.slice(start, rust.indexOf('static FLUSH_DONE', start));
+    assert.ok(start > 0 && body.length > 200, 'could not isolate restore_window_frame');
+    assert.match(body, /available_monitors\(\)/, 'the restore no longer enumerates monitors at all');
+    assert.match(body, /is_empty\(\)/,
+      'restore_window_frame no longer checks whether available_monitors() came back EMPTY');
+    assert.match(body, /primary_monitor\(\)|current_monitor\(\)/,
+      'restore_window_frame no longer falls back to primary/current_monitor when '
+      + 'available_monitors() is empty — which on this platform is always, so the frame guard '
+      + 'rejects every saved frame and the window forgets where it was');
+  });
+});

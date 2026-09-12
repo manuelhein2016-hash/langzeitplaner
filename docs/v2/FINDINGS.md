@@ -5486,3 +5486,52 @@ it would mean installing our own method on a delegate tao owns. On those two pat
 `pagehide` is still the only flush — exactly as in rc.3, so this is a gap that was never closed
 rather than one that was opened. The two shells therefore still differ on quit, and that
 difference is now written down instead of being assumed absent.
+
+### §25.4 · The window frame was saved faithfully and then ignored on every launch
+
+**13.1, found by measuring the fix instead of reading it.**
+
+`restore_window_frame` ran at every launch, parsed the file correctly, and applied nothing. Two
+launches against a scratch `HOME` with completely different saved frames came back byte-identical:
+
+```
+wanted {"x":300,"y":300,"w":2000,"h":1600,"scale":2.0}  got {"x":72,"y":66,"w":2582,"h":1786}
+wanted {"x":600,"y":200,"w":2200,"h":1500,"scale":2.0}  got {"x":72,"y":66,"w":2582,"h":1786}
+```
+
+`72,66` is simply where `"center": true` puts a 1440×900 window on this screen. The restore was a
+no-op, so 13.1's fix delivered the *save* half and nothing else — and the symptom is indistinguish-
+able from having no fix at all.
+
+**The cause, instrumented rather than guessed.** The guard that decides whether a saved frame is
+still reachable asked `available_monitors()`, and on this machine that answers an **empty list**:
+
+```
+[probe] monitors=0  primary=Ok(Some((3024×1964, (0,0), 2.0)))  current=Ok(Some(…same…))
+```
+
+tao implements it with `CGDisplay::active_displays()` and returns an empty `VecDeque` on any error
+(`tao-0.35.3/src/platform_impl/macos/monitor.rs:146-156`), while `primary_monitor()` and
+`current_monitor()` go through `CGDisplay::main()` and answer correctly. An empty list is not
+distinguishable from "no displays attached", so the guard concluded the frame was unreachable —
+**every frame, every launch.** The fix prefers `available_monitors()` when it answers, because it
+is the only one of the three that can see a second display, and falls back to current/primary when
+it does not.
+
+**And a second hole the working guard exposed.** Once frames were applied, a `window.json` of
+`{"w":0,"h":0}` restored a **two-pixel window**: running, drawing nothing a person could see, with
+no way back but deleting the file by hand. tao applies `minWidth`/`minHeight` to a user's own
+resizing, not to a programmatic `set_size`. So the restore now clamps **up** to the configured
+minimum as well as down to the monitor — the shipped code had a ceiling and no floor.
+
+**What the gate does about it.** `tests/tier1/shell-parity.test.js` §4 is four rows, each
+mutation-verified: the floor constants must equal `tauri.conf.json`, the Swift shell's own
+`window.minSize` must equal them too, the clamp must clamp *up* and not only down, and the restore
+must not trust `available_monitors()` alone. The last is the important one — reverting that
+fallback is completely silent. No test fails, nothing is logged, and the window just quietly
+forgets where it was, which is exactly how this shipped in the first place.
+
+**The lesson, which is §25.3's lesson again.** Both of these were fixes that compiled, read
+correctly, and never executed. Neither `cargo check` nor a source census can see an event handler
+that is never entered or a guard that is always false. The only thing that found either was running
+the binary and comparing what came back against what went in.
