@@ -176,7 +176,8 @@
 - [ ] **15.4 [M]** All members see the member list (name, color, initial), so everyone knows who's in the circle.
 - [ ] **15.5 [M]** Invite codes are single-use, expire after 7 days, and are revocable by the admin, so a leaked link can't haunt the family.
 - [ ] **15.6 [M]** I can change my display name and color anytime and it propagates to everyone's boards, so identity stays current without admin involvement.
-- [ ] **15.A [M]** The join flow is one screen with a large paste field; it prevents choosing a color already taken by another member. *(src: v2 F15 notes)*
+- [ ] **15.A [M] *(am.)*** The join flow is one screen with a large paste field; it prevents **ending up with** a colour already taken by another member — taken colours are disabled in the picker once known, and a collision discovered at redemption is rolled back and offered a free colour as an offer, not an error. *(src: v2 F15 notes)*
+      **Erratum, 2026-09-12.** Literal pre-emption before submit is not buildable without harm: a joiner is not yet a member, so learning the roster would require an endpoint that turns an invite code into a roster oracle for anyone holding one. `createjoin.js` refuses to build that, correctly. The achievable property — no duplicate colour ever results — is what the code delivers and what the tests already assert.
 
 ## F16 — Visibility (Privat / Belegt / Geteilt)
 
@@ -213,10 +214,13 @@
 - [ ] **19.1 [M]** The app is fully functional offline — create, edit, move, everything — and queues changes locally; sync happens when connectivity returns, so a train ride never interrupts planning.
 - [ ] **19.2 [M] *(am.)*** My changes upload within seconds of saving; others' changes arrive automatically — on app focus and every ~30–60 s while the app is open. There is no sync button and no manual refresh anywhere.
 - [ ] **19.3 [M]** Sync status is silent when healthy; only pending-offline or a real error produces a small, unobtrusive indicator.
-- [ ] **19.4 [M]** I can pair my own second Mac: my **entire** board — including private entries — syncs end-to-end encrypted between **my** devices only.
-- [ ] **19.5 [M]** Adding a device means entering a short pairing code shown on an existing device — not a password-reset flow; there are no passwords in this product.
+- [ ] **19.4 [M] *(am., interim)*** I can pair my own second Mac: my board — including private entries — syncs end-to-end encrypted between **my** devices only. **Interim:** a newly paired Mac receives everything authored since the personal space existed; entries older than that are carried by the backup file (21.B), not over the wire.
+      **Erratum, 2026-09-12.** Finding **E5-6** (HIGH, open, owner WP-9) is the gap: pre-space entries hold a genesis stamp and `outbox()` excludes those, so a second Mac gets none of them. The word that fails is "entire", and this interim wording says what actually happens rather than letting a `[M]` row read as met. It reverts when E5-6 closes.
+- [ ] **19.5 [M] *(am.)*** Adding a device means entering a short pairing code shown on an existing device — not a password-reset flow. There are no **account** passwords in this product: nothing to register, nothing to sign in with, nothing to reset, nothing to forget. The one passphrase that exists protects a **backup file you hold** (21.B) and authenticates you to nobody.
+      **Erratum, 2026-09-12.** The unqualified wording was only true because the export sheet was unreachable dead code. Wiring it (21.B) made a real `<input type=password>` reachable, so the sentence had to become either false or precise. The distinction it now draws is the one that was always meant: a credential that guards a remote account is a different object from a key that encrypts a local file.
 - [ ] **19.6 [M]** After long offline periods everything merges cleanly on return — including month rolls and yearly repeats that occurred meanwhile — so a laptop opened after three weeks just catches up.
 - [ ] **19.A [M]** Pairing has designed screens on both ends (show code / enter code) with both-ends confirmation. *(src: v2 F19 notes, deliverable 21)*
+      **Audit note, 2026-09-12.** Verified, not amended: both ends reach the same SAS screen showing the same six digits and both device short ids, the affirmative restates the digits and is inert for two seconds, every other exit refuses, and there is exactly one `confirmMatch(true)` call site. Driven end to end in a real WKWebView by `tests/tier2/pairing-flow.dom.js`.
 
 ## F20 — Space lifecycle and admin
 
@@ -234,7 +238,8 @@
 - [ ] **21.2 [M]** Private entries never leave my machines except end-to-end encrypted to my *own* paired devices — no family key can ever decrypt them.
 - [ ] **21.3 [M] *(am.)*** The app documents plainly what the server side *can* see — pseudonymous IDs, timestamps, IP addresses in transit, encrypted blob sizes — and names the processors (Vercel, Prisma Postgres; EU/Frankfurt region), so trust is informed, not marketed.
 - [ ] **21.4 [M]** Still no analytics, no tracking, no third-party services beyond the sync endpoint.
-- [ ] **21.5 [M]** In solo mode the app makes zero network requests; with a Familienkreis it talks to exactly one sync endpoint and nothing else. *(supersedes 13.4)*
+- [ ] **21.5 [M] *(am. 2)*** In solo mode the app makes zero **unrequested** network requests. There are exactly two exceptions and both are disclosed: the one request a human asks for by pressing „Senden" on the Rückmeldung screen, and the update check of 22.3, which runs only after the first-run card has stated it and can be switched off in settings. With a Familienkreis it talks to exactly one sync endpoint and nothing else. *(supersedes 13.4)*
+      **Erratum, 2026-09-12.** The catalogue still carried the pre-amendment wording: the PO's D10 ruling of 2026-09-03 (`STATUS.md:366-374`) was never folded in. Folding it in exposed a second omission — the catalogue **contradicted itself**, because 22.3 `[M]` mandates a launch-and-daily update check that the old sentence forbade. The code is doing what 22.3 asks, behind two independent gates (JS and native) and a first-run disclosure; the sentence was what was wrong.
 - [ ] **21.A [M]** A "Datenschutz" section in settings carries this in human German, not legalese. *(src: v2 F21 notes)*
 - [ ] **21.B [M]** Family onboarding contains the honesty moment: "Kein Passwort. Dein Backup ist dein Schlüssel — exportiere jetzt eins," making key-loss consequences plain and prompting an immediate backup export. *(src: v2 §3, deliverable 24)*
 
@@ -247,23 +252,25 @@
 - [ ] **22.5 [M]** Every device — my two Macs and Mom's — follows the same single release channel and converges automatically.
 - [ ] **22.6 [M]** Updates are cryptographically signed and verified before installing — a device installs authentic builds or nothing.
 - [ ] **22.7 [M]** Updates never touch user data; migrations run after the swap; if a server change ever requires a minimum client version, outdated clients say so in one plain sentence instead of failing quietly.
-- [ ] **22.8 [M]** Releases flow from GitHub: one tag moves the entire product — server and every desktop — forward together.
+- [ ] **22.8 [M] *(am.)*** Releases flow from GitHub: one tag builds, signs, notarizes and publishes the desktop, and every desktop converges on it through 22.3's channel. The sync server deploys separately from `main` through Vercel's own GitHub integration (decision D3), guarded before and after by `server.yml`.
+      **Erratum, 2026-09-12.** The split is deliberate and `server.yml` says so in its own header: making one tag move both would mean holding a long-lived deploy credential in this repository, which D3 declined for no gain.
 - [ ] **22.A [M]** The update hint is a dot in the quiet-signal family, not a badge count. *(src: v2 F22 notes)*
 - [ ] **22.B [M]** The invitation email is itself part of the experience: subject, three install steps with a screenshot, the invite code, the fallback link. *(src: deliverable 28)*
 ---
 
 ## N — Committed absences (audit by confirming these are NOT present)
 
-- [ ] **N1 [M]** No accounts, emails, or passwords exist anywhere in the product. *(15.3, 19.5, v2 §3)*
+- [ ] **N1 [M] *(am.)*** No accounts, emails, or account passwords exist anywhere in the product — no registration, no sign-in, no reset. The backup passphrase of 21.B is not one of these; see 19.5. *(15.3, 19.5, v2 §3)*
 - [ ] **N2 [M]** No save button, no sync button, no manual refresh, anywhere. *(11.1, 19.2)*
 - [ ] **N3 [M]** No dialogs for creating or editing entries — dialogs appear only for destructive or rare actions (delete category, import, restore, leave/remove/delete space). *(v1 Principle 2)*
-- [ ] **N4 [M]** No times of day anywhere — dates only; consequently no timezone or DST behavior exists to audit. *(v1 §13, v2 §8)*
+- [ ] **N4 [M] *(am.)*** No times of day on any **entry**, anywhere on the board, in print or in find — the entry model is dates-only, and consequently no timezone or DST behaviour exists to audit. App-activity timestamps in the settings sheet (when a snapshot was taken, when sync last ran, when updates were last checked) do carry a local wall-clock time; they describe the app's own actions, not the user's plans. *(v1 §13, v2 §8)*
+      **Erratum, 2026-09-12.** The consequent clause — "consequently no timezone or DST behaviour exists to audit" — only ever follows from a claim about the DATA MODEL, which is genuinely dates-only. Read literally the row also forbade „Zuletzt abgeglichen: 14:32", which answers exactly the question 19.3's status sheet exists to answer.
 - [ ] **N5 [M]** No reminders, notifications, or push of any kind. *(anti-goals; v2 §11)*
 - [ ] **N6 [M]** No popups, badge counts, or attention-demanding signals for family changes or available updates — only quiet dots. *(17.5, 22.4, 22.A)*
 - [ ] **N7 [M]** No read receipts, no presence indicators, no "seen" states — in either direction. *(Principle 9)*
 - [ ] **N8 [M]** No notification or trace when someone changes an entry's visibility — downgraded entries are simply no longer there ("no snitch mechanics"). *(v2 §6)*
 - [ ] **N9 [M]** No comments, reactions, or chat on entries — the board is not a messenger. *(v2 §6)*
-- [ ] **N10 [M]** No ads, analytics, tracking, or third-party calls beyond the single sync endpoint; solo mode = zero network, verifiable with a network monitor. *(21.4, 21.5)*
+- [ ] **N10 [M] *(am.)*** No ads, analytics, tracking, or third-party calls beyond the single sync endpoint and the release host named in 22.3. Solo mode originates nothing unrequested — see 21.5 for the two disclosed exceptions — and that is verifiable with a network monitor. *(21.4, 21.5)*
 - [ ] **N11 [M]** No spinners or loading states on the board itself. *(v2 F19 notes)*
 - [ ] **N12 [M]** No role — including admin — can access another member's private entries or Belegt contents. *(20.5)*
 - [ ] **N13 [M]** No per-year exceptions on repeat series, and no recurrence beyond yearly notes (no weekly/monthly, no repeating bars). *(9.3, 9.6)*
