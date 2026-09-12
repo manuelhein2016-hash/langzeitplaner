@@ -8,6 +8,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -1465,6 +1466,17 @@ fn print_board(window: tauri::WebviewWindow) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 11.1 — set when the page has finished its pre-quit flush, or when the deadline gave up on it.
+/// Read by `RunEvent::ExitRequested`, which must let the second exit through or the app could
+/// never be quit at all.
+static FLUSH_DONE: AtomicBool = AtomicBool::new(false);
+
+/// 11.1 — the page's answer to the pre-quit flush. See `RunEvent::ExitRequested`.
+#[tauri::command]
+fn flush_done() {
+    FLUSH_DONE.store(true, Ordering::SeqCst);
+}
+
 /// 13.2 / 13.3 — shell preferences the web layer cannot apply itself.
 #[tauri::command]
 fn set_shell_pref(app: AppHandle, key: String, value: bool) -> Result<(), String> {
@@ -1625,6 +1637,7 @@ pub fn run() {
             import_board,
             #[cfg(target_os = "macos")]
             print_board,
+            flush_done,
             set_shell_pref,
             // LZP-302 · ADR 002 §2.2 — the Keychain backstop. UNVERIFIED (no
             // Rust toolchain here); shell-macos/main.swift is the reference.
@@ -1697,6 +1710,77 @@ pub fn run() {
                 let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running LangzeitPlaner");
+        .build(tauri::generate_context!())
+        .expect("error while running LangzeitPlaner")
+        .run(|app, event| match event {
+            // ── 13.5 · THE DOCK ICON MUST BRING THE WINDOW BACK ──────────────────────────────
+            //
+            // ⌘W and the red button HIDE the window (see `on_window_event` above) and the app
+            // keeps running — that is the story 13.5 asks for. What was missing is the other
+            // half: nothing brought it back. macOS sends `applicationShouldHandleReopen` when
+            // the Dock icon is clicked, tao surfaces it as `RunEvent::Reopen`, and this shell
+            // handled no `RunEvent` at all.
+            //
+            // So ⌘W left the window unreachable from the Dock. The only way back was the
+            // menu-bar icon — which 13.2 makes a SETTING, default on but switchable off. With
+            // it off, ⌘W made the app unreachable by any means short of force-quitting it.
+            // `main.swift:2441-2445` has always done this correctly.
+            tauri::RunEvent::Reopen { .. } => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+
+            // ── 11.1 · A QUIT MUST NOT OUTRUN THE SAVE ───────────────────────────────────────
+            //
+            // `store.js`'s `SAVE_DEBOUNCE` is 700 ms, so at any instant up to 700 ms of typing
+            // may exist only in memory. The page's own `pagehide` → `flushSync()` is not enough
+            // here: `NSApp.terminate` is not a navigation, and a WKWebView is not guaranteed to
+            // deliver `pagehide` before the process dies. So ⌘Q could drop the last edit, and
+            // the user would never know which one.
+            //
+            // `main.swift:2425-2434` solves it with `.terminateLater` + `__lzpFlush` + a 2 s
+            // fallback. This is the same shape: hold the exit, ask the page to flush, let it go
+            // when the page answers or the deadline passes — because a wedged page must not be
+            // able to make the app unquittable.
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
+                // ONLY A USER-INITIATED QUIT. `code.is_none()` is what distinguishes ⌘Q from a
+                // programmatic exit that has already decided — and in particular from the
+                // UPDATER'S RESTART, which is the hazard here: `update_restart` calls
+                // `AppHandle::restart()`, and if that reached this arm we would prevent the exit
+                // and then `exit(0)` instead, turning "restart into the new version" into
+                // "quit". It cannot: `restart()` carries `RESTART_EXIT_CODE` (tauri's app.rs:582),
+                // and on the main thread it bypasses `ExitRequested` altogether. Measured, not
+                // assumed. `update-ui.js` has already flushed the board before calling it anyway.
+                if code.is_none() && !FLUSH_DONE.load(Ordering::SeqCst) {
+                    api.prevent_exit();
+                    let handle = app.clone();
+                    let Some(win) = app.get_webview_window("main") else {
+                        FLUSH_DONE.store(true, Ordering::SeqCst);
+                        handle.exit(0);
+                        return;
+                    };
+                    // The page resolves this by calling back; `main.js:583` defines
+                    // `window.__lzpFlush = () => store.persistNow()`.
+                    let done = handle.clone();
+                    let _ = win.eval(
+                        "(async () => { try { if (window.__lzpFlush) await window.__lzpFlush(); } \
+                         catch (e) {} finally { try { await window.__TAURI__.core.invoke('flush_done'); } catch (e) {} } })()",
+                    );
+                    std::thread::spawn(move || {
+                        // The deadline, not a promise of one. Whichever arrives first wins.
+                        for _ in 0..40 {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            if FLUSH_DONE.load(Ordering::SeqCst) {
+                                break;
+                            }
+                        }
+                        FLUSH_DONE.store(true, Ordering::SeqCst);
+                        done.exit(0);
+                    });
+                }
+            }
+            _ => {}
+        });
 }

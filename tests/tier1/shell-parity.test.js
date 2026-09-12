@@ -65,7 +65,14 @@ const RUST = 'src-tauri/src/lib.rs';
 // The two-way rule matters as much as the one-way rule: a name listed here that is no longer
 // divergent is ALSO a red (§1c), because a stale exemption is how a gate quietly stops gating.
 const ACCEPTED_DIVERGENCE = Object.freeze({
-  // (empty — and it should stay that way)
+  // Tauri-only, and it should stay that way. Both shells flush the board before quitting (11.1),
+  // but they learn that the flush FINISHED in different ways. Swift has
+  // `callAsyncJavaScript(..., completionHandler:)` — a real callback — so `main.swift:2425-2434`
+  // awaits `__lzpFlush()` directly and needs no command. Tauri's `webview.eval()` is
+  // fire-and-forget with no result channel, so the page has to call back, and `flush_done` is
+  // that callback. Adding it to Swift would replace a completion handler with a round trip:
+  // strictly worse, purely for symmetry.
+  flush_done: 'Tauri has no eval-with-result; Swift uses callAsyncJavaScript’s completion handler instead',
 });
 
 /** Commands the page invokes that no shell is expected to implement. Same rule: name the reason. */
