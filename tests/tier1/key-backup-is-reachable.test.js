@@ -31,15 +31,16 @@
 // nothing to back up.
 
 import '../helpers/env.js';
-import fs from 'node:fs';
-import path from 'node:path';
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { REPO } from '../helpers/purity.js';
+import { shippedFiles } from '../helpers/netscope.js';
 import { recoveryMaterial } from '../../src/js/family/mount.js';
 
-const MOUNT = fs.readFileSync(path.join(REPO, 'src/js/family/mount.js'), 'utf8');
+// Read through the helper, never `node:fs` here: `suite-integrity.test.js` bans the import from
+// tier-1 test files outright, so that no test can quietly reach the user's real board. The file
+// walk lives in `helpers/netscope.js`, which is the same seam `shell-parity.test.js` uses.
+const MOUNT = (shippedFiles().find((f) => f.rel.endsWith('family/mount.js')) || {}).src || '';
 
 const IDENTITY = Object.freeze({ memberId: 'mem_me', sigPubRaw: new Uint8Array(32) });
 
@@ -58,6 +59,7 @@ describe('21.B · the key backup is reachable at all', () => {
     // early unless this property is on the hooks object, so its ABSENCE is invisible at runtime —
     // no error, no warning, just a section that never appears. Asserting the wiring is the only
     // way to notice it going away again.
+    assert.ok(MOUNT.length > 0, 'could not read family/mount.js through the file walk');
     const call = /buildFamilySections\(body, api, \{([\s\S]{0,400}?)\}\)/.exec(MOUNT);
     assert.ok(call, 'installSections no longer calls buildFamilySections with a hooks literal');
     assert.match(call[1], /recoveryMaterial\s*:/,
