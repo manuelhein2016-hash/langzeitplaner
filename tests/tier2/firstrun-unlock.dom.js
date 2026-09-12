@@ -45,15 +45,55 @@ test('a healthy launch shows no unlock screen at all', async () => {
   assert.equal(document.body.classList.contains('unlock-on'), false);
 });
 
-test('against the REAL shell the probe reports "unsupported", so nothing is guessed', async () => {
-  // This shell has no `gatekeeper_status` command yet (LZP-107 owns it). The
-  // bridge rejects an unknown command; the module must read that as "we do not
-  // know" and never as "blocked". This is the assertion that keeps the screen
-  // honest while the native half is still missing.
+test('against the REAL shell the probe now ANSWERS, and answers "not blocked"', async () => {
+  // ── THIS ROW USED TO PIN THE BUG AS CORRECT ────────────────────────────────
+  //
+  // It read: `assert.equal(p.supported, false, 'an unimplemented command is not
+  // evidence of a block')`, with a comment saying the shell "has no
+  // `gatekeeper_status` command yet (LZP-107 owns it)". That was true, and the
+  // assertion about an UNIMPLEMENTED command was right — but it had quietly
+  // become the thing that made the whole feature untestable: `shouldAutoShow`
+  // refuses `supported:false` unconditionally, so while that row was green the
+  // unlock screen could never present itself on any Mac, and nothing said so.
+  // `tests/tier1/shell-parity.test.js` §2a is what finally did.
+  //
+  // Both shells implement the command now. The probe therefore ANSWERS, and on
+  // this build the answer is "not blocked" — the test bundle carries no
+  // `com.apple.quarantine`, which is also true of the notarized DMG after macOS
+  // has approved it once. So the screen still stays away, but now because the
+  // host SAID SO rather than because nobody asked.
+  //
+  // The "an unimplemented command is not evidence of a block" property has not
+  // been lost: it is `probeHost`'s catch, and §2b below drives it directly.
   const p = await fr.probeHost();
-  assert.equal(p.supported, false, 'an unimplemented command is not evidence of a block');
-  assert.equal(p.blocked, false);
+  assert.equal(p.supported, true,
+    'the shell stopped answering gatekeeper_status — the unlock screen is unreachable again');
+  assert.equal(p.blocked, false, 'this bundle is not quarantined, so nothing should be offered');
+  assert.equal(p.reason, null, 'a not-blocked answer carries no reason');
   assert.equal(fr.shouldAutoShow(p, { launches: 0, dismissedAt: null }), false);
+});
+
+test('…and an unimplemented or broken command is still never read as "blocked"', async () => {
+  // The half the row above used to carry, kept as its own row rather than
+  // deleted with the assertion it was attached to. A rejected invoke, a reply
+  // that is not JSON, and a reply missing `supported` must all mean "we do not
+  // know" — which never shows the screen.
+  const saved = window.__TAURI__;
+  try {
+    for (const fake of [
+      { core: { invoke: async () => { throw new Error('unknown command'); } } },
+      { core: { invoke: async () => 'not json at all' } },
+      { core: { invoke: async () => ({ blocked: true }) } },
+    ]) {
+      window.__TAURI__ = fake;
+      const p = await fr.probeHost();
+      assert.equal(p.supported, false, 'a shell that cannot answer was read as evidence');
+      assert.equal(p.blocked, false);
+      assert.equal(fr.shouldAutoShow(p, { launches: 0, dismissedAt: null }), false);
+    }
+  } finally {
+    window.__TAURI__ = saved;
+  }
 });
 
 test('the auto-show rule: only positive evidence, only once, never after a clean history', async () => {

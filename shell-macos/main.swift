@@ -1830,6 +1830,31 @@ final class Bridge: NSObject, WKScriptMessageHandlerWithReply {
                 printAction?()
                 replyHandler(NSNull(), nil)
 
+            // ── 22.2 · the quarantine probe `firstrun.js:117` has always called ──
+            //
+            // Neither shell implemented this, so `probeHost` fell into its catch
+            // on every Mac and answered `supported:false` — which
+            // `shouldAutoShow` refuses unconditionally. The LZP-106 unlock
+            // walkthrough could never present itself anywhere.
+            //
+            // A genuinely BLOCKED app does not run, so no in-app screen can greet
+            // one; that reader is served by the read-me on the DMG. What a
+            // running app can tell is whether its own bundle still carries
+            // `com.apple.quarantine` — present when the user unlocked it by hand
+            // (D1's unsigned fallback), stripped once a notarized build has been
+            // approved. That is the population 22.2 describes.
+            case "gatekeeper_status":
+                let bundleURL = Bundle.main.bundleURL
+                var quarantined = false
+                if let vals = try? bundleURL.resourceValues(forKeys: [.quarantinePropertiesKey]) {
+                    quarantined = vals.quarantineProperties != nil
+                }
+                replyHandler([
+                    "supported": true,
+                    "blocked": quarantined,
+                    "reason": quarantined ? "quarantine" : NSNull(),
+                ] as [String: Any], nil)
+
             // ── LZP-302 · the Keychain backstop (ADR 002 §2.2) ───────────────
             //
             // These three commands hold ONE thing between them: the recovery

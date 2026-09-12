@@ -9,6 +9,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use tauri::menu::{AboutMetadata, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
@@ -1466,6 +1467,54 @@ fn print_board(window: tauri::WebviewWindow) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+// ── 22.2 · `gatekeeper_status` — A COMMAND THE PAGE HAS ALWAYS CALLED AND NOBODY WROTE ───────
+//
+// `src/js/firstrun.js:117` invokes this to decide whether to show the LZP-106 unlock walkthrough.
+// NEITHER shell implemented it, so `probeHost` always fell into its catch and answered
+// `supported:false` — and `shouldAutoShow` returns false on that, unconditionally. The screen
+// could therefore never present itself on any Mac, signed or not. It was reachable only from
+// Settings, and `tests/tier2/firstrun-unlock.dom.js` pinned the broken state as correct by
+// asserting `p.supported === false` against "the REAL shell".
+//
+// WHAT IS ACTUALLY KNOWABLE. A genuinely Gatekeeper-BLOCKED app does not run, so no in-app screen
+// can ever greet one — that reader is served by the read-me on the DMG, which opens in Safari.
+// What a running app can tell is whether its own bundle still carries `com.apple.quarantine`:
+// present when the user had to unlock it by hand (D1's unsigned fallback), and stripped by macOS
+// once a notarized build has been approved. That is exactly the population story 22.2 describes,
+// so it is what `blocked` reports — and on the build we actually ship, which `release.yml` gates
+// with a hard `spctl` check, it is false and the screen stays away.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn gatekeeper_status(app: AppHandle) -> String {
+    use std::os::unix::ffi::OsStrExt;
+
+    let quarantined = (|| -> Option<bool> {
+        // The .app bundle is three levels above the executable: Foo.app/Contents/MacOS/foo.
+        let exe = std::env::current_exe().ok()?;
+        let bundle = exe.parent()?.parent()?.parent()?;
+        let mut c = Vec::from(bundle.as_os_str().as_bytes());
+        c.push(0);
+        let name = std::ffi::CString::new("com.apple.quarantine").ok()?;
+        // Size probe only — the VALUE is not read, because its format is Apple's and undocumented,
+        // and presence is the whole question.
+        let n = unsafe {
+            libc::getxattr(c.as_ptr() as *const libc::c_char, name.as_ptr(), std::ptr::null_mut(), 0, 0, 0)
+        };
+        Some(n >= 0)
+    })()
+    .unwrap_or(false);
+
+    let _ = &app;
+    serde_json::json!({
+        "supported": true,
+        "blocked": quarantined,
+        // `string | null`, per `firstrun.js:120` — not an empty string, which would read as a
+        // reason that happens to be blank.
+        "reason": if quarantined { serde_json::json!("quarantine") } else { serde_json::Value::Null },
+    })
+    .to_string()
+}
+
 /// 11.1 — set when the page has finished its pre-quit flush, or when the deadline gave up on it.
 /// Read by `RunEvent::ExitRequested`, which must let the second exit through or the app could
 /// never be quit at all.
@@ -1479,12 +1528,27 @@ fn flush_done() {
 
 /// 13.2 / 13.3 — shell preferences the web layer cannot apply itself.
 #[tauri::command]
-fn set_shell_pref(app: AppHandle, key: String, value: bool) -> Result<(), String> {
+fn set_shell_pref(
+    app: AppHandle,
+    key: String,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    // `serde_json::Value`, NOT `bool`. The page sends `{key:'language', value:'en'}` alongside the
+    // three boolean prefs, and with a `bool` parameter that invoke failed inside serde before the
+    // match below was ever reached — so the arm could not have helped even if it had existed. Both
+    // call sites swallow the rejection (`main.js:594`, `settings.js:503`), which is why an English
+    // install kept a German menu bar with nothing on screen and nothing in any test.
+    //
+    // A non-boolean for a boolean key is now a NAMED refusal rather than a deserialisation failure
+    // with no arm, so the next mismatch of this kind says what it is.
+    let as_bool = |v: &serde_json::Value| -> Result<bool, String> {
+        v.as_bool().ok_or_else(|| format!("shell pref {key} expects a boolean, got {v}"))
+    };
     match key.as_str() {
         "launch_at_login" => {
             use tauri_plugin_autostart::ManagerExt;
             let mgr = app.autolaunch();
-            if value {
+            if as_bool(&value)? {
                 mgr.enable().map_err(|e| e.to_string())
             } else {
                 mgr.disable().map_err(|e| e.to_string())
@@ -1495,16 +1559,30 @@ fn set_shell_pref(app: AppHandle, key: String, value: bool) -> Result<(), String
         // and FALSE by default, so a relaunch of a solo install is solo again without asking.
         "sync_enabled" => {
             let mut p = SyncPrefs::load(&app);
-            p.enabled = value;
+            p.enabled = as_bool(&value)?;
             p.save(&app);
             Ok(())
         }
         "menu_bar_icon" => {
             if let Some(tray) = app.tray_by_id("main") {
-                tray.set_visible(value).map_err(|e| e.to_string())
+                tray.set_visible(as_bool(&value)?).map_err(|e| e.to_string())
             } else {
                 Ok(())
             }
+        }
+        // 13.7 — the native menu bar, relabelled. `main.swift:1927` does the same thing by calling
+        // `relabelMenu`; here the language is stashed and the whole menu is rebuilt, which is also
+        // how `update_menu_hint` swaps the 22.4 row.
+        "language" => {
+            let lang = value
+                .as_str()
+                .ok_or_else(|| format!("shell pref language expects a string, got {value}"))?;
+            if let Ok(mut g) = MENU_LANG.lock() {
+                *g = Some(if lang == "en" { "en".to_string() } else { "de".to_string() });
+            }
+            let menu = build_menu(&app).map_err(|e| e.to_string())?;
+            app.set_menu(menu).map_err(|e| e.to_string())?;
+            Ok(())
         }
         other => Err(format!("unknown shell pref: {other}")),
     }
@@ -1513,30 +1591,50 @@ fn set_shell_pref(app: AppHandle, key: String, value: bool) -> Result<(), String
 /// The menu bar fixed in §9. Every item that maps to a board action emits an
 /// event the web layer already handles, so there is exactly one implementation
 /// of each command.
+/// 13.7 — THE MENU BAR IS UI TOO, AND IT STAYED GERMAN.
+///
+/// `settings.js:346` pushes `set_shell_pref{key:'language'}` on every language change, and
+/// `main.swift:1927` handles it by relabelling the whole menu (`relabelMenu`). This shell handled
+/// no such key — and could not have, because `set_shell_pref` took `value: bool` and a language is
+/// a string, so the invoke died in serde before the match was ever reached. Both call sites
+/// `.catch()` it, so an English install simply kept a German menu bar for ever, with nothing on
+/// screen and nothing in any test. `tests/tier1/shell-parity.test.js` §3 is the gate that says so.
+static MENU_LANG: Mutex<Option<String>> = Mutex::new(None);
+
+fn menu_lang() -> String {
+    MENU_LANG.lock().ok().and_then(|g| g.clone()).unwrap_or_else(|| "de".into())
+}
+
+/// The Swift shell's `L(de, en)` (`main.swift:2453`), one language over.
+fn l(de: &str, en: &str) -> String {
+    if menu_lang() == "en" { en.to_string() } else { de.to_string() }
+}
+
 fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     // ── 22.4 · the App menu carries the quiet hint (LZP-103) ─────────────────
     // The hint item exists ONLY while a verified build is staged: no greyed-out
     // row, no "no updates available" to click. Directly under About, above
     // „Auf Updates prüfen …“, so the answer sits above the question. Built as a
     // Vec rather than a literal slice because one of the items is conditional.
-    let about = PredefinedMenuItem::about(app, Some("Über LangzeitPlaner"), Some(AboutMetadata::default()))?;
+    let about = PredefinedMenuItem::about(app, Some(l("Über LangzeitPlaner", "About LangzeitPlaner").as_str()), Some(AboutMetadata::default()))?;
     let sep_a = PredefinedMenuItem::separator(app)?;
     let hint_item = match update_hint_value() {
         Some(v) => Some(MenuItem::with_id(
             app,
             "update-restart",
-            format!("Update verfügbar ({v}) — neu starten"),
+            l(&format!("Update verfügbar ({v}) — neu starten"),
+              &format!("Update available ({v}) — restart")),
             true,
             None::<&str>,
         )?),
         None => None,
     };
-    let check_item = MenuItem::with_id(app, "check-updates", "Auf Updates prüfen …", true, None::<&str>)?;
+    let check_item = MenuItem::with_id(app, "check-updates", l("Auf Updates prüfen …", "Check for Updates …").as_str(), true, None::<&str>)?;
     let sep_b = PredefinedMenuItem::separator(app)?;
-    let settings_item = MenuItem::with_id(app, "settings", "Einstellungen …", true, Some("CmdOrCtrl+,"))?;
+    let settings_item = MenuItem::with_id(app, "settings", l("Einstellungen …", "Settings …").as_str(), true, Some("CmdOrCtrl+,"))?;
     let sep_c = PredefinedMenuItem::separator(app)?;
-    let hide_item = PredefinedMenuItem::hide(app, Some("LangzeitPlaner ausblenden"))?;
-    let quit_item = PredefinedMenuItem::quit(app, Some("Beenden"))?;
+    let hide_item = PredefinedMenuItem::hide(app, Some(l("LangzeitPlaner ausblenden", "Hide LangzeitPlaner").as_str()))?;
+    let quit_item = PredefinedMenuItem::quit(app, Some(l("Beenden", "Quit LangzeitPlaner").as_str()))?;
 
     let mut app_items: Vec<&dyn IsMenuItem<R>> = vec![&about, &sep_a];
     if let Some(h) = hint_item.as_ref() {
@@ -1553,57 +1651,57 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 
     let file_menu = Submenu::with_items(
         app,
-        "Ablage",
+        l("Ablage", "File").as_str(),
         true,
         &[
-            &MenuItem::with_id(app, "export", "Exportieren …", true, Some("CmdOrCtrl+Shift+E"))?,
-            &MenuItem::with_id(app, "import", "Importieren …", true, Some("CmdOrCtrl+Shift+I"))?,
+            &MenuItem::with_id(app, "export", l("Exportieren …", "Export …").as_str(), true, Some("CmdOrCtrl+Shift+E"))?,
+            &MenuItem::with_id(app, "import", l("Importieren …", "Import …").as_str(), true, Some("CmdOrCtrl+Shift+I"))?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "print", "Drucken …", true, Some("CmdOrCtrl+P"))?,
+            &MenuItem::with_id(app, "print", l("Drucken …", "Print …").as_str(), true, Some("CmdOrCtrl+P"))?,
             &PredefinedMenuItem::separator(app)?,
             // 13.5 — ⌘W hides; the app keeps running.
-            &MenuItem::with_id(app, "hide-window", "Fenster schließen", true, Some("CmdOrCtrl+W"))?,
+            &MenuItem::with_id(app, "hide-window", l("Fenster schließen", "Close Window").as_str(), true, Some("CmdOrCtrl+W"))?,
         ],
     )?;
 
     let edit_menu = Submenu::with_items(
         app,
-        "Bearbeiten",
+        l("Bearbeiten", "Edit").as_str(),
         true,
         &[
-            &MenuItem::with_id(app, "undo", "Widerrufen", true, Some("CmdOrCtrl+Z"))?,
-            &MenuItem::with_id(app, "redo", "Wiederholen", true, Some("CmdOrCtrl+Shift+Z"))?,
+            &MenuItem::with_id(app, "undo", l("Widerrufen", "Undo").as_str(), true, Some("CmdOrCtrl+Z"))?,
+            &MenuItem::with_id(app, "redo", l("Wiederholen", "Redo").as_str(), true, Some("CmdOrCtrl+Shift+Z"))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::cut(app, Some("Ausschneiden"))?,
-            &PredefinedMenuItem::copy(app, Some("Kopieren"))?,
-            &PredefinedMenuItem::paste(app, Some("Einsetzen"))?,
-            &PredefinedMenuItem::select_all(app, Some("Alles auswählen"))?,
+            &PredefinedMenuItem::cut(app, Some(l("Ausschneiden", "Cut").as_str()))?,
+            &PredefinedMenuItem::copy(app, Some(l("Kopieren", "Copy").as_str()))?,
+            &PredefinedMenuItem::paste(app, Some(l("Einsetzen", "Paste").as_str()))?,
+            &PredefinedMenuItem::select_all(app, Some(l("Alles auswählen", "Select All").as_str()))?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "find", "Suchen", true, Some("CmdOrCtrl+F"))?,
+            &MenuItem::with_id(app, "find", l("Suchen", "Find").as_str(), true, Some("CmdOrCtrl+F"))?,
         ],
     )?;
 
     let view_menu = Submenu::with_items(
         app,
-        "Darstellung",
+        l("Darstellung", "View").as_str(),
         true,
         &[
-            &MenuItem::with_id(app, "today", "Heute", true, Some("CmdOrCtrl+T"))?,
+            &MenuItem::with_id(app, "today", l("Heute", "Today").as_str(), true, Some("CmdOrCtrl+T"))?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "layer-feiertage", "Feiertage", true, Some("CmdOrCtrl+1"))?,
-            &MenuItem::with_id(app, "layer-ferien", "Schulferien", true, Some("CmdOrCtrl+2"))?,
+            &MenuItem::with_id(app, "layer-feiertage", l("Feiertage", "Public Holidays").as_str(), true, Some("CmdOrCtrl+1"))?,
+            &MenuItem::with_id(app, "layer-ferien", l("Schulferien", "School Holidays").as_str(), true, Some("CmdOrCtrl+2"))?,
             &PredefinedMenuItem::separator(app)?,
-            &MenuItem::with_id(app, "mode-toggle", "Modus rollierend / fixiert", true, None::<&str>)?,
+            &MenuItem::with_id(app, "mode-toggle", l("Modus rollierend / fixiert", "Mode: Rolling / Pinned").as_str(), true, None::<&str>)?,
         ],
     )?;
 
     let window_menu = Submenu::with_items(
         app,
-        "Fenster",
+        l("Fenster", "Window").as_str(),
         true,
         &[
-            &PredefinedMenuItem::minimize(app, Some("Im Dock ablegen"))?,
-            &PredefinedMenuItem::fullscreen(app, Some("Vollbild"))?,
+            &PredefinedMenuItem::minimize(app, Some(l("Im Dock ablegen", "Minimize").as_str()))?,
+            &PredefinedMenuItem::fullscreen(app, Some(l("Vollbild", "Enter Full Screen").as_str()))?,
         ],
     )?;
 
@@ -1638,6 +1736,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             print_board,
             flush_done,
+            #[cfg(target_os = "macos")]
+            gatekeeper_status,
             set_shell_pref,
             // LZP-302 · ADR 002 §2.2 — the Keychain backstop. UNVERIFIED (no
             // Rust toolchain here); shell-macos/main.swift is the reference.

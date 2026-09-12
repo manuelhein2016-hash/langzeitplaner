@@ -54,6 +54,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # call sequence through objc2. Both crates are ALREADY in Cargo.lock at these exact versions —
 # `tauri` itself depends on them for macOS — so this adds a direct edge and no new tree.
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"          # 22.2 · getxattr, for the one quarantine probe (already in Cargo.lock)
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSPrintInfo", "NSPrintOperation", "NSView", "NSWindow", "NSResponder", "NSGraphics"] }
 objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSDictionary"] }

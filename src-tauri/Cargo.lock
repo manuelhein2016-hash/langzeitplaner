@@ -1839,6 +1839,7 @@ dependencies = [
 name = "langzeitplaner"
 version = "2.0.0-rc.3"
 dependencies = [
+ "libc",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
