@@ -1415,14 +1415,28 @@ fn print_board(window: tauri::WebviewWindow) -> Result<(), String> {
             // A COPY of the shared info, never the shared object itself — the user's system-wide
             // print settings are not ours to mutate. `main.swift:2471` does the same.
             let shared: *mut AnyObject = msg_send![objc2::class!(NSPrintInfo), sharedPrintInfo];
-            // `copy` returns +1 and this never releases it: one small NSPrintInfo is leaked per
-            // print. Said out loud rather than left for someone to find — it is bounded by how
-            // often a person presses CmdOrCtrl+P, and the alternative is holding a `Retained<>`
-            // through a typed binding this function deliberately does not use.
             let info: *mut AnyObject = msg_send![shared, copy];
             if info.is_null() {
                 return;
             }
+            // ── THE +1 FROM `copy` HAS TO GO BACK ────────────────────────────────────────────
+            //
+            // It used to leak, and the comment here admitted to the leak rather than fixing it.
+            // One NSPrintInfo per CmdOrCtrl+P is bounded, but it is also two lines to not do.
+            //
+            // `Retained::from_raw` ADOPTS the +1 and releases it when this binding drops at the
+            // end of the closure. Not `msg_send![info, release]`: objc2 documents the `retain`,
+            // `release` and `autorelease` selectors as unsupported through that macro
+            // (objc2-0.6.4 `src/macros/mod.rs:903-904`) and points at exactly this type instead.
+            // A raw `release` compiles — the macro sends whatever name it is handed, which is the
+            // same property that nearly shipped a crash in this very function.
+            //
+            // The name matters: `let _info_owned` lives to the end of the scope, whereas a bare
+            // `let _` would drop it — and release it — on this line, before the print operation
+            // is even created. Dropping at the end is safe because the operation does not hold
+            // this reference: `NSPrintOperation.h:45` says the print info passed to it "is
+            // copied, and the copy is retained by the new NSPrintOperation".
+            let _info_owned = objc2::rc::Retained::<AnyObject>::from_raw(info);
 
             let _: () = msg_send![info, setOrientation: NSPaperOrientation::Landscape];
             let twelve: f64 = 12.0;   // CGFloat is f64 on every 64-bit Apple target
@@ -1567,6 +1581,11 @@ struct WindowFrame {
     y: i32,
     w: u32,
     h: u32,
+    /// The backing scale factor the four numbers above were measured at. They are PHYSICAL
+    /// pixels, so they mean nothing without it — see `restore_window_frame`. `#[serde(default)]`
+    /// so a `window.json` written before this field existed reads as 0.0 and is handled there.
+    #[serde(default)]
+    scale: f64,
 }
 
 static LAST_FRAME_SAVE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
@@ -1592,11 +1611,30 @@ fn save_window_frame(window: &tauri::Window, throttle: bool) {
     if size.width == 0 || size.height == 0 {
         return;
     }
-    let frame = WindowFrame { x: pos.x, y: pos.y, w: size.width, h: size.height };
-    if let Ok(dir) = data_dir(window.app_handle()) {
-        if let Ok(txt) = serde_json::to_string(&frame) {
-            let _ = write_atomic(&dir.join(WINDOW_FILE), &txt);
-        }
+    let frame = WindowFrame {
+        x: pos.x,
+        y: pos.y,
+        w: size.width,
+        h: size.height,
+        scale: window.scale_factor().unwrap_or(1.0),
+    };
+    let Ok(dir) = data_dir(window.app_handle()) else { return };
+    let Ok(txt) = serde_json::to_string(&frame) else { return };
+    let path = dir.join(WINDOW_FILE);
+    if throttle {
+        // OFF THE MAIN THREAD, and only here. `Moved` and `Resized` are delivered on the main
+        // thread — tao's `window_delegate.rs` hands them to `AppState::queue_event`, which
+        // panics if it is called from anywhere else — and `write_atomic` ends in `sync_all()`,
+        // a real fsync: 5 ms at rest, up to 27 ms under disk load. Once a second, inside a live
+        // window drag, that is a stutter on the drag itself. `WindowFrame` is `Copy` and the
+        // path is owned, so the whole write moves to a thread and the drag never waits on disk.
+        std::thread::spawn(move || {
+            let _ = write_atomic(&path, &txt);
+        });
+    } else {
+        // The unthrottled call is the one at a terminal moment — a close, a blur, a quit. The
+        // process may be gone microseconds later, so this one must complete before returning.
+        let _ = write_atomic(&path, &txt);
     }
 }
 
@@ -1608,34 +1646,129 @@ fn restore_window_frame(app: &AppHandle) -> bool {
     let Ok(f) = serde_json::from_str::<WindowFrame>(&txt) else { return false };
     let Some(w) = app.get_webview_window("main") else { return false };
 
+    // ── THE SCALE THE NUMBERS WERE MEASURED AT ───────────────────────────────────────────────
+    //
+    // `outer_position()` and `inner_size()` answer PHYSICAL pixels — logical units times the
+    // window's backing scale factor. Writing them raw and replaying them raw round-trips exactly
+    // on one display and nowhere else. Quit on a 2× Retina panel, relaunch on a 1× external, and
+    // a 1440×900 window comes back asking for 2880×1800; the other direction halves it, and
+    // because the halved frame is then written back on the next `Moved`, the size the user chose
+    // is gone for good. So the scale travels with the numbers and the ratio is applied here.
+    //
+    // A `window.json` written before the field existed reads `scale: 0.0` through
+    // `#[serde(default)]`, which is taken to mean "measured at whatever we are now" — precisely
+    // today's behaviour, for the single-display case where today's behaviour is right.
+    let now = w.scale_factor().unwrap_or(1.0);
+    let then = if f.scale.is_finite() && f.scale > 0.0 { f.scale } else { now };
+    let k = if then > 0.0 && now > 0.0 { now / then } else { 1.0 };
+    let fx = (f.x as f64 * k).round() as i32;
+    let fy = (f.y as f64 * k).round() as i32;
+    let mut fw = ((f.w as f64 * k).round() as i64).clamp(1, i64::from(u32::MAX)) as u32;
+    let mut fh = ((f.h as f64 * k).round() as i64).clamp(1, i64::from(u32::MAX)) as u32;
+
     // A frame saved on a monitor that is no longer attached would put the window somewhere the
-    // user cannot reach. Accept it only if it overlaps some monitor by a sensible margin.
-    let visible = w.available_monitors().map(|ms| {
-        ms.iter().any(|m| {
-            let p = m.position();
-            let s = m.size();
-            let (l, t) = (p.x, p.y);
-            let (r, b) = (p.x + s.width as i32, p.y + s.height as i32);
-            f.x + (f.w as i32) > l + 80 && f.x < r - 80 && f.y + 40 > t && f.y < b - 80
-        })
-    });
-    if !matches!(visible, Ok(true)) {
+    // user cannot reach. Accept it only if it overlaps some monitor by a sensible margin — and
+    // then take THAT monitor's size as a ceiling, because the overlap test on its own happily
+    // passes a window far larger than the screen it lands on. i64 throughout: `f.x + f.w as i32`
+    // overflows on a hostile file, and the panic would be at launch, before any window exists.
+    let Ok(monitors) = w.available_monitors() else { return false };
+    let (x, y, cw, ch) = (i64::from(fx), i64::from(fy), i64::from(fw), i64::from(fh));
+    let Some(m) = monitors.iter().find(|m| {
+        let p = m.position();
+        let sz = m.size();
+        let (l, t) = (i64::from(p.x), i64::from(p.y));
+        let (r, b) = (l + i64::from(sz.width), t + i64::from(sz.height));
+        x + cw > l + 80 && x < r - 80 && y + ch > t && y < b - 80
+    }) else {
         return false;
-    }
-    let _ = w.set_size(tauri::PhysicalSize::new(f.w, f.h));
-    let _ = w.set_position(tauri::PhysicalPosition::new(f.x, f.y));
+    };
+    fw = fw.min(m.size().width);
+    fh = fh.min(m.size().height);
+
+    let _ = w.set_size(tauri::PhysicalSize::new(fw, fh));
+    let _ = w.set_position(tauri::PhysicalPosition::new(fx, fy));
     true
 }
 
 /// 11.1 — set when the page has finished its pre-quit flush, or when the deadline gave up on it.
-/// Read by `RunEvent::ExitRequested`, which must let the second exit through or the app could
-/// never be quit at all.
+/// Read by `flush_then_quit`'s deadline thread, which must stop waiting either way: a wedged page
+/// must not be able to make the app unquittable.
 static FLUSH_DONE: AtomicBool = AtomicBool::new(false);
 
-/// 11.1 — the page's answer to the pre-quit flush. See `RunEvent::ExitRequested`.
+/// 11.1 — one quit at a time. A second CmdOrCtrl+Q while the first is in flight must not start a
+/// second deadline thread, or two of them race to call `exit`.
+static FLUSH_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// 11.1 — the page's answer to the pre-quit flush. See `flush_then_quit`.
 #[tauri::command]
 fn flush_done() {
     FLUSH_DONE.store(true, Ordering::SeqCst);
+}
+
+// ── 11.1 · A QUIT MUST NOT OUTRUN THE SAVE, AND THE FIRST FIX NEVER RAN ─────────────────────
+//
+// `store.js`'s `SAVE_DEBOUNCE` is 700 ms, so at any instant up to 700 ms of typing exists only in
+// memory. `main.swift:2425-2434` holds the quit with `.terminateLater`, asks the page to flush,
+// and lets go when the page answers or a 2 s deadline passes. This is the same shape.
+//
+// IT USED TO HANG OFF `RunEvent::ExitRequested`, AND THAT ARM IS UNREACHABLE ON CmdOrCtrl+Q.
+// Traced through the shipped crates rather than assumed:
+//
+//   · `ExitRequested { code: None }` is emitted in exactly one place —
+//     tauri-runtime-wry-2.11.4 `lib.rs:4310-4316`, inside `TaoWindowEvent::Destroyed`, once the
+//     last window has been removed. `on_window_event` here answers `CloseRequested` with
+//     `prevent_close()` and `hide()` for 13.5, so the window is never destroyed and that event
+//     is never emitted.
+//   · CmdOrCtrl+Q was `PredefinedMenuItem::quit`, whose action is AppKit's `terminate:`
+//     (muda-0.19.3 `platform_impl/macos/mod.rs:994`). That reaches tao's
+//     `applicationWillTerminate:` (`app_delegate.rs:63`) → `Event::LoopDestroyed` →
+//     `RunEvent::Exit` (tauri-runtime-wry `lib.rs:4185`) — never `ExitRequested`.
+//
+// So the flush, its deadline thread and the unthrottled frame save beside them were dead code on
+// the only quit path a user has. The fix looked right, shipped, and never executed once. Its
+// replacement is hung off a CUSTOM menu item, because a handler is the last moment at which the
+// page can still be asked anything: by the time `terminate:` has been sent, it cannot.
+//
+// And it must not block. The page answers over IPC, and that reply is delivered by the main run
+// loop — so waiting for it on the main thread is a deadlock by construction. The deadline lives
+// on a thread of its own, and the exit is issued from there.
+//
+// REMAINING GAP, recorded rather than papered over: `terminate:` also arrives from the Dock
+// icon's own Quit item and from a logout, and neither runs a handler of ours. `main.swift` covers
+// those through `applicationShouldTerminate:`, which Tauri does not surface. On those two paths
+// the page's own `pagehide` is still the only flush, exactly as in rc.3. See FINDINGS §25.3.
+fn flush_then_quit(app: &AppHandle) {
+    if FLUSH_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // 13.1 — while a window still exists to measure.
+    if let Some(w) = app.get_webview_window("main") {
+        save_window_frame(&w.as_ref().window_ref(), false);
+    }
+    let Some(win) = app.get_webview_window("main") else {
+        app.exit(0);
+        return;
+    };
+    // `main.js:627` defines `window.__lzpFlush = () => store.persistNow()`.
+    let _ = win.eval(
+        "(async () => { try { if (window.__lzpFlush) await window.__lzpFlush(); } \
+         catch (e) {} finally { try { await window.__TAURI__.core.invoke('flush_done'); } catch (e) {} } })()",
+    );
+    let done = app.clone();
+    std::thread::spawn(move || {
+        // The deadline, not a promise of one. Whichever arrives first wins.
+        for _ in 0..40 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if FLUSH_DONE.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        FLUSH_DONE.store(true, Ordering::SeqCst);
+        // `AppHandle::exit` off the main thread posts `Message::RequestExit` (tauri 2.11.5
+        // `app.rs:575` → tauri-runtime-wry `lib.rs:2748`), which the loop turns into
+        // `ExitRequested { code: Some(0) }` and then `Exit`. Both arms below run.
+        done.exit(0);
+    });
 }
 
 /// 13.2 / 13.3 — shell preferences the web layer cannot apply itself.
@@ -1746,7 +1879,12 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let settings_item = MenuItem::with_id(app, "settings", l("Einstellungen …", "Settings …").as_str(), true, Some("CmdOrCtrl+,"))?;
     let sep_c = PredefinedMenuItem::separator(app)?;
     let hide_item = PredefinedMenuItem::hide(app, Some(l("LangzeitPlaner ausblenden", "Hide LangzeitPlaner").as_str()))?;
-    let quit_item = PredefinedMenuItem::quit(app, Some(l("Beenden", "Quit LangzeitPlaner").as_str()))?;
+    // NOT `PredefinedMenuItem::quit`. Its action is AppKit's `terminate:`, which never produces
+    // `RunEvent::ExitRequested` — so the pre-quit flush hung off that event was dead code on the
+    // only quit path a user has. The long note above `flush_then_quit` traces it through the
+    // crates. A custom item's handler runs BEFORE anything has asked the process to die, which
+    // is the whole point: it is the last moment at which the page can still be asked to save.
+    let quit_item = MenuItem::with_id(app, "quit-app", l("Beenden", "Quit LangzeitPlaner").as_str(), true, Some("CmdOrCtrl+Q"))?;
 
     let mut app_items: Vec<&dyn IsMenuItem<R>> = vec![&about, &sep_a];
     if let Some(h) = hint_item.as_ref() {
@@ -1932,10 +2070,24 @@ pub fn run() {
                 .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray-glyph@2x.png"))?)
                 .icon_as_template(true)
                 .tooltip("LangzeitPlaner")
-                .on_tray_icon_event(move |_tray, _event| {
-                    if let Some(w) = tray_handle.get_webview_window("main") {
-                        let _ = w.show();
-                        let _ = w.set_focus();
+                .on_tray_icon_event(move |_tray, event| {
+                    // THE EVENT HAS TO BE MATCHED. `tray-icon` drives the menu-bar item from an
+                    // `NSTrackingArea`, so it emits `Enter` and `Move` as the pointer merely
+                    // crosses the icon — and a handler that ignores its argument treated every
+                    // one of those as a click. So the hidden window un-hid on mouse-over, and
+                    // because `set_focus` is `activateIgnoringOtherApps:`, brushing past the menu
+                    // bar stole the front from whatever the user was typing into. 13.2 asks for a
+                    // click, and this is one: left button, on release.
+                    if let tauri::tray::TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(w) = tray_handle.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
                     }
                 })
                 .build(app)?;
@@ -1944,6 +2096,10 @@ pub fn run() {
         })
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
+            if id == "quit-app" {
+                flush_then_quit(app);
+                return;
+            }
             if id == "hide-window" {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
@@ -1962,6 +2118,11 @@ pub fn run() {
             }
             // 13.1 — throttled, because a drag emits these continuously.
             WindowEvent::Moved(_) | WindowEvent::Resized(_) => save_window_frame(window, true),
+            // 13.1 — the trailing write the throttle cannot do. The throttle is leading-edge:
+            // it writes the first event of a burst and drops the rest, so a drag that starts and
+            // finishes inside one second persists the frame from BEFORE the drag. Every terminal
+            // moment therefore takes an unthrottled save, and losing the front is one of them.
+            WindowEvent::Focused(false) => save_window_frame(window, false),
             _ => {}
         })
         .build(tauri::generate_context!())
@@ -1986,59 +2147,33 @@ pub fn run() {
                 }
             }
 
-            // ── 11.1 · A QUIT MUST NOT OUTRUN THE SAVE ───────────────────────────────────────
+            // ── 11.1 / 13.1 · THE PROGRAMMATIC EXIT ──────────────────────────────────────────
             //
-            // `store.js`'s `SAVE_DEBOUNCE` is 700 ms, so at any instant up to 700 ms of typing
-            // may exist only in memory. The page's own `pagehide` → `flushSync()` is not enough
-            // here: `NSApp.terminate` is not a navigation, and a WKWebView is not guaranteed to
-            // deliver `pagehide` before the process dies. So ⌘Q could drop the last edit, and
-            // the user would never know which one.
-            //
-            // `main.swift:2425-2434` solves it with `.terminateLater` + `__lzpFlush` + a 2 s
-            // fallback. This is the same shape: hold the exit, ask the page to flush, let it go
-            // when the page answers or the deadline passes — because a wedged page must not be
-            // able to make the app unquittable.
-            tauri::RunEvent::ExitRequested { api, code, .. } => {
-                // ONLY A USER-INITIATED QUIT. `code.is_none()` is what distinguishes ⌘Q from a
-                // programmatic exit that has already decided — and in particular from the
-                // UPDATER'S RESTART, which is the hazard here: `update_restart` calls
-                // `AppHandle::restart()`, and if that reached this arm we would prevent the exit
-                // and then `exit(0)` instead, turning "restart into the new version" into
-                // "quit". It cannot: `restart()` carries `RESTART_EXIT_CODE` (tauri's app.rs:582),
-                // and on the main thread it bypasses `ExitRequested` altogether. Measured, not
-                // assumed. `update-ui.js` has already flushed the board before calling it anyway.
+            // Reached by `AppHandle::exit` — which is how `flush_then_quit` finishes — and by the
+            // last window being destroyed. NOT by CmdOrCtrl+Q: see the note above
+            // `flush_then_quit` for why, traced through tauri-runtime-wry and muda. Nothing is
+            // prevented here, deliberately: the flush has already happened by the time this
+            // arrives on the quit path, and preventing an exit that carries a code is how the
+            // UPDATER'S RESTART would have been turned into a quit.
+            tauri::RunEvent::ExitRequested { .. } => {
                 if let Some(w) = app.get_webview_window("main") {
-                    // `WebviewWindow` derefs to the `Window` the saver takes.
                     save_window_frame(&w.as_ref().window_ref(), false);
                 }
-                if code.is_none() && !FLUSH_DONE.load(Ordering::SeqCst) {
-                    api.prevent_exit();
-                    let handle = app.clone();
-                    let Some(win) = app.get_webview_window("main") else {
-                        FLUSH_DONE.store(true, Ordering::SeqCst);
-                        handle.exit(0);
-                        return;
-                    };
-                    // The page resolves this by calling back; `main.js:583` defines
-                    // `window.__lzpFlush = () => store.persistNow()`.
-                    let done = handle.clone();
-                    let _ = win.eval(
-                        "(async () => { try { if (window.__lzpFlush) await window.__lzpFlush(); } \
-                         catch (e) {} finally { try { await window.__TAURI__.core.invoke('flush_done'); } catch (e) {} } })()",
-                    );
-                    std::thread::spawn(move || {
-                        // The deadline, not a promise of one. Whichever arrives first wins.
-                        for _ in 0..40 {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                            if FLUSH_DONE.load(Ordering::SeqCst) {
-                                break;
-                            }
-                        }
-                        FLUSH_DONE.store(true, Ordering::SeqCst);
-                        done.exit(0);
-                    });
+            }
+
+            // ── 13.1 · EVERY OTHER WAY THE APP CAN END ───────────────────────────────────────
+            //
+            // `RunEvent::Exit` is tao's `applicationWillTerminate:`, so this is the one arm that
+            // also catches the paths no handler of ours can see: the Dock icon's own Quit item, a
+            // logout, a shutdown. The page cannot be asked anything from here — the run loop is
+            // already being torn down and an IPC reply would need it — but the frame is still
+            // ours to write, and `save_window_frame(.., false)` writes inline for this reason.
+            tauri::RunEvent::Exit => {
+                if let Some(w) = app.get_webview_window("main") {
+                    save_window_frame(&w.as_ref().window_ref(), false);
                 }
             }
+
             _ => {}
         });
 }

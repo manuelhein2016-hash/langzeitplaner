@@ -5443,3 +5443,46 @@ the restore at the pre-image's original time; refuse to restore a field whose re
 under a different author; make undo author a `pub.*` too) changes op semantics that ADR 001 and
 the whole fold rest on. That wants its own pass and its own adversarial round, not a commit inside
 a UX fix cycle. 18.4 carries an interim erratum.
+
+
+### §25.3 · The quit flush was hung off an event CmdOrCtrl+Q does not emit
+
+**11.1, and a fix that shipped into a release candidate without ever executing once.**
+
+`P0-3` added a pre-quit flush: hold the exit, ask the page to `persistNow()`, let go when it
+answers or a 2 s deadline passes. It was written as a `tauri::RunEvent::ExitRequested` arm, it
+compiled, it read correctly, and **it was unreachable on the only quit path a user has.** Traced
+through the shipped crate versions, not inferred:
+
+| Link | Where |
+|---|---|
+| `ExitRequested { code: None }` is emitted in exactly one place | `tauri-runtime-wry-2.11.4/src/lib.rs:4310-4316`, inside `TaoWindowEvent::Destroyed`, once the last window has been removed |
+| …and this shell never lets the window be destroyed | `on_window_event` answers `CloseRequested` with `prevent_close()` + `hide()` — that is 13.5's fix, and it is correct |
+| CmdOrCtrl+Q was `PredefinedMenuItem::quit`, whose action is AppKit's `terminate:` | `muda-0.19.3/src/platform_impl/macos/mod.rs:994` |
+| `terminate:` reaches tao's `applicationWillTerminate:` → `Event::LoopDestroyed` → `RunEvent::Exit` | `tao-0.35.3/…/app_delegate.rs:63`, `app_state.rs:274`, `tauri-runtime-wry-2.11.4/src/lib.rs:4185` |
+
+So the whole block — the flush, its deadline thread, and the unthrottled window-frame save beside
+it — sat in an arm that no user action produces. 11.1 and half of 13.1 were inert.
+
+**Why nothing caught it.** The same reason the Ablage menu shipped broken and for the same class
+of reason the ⌘P selector did: tier 2 runs `shell-macos/main.swift`, the DMG ships `src-tauri/`,
+and `shell-parity.test.js` compares the two shells' **command sets**, which were identical here.
+A command census cannot see whether an event handler is ever entered. The ⌘P crash was found by
+asking the Objective-C runtime; this was found by reading the crate that emits the event.
+
+**The fix.** A custom `MenuItem::with_id(app, "quit-app", …, Some("CmdOrCtrl+Q"))`, because a menu
+handler runs *before* anything has asked the process to die — the last moment at which the page
+can still be asked to save. `flush_then_quit` evaluates the flush, then a thread waits for
+`flush_done` or the deadline and calls `AppHandle::exit(0)`, which posts `Message::RequestExit`
+and does produce `ExitRequested` and then `Exit`. It must not block: the page's answer arrives
+over IPC, which the main run loop delivers, so waiting for it on the main thread would deadlock by
+construction. `RunEvent::Exit` now also carries an unthrottled frame save, since that arm is the
+one thing `terminate:` reliably reaches.
+
+**Residual, deliberately left and named.** `terminate:` also arrives from the Dock icon's own Quit
+item and from a logout or shutdown, and neither runs a handler of ours. `main.swift` covers those
+through `applicationShouldTerminate:` + `.terminateLater`, which Tauri does not surface; reaching
+it would mean installing our own method on a delegate tao owns. On those two paths the page's own
+`pagehide` is still the only flush — exactly as in rc.3, so this is a gap that was never closed
+rather than one that was opened. The two shells therefore still differ on quit, and that
+difference is now written down instead of being assumed absent.

@@ -384,9 +384,10 @@ Each step here is blocked by the one above it.
 1. ~~**Create the GitHub repo and push.** The tree is local-only: `git remote -v` is empty,
    `git tag` is empty, no workflow has ever run.~~ **✅ DONE 2026-09-05.** `origin` →
    `github.com/manuelhein2016-hash/langzeitplaner`, **public**, on `main`; `ci.yml` runs on every
-   push, including `shell-rust` on macos-14, which is the only proof `src-tauri` compiles. Still
-   true: **`git tag` is empty and the release workflow has never run.** Protect `main` now if you
-   have not — anyone who can push a tag can install code on Mom's Mac.
+   push, including `shell-rust` on macos-14, which is the only proof `src-tauri` compiles.
+   ~~Still true: `git tag` is empty and the release workflow has never run.~~ **✅ Also done
+   2026-09-11:** `v2.0.0-rc.1` … `rc.3` are annotated tags and `release.yml` has run on each.
+   Protect `main` now if you have not — anyone who can push a tag can install code on Mom's Mac.
 2. **Generate the updater keypair** — `cargo tauri signer generate`. Then:
    - `src-tauri/tauri.conf.json:66` `plugins.updater.pubkey` — literally
      `REPLACE_ME__run_cargo_tauri_signer_generate__see_docs_v2_RELEASE.md` today.

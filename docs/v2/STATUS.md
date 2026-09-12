@@ -1,6 +1,18 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-05 (**the ship day** — repo, relay, database, origin, signing) ·
+**Last session:** 2026-09-12 (**the UX-audit fix cycle** — 196 catalogue items graded, 45 open,
+39 closed) · **Stopped at:** `v2.0.0-rc.4` tagged. Full record: `docs/v2/UX-AUDIT.md` (every item
+with its verdict and evidence), `docs/v2/UX-AUDIT-CATALOGUE.md` (the promises, with this cycle's
+errata), findings in `FINDINGS.md` §25.
+
+> **What that cycle found that no test tier could.** Tier 2 runs `shell-macos/main.swift`; the DMG
+> ships `src-tauri/`; nothing compared them. The Ablage menu was broken in the shipped shell,
+> CmdOrCtrl+P had no command at all and then shipped a selector that would have aborted the app,
+> the key backup had no reachable UI, and the CmdOrCtrl+Q flush was hung off an event that quit
+> path never emits. `tests/tier1/shell-parity.test.js` is the gate that now names that class;
+> `FINDINGS.md` §25.3 is the one it still cannot see.
+
+**Previous session:** 2026-09-05 (**the ship day** — repo, relay, database, origin, signing) ·
 **Stopped at:** **everything a person could do by hand is done and measured; the pipeline has
 never once done any of it.** Previous entries: LZP-1009's second pass (same day), and 2026-09-04's
 audit fix cycle. Full record: `docs/v2/AUDIT.md` (the audit, with each finding marked and its
@@ -37,8 +49,12 @@ suites    npm test 2323/2323 · attack 986/986 · server 1094/1094 +1 stated ski
 **NOT PROVEN, and each one stays named:**
 
 1. **`cargo tauri build` has never run anywhere.** No universal binary — the x86_64 half has never
-   been compiled by anybody — no bundler, no DMG from the real path. `git tag` is empty and
-   `release.yml` has never executed. **The signing above was done by a person.** The pipeline now
+   been compiled by anybody — no bundler, no DMG from the real path. ~~`git tag` is empty and
+   `release.yml` has never executed.~~ **Stale as of 2026-09-11:** `v2.0.0-rc.1`, `rc.2` and
+   `rc.3` are annotated tags on this repository and `release.yml` has run on each. What remains
+   unproven is narrower and worth stating narrowly: **no DMG from that pipeline has been installed
+   and opened by a person**, and the pre-flight/notarization gates below have only ever been
+   exercised by the workflow itself. **The signing above was done by a person.** The pipeline now
    holds the same sequence (step 9b: `notarytool submit --wait` → `stapler staple` → `stapler
    validate` on **both** the DMG and the `.app`; a hard `spctl` gate demanding `accepted` **and**
    `source=Notarized Developer ID` on the app *and* the downloaded image; pre-flight rows
