@@ -63,12 +63,28 @@ export function printBoard() {
   buildPrintFurniture();
   // Bare WKWebView ignores window.print() — in the shell the toolbar button
   // and ⌘P must reach the native NSPrintOperation through the bridge instead.
+  //
+  // BRANCH ON THE COMMAND SUCCEEDING, NOT ON THE BRIDGE EXISTING. This used to `return`
+  // immediately after invoking, so `window.print()` below was unreachable inside any shell — and
+  // when the shipped Tauri shell turned out not to implement `print_board` at all, the rejection
+  // landed in a `.catch` that logged to a console nobody reads. ⌘P did nothing, silently, and no
+  // test could see it because tier 2 runs the shell that DOES implement it.
+  //
+  // Now a missing or failing command degrades to the web path instead of vanishing. That path is
+  // weak inside a WKWebView, but "weak" is a bug report and "nothing at all" is not.
   const invoke = window.__TAURI__?.core?.invoke;
   if (invoke) {
-    invoke('print_board', {}).catch((e) => console.warn('[print] bridge failed', e));
+    invoke('print_board', {}).catch((e) => {
+      console.warn('[print] the shell has no print_board — falling back to window.print()', e);
+      webPrint();
+    });
     return;
   }
-  // Let layout settle at print metrics before the dialog snapshots the page.
+  webPrint();
+}
+
+/** Let layout settle at print metrics before the dialog snapshots the page. */
+function webPrint() {
   requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
 }
 

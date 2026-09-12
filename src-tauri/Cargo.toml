@@ -48,6 +48,16 @@ security-framework = "3"
 # the same contract IS verified end to end — docs/v2/SHELL-VERIFICATION.md.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
+# 12.4 · `print_board`. Tauri has no print API, so the shipped shell simply had no print command
+# at all — `print.js` invoked one, Tauri rejected it, and CmdOrCtrl+P did nothing, silently, in
+# every DMG. `shell-macos/main.swift:2468-2487` does it with NSPrintOperation; this is the same
+# call sequence through objc2. Both crates are ALREADY in Cargo.lock at these exact versions —
+# `tauri` itself depends on them for macOS — so this adds a direct edge and no new tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSPrintInfo", "NSPrintOperation", "NSView", "NSWindow", "NSResponder", "NSGraphics"] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSDictionary"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

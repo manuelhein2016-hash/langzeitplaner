@@ -1302,9 +1302,43 @@ fn sync_status(app: AppHandle) -> serde_json::Value {
     }
 }
 
+// ── 11.2 / 11.3 / 11.7 · THE TWO DIALOGS, AND WHY THEY MUST BE `async fn` ────────────────────
+//
+// Both of these used to be SYNCHRONOUS `#[tauri::command]` functions, and both deadlocked the
+// app. `tauri-plugin-dialog`'s own docstring forbids exactly what they did:
+//
+//     "This is a blocking operation, and should *NOT* be used when running on the main thread.
+//      See `Self::save_file` for a non-blocking version for use in main-thread contexts."
+//         — tauri-plugin-dialog-2.7.3/src/lib.rs:756-760, whose example uses `async fn`
+//
+// A sync command runs on the main thread, link by link: WebKit calls wry's `start_task`
+// (the Obj-C `webView:startURLSchemeTask:`) on the main thread; wry calls Tauri's protocol
+// handler inline; `ipc/protocol.rs` calls `webview.on_message` → `run_invoke_handler` with no
+// spawn anywhere; and `tauri-macros` compiles a non-async command to `ExecutionContext::Blocking`,
+// which runs the body inline. `blocking_save_file` then expands `blocking_fn!` — a `sync_channel(0)`,
+// a call, and an `rx.recv()`. Meanwhile `save_file` hands the work to `run_on_main_thread`, which
+// `tauri-runtime-wry` executes INLINE when already on the main thread, and rfd presents the panel
+// with `beginSheetModalForWindow:completionHandler:` — a sheet whose completion needs the run loop
+// that `rx.recv()` has just parked. Neither ⇧⌘E nor ⇧⌘I ever returned.
+//
+// It did not even surface as an error: `backup.js`'s `catch` only covers a REJECTED promise, and a
+// deadlock never rejects. The app simply stopped.
+//
+// `async fn` is the fix and the file's own pattern — `update_fetch_manifest`, `update_download`
+// and `sync_request` are all async. Tauri dispatches an async command on the runtime rather than
+// the main thread, which is precisely the context the plugin's blocking helpers are documented
+// for, and `run_on_main_thread` then really does hop threads so the run loop stays free.
+//
+// The Swift shell was never affected: `main.swift:1699-1718` uses `NSSavePanel.runModal()`
+// directly, on the main thread, where a modal panel belongs.
+
 /// 11.2 / 11.7 — native save dialog, dated default name.
 #[tauri::command]
-fn export_board(app: AppHandle, contents: String, suggested_name: String) -> Result<bool, String> {
+async fn export_board(
+    app: AppHandle,
+    contents: String,
+    suggested_name: String,
+) -> Result<bool, String> {
     let picked = app
         .dialog()
         .file()
@@ -1314,7 +1348,10 @@ fn export_board(app: AppHandle, contents: String, suggested_name: String) -> Res
     match picked {
         Some(p) => {
             let path = p.into_path().map_err(|e| e.to_string())?;
-            fs::write(path, contents).map_err(|e| e.to_string())?;
+            // 11.4's rule, applied to the export too: temp file + rename. A bare `fs::write`
+            // truncates first, so a crash or a full disk mid-write left the user holding a
+            // half-written backup — the one file that exists to be trustworthy.
+            write_atomic(&path, &contents)?;
             Ok(true)
         }
         None => Ok(false),
@@ -1323,7 +1360,7 @@ fn export_board(app: AppHandle, contents: String, suggested_name: String) -> Res
 
 /// 11.3 — the confirmation itself lives in the UI; this only reads the file.
 #[tauri::command]
-fn import_board(app: AppHandle) -> Result<Option<String>, String> {
+async fn import_board(app: AppHandle) -> Result<Option<String>, String> {
     let picked = app
         .dialog()
         .file()
@@ -1336,6 +1373,96 @@ fn import_board(app: AppHandle) -> Result<Option<String>, String> {
         }
         None => Ok(None),
     }
+}
+
+// ── 12.4 · PRINTING, AND THE COMMAND THAT WAS NEVER WRITTEN ──────────────────────────────────
+//
+// `src/js/print.js` has invoked `print_board` since the shell bridge existed. The Swift shell
+// answers it (`main.swift:1829`); this one did not — there was no such command, in the handler
+// list or anywhere else. Tauri rejects an unknown command, `print.js` logs the rejection to a
+// console nobody reads, and the `return` on the line above has already skipped the
+// `window.print()` fallback. So CmdOrCtrl+P and Ablage → „Drucken …" did nothing at all, in
+// every DMG ever shipped, while every print test passed inside the shell that has the command.
+// `tests/tier1/shell-parity.test.js` §1a/§2a is the gate that now says so.
+//
+// Tauri exposes no print API, so this is AppKit directly, mirroring `main.swift:2468-2487` call
+// for call. The page has already built its print furniture: `printBoard()` runs `applyPageRule()`
+// and `buildPrintFurniture()` synchronously BEFORE it invokes, and the native menu item reaches
+// the same function through `emit("menu") → actions.print`. So unlike Swift — whose menu item is
+// wired straight to the selector and must therefore dispatch `beforeprint` into the page itself —
+// there is nothing to wait for here, and no evaluateJavaScript race to lose.
+//
+// `with_webview` runs its closure on the main thread, which is where AppKit belongs. That is not
+// the mistake `export_board` made: `runModal` pumps the run loop rather than parking it.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn print_board(window: tauri::WebviewWindow) -> Result<(), String> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSPaperOrientation, NSPrintingPaginationMode};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    window
+        .with_webview(|platform| unsafe {
+            let webview: *mut AnyObject = platform.inner().cast();
+            let ns_window: *mut AnyObject = platform.ns_window().cast();
+            if webview.is_null() {
+                return;
+            }
+
+            // A COPY of the shared info, never the shared object itself — the user's system-wide
+            // print settings are not ours to mutate. `main.swift:2471` does the same.
+            let shared: *mut AnyObject = msg_send![objc2::class!(NSPrintInfo), sharedPrintInfo];
+            let info: *mut AnyObject = msg_send![shared, copy];
+            if info.is_null() {
+                return;
+            }
+
+            let _: () = msg_send![info, setOrientation: NSPaperOrientation::Landscape];
+            let twelve: f64 = 12.0;   // CGFloat is f64 on every 64-bit Apple target
+            let _: () = msg_send![info, setTopMargin: twelve];
+            let _: () = msg_send![info, setBottomMargin: twelve];
+            let _: () = msg_send![info, setLeftMargin: twelve];
+            let _: () = msg_send![info, setRightMargin: twelve];
+            let _: () = msg_send![info, setHorizontallyCentered: true];
+            let _: () = msg_send![info, setVerticallyCentered: false];
+            // Scale-to-fit on both axes: a 12-month board is wider than any paper, and clipping
+            // it would silently drop months off the right edge of the page.
+            let _: () = msg_send![info, setHorizontalPagination: NSPrintingPaginationMode::Fit];
+            let _: () = msg_send![info, setVerticalPagination: NSPrintingPaginationMode::Fit];
+
+            let op: *mut AnyObject = msg_send![webview, printOperationWithPrintInfo: info];
+            if op.is_null() {
+                return;
+            }
+
+            // THE WKWebView QUIRK, carried over verbatim from `main.swift:2480-2482`: without an
+            // explicit frame on the print view the operation renders a blank page.
+            let paper: NSSize = msg_send![info, paperSize];
+            let view: *mut AnyObject = msg_send![op, view];
+            if !view.is_null() {
+                let frame = NSRect::new(NSPoint::new(0.0, 0.0), paper);
+                let _: () = msg_send![view, setFrame: frame];
+            }
+
+            // 12.4's whole point: the real macOS print panel, so „Als PDF sichern", paper size
+            // and scale-to-fit come free rather than being reimplemented badly.
+            let _: () = msg_send![op, setShowsPrintPanel: true];
+            let _: () = msg_send![op, setShowsProgressPanel: true];
+
+            if ns_window.is_null() {
+                let _: bool = msg_send![op, runOperation];
+            } else {
+                let _: () = msg_send![
+                    op,
+                    runModalForWindow: ns_window,
+                    delegate: std::ptr::null_mut::<AnyObject>(),
+                    didRunSelector: None::<objc2::runtime::Sel>,
+                    contextInfo: std::ptr::null_mut::<std::ffi::c_void>()
+                ];
+            }
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// 13.2 / 13.3 — shell preferences the web layer cannot apply itself.
@@ -1496,6 +1623,8 @@ pub fn run() {
             save_checkpoint,
             export_board,
             import_board,
+            #[cfg(target_os = "macos")]
+            print_board,
             set_shell_pref,
             // LZP-302 · ADR 002 §2.2 — the Keychain backstop. UNVERIFIED (no
             // Rust toolchain here); shell-macos/main.swift is the reference.
