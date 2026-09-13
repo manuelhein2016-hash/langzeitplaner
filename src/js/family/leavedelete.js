@@ -342,6 +342,56 @@ export const LIFECYCLE_COPY = Object.freeze({
     }),
   }),
 
+  // ── 19.4 · giving the private room back ───────────────────────────────────────────────────
+  //
+  // NOT a Familienkreis action, and the copy must never imply it is: this is the `psp_` space
+  // from „Server & eigene Geräte", shared with nobody but this person's own Macs. It is in this
+  // register anyway because it is a lifecycle action with a consequence and an honesty line, and
+  // splitting it out would mean two spellings of „kein einziger Eintrag geht verloren".
+  dissolvePersonal: Object.freeze({
+    title: Object.freeze({
+      de: () => 'Privaten Raum auflösen?',
+      en: () => 'Dissolve the private space?',
+    }),
+    consequence: Object.freeze({
+      // `paired` is how many OTHER Macs of this person are in the room. The second sentence only
+      // appears when there is a second Mac to lose, because warning about one that does not exist
+      // is how a person decides not to press a button they wanted.
+      de: (ctx) =>
+        'Alles, was dieser Raum auf dem Server liegen hat, wird gelöscht. Dein Board auf diesem '
+        + 'Mac bleibt vollständig — kein einziger Eintrag geht verloren.'
+        + (ctx && ctx.paired
+          ? ' Dein anderer Mac gleicht danach nicht mehr ab; sein eigenes Board bleibt ebenfalls '
+            + 'vollständig.'
+          : ''),
+      en: (ctx) =>
+        "Everything this space is holding on the server is deleted. Your board on this Mac stays "
+        + 'complete — not a single entry is lost.'
+        + (ctx && ctx.paired
+          ? ' Your other Mac will stop syncing; its own board stays complete too.'
+          : ''),
+    }),
+    honesty: Object.freeze({
+      de: 'Danach ist dieser Raum weg. Einen neuen kannst du einrichten; dieser kommt nicht zurück.',
+      en: 'After this the space is gone. You can set up a new one; this one does not come back.',
+    }),
+    /** The typed gate. A private room has no NAME — the only thing on that row a person can read
+     *  is this Mac's short — so that is what is typed. See `confirmDissolvePersonal`. */
+    typeToConfirm: Object.freeze({
+      de: 'Tippe die Kennung dieses Macs, um zu bestätigen.',
+      en: "Type this Mac's identifier to confirm.",
+    }),
+    mismatch: Object.freeze({
+      de: 'Die Kennung stimmt noch nicht.',
+      en: 'That is not the identifier yet.',
+    }),
+    confirm: Object.freeze({ de: 'Endgültig auflösen', en: 'Dissolve for good' }),
+    done: Object.freeze({
+      de: 'Der private Raum ist aufgelöst. Dieser Mac gleicht nichts mehr ab — dein Board ist vollständig.',
+      en: 'The private space is dissolved. This Mac syncs nothing now — your board is complete.',
+    }),
+  }),
+
   // ── 20.1 · handing over the admin role ────────────────────────────────────────────────────
   transfer: Object.freeze({
     title: Object.freeze({
@@ -567,7 +617,7 @@ export const COSIGN_COPY = Object.freeze({
 // THE PURE HALF — what a person is told, as data
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-/** @typedef {'remove'|'leave'|'delete'|'transfer'} LifecycleKind */
+/** @typedef {'remove'|'leave'|'delete'|'transfer'|'dissolvePersonal'} LifecycleKind */
 
 /**
  * The sentences one confirmation shows, in order, in one language.
@@ -578,7 +628,7 @@ export const COSIGN_COPY = Object.freeze({
  *
  * @param {LifecycleKind} kind
  * @param {'de'|'en'} lang
- * @param {{name?:string, space?:string, isAdmin?:boolean, lastOneOut?:boolean}} [ctx]
+ * @param {{name?:string, space?:string, isAdmin?:boolean, lastOneOut?:boolean, paired?:boolean}} [ctx]
  * @returns {string[]} at least two sentences: the consequence, then the honesty
  */
 export function consequencesOf(kind, lang, ctx = {}) {
@@ -589,6 +639,9 @@ export function consequencesOf(kind, lang, ctx = {}) {
   const out = [];
 
   if (kind === 'remove' || kind === 'transfer') out.push(c.consequence[l](name));
+  // 19.4's dissolve is the one kind whose consequence depends on a FACT rather than a name: it
+  // says a second sentence only when this person has another Mac paired into the room to lose.
+  else if (kind === 'dissolvePersonal') out.push(c.consequence[l](ctx));
   else out.push(c.consequence[l]());
 
   // The order is deliberate. The consequence answers "what happens", the honesty answers "and
@@ -1343,6 +1396,59 @@ export function confirmLeaveCircle(spec) {
       const res = await port.leaveSpace();
       assertRelayAgrees(res, 'members/leave');
       toast(say(LIFECYCLE_COPY.leave.done));
+      spec.onDone?.(res);
+    },
+  });
+}
+
+/**
+ * 19.4 — dissolve the private room, which until now could be armed and not given up.
+ *
+ * Typed, for the same reason 20.4 is typed: it is irreversible on the relay. What is typed is the
+ * DEVICE SHORT and not a name, because a `psp_` space has no name — the id is the one thing on
+ * that settings row a person cannot reasonably read back, and the short is already on screen two
+ * lines above the button (`familysettings.js`'s „Dieser Mac: …").
+ *
+ * No co-signature path, unlike `confirmDeleteSpace`: `handlers/lifecycle.js` requires the second
+ * key only when the roster is bigger than one, and a private room holds exactly one member
+ * however many of this person's Macs are paired into it. A `proofDemand` here would mean the
+ * relay disagrees about that, and it is surfaced rather than swallowed.
+ *
+ * @param {{port:Object, deviceShort:string, paired?:boolean, onDone?:Function}} spec
+ */
+export function confirmDissolvePersonal(spec) {
+  const { port } = spec;
+  const wanted = String(spec.deviceShort || '').trim();
+
+  const field = el('div', 'field');
+  const label = el('label', null, say(LIFECYCLE_COPY.dissolvePersonal.typeToConfirm));
+  label.style.cssText = 'width:auto;flex:none;font:400 11.5px/1.5 var(--font);color:var(--ink-2)';
+  const input = el('input');
+  input.type = 'text';
+  input.className = 'txt';
+  input.placeholder = wanted;
+  input.spellcheck = false;
+  input.autocomplete = 'off';
+  input.style.cssText = 'flex:1;min-width:0;height:26px;padding:0 7px;border:1px solid var(--field-border);border-radius:5px;font:400 12px var(--font)';
+  field.style.cssText = 'display:flex;align-items:center;gap:8px;margin:12px 0 0';
+  field.appendChild(label);
+  field.appendChild(input);
+  setTimeout(() => input.focus(), 0);
+
+  return confirmLifecycle({
+    kind: 'dissolvePersonal',
+    ctx: { paired: !!spec.paired },
+    extraNodes: [field],
+    // Case-insensitive, because the short is Crockford base32 and shown uppercase: a person who
+    // types what they read in lower case has typed the right thing.
+    canConfirm: () => wanted.length > 0 && input.value.trim().toUpperCase() === wanted.toUpperCase(),
+    notYet: LIFECYCLE_COPY.dissolvePersonal.mismatch,
+    onConfirm: async () => {
+      const res = await port.dissolvePersonal();
+      if (res && res.localBoardsUnaffected !== true) {
+        console.warn('[family] spaces/:id/delete answered without localBoardsUnaffected');
+      }
+      toast(say(LIFECYCLE_COPY.dissolvePersonal.done));
       spec.onDone?.(res);
     },
   });

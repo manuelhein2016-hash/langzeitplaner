@@ -277,6 +277,26 @@ database at all — can reconstruct this section's entire activity timeline per 
 Two more paths carry a space id in the path rather than the query: `/api/v1/spaces/:id/members`
 and `/api/v1/spaces/:id/keys`.
 
+### The twelfth path — `POST /api/v1/spaces/:id/delete` (19.4, 2026-09-13)
+
+The only path in this product whose purpose is to make the relay hold **less**. „Privaten Raum
+auflösen" in „Server & eigene Geräte" sends it for a `psp_` space, and the relay cascades that
+space's Member, Device, Op, epoch, KeyWrap and Invite rows away (`store.deleteSpace`, contract
+cases C09..C11). No `adminProof` is carried or needed: a private room has exactly one Member row,
+and `handlers/lifecycle.js` requires the second member's co-signature only above one.
+
+**What it tells the operator.** One request, naming one space id that the operator already holds —
+it is the same id that has been in every cadence query string since the room was armed — and after
+it there are no further requests from that Mac at all. So it adds no new fact to §2 and removes
+the rows that §2 is about. It is never on the cadence: it is reached once, from a typed
+confirmation, and the Mac goes silent afterwards.
+
+**Why it exists at all**, beyond privacy: a Mac mints one device identity for life, and the relay
+refuses a device id it already holds anywhere. So a Mac that had armed the private room could
+never join a Familienkreis, and until this path was wired nothing in the product could clear the
+row that refused it. Deleting is what frees it; revoking is not, because the refusal does not care
+whether a row is revoked.
+
 ### The ninth path — `POST /api/v1/feedback` (LZP-1009)
 
 Added when „Rückmeldung senden" was bound to a transport (`family/mount.js#bindFeedback`), and it

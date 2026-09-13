@@ -132,6 +132,10 @@ import { buildAdminSection } from './adminpanel.js';
 // published for this entity" has ONE owner, and a second reader here would be free to disagree
 // with the one the button then acts through.
 import { createUnshare, publishedState, UNSHARE, UNSHARE_COPY } from './unshare.js';
+// 19.4's dissolve sheet. `leavedelete.js` imports only `ui.js` and `i18n.js`, so this adds no
+// reachability — and the sheet belongs there rather than here because the consequence and the
+// honesty sentence are lifecycle copy, in one register with „verlassen" and „löschen".
+import { confirmDissolvePersonal } from './leavedelete.js';
 import { TXT as SHARING_TXT } from './sharing.js';
 import { FAMILY_PREFS, CIRCLE_SPACE_PREF, CLIENT_VERSION } from './engine.js';
 import { armGate3, disarmGate3 } from './gate3.js';
@@ -374,6 +378,15 @@ export async function disarmShellSyncIfNoSpace() {
   return disarmGate3();
 }
 
+/**
+ * The one word this section adds. Every other sentence of the dissolve flow is
+ * `leavedelete.js`'s `LIFECYCLE_COPY.dissolvePersonal`, because the sheet owns the consequence
+ * and the honesty; this is only what the button says before you press it.
+ */
+const PERSONAL_COPY = Object.freeze({
+  dissolve: Object.freeze({ de: 'Privaten Raum auflösen', en: 'Dissolve private space' }),
+});
+
 function buildOptInSection(body, api, hooks) {
   const s = store.state.settings;
   body.appendChild(el('div', 'section-title', t('familySectionTitle')));
@@ -396,6 +409,39 @@ function buildOptInSection(body, api, hooks) {
 
     const d = store.diagnostics();
     body.appendChild(el('p', 'hint', t('familyThisMac', d.identity?.deviceShort || '—')));
+
+    // ── 19.4 · AND THE WAY BACK OUT ─────────────────────────────────────────────────────────
+    //
+    // This branch was "two facts and no controls", and the docblock above says turning sync off
+    // "is `POST /members/leave`" — but nothing in the product ever called it for a `psp_` space,
+    // so there was no way out at all. That was a dead end on its own, and a TRAP in combination
+    // with the relay: one Mac has one device id for life and the relay's `getDevice` check is
+    // global, so a Mac with a private room is refused when it later redeems a Familienkreis
+    // invite. The product owner met exactly that, on his second Mac.
+    //
+    // Deliberately a BUTTON and not a switch, for this section's own stated reason: a switch
+    // would read as a display preference, and this is irreversible on the relay. Deliberately
+    // NOT a new section, because a tier-2 row pins that exactly one section carries the word
+    // „Familienkreis" and this one may not borrow it.
+    //
+    // Drawn only when `mount.js` supplied the port — i.e. only on a Mac that really is armed to
+    // a `psp_` space it could reach. There is nothing to offer a solo Mac, and a circle-only Mac
+    // has no private room.
+    const dp = typeof hooks.dissolvePersonal === 'object' && hooks.dissolvePersonal
+      ? hooks.dissolvePersonal : null;
+    if (dp) {
+      const acts = el('div', 'circle-acts');
+      const btn = el('button', 'btn-ghost btn-danger', say(PERSONAL_COPY.dissolve));
+      btn.type = 'button';
+      btn.addEventListener('click', () => confirmDissolvePersonal({
+        port: dp,
+        deviceShort: dp.deviceShort || d.identity?.deviceShort || '',
+        paired: !!dp.paired,
+        onDone: () => api?.close?.(),
+      }));
+      acts.appendChild(btn);
+      body.appendChild(acts);
+    }
     return;
   }
 

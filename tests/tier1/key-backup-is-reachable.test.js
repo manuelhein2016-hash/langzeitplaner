@@ -60,7 +60,11 @@ describe('21.B · the key backup is reachable at all', () => {
     // no error, no warning, just a section that never appears. Asserting the wiring is the only
     // way to notice it going away again.
     assert.ok(MOUNT.length > 0, 'could not read family/mount.js through the file walk');
-    const call = /buildFamilySections\(body, api, \{([\s\S]{0,400}?)\}\)/.exec(MOUNT);
+    // The window is a bound, not a measurement: it exists so a match cannot run away across the
+    // whole file, and it was 400 until 19.4's `dissolvePersonal` hook and its comment made the
+    // literal longer than that — which failed this row for a reason that had nothing to do with
+    // the property. Widened deliberately; the lazy quantifier still stops at the first `})`.
+    const call = /buildFamilySections\(body, api, \{([\s\S]{0,1200}?)\}\)/.exec(MOUNT);
     assert.ok(call, 'installSections no longer calls buildFamilySections with a hooks literal');
     assert.match(call[1], /recoveryMaterial\s*:/,
       'mount.js stopped passing `recoveryMaterial`, so „Schlüssel sichern" is unreachable again '

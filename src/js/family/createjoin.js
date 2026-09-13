@@ -231,6 +231,25 @@ const DEFAULT_PORTS = Object.freeze({
    * is then not drawn at all, rather than drawn and dead.
    */
   openRecovery: () => false,
+
+  /**
+   * 19.4 — does THIS Mac hold a private room (`psp_`)?
+   *
+   * A fact, not a capability, and it exists to make one refusal honest. The relay answers
+   * `device_registered` for TWO different reasons — this Mac syncs its own devices, or it was
+   * once in a circle and its row survived the leave — and `circleErrDeviceRegistered` hedges
+   * between them BECAUSE the client could not tell which. It can: the private room is this Mac's
+   * own setting. When the answer is yes the screen names the cause and offers the way out, and
+   * when it is no the hedged sentence stays exactly as it was.
+   *
+   * Injected by `family/mount.js`. The default is `false`, which is the honest answer in a
+   * harness with no settings to read — and it degrades to today's behaviour rather than to a
+   * button that does nothing.
+   */
+  hasPrivateRoom: () => false,
+
+  /** Open the settings sheet, where „Privaten Raum auflösen" lives. Same seam as `openRecovery`. */
+  openSettingsSheet: () => false,
 });
 
 let ports = { ...DEFAULT_PORTS };
@@ -1446,6 +1465,7 @@ export function openCircleScreen({ screen } = {}) {
     spaceId: null,
     notice: null,       // calm, expected, not a failure — e.g. a colour somebody else holds
     problem: null,      // an actual refusal, said in one sentence
+    problemAction: null, // {label, run} — a refusal that has a way out offers it right there
   };
 
   layer = el('div', 'circle');
@@ -1683,6 +1703,16 @@ function notices(parent) {
     p.setAttribute('role', 'alert');
     p.textContent = view.problem;
     parent.appendChild(p);
+    // A refusal with a known remedy offers it here rather than describing it. The button is
+    // drawn only when something set one, so every other failure looks exactly as it did.
+    if (view.problemAction) {
+      const acts = el('div', 'circle-acts');
+      const b = el('button', 'circle-ghost', view.problemAction.label);
+      b.type = 'button';
+      b.addEventListener('click', () => view.problemAction.run());
+      acts.appendChild(b);
+      parent.appendChild(acts);
+    }
   }
 }
 
@@ -1806,7 +1836,7 @@ async function submitCreate() {
     // must not disarm a Mac that is now in a circle.
     if (armedByThisSubmit && !familyCircle()) await disarmGate3();
     view.busy = false;
-    fail(sentenceFor(e));
+    fail(...refusalWithWayOut(e));
     console.warn('[circle] create failed', e);
   }
 }
@@ -2096,7 +2126,7 @@ async function submitJoin() {
       render();
       return;
     }
-    fail(sentenceFor(e));
+    fail(...refusalWithWayOut(e));
     console.warn('[circle] join failed', e);
   }
 }
@@ -2173,9 +2203,43 @@ function memberStrip(rows) {
   return strip;
 }
 
-/** One sentence, in the problem slot, and a re-render. Never a toast for something on screen. */
-function fail(sentence) {
+/**
+ * 19.4 · A DEAD END THAT HAS A DOOR MUST SHOW THE DOOR.
+ *
+ * `device_registered` is the refusal the product owner met on his second Mac: he had armed the
+ * private room, and the relay's `getDevice(deviceId)` check is global, so the same Mac could not
+ * redeem a Familienkreis invite. What he read was `circleErrDeviceRegistered` — which names both
+ * possible causes because the client could not tell them apart, and ends „Ein zweites Mal geht es
+ * auf diesem Server zurzeit nicht." That is true and it is a wall.
+ *
+ * When this Mac holds a private room the cause is KNOWN, so the sentence says which one it is and
+ * the button goes where the remedy is. When it does not, nothing changes: the hedged sentence is
+ * still the honest one, because the other cause — a device row left behind by a circle this Mac
+ * once left — has no remedy in the product yet (FINDINGS §25.5).
+ *
+ * @param {Error} e @returns {[string, {label:string, run:Function}|null]}
+ */
+function refusalWithWayOut(e) {
+  const code = (e && e.code) || '';
+  if (code !== 'device_registered' || !ports.hasPrivateRoom()) return [sentenceFor(e), null];
+  return [t('circleErrDeviceRegisteredPrivate'), {
+    label: t('circleDissolvePrivate'),
+    // Close first, then open Settings — `backupButton`'s reason, verbatim: leaving this screen
+    // up would put a second sheet behind it. Nothing is lost, because the invite code is still
+    // valid; the relay rolled nothing back, it refused before consuming anything.
+    run: () => { closeCircleScreen(); ports.openSettingsSheet(); },
+  }];
+}
+
+/**
+ * One sentence, in the problem slot, and a re-render. Never a toast for something on screen.
+ *
+ * `action` is the optional `{label, run}` for a refusal that has a remedy. Passing nothing CLEARS
+ * any previous one, so a second, different failure cannot inherit the first one's button.
+ */
+function fail(sentence, action = null) {
   view.problem = sentence;
+  view.problemAction = action || null;
   render();
 }
 

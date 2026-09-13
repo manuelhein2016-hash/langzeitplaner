@@ -31,14 +31,14 @@
 import { store } from '../store.js';
 import { setFamilySections, openSettings } from '../settings.js';
 import {
-  readFamilyConfig, armStore, startEngine, createSpaceOnRelay, adoptOnRelay,
+  readFamilyConfig, armStore, startEngine, createSpaceOnRelay, deletePersonalSpaceOnRelay, adoptOnRelay,
   attestPeer, savePeer, saveRingEpoch, mintSpaceId, createSpaceKey, FAMILY_PREFS,
-  readCircleConfig, armCircleIdentity, startFamilyEngine, CIRCLE_PENDING_PREF,
+  readCircleConfig, armCircleIdentity, startFamilyEngine, CIRCLE_PENDING_PREF, peerCount,
 } from './engine.js';
 import { createPairingFlow } from './pairflow.js';
 import { initPairingUI } from './pairingui.js';
 import { initSyncStatus, refreshSyncChrome } from './syncstatus.js';
-import { buildFamilySections } from './familysettings.js';
+import { buildFamilySections, disarmShellSyncIfNoSpace } from './familysettings.js';
 import { initCreateJoin, familyCircle, circleTransport, CIRCLE_ROLE } from './createjoin.js';
 import { initMembersUI, renderFamilyLegend } from './membersui.js';
 import { initAdminPanel } from './adminpanel.js';
@@ -191,6 +191,10 @@ function installSections(handle, hooks) {
     return buildFamilySections(body, api, {
       onOptIn: (origin) => optIn(origin, hooks),
       recoveryMaterial: recoveryMaterial(handle),
+      // 19.4's missing counterpart. Supplied from HERE for the same reason `recoveryMaterial` is:
+      // `familysettings.js` may not reach a transport, and this module already owns one. A Mac
+      // that is not armed gets `null`, and the settings section draws no button for it.
+      dissolvePersonal: dissolvePersonal(handle, hooks),
     });
   });
 }
@@ -314,7 +318,17 @@ function syncCircleMounts(hooks) {
   // `familysettings.js`, which IMPORTS `createjoin.js`, so the edge only runs one way; and
   // routing through settings keeps `crypto/backup.js` out of the circle screen's static graph.
   // Answering `true` is what tells `renderCreated`/`renderJoined` the button has somewhere to go.
-  initCreateJoin({ openRecovery: () => { openSettings(); return true; } });
+  initCreateJoin({
+    openRecovery: () => { openSettings(); return true; },
+    // 19.4 — so a `device_registered` refusal can name its cause and offer the door. Read at the
+    // MOMENT OF THE REFUSAL, not at mount: a Mac can dissolve its private room and try again in
+    // the same session, and a lambda captured at boot would still say yes.
+    hasPrivateRoom: () => {
+      const id = store.state.settings?.[FAMILY_PREFS.space];
+      return typeof id === 'string' && id.startsWith('psp_');
+    },
+    openSettingsSheet: () => { openSettings(); return true; },
+  });
   // The ONE port `adminpanel.js` cannot build for itself: the relay's roster, which is the only
   // list on this Mac that knows who has LEFT (a leave authors no op — the relay purges the
   // leaver's ops in the same transaction, `handlers/lifecycle.js:229`). It is the SAME array
@@ -747,6 +761,79 @@ async function armStoreForOptIn(origin, spaceId, today) {
     diagnostics: () => ({}),
   };
   return armStore(stub, { origin, spaceId }, { today, invoke: ports().invoke });
+}
+
+/**
+ * 19.4 — the counterpart to `optIn`, which had none.
+ *
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ * THE TRAP THIS ENDS
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * „Server & eigene Geräte" could arm the private room and nothing in the product could give it
+ * back: `buildAdminSection` draws „verlassen"/„löschen" only for an `fsp_` circle, and
+ * `forgetCircle()` clears only `CIRCLE_PREFS`. That was already a dead end — „ich habe das
+ * eingerichtet und will es wieder loswerden" had no answer — and it became a TRAP because of
+ * what the relay does with the row: one Mac mints one device identity for life, and
+ * `handlers/invites.js:337` checks `getDevice(deviceId)` GLOBALLY, so a Mac with a private room
+ * is refused when it later redeems a Familienkreis invite. The product owner met exactly that.
+ *
+ * Returns `null` — and the section therefore draws nothing — unless this Mac really is armed to a
+ * `psp_` space with a transport to reach it. A circle-only Mac has no private room to dissolve,
+ * and a solo one has nothing to ask about.
+ *
+ * @param {{cfg:Object, armed:Object, parts:Object}|null} handle
+ * @param {Object} hooks
+ * @returns {null|{spaceId:string, deviceShort:string, paired:boolean, dissolvePersonal:Function}}
+ */
+export function dissolvePersonal(handle, hooks) {
+  if (!handle || !handle.cfg || !handle.parts || !handle.parts.transport) return null;
+  const spaceId = handle.cfg.spaceId;
+  if (typeof spaceId !== 'string' || !spaceId.startsWith('psp_')) return null;
+  const deviceShort = (handle.armed && handle.armed.forStore && handle.armed.forStore.deviceShort)
+    || (store.diagnostics().identity || {}).deviceShort || '';
+
+  return {
+    spaceId,
+    deviceShort,
+    // Whether there is a SECOND Mac of this person's in the room, which decides whether the
+    // confirmation warns about one. Read from the peer rows this Mac already holds, never
+    // guessed: `savePeer` writes one per adopted device, and this Mac is not among them.
+    paired: peerCount(spaceId) > 0,
+    async dissolvePersonal() {
+      const res = await deletePersonalSpaceOnRelay(handle.parts, spaceId);
+      await forgetPersonal();
+      return res;
+    },
+  };
+}
+
+/**
+ * What dissolving does to THIS Mac: the private room stops existing here.
+ *
+ * Mirrors `adminpanel.js#forgetCircle` and makes the same two deliberate choices.
+ *
+ *   · `FAMILY_PREFS.origin` is KEPT. It is shared with the Familienkreis (`engine.js`) and in the
+ *     shipped shell it is the build's own pin, so clearing it would take the circle's relay
+ *     address away as a side effect of giving up the private room. Two features, two decisions.
+ *   · The board is reloaded, because `readFamilyConfig` is read at boot and half the app was
+ *     armed from it. `store.usePersonalSpace()` may not be called after `init()`
+ *     (`armStoreForOptIn`'s docblock), so the space can only be let go of on the way up.
+ *
+ * Nothing here deletes an entry. `board.json` is the truth (ADR 006) and it is not touched, which
+ * is what lets the confirmation promise „kein einziger Eintrag geht verloren" and mean it.
+ */
+async function forgetPersonal() {
+  store.setSettings({
+    [FAMILY_PREFS.enabled]: false,
+    [FAMILY_PREFS.space]: '',
+  });
+  await store.persistNow();
+  // ADR 003 §7 gate 3: with no space left, the shell's sync switch goes back off. It refuses to
+  // fire while any space id remains, so on a Mac that is also in a circle this correctly does
+  // nothing — and it must run AFTER the prefs are written or it would see the old space.
+  try { await disarmShellSyncIfNoSpace(); } catch { /* the visible symptom has its own sentence */ }
+  globalThis.location?.reload();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════

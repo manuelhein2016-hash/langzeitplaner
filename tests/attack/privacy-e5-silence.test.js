@@ -146,9 +146,27 @@ describe('§2 · the first launch of a fresh install', () => {
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('§3 · a user creates a Familienkreis and then wants it gone', () => {
-  test('SUCCEEDED — there is NO WAY BACK to silence: nothing in the product ever clears the flag', () => {
+  test('CLOSED — the way back exists: one control clears the flag and tells the relay', () => {
     // ═══════════════════════════════════════════════════════════════════════════════════════
-    // FINDING P-1 · HIGH · story 21.5, third clause.
+    // FINDING P-1 · HIGH · story 21.5, third clause. ✅ CLOSED 2026-09-13 — the row is INVERTED
+    // rather than deleted, because a closed finding whose test is removed is a finding that can
+    // reopen silently. Everything below the line is what P-1 said when it was open; what this
+    // row now asserts is the property it asked for.
+    //
+    // WHAT CLOSED IT, and why it took a user report. P-1 was filed as a privacy defect — a Mac
+    // that could not be made to stop contacting the relay. It was also, unnoticed, a TRAP: one
+    // Mac mints one device identity for life and the relay's `getDevice(deviceId)` check is
+    // global, so a Mac that had armed the private room was REFUSED when it later tried to redeem
+    // a Familienkreis invite (`handlers/invites.js`), and nothing in the product could clear the
+    // row that was refusing it. The product owner met exactly that on his second Mac. The fix
+    // P-1 asked for — „one control that clears the three keys, plus whatever 20.3 decides about
+    // telling the relay" — is `familysettings.js`'s „Privaten Raum auflösen", which deletes the
+    // space on the relay (`engine.js#deletePersonalSpaceOnRelay`) and then clears the keys
+    // (`mount.js#forgetPersonal`). Deleting is what frees the Mac; revoking would not, because
+    // the global check does not care whether a row is revoked.
+    // ═══════════════════════════════════════════════════════════════════════════════════════
+    //
+    // ── P-1, AS IT WAS FILED ──────────────────────────────────────────────────────────────
     //
     // "Does a user who creates and then deletes a Familienkreis go back to silent?" — no,
     // because a Familienkreis cannot be deleted, left, disabled or paused from anywhere in the
@@ -177,9 +195,15 @@ describe('§3 · a user creates a Familienkreis and then wants it gone', () => {
       'src/js/settings.js', 'src/js/main.js', 'src/js/store.js',
     ];
 
-    // (a) nothing calls the leave endpoint.
-    const leaveCallSites = files.filter((f) => /members\/leave/.test(stripComments(repoFile(f))));
-    assert.deepEqual(leaveCallSites, [], 'if this goes red, story 20.3 landed — reopen finding P-1');
+    // (a) THE RELAY IS TOLD. P-1 asked for "whatever 20.3 decides about telling the relay", and
+    //     the decision is: delete the space, not leave it and not revoke the device. Only the
+    //     delete cascades the Device and Member rows away, and only that frees the Mac to join a
+    //     Familienkreis afterwards — measured against both store adapters.
+    const tellsRelay = files.filter((f) => /spaces\/\$\{spaceId\}\/delete|members\/leave/
+      .test(stripComments(repoFile(f))));
+    assert.notDeepEqual(tellsRelay, [],
+      'nothing in the product tells the relay to let go any more — P-1 has reopened, and with it '
+      + 'the trap that a Mac with a private room can never join a Familienkreis');
 
     // (b) EVERY `setSettings` call in the product, read. `setSettings` is the only writer of a
     //     board setting, so the complete set of writes to the three arming keys is the complete
@@ -202,10 +226,22 @@ describe('§3 · a user creates a Familienkreis and then wants it gone', () => {
       }
     }
     assert.ok(writes.length > 0, 'the setSettings scan matched nothing at all — the scan is vacuous');
-    assert.deepEqual(
-      writes.filter((w) => w.disables), [],
-      'if this goes red an off switch exists — close finding P-1',
-    );
+    const off = writes.filter((w) => w.disables);
+    assert.notDeepEqual(off, [],
+      'no `setSettings` call disarms any arming key any more. P-1 is reopened: a Mac that tried '
+      + 'the feature once can no longer be made to stop contacting the relay, and it can never '
+      + 'join a Familienkreis either.');
+    // Both keys, by name. Clearing the flag without the space id (or the reverse) leaves a
+    // half-armed board, which `readFamilyConfig`'s own near-miss rows in §2 exist to refuse.
+    const offKeys = new Set(off.map((w) => w.key));
+    assert.ok(offKeys.has(FAMILY_PREFS.enabled), `the enabled flag is never cleared: ${[...offKeys]}`);
+    assert.ok(offKeys.has(FAMILY_PREFS.space), `the space id is never cleared: ${[...offKeys]}`);
+    // …and the ORIGIN is deliberately NOT cleared. It is shared with the Familienkreis and in the
+    // shipped shell it is the build's own pin, so clearing it would unpair somebody's circle as a
+    // side effect of giving up the private room. `forgetCircle` made the same call for the same
+    // reason; this pins that the two agree.
+    assert.equal(offKeys.has(FAMILY_PREFS.origin), false,
+      'the relay address is being cleared as a side effect — that unpairs the Familienkreis too');
 
     // (c) the positive control: the ON switch is right there, so the asymmetry is real and not
     //     an artefact of a regex that matches nothing.

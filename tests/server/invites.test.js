@@ -497,6 +497,97 @@ for (const adapter of ADAPTERS) {
     assert.equal((await store.listMembers(SPACE)).length, 1);
   });
 
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // THE PRODUCT OWNER'S REPORT, 2026-09-12 — and the identity a real Mac actually sends
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // „When adding another Mac to Familienkreis, it said 'Dieser Mac ist auf diesem Server schon
+  //  eingetragen …' probably as I had added a private sync on this other app installation."
+  //
+  // He was right about the cause. These two rows are the difference between a suite that can see
+  // that and one that cannot, and the distinction is ONE FIXTURE CHOICE:
+  //
+  //   `attestedDeviceFor(p, {borrowKeysFrom: q})` mints a FRESH RANDOM deviceId
+  //   (`_attested-person.js:126`, `o.deviceId || 'dev_' + id22()`).
+  //
+  // A real Mac never does that. `crypto/identity.js#ensureDeviceIdentity` writes devSig, devKex
+  // and devMeta under three FIXED keystore ids and returns the STORED deviceId, deviceShort and
+  // memberId on every later call, for the life of the machine. So the join presents the same
+  // three values the private room was created with.
+  //
+  // `spaces.test.js` has a row called „a Mac that already has a space CAN create a second one —
+  // E2-203-1, closed (round 10 item 8)". It passes. It borrows the machine's KEYS and mints a new
+  // deviceId, so what it proves is that a shape the product cannot build is accepted. Round 10
+  // moved `deviceShort`'s namespace into the space and left the `deviceId` check above it global,
+  // and that half of E2-203-1 has been open ever since, with a green suite over it. FINDINGS E6-3
+  // named it and assigned the fix to `server/`; it was never made.
+
+  T('a Mac that already syncs privately is REFUSED by the circle — the reported defect, pinned', async () => {
+    const { store, clock } = await makeSpace(adapter);                       // the Familienkreis
+    const PERSONAL = `psp_${id22(77)}`;
+    await createSpace(req({
+      body: {
+        spaceId: PERSONAL, kind: 'PERSONAL', colorRef: 'blau',
+        member: memberBody(MOM), device: deviceBody(MOM),
+        wraps: [wrap(MOM.deviceId, 1, 1), wrap(recoveryRecipient(MOM.memberId), 1, 2)],
+      },
+    }), asNewDevice(store, clock, MOM));                                     // 19.4's private sync
+
+    const inv = inviteFromCode(77);
+    await createInvite(req({ body: { spaceId: SPACE, inviteId: inv.inviteId, verifier: b64(inv.verifier) } }),
+      asPerson(store, clock, ADMIN));
+
+    // No fixture trickery: `memberBody(MOM)`/`deviceBody(MOM)` are the SAME bytes the personal
+    // space was created with, which is the whole point.
+    const err = await expectFail(
+      () => redeemInvite(req({ body: redeemBody(inv, MOM, 'tuerkis') }), asNewDevice(store, clock, MOM)),
+      400, 'bad_request', 'a Mac with a private room joining a circle');
+    assert.equal(err.extra.field, 'device.deviceId',
+      'the refusal must still be the GLOBAL deviceId check at invites.js:337 — if this moved, the '
+      + 'sentence the owner read (i18n.js:472 `circleErrDeviceRegistered`) is now reached by a '
+      + 'different route and `createjoin.js#relayError` needs re-reading');
+    assert.equal(err.extra.reason, 'registered');
+    // The invite is not burned, so the SAME code still works after the room is dissolved — which
+    // is what the next row does, and what „Privaten Raum auflösen" tells the person to do.
+    assert.equal((await store.getInvite(inv.inviteId)).usedAt, null, 'THE INVITE SURVIVED');
+
+    // ⚠ WHY THIS ROW ASSERTS THE REFUSAL RATHER THAN THE JOIN. Scoping the deviceId check to the
+    // space does NOT fix this on its own: `Member.id` is a global primary key too, so the next
+    // line up throws `StoreShapeError: member … already exists` and the owner's clean 400 becomes
+    // a 500. Measured on both adapters. The real fix is composite `(spaceId, id)` keys on Member
+    // and Device plus space-scoped store signatures — a Prisma migration against a live database.
+    // Recorded as FINDINGS §25.5 and deliberately not attempted in the same change as the
+    // affordance that unblocks the owner today.
+  });
+
+  T('…and dissolving the private room frees it: the same Mac then joins', async () => {
+    const { store, clock } = await makeSpace(adapter);
+    const PERSONAL = `psp_${id22(78)}`;
+    await createSpace(req({
+      body: {
+        spaceId: PERSONAL, kind: 'PERSONAL', colorRef: 'blau',
+        member: memberBody(MOM), device: deviceBody(MOM),
+        wraps: [wrap(MOM.deviceId, 1, 1), wrap(recoveryRecipient(MOM.memberId), 1, 2)],
+      },
+    }), asNewDevice(store, clock, MOM));
+
+    // What „Privaten Raum auflösen" asks for. DELETE, not revoke: the cascade removes the Member
+    // and Device rows, and the global check does not care whether a row is merely revoked.
+    await store.deleteSpace(PERSONAL);
+    assert.equal(await store.getDevice(MOM.deviceId), null, 'the cascade must free the device id');
+    assert.equal(await store.getSpace(SPACE) !== null, true, 'and must not touch the circle');
+
+    const inv = inviteFromCode(78);
+    await createInvite(req({ body: { spaceId: SPACE, inviteId: inv.inviteId, verifier: b64(inv.verifier) } }),
+      asPerson(store, clock, ADMIN));
+    const res = await redeemInvite(req({ body: redeemBody(inv, MOM, 'tuerkis') }), asNewDevice(store, clock, MOM));
+    assert.equal(res.status, 200,
+      'after the private room is dissolved the SAME deviceId, memberId and deviceShort must be '
+      + 'admitted to the circle — this is the path „Privaten Raum auflösen" exists to open, and '
+      + 'if it goes red the product owner has no way into his own Familienkreis');
+    assert.equal((await store.listMembers(SPACE)).length, 2);
+  });
+
   T('signing with one device and registering another is refused, and burns nothing', async () => {
     const { store, clock } = await makeSpace(adapter);
     const inv = inviteFromCode(21);

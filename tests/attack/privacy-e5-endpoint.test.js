@@ -499,7 +499,7 @@ describe('§5 · everything two real Macs address over a real session', () => {
     }
   });
 
-  test('FAILED — the complete set of paths the SOURCE can build is eleven, all under /api/v1/', () => {
+  test('FAILED — the complete set of paths the SOURCE can build is twelve, all under /api/v1/', () => {
     // The session above exercises the steady state. Pairing and opt-in add five more paths that
     // no fleet run reaches (the harness drives pairing over `mitm.js`, not over HTTP), so they
     // are read out of the source instead — which is the stronger statement anyway: this is every
@@ -550,6 +550,13 @@ describe('§5 · everything two real Macs address over a real session', () => {
       '/api/v1/pair/deliver',
       '/api/v1/pair/offer',
       '/api/v1/spaces',
+      // 19.4's way back out, 2026-09-13. „Privaten Raum auflösen" —
+      // `engine.js#deletePersonalSpaceOnRelay`. Eleven becomes twelve, and this one is the first
+      // path in the product whose whole purpose is to make the relay hold LESS: it deletes the
+      // space and cascades this Mac's Member and Device rows away. It is never on the cadence —
+      // it is reached once, from a typed confirmation, and the Mac stops addressing the relay
+      // entirely afterwards. `docs/v2/server-metadata.md` §7.7 carries its line.
+      '/api/v1/spaces/:id/delete',
       '/api/v1/spaces/:id/members',
     ], 'the addressable path set changed — every entry needs a line in server-metadata.md');
   });

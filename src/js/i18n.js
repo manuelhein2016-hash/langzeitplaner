@@ -472,6 +472,16 @@ const DE = {
   circleErrDeviceRegistered:
     'Dieser Mac ist auf diesem Server schon eingetragen — aus einem früheren Kreis oder vom '
     + 'Abgleich der eigenen Geräte. Ein zweites Mal geht es auf diesem Server zurzeit nicht.',
+  // 19.4 — the SAME refusal, on a Mac where the cause is KNOWN. `circleErrDeviceRegistered`
+  // above hedges between two causes because the client could not tell them apart; when this Mac
+  // holds its own privaten Raum it can, so it names that one and says where the door is. See
+  // `createjoin.js#refusalWithWayOut`. The hedged sentence stays for the other cause, which has
+  // no remedy in the product yet (FINDINGS §25.5).
+  circleErrDeviceRegisteredPrivate:
+    'Dieser Mac ist auf diesem Server schon mit seinem privaten Raum eingetragen — dem Abgleich '
+    + 'der eigenen Geräte. Löse den privaten Raum auf, dann kann dieser Mac dem Familienkreis '
+    + 'beitreten. Dein Board bleibt dabei vollständig.',
+  circleDissolvePrivate: 'Privaten Raum auflösen …',
   circleErrMemberExists: 'Dieser Mac gehört schon zu diesem Kreis.',
   circleErrOffline:
     'Keine Verbindung zum Server. Dein Board bleibt unverändert; später geht es weiter.',
@@ -895,6 +905,11 @@ const EN = {
   circleErrDeviceRegistered:
     'This Mac is already registered on that server — from an earlier circle, or from syncing '
     + 'your own devices. For now it cannot be set up there a second time.',
+  circleErrDeviceRegisteredPrivate:
+    'This Mac is already registered on that server with its private space — the sync between '
+    + 'your own Macs. Dissolve the private space and this Mac can join the family circle. Your '
+    + 'board stays complete.',
+  circleDissolvePrivate: 'Dissolve private space …',
   circleErrMemberExists: 'This Mac already belongs to that circle.',
   circleErrOffline:
     'No connection to the server. Your board is unchanged; it carries on later.',

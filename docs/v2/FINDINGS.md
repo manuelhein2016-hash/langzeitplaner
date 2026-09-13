@@ -5535,3 +5535,70 @@ forgets where it was, which is exactly how this shipped in the first place.
 correctly, and never executed. Neither `cargo check` nor a source census can see an event handler
 that is never entered or a guard that is always false. The only thing that found either was running
 the binary and comparing what came back against what went in.
+
+### §25.5 · One Mac cannot hold a private room and a Familienkreis at once
+
+**Reported by the product owner, 2026-09-12, on his second Mac:**
+
+> „When adding another Mac to Familienkreis, it said 'Dieser Mac ist auf diesem Server schon
+> eingetragen …' probably as I had added a private sync on this other app installation."
+
+He was right about the cause. **Half of finding E2-203-1 has been open since round 10, with a
+green suite over it.**
+
+**The mechanism.** A Mac mints ONE device identity for life:
+`crypto/identity.js#ensureDeviceIdentity` writes `devSig`/`devKex`/`devMeta` under three fixed
+keystore ids and returns the stored `deviceId`, `deviceShort` and `memberId` on every later call.
+Round 10 item 8 moved `deviceShort`'s namespace into the space
+(`@@unique([spaceId, deviceShort])`) and left the check one line above it global:
+
+```js
+// server/core/handlers/invites.js:337, and spaces.js:929
+if (await tx.getDevice(device.deviceId)) throw fail('bad_request', { field: 'device.deviceId', reason: 'registered' });
+```
+
+So arming 19.4's private room registers a `Device` row, and 15.2's join presents the same
+`deviceId` and is refused. Reproduced against the real handlers on both adapters, with a control:
+a Mac with no private room redeems the same invite and gets 200.
+
+**Why the suite could not see it.** `tests/server/spaces.test.js` carries a row named *"a Mac that
+already has a space CAN create a second one — E2-203-1, closed (round 10 item 8)"*. It passes.
+Its fixture is `attestedDeviceFor(MOM, {borrowKeysFrom: ADMIN})`, which borrows the machine's keys
+— so the short is genuinely shared, which is what that row is about — and mints a **fresh random
+`deviceId`** (`_attested-person.js:126`). A real Mac cannot do that. The row proves a shape the
+product cannot build, and its NAME declared the finding closed. `_attested-person.js`'s own header
+warns about this exact failure — *"a test that minted its own blob would be proving that the relay
+accepts what this file writes rather than what the product writes"* — about the attestation; the
+device id went through the same door. The name is corrected and the gap is now asserted in place.
+
+No tier could have caught it either: the fleet tier mints personal spaces only, the circle kit
+mints a fresh keystore per member, and the server tier gives each space fresh ids. **No tier ever
+runs one real client identity into two spaces.**
+
+**What shipped instead, and why.** „Privaten Raum auflösen" — `POST /spaces/:id/delete` for the
+`psp_` space, then clear the arming keys. It needs no migration, it is what the owner asked for
+(*"remove the private room and add the familienkreis instead"*), and it closes finding P-1 as a
+side effect. Deleting is load-bearing: `POST /devices/revoke` sets `revokedAt` and leaves the row,
+and the global check does not care whether a row is revoked.
+
+**What did NOT ship, and what it would cost.** Letting one Mac hold BOTH at once. Scoping the four
+device checks is **not** the fix and makes things worse: `Member.id` is a global primary key too,
+so the next line throws `StoreShapeError: member … already exists` and the owner's clean 400
+becomes a 500. Measured on both adapters. The real change is:
+
+| | |
+|---|---|
+| `schema.prisma` | `@@id([spaceId, id])` on `Member` **and** `Device`; the `Device→Member` relation becomes composite `fields: [spaceId, memberId], references: [spaceId, id]` |
+| `store-interface.js` | `getDevice`, `removeMember`, `revokeDevice` gain the space they were always implicitly asking for; a new contract case for same-member-same-device-two-spaces |
+| adapters | memory/file key their maps on `(spaceId, id)`; prisma gains compound selectors |
+| handlers | the four raise sites, plus `devices.js`'s two lookups |
+| migration | a Prisma migration **against the live Postgres, which holds the owner's real personal space** |
+
+That last row is why it is recorded rather than done in the same change as the affordance that
+unblocks a person today. The auth layer is already ready for it — `auth.js#authenticate` resolves
+by `listDevicesByShort` plus a space hint, never by device id — so the work is real but bounded.
+
+Until it lands, **a Mac is free for one space at a time**, and the copy must not promise
+otherwise. A Mac that once left a circle still carries that circle's revoked `Device` row and is
+still refused, with no remedy in the product: `circleErrDeviceRegistered` keeps its hedged wording
+for exactly that case, and only the private-room case gets the named cause and the button.

@@ -373,6 +373,63 @@ export async function createSpaceOnRelay(engineParts, armed, spaceKey) {
   return res.json;
 }
 
+/**
+ * `POST /api/v1/spaces/:id/delete` — give the private room back.
+ *
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ * WHY THIS EXISTS, AND WHY IT IS THE DELETE AND NOT THE REVOKE
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * `createSpaceOnRelay` above had no counterpart. A person who pressed „Einrichten" in
+ * „Server & eigene Geräte" could arm the private room and had no way, anywhere in the product, to
+ * give it up again — `buildAdminSection` draws „verlassen"/„löschen" only when `familyCircle()`
+ * finds an `fsp_` circle, so a `psp_` space was armable and not disarmable.
+ *
+ * That was a dead end on its own. It became a TRAP because of what the relay does next: one Mac
+ * mints one device identity for life (`crypto/identity.js#ensureDeviceIdentity` returns the
+ * STORED `deviceId`/`deviceShort`/`memberId` on every later call), and the relay's
+ * `getDevice(deviceId)` check at `handlers/invites.js:337` is GLOBAL. So a Mac that had armed the
+ * private room was refused when it later tried to redeem a Familienkreis invite —
+ * `400 {field:'device.deviceId', reason:'registered'}`, the sentence at `i18n.js:472` — and
+ * nothing in the product could clear the row that was refusing it.
+ *
+ * **DELETE, not revoke.** `POST /devices/revoke` sets `revokedAt` and LEAVES the row, and the
+ * global check does not care whether a row is revoked. Deleting the space cascades the Member and
+ * Device rows away (`store.deleteSpace`, contract cases C09..C11), which is the one thing that
+ * actually frees the Mac. Measured against both adapters: after this call the same `deviceId` and
+ * `memberId` join a circle successfully.
+ *
+ * **No `adminProof`.** `handlers/lifecycle.js` demands the second member's co-signature only when
+ * `roster.length > 1`, and its own comment names `psp_` as the exemption: a private room has
+ * exactly one Member row, so it answers 200 with `authorizedBy: 'sole_member'`. Pairing a second
+ * Mac adds a DEVICE to that one member, not a member, so the exemption holds however many of this
+ * person's own Macs are in it.
+ *
+ * `confirm` must equal the space id — the relay refuses a destructive call on an empty body.
+ *
+ * @param {{transport:Object}} engineParts
+ * @param {string} spaceId `psp_…`
+ * @returns {Promise<Object>} the relay's body, or `{alreadyGone:true}` when it was already gone.
+ */
+export async function deletePersonalSpaceOnRelay(engineParts, spaceId) {
+  if (typeof spaceId !== 'string' || !spaceId.startsWith('psp_')) {
+    throw new Error(`deletePersonalSpaceOnRelay: refusing a non-personal space ${JSON.stringify(spaceId)}`);
+  }
+  const res = await engineParts.transport.request(
+    'POST', `/api/v1/spaces/${spaceId}/delete`, undefined, { confirm: spaceId },
+  );
+  // Already gone is a success. A relay that has forgotten this space must not leave the Mac
+  // armed to it — the same carve-out `adminpanel.js#deleteSpace` makes for a circle, and the
+  // reason it exists is that the alternative is precisely the trap this function is here to end.
+  if (res.status === 403 && res.json && res.json.error === 'not_a_member') {
+    return { alreadyGone: true, localBoardsUnaffected: true };
+  }
+  if (res.status !== 200) {
+    throw new NetError('bad_response', `POST /spaces/${spaceId}/delete → ${res.status} ${JSON.stringify(res.json)}`);
+  }
+  return res.json;
+}
+
 /** `POST /api/v1/devices/adopt` — the second Mac becomes a row so its signatures verify. */
 export async function adoptOnRelay(engineParts, armed) {
   const id = armed.forStore;
@@ -886,6 +943,21 @@ function loadPeers(spaceId) {
   return rows
     .filter((r) => r && typeof r.deviceId === 'string' && typeof r.blob === 'string')
     .map((r) => ({ ...r, attestation: r.attestation || null }));
+}
+
+/**
+ * How many OTHER Macs of this person are in the space — the peers this Mac has adopted or been
+ * adopted by. This Mac is never among them (`savePeer` is only ever called for a peer), so 0
+ * means "the only Mac in the room".
+ *
+ * Read rather than asked of the relay, deliberately: it decides one sentence in a confirmation
+ * (`leavedelete.js`'s `dissolvePersonal`), and a confirmation that has to make a network call
+ * before it can tell you what it is about is a confirmation that cannot be shown offline.
+ *
+ * @param {string} spaceId @returns {number}
+ */
+export function peerCount(spaceId) {
+  return loadPeers(spaceId).length;
 }
 
 export function savePeer(spaceId, row) {

@@ -1,6 +1,16 @@
 # v2 — where the work stands
 
-**Last session:** 2026-09-12 (**the UX-audit fix cycle** — 196 catalogue items graded, 45 open,
+**Last session:** 2026-09-13 (**v2.0.0 — the first full release**) · **Stopped at:** a user report
+closed a year-old half-fix. A Mac that had armed 19.4's private room could never join a
+Familienkreis — one Mac has one device identity for life and the relay's `getDevice` check is
+global — and nothing in the product could clear the row that refused it. „Privaten Raum auflösen"
+is the way back out, and it closes privacy finding P-1 as a side effect. The remaining half (one
+Mac in BOTH at once) needs composite primary keys and a migration against the live database:
+`FINDINGS.md` §25.5. Shipped as **2.0.0, a non-prerelease**, because every release until now was a
+prerelease and `releases/latest/download/latest.json` therefore answered 404 — the in-app updater
+had never had anything to find.
+
+**Previous session:** 2026-09-12 (**the UX-audit fix cycle** — 196 catalogue items graded, 45 open,
 39 closed) · **Stopped at:** `v2.0.0-rc.4` tagged. Full record: `docs/v2/UX-AUDIT.md` (every item
 with its verdict and evidence), `docs/v2/UX-AUDIT-CATALOGUE.md` (the promises, with this cycle's
 errata), findings in `FINDINGS.md` §25.

@@ -503,11 +503,30 @@ for (const adapter of ADAPTERS) {
     assert.equal(err2.extra.field, 'device.deviceId');
   });
 
-  T('a Mac that already has a space CAN create a second one — E2-203-1, closed (round 10 item 8)', async () => {
+  T('a Mac reusing its SHORT can create a second space — E2-203-1, half closed (round 10 item 8)', async () => {
+    // ⚠ READ THE FIXTURE BEFORE READING THE NAME. This row was called „a Mac that already has a
+    // space CAN create a second one — E2-203-1, closed", and that claim was too strong by exactly
+    // one field, for a year, with this row green over it.
+    //
+    // `attestedDeviceFor(MOM, {borrowKeysFrom: ADMIN})` borrows the machine's KEYS — so the short
+    // is genuinely the same, which is what this row is about — but mints a FRESH RANDOM deviceId
+    // (`_attested-person.js:126`). A real Mac cannot do that:
+    // `crypto/identity.js#ensureDeviceIdentity` returns the STORED deviceId for the life of the
+    // machine. So what this row proves is that reusing a SHORT is allowed; it proves nothing
+    // about the identity the product actually sends, and the row above it
+    // („a second space with the same id, or the same device, is refused") shows that identity
+    // being refused on the very next check.
+    //
+    // The consequence reached a person: a Mac that had armed 19.4's private room could not join a
+    // Familienkreis at all, because `getDevice(deviceId)` is global. Round 10 moved `deviceShort`
+    // into the space and left `deviceId` alone; half of E2-203-1 is still open. The join-path
+    // counterpart is `invites.test.js` — „a Mac that already syncs privately is REFUSED by the
+    // circle" — and the remaining work is FINDINGS §25.5.
+    //
     // The flow this round unblocked, on the wire: one machine, one `IK_sig`, one `deviceShort`
     // for life (ADR 002 §2.1), and 19.4 + 15.2 both need it. The ONLY thing that changes between
-    // the two requests is the space and the member row — the device's short and keys are the
-    // same bytes, deliberately, because that is what used to be refused.
+    // the two requests is the space, the member row and — the part the name used to hide — the
+    // device id.
     const { store, clock } = await withSpace(adapter);
     // The SAME machine: `borrowKeysFrom` hands MOM's new attestation ADMIN's actual public
     // points, so the payload MOM signs carries ADMIN's `deviceShort` — which is what one Mac in
@@ -526,6 +545,12 @@ for (const adapter of ADAPTERS) {
 
     // Two rows, one machine, one key — and the correlation that follows is stated rather than
     // denied (ADR 003 §5.1, server-metadata.md §7, attack-relay-correlate.test.js §2).
+    // And the gap, asserted rather than left to the reader: the two rows differ in the one field
+    // a real Mac cannot vary. If this ever becomes equal, the identity model changed and the
+    // rows above and below this one both need re-reading.
+    assert.notEqual(sameMac.deviceId, ADMIN.deviceId,
+      'this row only passes because the fixture minted a new deviceId — see the header');
+
     const both = await store.listDevicesByShort(sameMac.deviceShort);
     assert.equal(both.length, 2, 'one Mac, a row in each circle');
     assert.equal(new Set(both.map((d) => d.spaceId)).size, 2);
